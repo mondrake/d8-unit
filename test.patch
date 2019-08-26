@@ -1,1159 +1,354 @@
-diff --git a/core/lib/Drupal/Core/Test/JUnitConverter.php b/core/lib/Drupal/Core/Test/JUnitConverter.php
-index 5af99f07d9..9bbf1b7ce6 100644
---- a/core/lib/Drupal/Core/Test/JUnitConverter.php
-+++ b/core/lib/Drupal/Core/Test/JUnitConverter.php
-@@ -109,16 +109,26 @@ public static function findTestCases(\SimpleXMLElement $element, \SimpleXMLEleme
-    * @internal
-    */
-   public static function convertTestCaseToSimpletestRow($test_id, \SimpleXMLElement $test_case) {
-+    $status = static::getStatus($test_case);
-+
-     $message = '';
--    $pass = TRUE;
--    if ($test_case->failure) {
--      $lines = explode("\n", $test_case->failure);
--      $message = $lines[2];
--      $pass = FALSE;
-+    if ($status == 'fail') {
-+      if ($test_case->failure) {
-+        $lines = explode("\n", $test_case->failure);
-+        $message = $lines[2];
-+      }
-+      elseif ($test_case->error) {
-+        $message = $test_case->error[0];
-+      }
-+    }
-+    elseif ($status == 'risky') {
-+      $message = 'Risky';
-     }
--    if ($test_case->error) {
--      $message = $test_case->error;
--      $pass = FALSE;
-+    elseif ($status == 'skipped') {
-+      $message = 'Skipped';
-+    }
-+    elseif ($status == 'incomplete') {
-+      $message = 'Incomplete';
-     }
- 
-     $attributes = $test_case->attributes();
-@@ -126,7 +136,7 @@ public static function convertTestCaseToSimpletestRow($test_id, \SimpleXMLElemen
-     $record = [
-       'test_id' => $test_id,
-       'test_class' => (string) $attributes->class,
--      'status' => $pass ? 'pass' : 'fail',
-+      'status' => $status,
-       'message' => $message,
-       'message_group' => 'Other',
-       'function' => $attributes->class . '->' . $attributes->name . '()',
-@@ -136,4 +146,24 @@ public static function convertTestCaseToSimpletestRow($test_id, \SimpleXMLElemen
-     return $record;
-   }
- 
-+  /**
-+   * Determine a status string for the given testcase.
-+   *
-+   * @param \SimpleXMLElement $test_case
-+   *
-+   * @return string
-+   *   The status value to insert into the {simpletest} record. Allowed values:
-+   *   'pass', 'fail', 'risky', 'skipped', 'incomplete'.
-+   */
-+  protected static function getStatus(\SimpleXMLElement $test_case) {
-+    $status = 'pass';
-+    if ($test_case->failure || $test_case->error || $test_case->risky) {
-+      $status = 'fail';
-+    }
-+    elseif ($test_case->skipped) {
-+      $status = $test_case->skipped->attributes()->message;
-+    }
-+    return $status;
-+  }
-+
- }
-diff --git a/core/lib/Drupal/Core/Test/JUnitListener.php b/core/lib/Drupal/Core/Test/JUnitListener.php
-new file mode 100644
-index 0000000000..0f586337c7
---- /dev/null
-+++ b/core/lib/Drupal/Core/Test/JUnitListener.php
-@@ -0,0 +1,354 @@
-+<?php
-+
-+namespace Drupal\Core\Test;
-+
-+use PHPUnit\Framework\AssertionFailedError;
-+use PHPUnit\Framework\ExceptionWrapper;
-+use PHPUnit\Framework\SelfDescribing;
-+use PHPUnit\Framework\Test;
-+use PHPUnit\Framework\TestCase;
-+use PHPUnit\Framework\TestFailure;
-+use PHPUnit\Framework\TestListener;
-+use PHPUnit\Framework\TestSuite;
-+use PHPUnit\Framework\Warning;
-+use PHPUnit\Util\Filter;
-+use PHPUnit\Util\Xml;
-+
-+/**
-+ * A TestListener that generates a logfile of the test execution in XML markup.
-+ *
-+ * The XML markup used is the same as the one that is used by the JUnit Ant task.
-+ */
-+class JUnitListener implements TestListener {
-+
-+  /**
-+   * @var \DOMDocument
-+   */
-+  protected $document;
-+
-+  /**
-+   * @var \DOMElement
-+   */
-+  protected $root;
-+
-+  /**
-+   * @var bool
-+   */
-+  protected $writeDocument = TRUE;
-+
-+  /**
-+   * @var \DOMElement[]
-+   */
-+  protected $testSuites = [];
-+
-+  /**
-+   * @var array
-+   */
-+  protected $testSuiteRuns = [];
-+
-+  /**
-+   * @var int
-+   */
-+  protected $testSuiteLevel = 0;
-+
-+  /**
-+   * @var \DOMElement
-+   */
-+  protected $currentTestCase;
-+
-+  /**
-+   * Constructor.
-+   */
-+  public function __construct() {
-+    $this->document = new \DOMDocument('1.0', 'UTF-8');
-+    $this->document->formatOutput = TRUE;
-+
-+    $this->root = $this->document->createElement('testsuites');
-+    $this->document->appendChild($this->root);
-+  }
-+
-+  /**
-+   * Destructor.
-+   */
-+  public function __destruct() {
-+    $junit_file = getenv('SIMPLETEST_JUNIT_FILE');
-+    if (!empty($junit_file)) {
-+      @file_put_contents($junit_file, $this->getXML());
-+    }
-+  }
-+
-+  /**
-+   * An error occurred.
-+   *
-+   * @param \PHPUnit\Framework\Test $test
-+   * @param \Exception $e
-+   * @param float $time
-+   */
-+  public function addError(Test $test, \Exception $e, $time) {
-+    $this->doAddFault($test, $e, $time, 'error');
-+    $this->testSuiteRuns[$this->testSuiteLevel]['errors']++;
-+  }
-+
-+  /**
-+   * A warning occurred.
-+   *
-+   * @param \PHPUnit\Framework\Test $test
-+   * @param \PHPUnit\Framework\Warning $e
-+   * @param float $time
-+   */
-+  public function addWarning(Test $test, Warning $e, $time) {
-+    $this->doAddFault($test, $e, $time, 'warning');
-+    $this->testSuiteRuns[$this->testSuiteLevel]['failures']++;
-+  }
-+
-+  /**
-+   * A failure occurred.
-+   *
-+   * @param \PHPUnit\Framework\Test $test
-+   * @param \PHPUnit\Framework\AssertionFailedError $e
-+   * @param float $time
-+   */
-+  public function addFailure(Test $test, AssertionFailedError $e, $time) {
-+    $this->doAddFault($test, $e, $time, 'failure');
-+    $this->testSuiteRuns[$this->testSuiteLevel]['failures']++;
-+  }
-+
-+  /**
-+   * Incomplete test.
-+   *
-+   * @param \PHPUnit\Framework\Test $test
-+   * @param \Exception $e
-+   * @param float $time
-+   */
-+  public function addIncompleteTest(Test $test, \Exception $e, $time) {
-+    $this->doAddSkipped($test, 'incomplete');
-+  }
-+
-+  /**
-+   * Risky test.
-+   *
-+   * @param \PHPUnit\Framework\Test $test
-+   * @param \Exception $e
-+   * @param float $time
-+   */
-+  public function addRiskyTest(Test $test, \Exception $e, $time) {
-+    $this->doAddSkipped($test, 'risky');
-+  }
-+
-+  /**
-+   * Skipped test.
-+   *
-+   * @param \PHPUnit\Framework\Test $test
-+   * @param \Exception $e
-+   * @param float $time
-+   */
-+  public function addSkippedTest(Test $test, \Exception $e, $time) {
-+    $this->doAddSkipped($test, 'skipped');
-+  }
-+
-+  /**
-+   * A testsuite started.
-+   *
-+   * @param \PHPUnit\Framework\TestSuite $suite
-+   */
-+  public function startTestSuite(TestSuite $suite) {
-+    $testSuite = $this->document->createElement('testsuite');
-+    $testSuite->setAttribute('name', $suite->getName());
-+    if (class_exists($suite->getName(), FALSE)) {
-+      try {
-+        $class = new \ReflectionClass($suite->getName());
-+        $testSuite->setAttribute('file', $class->getFileName());
-+      }
-+      catch (\ReflectionException $e) {
-+        // Do nothing.
-+      }
-+    }
-+    if ($this->testSuiteLevel > 0) {
-+      $this->testSuites[$this->testSuiteLevel]->appendChild($testSuite);
-+    }
-+    else {
-+      $this->root->appendChild($testSuite);
-+    }
-+    $this->testSuiteLevel++;
-+    $this->testSuites[$this->testSuiteLevel] = $testSuite;
-+    $this->testSuiteRuns[$this->testSuiteLevel] = [
-+      'tests' => 0,
-+      'assertions' => 0,
-+      'errors' => 0,
-+      'failures' => 0,
-+      'risky' => 0,
-+      'skipped' => 0,
-+      'incomplete' => 0,
-+      'time' => 0,
-+    ];
-+  }
-+
-+  /**
-+   * A testsuite ended.
-+   *
-+   * @param \PHPUnit\Framework\TestSuite $suite
-+   */
-+  public function endTestSuite(TestSuite $suite) {
-+    $properties = [
-+      'tests',
-+      'assertions',
-+      'errors',
-+      'failures',
-+      'risky',
-+      'skipped',
-+      'incomplete',
-+    ];
-+
-+    // Add summary to the <testsuite> DOM element.
-+    foreach ($properties as $property) {
-+      $this->testSuites[$this->testSuiteLevel]->setAttribute($property, $this->testSuiteRuns[$this->testSuiteLevel][$property]);
-+    }
-+    $this->testSuites[$this->testSuiteLevel]->setAttribute('time', sprintf('%F', $this->testSuiteRuns[$this->testSuiteLevel]['time']));
-+
-+    // When nesting, sum up results to the parent testsuite.
-+    if ($this->testSuiteLevel > 1) {
-+      foreach ($properties as $property) {
-+        $this->testSuiteRuns[$this->testSuiteLevel - 1][$property] += $this->testSuiteRuns[$this->testSuiteLevel][$property];
-+      }
-+      $this->testSuiteRuns[$this->testSuiteLevel - 1]['time'] += $this->testSuiteRuns[$this->testSuiteLevel]['time'];
-+    }
-+    $this->testSuiteLevel--;
-+  }
-+
-+  /**
-+   * A test started.
-+   *
-+   * @param \PHPUnit\Framework\Test $test
-+   */
-+  public function startTest(Test $test) {
-+    $testCase = $this->document->createElement('testcase');
-+    $testCase->setAttribute('name', $test->getName());
-+
-+    if ($test instanceof TestCase) {
-+      $class = new \ReflectionClass($test);
-+      $methodName = $test->getName(!$test->usesDataProvider());
-+
-+      if ($class->hasMethod($methodName)) {
-+        $method = $class->getMethod($methodName);
-+
-+        $testCase->setAttribute('class', $class->getName());
-+        $testCase->setAttribute('classname', str_replace('\\', '.', $class->getName()));
-+        $testCase->setAttribute('file', $class->getFileName());
-+        $testCase->setAttribute('line', $method->getStartLine());
-+      }
-+    }
-+
-+    $this->currentTestCase = $testCase;
-+  }
-+
-+  /**
-+   * A test ended.
-+   *
-+   * @param \PHPUnit\Framework\Test $test
-+   * @param float $time
-+   */
-+  public function endTest(Test $test, $time) {
-+    if ($test instanceof TestCase) {
-+      $num_assertions = $test->getNumAssertions();
-+      $this->testSuiteRuns[$this->testSuiteLevel]['assertions'] += $num_assertions;
-+
-+      $this->currentTestCase->setAttribute('assertions', $num_assertions);
-+    }
-+
-+    $this->currentTestCase->setAttribute('time', sprintf('%F', $time));
-+
-+    $this->testSuites[$this->testSuiteLevel]->appendChild(
-+      $this->currentTestCase
-+    );
-+
-+    $this->testSuiteRuns[$this->testSuiteLevel]['tests']++;
-+    $this->testSuiteRuns[$this->testSuiteLevel]['time'] += $time;
-+
-+    if (method_exists($test, 'hasOutput') && $test->hasOutput()) {
-+      $systemOut = $this->document->createElement('system-out', Xml::prepareString($test->getActualOutput()));
-+
-+      $this->currentTestCase->appendChild($systemOut);
-+    }
-+
-+    $this->currentTestCase = NULL;
-+  }
-+
-+  /**
-+   * Returns the XML as a string.
-+   *
-+   * @return string
-+   */
-+  public function getXML() {
-+    return $this->document->saveXML();
-+  }
-+
-+  /**
-+   * Method which generalizes addError() and addFailure()
-+   *
-+   * @param \PHPUnit\Framework\Test $test
-+   * @param \Exception $e
-+   * @param float $time
-+   * @param string $type
-+   */
-+  private function doAddFault(Test $test, \Exception $e, $time, $type) {
-+    if ($this->currentTestCase === NULL) {
-+      return;
-+    }
-+
-+    if ($test instanceof SelfDescribing) {
-+      $buffer = $test->toString() . "\n";
-+    }
-+    else {
-+      $buffer = '';
-+    }
-+
-+    $buffer .= TestFailure::exceptionToString($e) . "\n" . Filter::getFilteredStacktrace($e);
-+
-+    $fault = $this->document->createElement($type, Xml::prepareString($buffer));
-+
-+    if ($e instanceof ExceptionWrapper) {
-+      $fault->setAttribute('type', $e->getClassName());
-+    }
-+    else {
-+      $fault->setAttribute('type', get_class($e));
-+    }
-+
-+    $this->currentTestCase->appendChild($fault);
-+  }
-+
-+  /**
-+   * Method that generalizes unproductive tests.
-+   *
-+   * @see ::addSkippedTest
-+   * @see ::addIncompleteTest
-+   * @see ::addRiskyTest
-+   *
-+   * @param \PHPUnit\Framework\Test $test
-+   * @param string $message
-+   */
-+  private function doAddSkipped(Test $test, $message) {
-+    if ($this->currentTestCase === NULL) {
-+      return;
-+    }
-+
-+    $skipped = $this->document->createElement('skipped');
-+    $skipped->setAttribute('message', $message);
-+    $this->currentTestCase->appendChild($skipped);
-+
-+    switch ($message) {
-+      case 'risky':
-+        $this->testSuiteRuns[$this->testSuiteLevel]['risky']++;
-+        break;
-+
-+      case 'skipped':
-+        $this->testSuiteRuns[$this->testSuiteLevel]['skipped']++;
-+        break;
-+
-+      case 'incomplete':
-+        $this->testSuiteRuns[$this->testSuiteLevel]['incomplete']++;
-+        break;
-+
-+    }
-+  }
-+
-+}
-diff --git a/core/lib/Drupal/Core/Test/PhpUnitTestRunner.php b/core/lib/Drupal/Core/Test/PhpUnitTestRunner.php
-index bc7846e819..b797fb4e23 100644
---- a/core/lib/Drupal/Core/Test/PhpUnitTestRunner.php
-+++ b/core/lib/Drupal/Core/Test/PhpUnitTestRunner.php
-@@ -4,9 +4,11 @@
- 
- use Drupal\Core\Database\Database;
- use Drupal\Core\DependencyInjection\ContainerInjectionInterface;
-+use Drupal\Core\File\FileSystemInterface;
- use Drupal\Tests\Listeners\SimpletestUiPrinter;
- use Symfony\Component\DependencyInjection\ContainerInterface;
- use Symfony\Component\Process\PhpExecutableFinder;
-+use Symfony\Component\Process\Process;
- 
- /**
-  * Run PHPUnit-based tests.
-@@ -39,13 +41,20 @@ class PhpUnitTestRunner implements ContainerInjectionInterface {
-    */
-   protected $appRoot;
- 
-+  /**
-+   * The file system service.
-+   *
-+   * @var \Drupal\Core\File\FileSystemInterface
-+   */
-+  protected $fileSystem;
-+
-   /**
-    * {@inheritdoc}
-    */
-   public static function create(ContainerInterface $container) {
-     return new static(
-       (string) $container->get('app.root'),
--      (string) $container->get('file_system')->realpath('public://simpletest')
-+      $container->get('file_system')
-     );
-   }
- 
-@@ -54,17 +63,17 @@ public static function create(ContainerInterface $container) {
-    *
-    * @param string $app_root
-    *   Path to the application root.
--   * @param string $working_directory
--   *   Path to the working directory. JUnit log files will be stored in this
--   *   directory.
-+   * @param \Drupal\Core\File\FileSystemInterface $file_system
-+   *   The file system service.
-    */
--  public function __construct($app_root, $working_directory) {
-+  public function __construct($app_root, FileSystemInterface $file_system) {
-     $this->appRoot = $app_root;
--    $this->workingDirectory = $working_directory;
-+    $this->fileSystem = $file_system;
-+    $this->workingDirectory = $this->fileSystem->realpath('public://simpletest');
-   }
- 
-   /**
--   * Returns the path to use for PHPUnit's --log-junit option.
-+   * Returns a prepared path to use for the JUnitListener output.
-    *
-    * @param int $test_id
-    *   The current test ID.
-@@ -75,6 +84,7 @@ public function __construct($app_root, $working_directory) {
-    * @internal
-    */
-   public function xmlLogFilePath($test_id) {
-+    \Drupal::service('file_system')->prepareDirectory($this->workingDirectory, FileSystemInterface::CREATE_DIRECTORY | FileSystemInterface::MODIFY_PERMISSIONS);
-     return $this->workingDirectory . '/phpunit-' . $test_id . '.xml';
-   }
- 
-@@ -125,34 +135,35 @@ public function phpUnitCommand() {
-    *
-    * @internal
-    */
--  public function runCommand(array $unescaped_test_classnames, $phpunit_file, &$status = NULL, &$output = NULL) {
-+  public function runCommand(array $unescaped_test_classnames, $phpunit_file, &$status = NULL, &$output = NULL, $environment_variables = []) {
-     global $base_url;
-     // Setup an environment variable containing the database connection so that
-     // functional tests can connect to the database.
--    putenv('SIMPLETEST_DB=' . Database::getConnectionInfoAsUrl());
-+    $process_environment_variables = array_merge($environment_variables, [
-+      'SIMPLETEST_DB' => Database::getConnectionInfoAsUrl(),
-+      'SIMPLETEST_JUNIT_FILE' => $phpunit_file,
-+    ]);
- 
-     // Setup an environment variable containing the base URL, if it is available.
-     // This allows functional tests to browse the site under test. When running
-     // tests via CLI, core/phpunit.xml.dist or core/scripts/run-tests.sh can set
-     // this variable.
-     if ($base_url) {
--      putenv('SIMPLETEST_BASE_URL=' . $base_url);
--      putenv('BROWSERTEST_OUTPUT_DIRECTORY=' . $this->workingDirectory);
-+      $process_environment_variables['SIMPLETEST_BASE_URL'] = $base_url;
-+      $process_environment_variables['BROWSERTEST_OUTPUT_DIRECTORY'] = $this->workingDirectory;
-     }
-     $phpunit_bin = $this->phpUnitCommand();
- 
-     $command = [
-       $phpunit_bin,
--      '--log-junit',
--      escapeshellarg($phpunit_file),
-       '--printer',
--      escapeshellarg(SimpletestUiPrinter::class),
-+      SimpletestUiPrinter::class,
-     ];
- 
-     // Optimized for running a single test.
-     if (count($unescaped_test_classnames) == 1) {
-       $class = new \ReflectionClass($unescaped_test_classnames[0]);
--      $command[] = escapeshellarg($class->getFileName());
-+      $command[] = $class->getFileName();
-     }
-     else {
-       // Double escape namespaces so they'll work in a regexp.
-@@ -163,26 +174,18 @@ public function runCommand(array $unescaped_test_classnames, $phpunit_file, &$st
-       $filter_string = implode("|", $escaped_test_classnames);
-       $command = array_merge($command, [
-         '--filter',
--        escapeshellarg($filter_string),
-+        $filter_string,
-       ]);
-     }
- 
--    // Need to change directories before running the command so that we can use
--    // relative paths in the configuration file's exclusions.
--    $old_cwd = getcwd();
--    chdir($this->appRoot . "/core");
-+    $process = new Process($command, \Drupal::root() . "/core", $process_environment_variables);
-+    $process->inheritEnvironmentVariables();
-+    $process->setTimeout(NULL);
-+    $process->run();
-+    $output = explode("\n", $process->getOutput());
-+    $status = $process->getExitCode();
- 
--    // exec in a subshell so that the environment is isolated when running tests
--    // via the simpletest UI.
--    $ret = exec(implode(" ", $command), $output, $status);
--
--    chdir($old_cwd);
--    putenv('SIMPLETEST_DB=');
--    if ($base_url) {
--      putenv('SIMPLETEST_BASE_URL=');
--      putenv('BROWSERTEST_OUTPUT_DIRECTORY=');
--    }
--    return $ret;
-+    return '';
-   }
- 
-   /**
-@@ -203,11 +206,11 @@ public function runCommand(array $unescaped_test_classnames, $phpunit_file, &$st
-    *
-    * @internal
-    */
--  public function runTests($test_id, array $unescaped_test_classnames, &$status = NULL) {
-+  public function runTests($test_id, array $unescaped_test_classnames, &$status = NULL, $environment_variables = []) {
-     $phpunit_file = $this->xmlLogFilePath($test_id);
-     // Store ouptut from our test run.
-     $output = [];
--    $this->runCommand($unescaped_test_classnames, $phpunit_file, $status, $output);
-+    $this->runCommand($unescaped_test_classnames, $phpunit_file, $status, $output, $environment_variables);
- 
-     if ($status == TestStatus::PASS) {
-       return JUnitConverter::xmlToRows($test_id, $phpunit_file);
-@@ -245,6 +248,9 @@ public function summarizeResults(array $results) {
-         $summaries[$result['test_class']] = [
-           '#pass' => 0,
-           '#fail' => 0,
-+          '#risky' => 0,
-+          '#skipped' => 0,
-+          '#incomplete' => 0,
-           '#exception' => 0,
-           '#debug' => 0,
-         ];
-@@ -259,6 +265,18 @@ public function summarizeResults(array $results) {
-           $summaries[$result['test_class']]['#fail']++;
-           break;
- 
-+        case 'risky':
-+          $summaries[$result['test_class']]['#risky']++;
-+          break;
-+
-+        case 'skipped':
-+          $summaries[$result['test_class']]['#skipped']++;
-+          break;
-+
-+        case 'incomplete':
-+          $summaries[$result['test_class']]['#incomplete']++;
-+          break;
-+
-         case 'exception':
-           $summaries[$result['test_class']]['#exception']++;
-           break;
-@@ -266,6 +284,7 @@ public function summarizeResults(array $results) {
-         case 'debug':
-           $summaries[$result['test_class']]['#debug']++;
-           break;
-+
-       }
-     }
-     return $summaries;
 diff --git a/core/lib/Drupal/Core/Test/TestDatabase.php b/core/lib/Drupal/Core/Test/TestDatabase.php
-index 20cc8e6687..15b6475e08 100644
+index 20cc8e6687..86f52a9100 100644
 --- a/core/lib/Drupal/Core/Test/TestDatabase.php
 +++ b/core/lib/Drupal/Core/Test/TestDatabase.php
-@@ -336,10 +336,10 @@ public static function testingSchema() {
-         ],
-         'status' => [
-           'type' => 'varchar',
--          'length' => 9,
-+          'length' => 12,
-           'not null' => TRUE,
-           'default' => '',
--          'description' => 'Message status. Core understands pass, fail, exception.',
-+          'description' => 'Message status.',
-         ],
-         'message' => [
-           'type' => 'text',
-diff --git a/core/modules/simpletest/css/simpletest.module.css b/core/modules/simpletest/css/simpletest.module.css
-index f7a932e286..2978ab44f9 100644
---- a/core/modules/simpletest/css/simpletest.module.css
-+++ b/core/modules/simpletest/css/simpletest.module.css
-@@ -60,6 +60,13 @@ tr.simpletest-fail.odd {
- tr.simpletest-fail.even {
-   background-color: #ffacac;
+@@ -179,64 +179,6 @@ protected function getLockFile($lock_id) {
+     return FileSystem::getOsTemporaryDirectory() . '/test_' . $lock_id;
+   }
+ 
+-  /**
+-   * Store an assertion from outside the testing context.
+-   *
+-   * This is useful for inserting assertions that can only be recorded after
+-   * the test case has been destroyed, such as PHP fatal errors. The caller
+-   * information is not automatically gathered since the caller is most likely
+-   * inserting the assertion on behalf of other code. In all other respects
+-   * the method behaves just like \Drupal\simpletest\TestBase::assert() in terms
+-   * of storing the assertion.
+-   *
+-   * @param string $test_id
+-   *   The test ID to which the assertion relates.
+-   * @param string $test_class
+-   *   The test class to store an assertion for.
+-   * @param bool|string $status
+-   *   A boolean or a string of 'pass' or 'fail'. TRUE means 'pass'.
+-   * @param string $message
+-   *   The assertion message.
+-   * @param string $group
+-   *   The assertion message group.
+-   * @param array $caller
+-   *   The an array containing the keys 'file' and 'line' that represent the
+-   *   file and line number of that file that is responsible for the assertion.
+-   *
+-   * @return int
+-   *   Message ID of the stored assertion.
+-   *
+-   * @internal
+-   */
+-  public static function insertAssert($test_id, $test_class, $status, $message = '', $group = 'Other', array $caller = []) {
+-    // Convert boolean status to string status.
+-    if (is_bool($status)) {
+-      $status = $status ? 'pass' : 'fail';
+-    }
+-
+-    $caller += [
+-      'function' => 'Unknown',
+-      'line' => 0,
+-      'file' => 'Unknown',
+-    ];
+-
+-    $assertion = [
+-      'test_id' => $test_id,
+-      'test_class' => $test_class,
+-      'status' => $status,
+-      'message' => $message,
+-      'message_group' => $group,
+-      'function' => $caller['function'],
+-      'line' => $caller['line'],
+-      'file' => $caller['file'],
+-    ];
+-
+-    return static::getConnection()
+-      ->insert('simpletest')
+-      ->fields($assertion)
+-      ->execute();
+-  }
+-
+   /**
+    * Get information about the last test that ran given a test ID.
+    *
+diff --git a/core/lib/Drupal/Core/Test/TestStatus.php b/core/lib/Drupal/Core/Test/TestStatus.php
+index 79459e4eb0..57e9202dd2 100644
+--- a/core/lib/Drupal/Core/Test/TestStatus.php
++++ b/core/lib/Drupal/Core/Test/TestStatus.php
+@@ -2,6 +2,8 @@
+ 
+ namespace Drupal\Core\Test;
+ 
++use Drupal\Core\Database\Connection;
++
+ /**
+  * Consolidates test result status information.
+  *
+@@ -39,6 +41,9 @@ class TestStatus {
+    */
+   const SYSTEM = 3;
+ 
++  protected $connection;
++  protected $testId;
++
+   /**
+    * Turns a status code into a human-readable string.
+    *
+@@ -60,4 +65,58 @@ public static function label($status) {
+     return $label;
+   }
+ 
++  /**
++   * TestStatus constructor.
++   */
++  public function __construct(Connection $connection, $test_id) {
++    $this->connection = $connection;
++    $this->testId = $test_id;
++  }
++
++  /**
++   *
++   */
++  public static function createNew(Connection $connection) {
++    $test_id = $connection->insert('simpletest_test_id')
++      ->useDefaults(['test_id'])
++      ->execute();
++    return new static($connection, $test_id);
++  }
++
++  /**
++   *
++   */
++  public static function get(Connection $connection, $test_id) {
++    return new static($connection, $test_id);
++  }
++
++  /**
++   *
++   */
++  public function id() {
++    return $this->testId;
++  }
++
++  /**
++   *
++   */
++  public function update(array $status) {
++    $affected_rows = $this->connection->update('simpletest_test_id')
++      ->fields($status)
++      ->condition('test_id', $this->testId)
++      ->execute();
++    if (!$affected_rows) {
++      throw new \RuntimeException('Failed to set up database prefix.');
++    }
++  }
++
++  /**
++   *
++   */
++  public function insertLogEntry(array $entry) {
++    return $this->connection->insert('simpletest')
++      ->fields($entry)
++      ->execute();
++  }
++
  }
-+tr.simpletest-skipped,
-+tr.simpletest-skipped.odd {
-+  background-color: #ffc9c9;
-+}
-+tr.simpletest-skipped.even {
-+  background-color: #ffacac;
-+}
- tr.simpletest-exception,
- tr.simpletest-exception.odd {
-   background-color: #f4ea71;
 diff --git a/core/modules/simpletest/simpletest.module b/core/modules/simpletest/simpletest.module
-index e5853bb18a..1f6fbf9119 100644
+index e5853bb18a..3a45f3ad34 100644
 --- a/core/modules/simpletest/simpletest.module
 +++ b/core/modules/simpletest/simpletest.module
-@@ -46,7 +46,17 @@ function simpletest_help($route_name, RouteMatchInterface $route_match) {
- function simpletest_theme() {
-   return [
-     'simpletest_result_summary' => [
--      'variables' => ['label' => NULL, 'items' => [], 'pass' => 0, 'fail' => 0, 'exception' => 0, 'debug' => 0],
-+      'variables' => [
-+        'label' => NULL,
-+        'items' => [],
-+        'pass' => 0,
-+        'fail' => 0,
-+        'risky' => 0,
-+        'skipped' => 0,
-+        'incomplete' => 0,
-+        'exception' => 0,
-+        'debug' => 0,
-+      ],
-     ],
-   ];
- }
-@@ -94,6 +104,9 @@ function _simpletest_build_summary_line($summary) {
-   $translation = \Drupal::translation();
-   $items['pass'] = $translation->formatPlural($summary['pass'], '1 pass', '@count passes');
-   $items['fail'] = $translation->formatPlural($summary['fail'], '1 fail', '@count fails');
-+  $items['risky'] = $translation->formatPlural($summary['risky'], '1 risky', '@count risky');
-+  $items['skipped'] = $translation->formatPlural($summary['skipped'], '1 skipped', '@count skipped');
-+  $items['incomplete'] = $translation->formatPlural($summary['incomplete'], '1 incomplete', '@count incomplete');
-   $items['exception'] = $translation->formatPlural($summary['exception'], '1 exception', '@count exceptions');
-   if ($summary['debug']) {
-     $items['debug'] = $translation->formatPlural($summary['debug'], '1 debug message', '@count debug messages');
-@@ -193,17 +206,17 @@ function simpletest_run_tests($test_list) {
-  *
-  * @see https://www.drupal.org/node/2948547
-  */
--function simpletest_run_phpunit_tests($test_id, array $unescaped_test_classnames, &$status = NULL) {
-+function simpletest_run_phpunit_tests($test_id, array $unescaped_test_classnames, &$status = NULL, $environment_variables = []) {
-   $runner = PhpUnitTestRunner::create(\Drupal::getContainer());
-   @trigger_error(__FUNCTION__ . ' is deprecated in drupal:8.8.0 and is removed from drupal:9.0.0. Use \Drupal\Core\Test\PhpUnitTestRunner::runTests() instead. See https://www.drupal.org/node/2948547', E_USER_DEPRECATED);
--  return $runner->runTests($test_id, $unescaped_test_classnames, $status);
-+  return $runner->runTests($test_id, $unescaped_test_classnames, $status, $environment_variables);
- }
- 
- /**
-  * Inserts the parsed PHPUnit results into {simpletest}.
-  *
-  * @param array[] $phpunit_results
-- *   An array of test results returned from simpletest_phpunit_xml_to_rows().
-+ *   An array of test results returned from JUnitConverter::getRecords().
-  */
- function simpletest_process_phpunit_results($phpunit_results) {
-   // Insert the results of the PHPUnit test run into the database so the results
-@@ -298,10 +311,10 @@ function simpletest_phpunit_configuration_filepath() {
-  *
-  * @see https://www.drupal.org/node/2948547
-  */
--function simpletest_phpunit_run_command(array $unescaped_test_classnames, $phpunit_file, &$status = NULL, &$output = NULL) {
-+function simpletest_phpunit_run_command(array $unescaped_test_classnames, $phpunit_file, &$status = NULL, &$output = NULL, $environment_variables = []) {
-   $runner = PhpUnitTestRunner::create(\Drupal::getContainer());
-   @trigger_error(__FUNCTION__ . ' is deprecated in drupal:8.8.0 and is removed from drupal:9.0.0. Use \Drupal\Core\Test\PhpUnitTestRunner::runCommand() instead. See https://www.drupal.org/node/2948547', E_USER_DEPRECATED);
--  return $runner->runCommand($unescaped_test_classnames, $phpunit_file, $status, $output);
-+  return $runner->runCommand($unescaped_test_classnames, $phpunit_file, $status, $output, $environment_variables = []);
- }
- 
- /**
-@@ -331,7 +344,15 @@ function _simpletest_batch_operation($test_list_init, $test_id, &$context) {
-     // First iteration: initialize working values.
-     $test_list = $test_list_init;
-     $context['sandbox']['max'] = count($test_list);
--    $test_results = ['#pass' => 0, '#fail' => 0, '#exception' => 0, '#debug' => 0];
-+    $test_results = [
-+      '#pass' => 0,
-+      '#fail' => 0,
-+      '#risky' => 0,
-+      '#skipped' => 0,
-+      '#incomplete' => 0,
-+      '#exception' => 0,
-+      '#debug' => 0,
-+    ];
+@@ -13,6 +13,7 @@
+ use Drupal\Core\Test\JUnitConverter;
+ use Drupal\Core\Test\PhpUnitTestRunner;
+ use Drupal\Core\Test\TestDatabase;
++use Drupal\Core\Test\TestStatus;
+ use Drupal\Core\Url;
+ use Drupal\simpletest\TestDiscovery;
+ use PHPUnit\Framework\TestCase;
+@@ -139,9 +140,7 @@ function simpletest_run_tests($test_list) {
+     unset($test_list['phpunit']);
    }
-   else {
-     // Nth iteration: get the current values where we last stored them.
-@@ -739,7 +760,7 @@ function simpletest_phpunit_xml_to_rows($test_id, $phpunit_xml_file) {
-  * @param \SimpleXMLElement $element
-  *   The PHPUnit xml to search for test cases.
-  * @param \SimpleXMLElement $parent
-- *   (Optional) The parent of the current element. Defaults to NULL.
-+ *   (Optional) Unused. The parent of the current element. Defaults to NULL.
-  *
-  * @return array
-  *   A list of all test cases.
-diff --git a/core/modules/simpletest/src/Form/SimpletestResultsForm.php b/core/modules/simpletest/src/Form/SimpletestResultsForm.php
-index 5db8846353..7e6cdeb272 100644
---- a/core/modules/simpletest/src/Form/SimpletestResultsForm.php
-+++ b/core/modules/simpletest/src/Form/SimpletestResultsForm.php
-@@ -91,6 +91,9 @@ protected static function buildStatusImageMap() {
-     return [
-       'pass' => $image_pass,
-       'fail' => $image_fail,
-+      'risky' => $image_fail,
-+      'skipped' => $image_debug,
-+      'incomplete' => $image_debug,
-       'exception' => $image_exception,
-       'debug' => $image_debug,
-     ];
-@@ -262,6 +265,9 @@ public static function addResultForm(array &$form, array $results) {
-     $filter = [
-       'pass' => [],
-       'fail' => [],
-+      'risky' => [],
-+      'skipped' => [],
-+      'incomplete' => [],
-     ];
  
-     // Summary result widget.
-@@ -276,6 +282,9 @@ public static function addResultForm(array &$form, array $results) {
-       '#theme' => 'simpletest_result_summary',
-       '#pass' => 0,
-       '#fail' => 0,
-+      '#risky' => 0,
-+      '#skipped' => 0,
-+      '#incomplete' => 0,
-       '#exception' => 0,
-       '#debug' => 0,
-     ];
-@@ -332,7 +341,8 @@ public static function addResultForm(array &$form, array $results) {
+-  $test_id = \Drupal::database()->insert('simpletest_test_id')
+-    ->useDefaults(['test_id'])
+-    ->execute();
++  $test_status = TestStatus::createNew(\Drupal::database());
  
-       // Set summary information.
-       $group_summary['#ok'] = $group_summary['#fail'] + $group_summary['#exception'] == 0;
--      $form['result']['results'][$group]['#open'] = !$group_summary['#ok'];
-+      // Set the group to be revealed if there were fails, errors, risky or incomplete.
-+      $form['result']['results'][$group]['#open'] = !$group_summary['#ok'] || $group_summary['#risky'] || $group_summary['#incomplete'];
+   // Clear out the previous verbose files.
+   try {
+@@ -158,7 +157,7 @@ function simpletest_run_tests($test_list) {
+   $batch = [
+     'title' => t('Running tests'),
+     'operations' => [
+-      ['_simpletest_batch_operation', [$test_list, $test_id]],
++      ['_simpletest_batch_operation', [$test_list, $test_status->id()]],
+     ],
+     'finished' => '_simpletest_batch_finished',
+     'progress_message' => '',
+@@ -169,7 +168,7 @@ function simpletest_run_tests($test_list) {
  
-       // Store test group (class) as for use in filter.
-       $filter[$group_summary['#ok'] ? 'pass' : 'fail'][] = $group;
+   \Drupal::moduleHandler()->invokeAll('test_group_started');
+ 
+-  return $test_id;
++  return $test_status->id();
+ }
+ 
+ /**
+@@ -209,13 +208,10 @@ function simpletest_process_phpunit_results($phpunit_results) {
+   // Insert the results of the PHPUnit test run into the database so the results
+   // are displayed along with Simpletest's results.
+   if (!empty($phpunit_results)) {
+-    $query = TestDatabase::getConnection()
+-      ->insert('simpletest')
+-      ->fields(array_keys($phpunit_results[0]));
++    $test_status = TestStatus::get(TestDatabase::getConnection(), $phpunit_results[0]['test_id']);
+     foreach ($phpunit_results as $result) {
+-      $query->values($result);
++      $test_status->insertLogEntry($result);
+     }
+-    $query->execute();
+   }
+ }
+ 
+@@ -496,7 +492,30 @@ function simpletest_log_read($test_id, $database_prefix, $test_class) {
+  */
+ function simpletest_insert_assert($test_id, $test_class, $status, $message = '', $group = 'Other', array $caller = []) {
+   @trigger_error(__FUNCTION__ . ' is deprecated in drupal:8.8.0 and is removed from drupal:9.0.0. Use \Drupal\Core\Test\TestDatabase::insertAssert() instead. See https://www.drupal.org/node/3075252', E_USER_DEPRECATED);
+-  TestDatabase::insertAssert($test_id, $test_class, $status, $message, $group, $caller);
++
++  // Convert boolean status to string status.
++  if (is_bool($status)) {
++    $status = $status ? 'pass' : 'fail';
++  }
++
++  $caller += [
++    'function' => 'Unknown',
++    'line' => 0,
++    'file' => 'Unknown',
++  ];
++
++  $assertion = [
++    'test_id' => $test_id,
++    'test_class' => $test_class,
++    'status' => $status,
++    'message' => $message,
++    'message_group' => $group,
++    'function' => $caller['function'],
++    'line' => $caller['line'],
++    'file' => $caller['file'],
++  ];
++
++  TestStatus::get(TestDatabase::getConnection(), $test_id)->insertLogEntry($assertion);
+ }
+ 
+ /**
 diff --git a/core/modules/simpletest/src/TestBase.php b/core/modules/simpletest/src/TestBase.php
-index c3d5495fd0..100fc2f14f 100644
+index c3d5495fd0..ff091eff31 100644
 --- a/core/modules/simpletest/src/TestBase.php
 +++ b/core/modules/simpletest/src/TestBase.php
-@@ -63,6 +63,9 @@
-   public $results = [
-     '#pass' => 0,
-     '#fail' => 0,
-+    '#risky' => 0,
-+    '#skipped' => 0,
-+    '#incomplete' => 0,
-     '#exception' => 0,
-     '#debug' => 0,
-   ];
-@@ -306,8 +309,8 @@ protected function storeAssertion(array $assertion) {
-    * Internal helper: stores the assert.
-    *
-    * @param $status
--   *   Can be 'pass', 'fail', 'exception', 'debug'.
--   *   TRUE is a synonym for 'pass', FALSE for 'fail'.
-+   *   Can be 'pass', 'fail', 'risky', 'skipped', 'incomplete' , 'exception',
-+   *   'debug'. TRUE is a synonym for 'pass', FALSE for 'fail'.
-    * @param string|\Drupal\Component\Render\MarkupInterface $message
-    *   (optional) A message to display with the assertion. Do not translate
-    *   messages: use \Drupal\Component\Render\FormattableMarkup to embed
-diff --git a/core/modules/simpletest/src/Tests/SimpleTestTest.php b/core/modules/simpletest/src/Tests/SimpleTestTest.php
-index ea10bcef71..8723a01171 100644
---- a/core/modules/simpletest/src/Tests/SimpleTestTest.php
-+++ b/core/modules/simpletest/src/Tests/SimpleTestTest.php
-@@ -268,7 +268,7 @@ public function confirmStubTestResults() {
- 
-     $this->assertAssertion("Debug: 'Foo'", 'Debug', 'Fail', 'SimpleTestTest.php', 'Drupal\simpletest\Tests\SimpleTestTest->stubTest()');
- 
--    $this->assertEqual('16 passes, 3 fails, 2 exceptions, 3 debug messages', $this->childTestResults['summary']);
-+    $this->assertEqual('16 passes, 3 fails, 0 risky, 0 skipped, 0 incomplete, 2 exceptions, 3 debug messages', $this->childTestResults['summary']);
- 
-     $this->testIds[] = $test_id = $this->getTestIdFromResults();
-     $this->assertTrue($test_id, 'Found test ID in results.');
-diff --git a/core/modules/simpletest/tests/fixtures/phpunit_skipped.xml b/core/modules/simpletest/tests/fixtures/phpunit_skipped.xml
-new file mode 100644
-index 0000000000..bd1d037f36
---- /dev/null
-+++ b/core/modules/simpletest/tests/fixtures/phpunit_skipped.xml
-@@ -0,0 +1,29 @@
-+<?xml version="1.0" encoding="UTF-8"?>
-+<testsuites>
-+  <testsuite name="Drupal\Tests\Core\Access\AccessManagerTest" file="/var/www/lab01/core/tests/Drupal/Tests/Core/Access/AccessManagerTest.php" tests="18" assertions="61" errors="0" failures="0" risky="0" skipped="1" incomplete="0" time="0.308898">
-+    <testcase name="testSetChecks" class="Drupal\Tests\Core\Access\AccessManagerTest" classname="Drupal.Tests.Core.Access.AccessManagerTest" file="/var/www/lab01/core/tests/Drupal/Tests/Core/Access/AccessManagerTest.php" line="138" assertions="0" time="0.106626">
-+      <skipped message="skipped"/>
-+    </testcase>
-+    <testcase name="testSetChecksWithDynamicAccessChecker" class="Drupal\Tests\Core\Access\AccessManagerTest" classname="Drupal.Tests.Core.Access.AccessManagerTest" file="/var/www/lab01/core/tests/Drupal/Tests/Core/Access/AccessManagerTest.php" line="159" assertions="3" time="0.017037"/>
-+    <testcase name="testCheck" class="Drupal\Tests\Core\Access\AccessManagerTest" classname="Drupal.Tests.Core.Access.AccessManagerTest" file="/var/www/lab01/core/tests/Drupal/Tests/Core/Access/AccessManagerTest.php" line="189" assertions="24" time="0.021573"/>
-+    <testcase name="testCheckWithNullAccount" class="Drupal\Tests\Core\Access\AccessManagerTest" classname="Drupal.Tests.Core.Access.AccessManagerTest" file="/var/www/lab01/core/tests/Drupal/Tests/Core/Access/AccessManagerTest.php" line="231" assertions="1" time="0.010700"/>
-+    <testsuite name="Drupal\Tests\Core\Access\AccessManagerTest::testCheckConjunctions" tests="6" assertions="12" errors="0" failures="0" risky="0" skipped="0" incomplete="0" time="0.063584">
-+      <testcase name="testCheckConjunctions with data set #0" class="Drupal\Tests\Core\Access\AccessManagerTest" classname="Drupal.Tests.Core.Access.AccessManagerTest" file="/var/www/lab01/core/tests/Drupal/Tests/Core/Access/AccessManagerTest.php" line="305" assertions="2" time="0.010881"/>
-+      <testcase name="testCheckConjunctions with data set #1" class="Drupal\Tests\Core\Access\AccessManagerTest" classname="Drupal.Tests.Core.Access.AccessManagerTest" file="/var/www/lab01/core/tests/Drupal/Tests/Core/Access/AccessManagerTest.php" line="305" assertions="2" time="0.010670"/>
-+      <testcase name="testCheckConjunctions with data set #2" class="Drupal\Tests\Core\Access\AccessManagerTest" classname="Drupal.Tests.Core.Access.AccessManagerTest" file="/var/www/lab01/core/tests/Drupal/Tests/Core/Access/AccessManagerTest.php" line="305" assertions="2" time="0.010567"/>
-+      <testcase name="testCheckConjunctions with data set #3" class="Drupal\Tests\Core\Access\AccessManagerTest" classname="Drupal.Tests.Core.Access.AccessManagerTest" file="/var/www/lab01/core/tests/Drupal/Tests/Core/Access/AccessManagerTest.php" line="305" assertions="2" time="0.010508"/>
-+      <testcase name="testCheckConjunctions with data set #4" class="Drupal\Tests\Core\Access\AccessManagerTest" classname="Drupal.Tests.Core.Access.AccessManagerTest" file="/var/www/lab01/core/tests/Drupal/Tests/Core/Access/AccessManagerTest.php" line="305" assertions="2" time="0.010574"/>
-+      <testcase name="testCheckConjunctions with data set #5" class="Drupal\Tests\Core\Access\AccessManagerTest" classname="Drupal.Tests.Core.Access.AccessManagerTest" file="/var/www/lab01/core/tests/Drupal/Tests/Core/Access/AccessManagerTest.php" line="305" assertions="2" time="0.010384"/>
-+    </testsuite>
-+    <testcase name="testCheckNamedRoute" class="Drupal\Tests\Core\Access\AccessManagerTest" classname="Drupal.Tests.Core.Access.AccessManagerTest" file="/var/www/lab01/core/tests/Drupal/Tests/Core/Access/AccessManagerTest.php" line="333" assertions="5" time="0.012686"/>
-+    <testcase name="testCheckNamedRouteWithUpcastedValues" class="Drupal\Tests\Core\Access\AccessManagerTest" classname="Drupal.Tests.Core.Access.AccessManagerTest" file="/var/www/lab01/core/tests/Drupal/Tests/Core/Access/AccessManagerTest.php" line="368" assertions="5" time="0.012923"/>
-+    <testcase name="testCheckNamedRouteWithDefaultValue" class="Drupal\Tests\Core\Access\AccessManagerTest" classname="Drupal.Tests.Core.Access.AccessManagerTest" file="/var/www/lab01/core/tests/Drupal/Tests/Core/Access/AccessManagerTest.php" line="417" assertions="5" time="0.012138"/>
-+    <testcase name="testCheckNamedRouteWithNonExistingRoute" class="Drupal\Tests\Core\Access\AccessManagerTest" classname="Drupal.Tests.Core.Access.AccessManagerTest" file="/var/www/lab01/core/tests/Drupal/Tests/Core/Access/AccessManagerTest.php" line="464" assertions="2" time="0.010824"/>
-+    <testsuite name="Drupal\Tests\Core\Access\AccessManagerTest::testCheckException" tests="4" assertions="4" errors="0" failures="0" risky="0" skipped="0" incomplete="0" time="0.040806">
-+      <testcase name="testCheckException with data set #0" class="Drupal\Tests\Core\Access\AccessManagerTest" classname="Drupal.Tests.Core.Access.AccessManagerTest" file="/var/www/lab01/core/tests/Drupal/Tests/Core/Access/AccessManagerTest.php" line="480" assertions="1" time="0.010990"/>
-+      <testcase name="testCheckException with data set #1" class="Drupal\Tests\Core\Access\AccessManagerTest" classname="Drupal.Tests.Core.Access.AccessManagerTest" file="/var/www/lab01/core/tests/Drupal/Tests/Core/Access/AccessManagerTest.php" line="480" assertions="1" time="0.009883"/>
-+      <testcase name="testCheckException with data set #2" class="Drupal\Tests\Core\Access\AccessManagerTest" classname="Drupal.Tests.Core.Access.AccessManagerTest" file="/var/www/lab01/core/tests/Drupal/Tests/Core/Access/AccessManagerTest.php" line="480" assertions="1" time="0.009928"/>
-+      <testcase name="testCheckException with data set #3" class="Drupal\Tests\Core\Access\AccessManagerTest" classname="Drupal.Tests.Core.Access.AccessManagerTest" file="/var/www/lab01/core/tests/Drupal/Tests/Core/Access/AccessManagerTest.php" line="480" assertions="1" time="0.010005"/>
-+    </testsuite>
-+  </testsuite>
-+</testsuites>
-diff --git a/core/modules/simpletest/tests/src/Functional/SimpletestUiTest.php b/core/modules/simpletest/tests/src/Functional/SimpletestUiTest.php
-index 9103cb8aad..c681ddd23c 100644
---- a/core/modules/simpletest/tests/src/Functional/SimpletestUiTest.php
-+++ b/core/modules/simpletest/tests/src/Functional/SimpletestUiTest.php
-@@ -59,7 +59,7 @@ public function testTestingThroughUI() {
-         "tests[$test]" => TRUE,
-       ];
-       $this->drupalPostForm($url, $edit, t('Run tests'));
--      $assertion->pageTextContains('0 fails, 0 exceptions');
-+      $assertion->pageTextContains('0 fails, 0 risky, 0 skipped, 0 incomplete, 0 exceptions');
-     }
+@@ -14,6 +14,7 @@
+ use Drupal\Core\Test\TestDatabase;
+ use Drupal\Core\Test\TestDiscovery;
+ use Drupal\Core\Test\TestSetupTrait;
++use Drupal\Core\Test\TestStatus;
+ use Drupal\Core\Utility\Error;
+ use Drupal\Tests\AssertHelperTrait as BaseAssertHelperTrait;
+ use Drupal\Tests\ConfigTestTrait;
+@@ -296,10 +297,7 @@ protected function checkRequirements() {
+    *   The message ID.
+    */
+   protected function storeAssertion(array $assertion) {
+-    return self::getDatabaseConnection()
+-      ->insert('simpletest', ['return' => Database::RETURN_INSERT_ID])
+-      ->fields($assertion)
+-      ->execute();
++    return TestStatus::get(self::getDatabaseConnection(), $this->testId)->insertLogEntry($assertion);
    }
- 
-diff --git a/core/modules/simpletest/tests/src/Kernel/SimpletestDeprecationTest.php b/core/modules/simpletest/tests/src/Kernel/SimpletestDeprecationTest.php
-index 3c0c89c933..1ea2e3047b 100644
---- a/core/modules/simpletest/tests/src/Kernel/SimpletestDeprecationTest.php
-+++ b/core/modules/simpletest/tests/src/Kernel/SimpletestDeprecationTest.php
-@@ -69,6 +69,9 @@ public function testDeprecatedPhpUnitFunctions() {
-         static::class => [
-           '#pass' => 0,
-           '#fail' => 0,
-+          '#risky' => 0,
-+          '#skipped' => 0,
-+          '#incomplete' => 0,
-           '#exception' => 0,
-           '#debug' => 1,
-         ],
-diff --git a/core/modules/simpletest/tests/src/Unit/SimpletestPhpunitRunCommandTest.php b/core/modules/simpletest/tests/src/Unit/SimpletestPhpunitRunCommandTest.php
-index 4f90438d1d..cd3c0787d5 100644
---- a/core/modules/simpletest/tests/src/Unit/SimpletestPhpunitRunCommandTest.php
-+++ b/core/modules/simpletest/tests/src/Unit/SimpletestPhpunitRunCommandTest.php
-@@ -71,6 +71,8 @@ protected function setUp() {
-     $file_system = $this->prophesize(FileSystemInterface::class);
-     // The simpletest directory wrapper will always point to /tmp.
-     $file_system->realpath('public://simpletest')->willReturn(sys_get_temp_dir());
-+    // The simpletest directory wrapper preparation will always be true.
-+    $file_system->prepareDirectory(sys_get_temp_dir(), FileSystemInterface::CREATE_DIRECTORY | FileSystemInterface::MODIFY_PERMISSIONS)->willReturn(TRUE);
-     $container->set('file_system', $file_system->reveal());
-     \Drupal::setContainer($container);
-     $this->fixtureContainer = $container;
-@@ -123,19 +125,16 @@ public function testSimpletestPhpUnitRunCommand($status, $label) {
-       ]
-     );
-     $test_id = basename(tempnam(sys_get_temp_dir(), 'xxx'));
--    putenv('SimpletestPhpunitRunCommandTestWillDie=' . $status);
- 
-     // Test against simpletest_run_phpunit_tests().
--    $bc_ret = simpletest_run_phpunit_tests($test_id, [SimpletestPhpunitRunCommandTestWillDie::class]);
--    $this->assertSame($bc_ret[0]['status'], $label);
-+    $bc_ret = simpletest_run_phpunit_tests($test_id, [SimpletestPhpunitRunCommandTestWillDie::class], $status, ['SimpletestPhpunitRunCommandTestWillDie' => $status]);
-+    $this->assertSame($label, $bc_ret[0]['status']);
- 
-     // Test against PhpUnitTestRunner::runTests().
-     $runner = PhpUnitTestRunner::create($this->fixtureContainer);
--    $ret = $runner->runTests($test_id, [SimpletestPhpunitRunCommandTestWillDie::class]);
--    $this->assertSame($ret[0]['status'], $label);
-+    $ret = $runner->runTests($test_id, [SimpletestPhpunitRunCommandTestWillDie::class], $status, ['SimpletestPhpunitRunCommandTestWillDie' => $status]);
-+    $this->assertSame($label, $ret[0]['status']);
- 
--    // Unset our environmental variable.
--    putenv('SimpletestPhpunitRunCommandTestWillDie');
-     unlink(simpletest_phpunit_xml_filepath($test_id));
-   }
- 
-diff --git a/core/modules/system/system.install b/core/modules/system/system.install
-index 018d5d003e..617f11335c 100644
---- a/core/modules/system/system.install
-+++ b/core/modules/system/system.install
-@@ -2357,3 +2357,19 @@ function system_update_8801() {
-       ->save(TRUE);
-   }
- }
-+
-+/**
-+ * Increase the size of the 'status' column in the 'simpletest' table.
-+ */
-+function system_update_8802() {
-+  $schema = \Drupal::database()->schema();
-+  if ($schema->tableExists('simpletest')) {
-+    $schema->changeField('simpletest', 'status', 'status', [
-+      'type' => 'varchar',
-+      'length' => 12,
-+      'not null' => TRUE,
-+      'default' => '',
-+      'description' => 'Message status.',
-+    ]);
-+  }
-+}
-diff --git a/core/phpunit.xml.dist b/core/phpunit.xml.dist
-index c24d4008d0..0420c1f717 100644
---- a/core/phpunit.xml.dist
-+++ b/core/phpunit.xml.dist
-@@ -52,6 +52,7 @@
-     <!-- The Symfony deprecation listener has to come after the Drupal listener -->
-     <listener class="Symfony\Bridge\PhpUnit\SymfonyTestsListener">
-     </listener>
-+    <listener class="\Drupal\Core\Test\JUnitListener"/>
-   </listeners>
-   <!-- Filter for coverage reports. -->
-   <filter>
-diff --git a/core/scripts/run-tests.sh b/core/scripts/run-tests.sh
-index 26763c3adb..5350b3119c 100755
---- a/core/scripts/run-tests.sh
-+++ b/core/scripts/run-tests.sh
-@@ -744,10 +744,15 @@ function simpletest_script_execute_batch($test_classes) {
-           // Insert a fail for xml results.
-           TestDatabase::insertAssert($child['test_id'], $child['class'], FALSE, $message, 'run-tests.sh check');
-           // Ensure that an error line is displayed for the class.
--          simpletest_script_reporter_display_summary(
--            $child['class'],
--            ['#pass' => 0, '#fail' => 1, '#exception' => 0, '#debug' => 0]
--          );
-+          simpletest_script_reporter_display_summary($child['class'], [
-+            '#pass' => 0,
-+            '#fail' => 1,
-+            '#risky' => 0,
-+            '#skipped' => 0,
-+            '#incomplete' => 0,
-+            '#exception' => 0,
-+            '#debug' => 0
-+          ]);
-           if ($args['die-on-fail']) {
-             list($db_prefix) = TestDatabase::lastTestGet($child['test_id']);
-             $test_db = new TestDatabase($db_prefix);
-@@ -1211,15 +1216,18 @@ function simpletest_script_reporter_display_summary($class, $results) {
-   // Output all test results vertically aligned.
-   // Cut off the class name after 60 chars, and pad each group with 3 digits
-   // by default (more than 999 assertions are rare).
--  $output = vsprintf('%-60.60s %10s %9s %14s %12s', [
-+  $output = vsprintf('%-60.60s %10s %9s %10s %11s %14s %14s %12s', [
-     $class,
-     $results['#pass'] . ' passes',
-     !$results['#fail'] ? '' : $results['#fail'] . ' fails',
-+    !$results['#risky'] ? '' : $results['#risky'] . ' risky',
-+    !$results['#skipped'] ? '' : $results['#skipped'] . ' skipped',
-+    !$results['#incomplete'] ? '' : $results['#incomplete'] . ' incomplete',
-     !$results['#exception'] ? '' : $results['#exception'] . ' exceptions',
-     !$results['#debug'] ? '' : $results['#debug'] . ' messages',
-   ]);
- 
--  $status = ($results['#fail'] || $results['#exception'] ? 'fail' : 'pass');
-+  $status = ($results['#fail'] || $results['#exception'] || $results['#risky'] ? 'fail' : 'pass');
-   simpletest_script_print($output . "\n", simpletest_script_color_code($status));
- }
- 
-diff --git a/core/tests/Drupal/Tests/Core/Test/PhpUnitTestRunnerTest.php b/core/tests/Drupal/KernelTests/Core/Test/PhpUnitTestRunnerTest.php
-similarity index 91%
-rename from core/tests/Drupal/Tests/Core/Test/PhpUnitTestRunnerTest.php
-rename to core/tests/Drupal/KernelTests/Core/Test/PhpUnitTestRunnerTest.php
-index bd62c430c6..62032ae920 100644
---- a/core/tests/Drupal/Tests/Core/Test/PhpUnitTestRunnerTest.php
-+++ b/core/tests/Drupal/KernelTests/Core/Test/PhpUnitTestRunnerTest.php
-@@ -4,7 +4,7 @@
- 
- use Drupal\Core\Test\PhpUnitTestRunner;
- use Drupal\Core\Test\TestStatus;
--use Drupal\Tests\UnitTestCase;
-+use Drupal\KernelTests\KernelTestBase;
- 
- /**
-  * @coversDefaultClass \Drupal\Core\Test\PhpUnitTestRunner
-@@ -12,7 +12,7 @@
-  *
-  * @see Drupal\Tests\simpletest\Unit\SimpletestPhpunitRunCommandTest
-  */
--class PhpUnitTestRunnerTest extends UnitTestCase {
-+class PhpUnitTestRunnerTest extends KernelTestBase {
  
    /**
-    * Test an error in the test running phase.
-@@ -70,7 +70,7 @@ function ($unescaped_test_classnames, $phpunit_file, &$status) {
-    * @covers ::phpUnitCommand
-    */
-   public function testPhpUnitCommand() {
--    $runner = new PhpUnitTestRunner($this->root, sys_get_temp_dir());
-+    $runner = new PhpUnitTestRunner($this->root, \Drupal::service('file_system'));
-     $this->assertRegExp('/phpunit/', $runner->phpUnitCommand());
+@@ -416,10 +414,7 @@ public static function insertAssert($test_id, $test_class, $status, $message = '
+     ];
+ 
+     // We can't use storeAssertion() because this method is static.
+-    return self::getDatabaseConnection()
+-      ->insert('simpletest')
+-      ->fields($assertion)
+-      ->execute();
++    return TestStatus::get(self::getDatabaseConnection(), $test_id)->insertLogEntry($assertion);
    }
  
-@@ -78,7 +78,7 @@ public function testPhpUnitCommand() {
-    * @covers ::xmlLogFilePath
-    */
-   public function testXmlLogFilePath() {
--    $runner = new PhpUnitTestRunner($this->root, sys_get_temp_dir());
-+    $runner = new PhpUnitTestRunner($this->root, \Drupal::service('file_system'));
-     $this->assertStringEndsWith('phpunit-23.xml', $runner->xmlLogFilePath(23));
+   /**
+@@ -1041,13 +1036,7 @@ private function prepareDatabasePrefix() {
+     // As soon as the database prefix is set, the test might start to execute.
+     // All assertions as well as the SimpleTest batch operations are associated
+     // with the testId, so the database prefix has to be associated with it.
+-    $affected_rows = self::getDatabaseConnection()->update('simpletest_test_id')
+-      ->fields(['last_prefix' => $this->databasePrefix])
+-      ->condition('test_id', $this->testId)
+-      ->execute();
+-    if (!$affected_rows) {
+-      throw new \RuntimeException('Failed to set up database prefix.');
+-    }
++    TestStatus::get(self::getDatabaseConnection(), $this->testId)->update(['last_prefix' => $this->databasePrefix]);
    }
  
-@@ -128,7 +128,7 @@ public function providerTestSummarizeResults() {
-    * @covers ::summarizeResults
-    */
-   public function testSummarizeResults($results, $has_status) {
--    $runner = new PhpUnitTestRunner($this->root, sys_get_temp_dir());
-+    $runner = new PhpUnitTestRunner($this->root, \Drupal::service('file_system'));
-     $summary = $runner->summarizeResults($results);
+   /**
+diff --git a/core/scripts/run-tests.sh b/core/scripts/run-tests.sh
+index 26763c3adb..ed2b6dfe23 100755
+--- a/core/scripts/run-tests.sh
++++ b/core/scripts/run-tests.sh
+@@ -19,6 +19,7 @@
+ use Drupal\Core\Test\TestRunnerKernel;
+ use Drupal\simpletest\Form\SimpletestResultsForm;
+ use Drupal\Core\Test\TestDiscovery;
++use Drupal\Core\Test\TestStatus;
+ use PHPUnit\Framework\TestCase;
+ use Symfony\Component\HttpFoundation\Request;
  
-     $this->assertArrayHasKey(static::class, $summary);
-diff --git a/core/tests/fixtures/phpunit_error.xml b/core/tests/fixtures/phpunit_error.xml
-new file mode 100644
-index 0000000000..6a6a1cbc20
---- /dev/null
-+++ b/core/tests/fixtures/phpunit_error.xml
-@@ -0,0 +1,43 @@
-+<?xml version="1.0" encoding="UTF-8"?>
-+<testsuites>
-+  <testsuite name="Drupal Unit Test Suite" tests="1" assertions="0" failures="0" errors="1" time="0.002680">
-+    <testsuite name="Drupal\Tests\Component\PhpStorage\FileStorageTest" file="/home/chx/www/system/core/tests/Drupal/Tests/Component/PhpStorage/FileStorageTest.php" namespace="Drupal\Tests\Component\PhpStorage" fullPackage="Drupal.Tests.Component.PhpStorage" tests="0" assertions="0" failures="0" errors="0" time="0.000000"/>
-+    <testsuite name="Drupal\Tests\Component\PhpStorage\MTimeProtectedFastFileStorageTest" file="/home/chx/www/system/core/tests/Drupal/Tests/Component/PhpStorage/MTimeProtectedFastFileStorageTest.php" namespace="Drupal\Tests\Component\PhpStorage" fullPackage="Drupal.Tests.Component.PhpStorage" tests="0" assertions="0" failures="0" errors="0" time="0.000000"/>
-+    <testsuite name="Drupal\Tests\Core\Cache\BackendChainImplementationUnitTest" file="/home/chx/www/system/core/tests/Drupal/Tests/Core/Cache/BackendChainImplementationUnitTest.php" namespace="Drupal\Tests\Core\Cache" fullPackage="Drupal.Tests.Core.Cache" tests="0" assertions="0" failures="0" errors="0" time="0.000000"/>
-+    <testsuite name="Drupal\Tests\Core\Cache\NullBackendTest" file="/home/chx/www/system/core/tests/Drupal/Tests/Core/Cache/NullBackendTest.php" namespace="Drupal\Tests\Core\Cache" fullPackage="Drupal.Tests.Core.Cache" tests="0" assertions="0" failures="0" errors="0" time="0.000000"/>
-+    <testsuite name="Drupal\Tests\Core\Extension\ModuleHandlerUnitTest" file="/home/chx/www/system/core/tests/Drupal/Tests/Core/Extension/ModuleHandlerUnitTest.php" namespace="Drupal\Tests\Core\Extension" fullPackage="Drupal.Tests.Core.Extension" tests="1" assertions="0" failures="0" errors="1" time="0.002680">
-+      <testcase name="testloadInclude" class="Drupal\Tests\Core\Extension\ModuleHandlerUnitTest" file="/home/chx/www/system/core/tests/Drupal/Tests/Core/Extension/ModuleHandlerUnitTest.php" line="37" assertions="0" time="0.002680">
-+        <error type="PHPUnit\Framework\Error\Notice">Drupal\Tests\Core\Extension\ModuleHandlerUnitTest::testloadInclude
-+Undefined index: foo
-+
-+/home/chx/www/system/core/lib/Drupal/Core/Extension/ModuleHandler.php:219
-+/home/chx/www/system/core/tests/Drupal/Tests/Core/Extension/ModuleHandlerUnitTest.php:40
-+</error>
-+      </testcase>
-+    </testsuite>
-+    <testsuite name="Drupal\Tests\Core\NestedArrayUnitTest" file="/home/chx/www/system/core/tests/Drupal/Tests/Core/NestedArrayUnitTest.php" namespace="Drupal\Tests\Core" fullPackage="Drupal.Tests.Core" tests="0" assertions="0" failures="0" errors="0" time="0.000000"/>
-+    <testsuite name="Drupal\breakpoint\Tests\BreakpointMediaQueryTest" file="/home/chx/www/system/core/modules/breakpoint/tests/Drupal/breakpoint/Tests/BreakpointMediaQueryTest.php" namespace="Drupal\breakpoint\Tests" fullPackage="Drupal.breakpoint.Tests" tests="0" assertions="0" failures="0" errors="0" time="0.000000"/>
-+    <testsuite name="Drupal\Tests\Core\Route\RoleAccessCheckTest" file="/var/www/d8/core/tests/Drupal/Tests/Core/Route/RoleAccessCheckTestkTest.php" namespace="Drupal\Tests\Core\Route" fullPackage="Drupal.Tests.Core.Route" tests="3" assertions="3" failures="3" errors="0" time="0.009176">
-+      <testsuite name="Drupal\Tests\Core\Route\RoleAccessCheckTest::testRoleAccess" tests="3" assertions="3" failures="3" errors="0" time="0.009176">
-+        <testcase name="testRoleAccess with data set #0" assertions="1" time="0.004519">
-+          <failure type="PHPUnit\Framework\ExpectationFailedException">Drupal\Tests\Core\Route\RoleAccessCheckTest::testRoleAccess with data set #0 ('role_test_1', array(Drupal\user\Entity\User, Drupal\user\Entity\User))
-+            Access granted for user with the roles role_test_1 on path: role_test_1
-+            Failed asserting that false is true.
-+          </failure>
-+        </testcase>
-+        <testcase name="testRoleAccess with data set #1" assertions="1" time="0.002354">
-+          <failure type="PHPUnit\Framework\ExpectationFailedException">Drupal\Tests\Core\Route\RoleAccessCheckTest::testRoleAccess with data set #1 ('role_test_2', array(Drupal\user\Entity\User, Drupal\user\Entity\User))
-+            Access granted for user with the roles role_test_2 on path: role_test_2
-+            Failed asserting that false is true.
-+          </failure>
-+        </testcase>
-+        <testcase name="testRoleAccess with data set #2" assertions="1" time="0.002303">
-+          <failure type="PHPUnit\Framework\ExpectationFailedException">Drupal\Tests\Core\Route\RoleAccessCheckTest::testRoleAccess with data set #2 ('role_test_3', array(Drupal\user\Entity\User))
-+            Access granted for user with the roles role_test_1, role_test_2 on path: role_test_3
-+            Failed asserting that false is true.
-+          </failure>
-+        </testcase>
-+      </testsuite>
-+    </testsuite>
-+  </testsuite>
-+</testsuites>
-diff --git a/core/tests/fixtures/phpunit_skipped.xml b/core/tests/fixtures/phpunit_skipped.xml
-new file mode 100644
-index 0000000000..bd1d037f36
---- /dev/null
-+++ b/core/tests/fixtures/phpunit_skipped.xml
-@@ -0,0 +1,29 @@
-+<?xml version="1.0" encoding="UTF-8"?>
-+<testsuites>
-+  <testsuite name="Drupal\Tests\Core\Access\AccessManagerTest" file="/var/www/lab01/core/tests/Drupal/Tests/Core/Access/AccessManagerTest.php" tests="18" assertions="61" errors="0" failures="0" risky="0" skipped="1" incomplete="0" time="0.308898">
-+    <testcase name="testSetChecks" class="Drupal\Tests\Core\Access\AccessManagerTest" classname="Drupal.Tests.Core.Access.AccessManagerTest" file="/var/www/lab01/core/tests/Drupal/Tests/Core/Access/AccessManagerTest.php" line="138" assertions="0" time="0.106626">
-+      <skipped message="skipped"/>
-+    </testcase>
-+    <testcase name="testSetChecksWithDynamicAccessChecker" class="Drupal\Tests\Core\Access\AccessManagerTest" classname="Drupal.Tests.Core.Access.AccessManagerTest" file="/var/www/lab01/core/tests/Drupal/Tests/Core/Access/AccessManagerTest.php" line="159" assertions="3" time="0.017037"/>
-+    <testcase name="testCheck" class="Drupal\Tests\Core\Access\AccessManagerTest" classname="Drupal.Tests.Core.Access.AccessManagerTest" file="/var/www/lab01/core/tests/Drupal/Tests/Core/Access/AccessManagerTest.php" line="189" assertions="24" time="0.021573"/>
-+    <testcase name="testCheckWithNullAccount" class="Drupal\Tests\Core\Access\AccessManagerTest" classname="Drupal.Tests.Core.Access.AccessManagerTest" file="/var/www/lab01/core/tests/Drupal/Tests/Core/Access/AccessManagerTest.php" line="231" assertions="1" time="0.010700"/>
-+    <testsuite name="Drupal\Tests\Core\Access\AccessManagerTest::testCheckConjunctions" tests="6" assertions="12" errors="0" failures="0" risky="0" skipped="0" incomplete="0" time="0.063584">
-+      <testcase name="testCheckConjunctions with data set #0" class="Drupal\Tests\Core\Access\AccessManagerTest" classname="Drupal.Tests.Core.Access.AccessManagerTest" file="/var/www/lab01/core/tests/Drupal/Tests/Core/Access/AccessManagerTest.php" line="305" assertions="2" time="0.010881"/>
-+      <testcase name="testCheckConjunctions with data set #1" class="Drupal\Tests\Core\Access\AccessManagerTest" classname="Drupal.Tests.Core.Access.AccessManagerTest" file="/var/www/lab01/core/tests/Drupal/Tests/Core/Access/AccessManagerTest.php" line="305" assertions="2" time="0.010670"/>
-+      <testcase name="testCheckConjunctions with data set #2" class="Drupal\Tests\Core\Access\AccessManagerTest" classname="Drupal.Tests.Core.Access.AccessManagerTest" file="/var/www/lab01/core/tests/Drupal/Tests/Core/Access/AccessManagerTest.php" line="305" assertions="2" time="0.010567"/>
-+      <testcase name="testCheckConjunctions with data set #3" class="Drupal\Tests\Core\Access\AccessManagerTest" classname="Drupal.Tests.Core.Access.AccessManagerTest" file="/var/www/lab01/core/tests/Drupal/Tests/Core/Access/AccessManagerTest.php" line="305" assertions="2" time="0.010508"/>
-+      <testcase name="testCheckConjunctions with data set #4" class="Drupal\Tests\Core\Access\AccessManagerTest" classname="Drupal.Tests.Core.Access.AccessManagerTest" file="/var/www/lab01/core/tests/Drupal/Tests/Core/Access/AccessManagerTest.php" line="305" assertions="2" time="0.010574"/>
-+      <testcase name="testCheckConjunctions with data set #5" class="Drupal\Tests\Core\Access\AccessManagerTest" classname="Drupal.Tests.Core.Access.AccessManagerTest" file="/var/www/lab01/core/tests/Drupal/Tests/Core/Access/AccessManagerTest.php" line="305" assertions="2" time="0.010384"/>
-+    </testsuite>
-+    <testcase name="testCheckNamedRoute" class="Drupal\Tests\Core\Access\AccessManagerTest" classname="Drupal.Tests.Core.Access.AccessManagerTest" file="/var/www/lab01/core/tests/Drupal/Tests/Core/Access/AccessManagerTest.php" line="333" assertions="5" time="0.012686"/>
-+    <testcase name="testCheckNamedRouteWithUpcastedValues" class="Drupal\Tests\Core\Access\AccessManagerTest" classname="Drupal.Tests.Core.Access.AccessManagerTest" file="/var/www/lab01/core/tests/Drupal/Tests/Core/Access/AccessManagerTest.php" line="368" assertions="5" time="0.012923"/>
-+    <testcase name="testCheckNamedRouteWithDefaultValue" class="Drupal\Tests\Core\Access\AccessManagerTest" classname="Drupal.Tests.Core.Access.AccessManagerTest" file="/var/www/lab01/core/tests/Drupal/Tests/Core/Access/AccessManagerTest.php" line="417" assertions="5" time="0.012138"/>
-+    <testcase name="testCheckNamedRouteWithNonExistingRoute" class="Drupal\Tests\Core\Access\AccessManagerTest" classname="Drupal.Tests.Core.Access.AccessManagerTest" file="/var/www/lab01/core/tests/Drupal/Tests/Core/Access/AccessManagerTest.php" line="464" assertions="2" time="0.010824"/>
-+    <testsuite name="Drupal\Tests\Core\Access\AccessManagerTest::testCheckException" tests="4" assertions="4" errors="0" failures="0" risky="0" skipped="0" incomplete="0" time="0.040806">
-+      <testcase name="testCheckException with data set #0" class="Drupal\Tests\Core\Access\AccessManagerTest" classname="Drupal.Tests.Core.Access.AccessManagerTest" file="/var/www/lab01/core/tests/Drupal/Tests/Core/Access/AccessManagerTest.php" line="480" assertions="1" time="0.010990"/>
-+      <testcase name="testCheckException with data set #1" class="Drupal\Tests\Core\Access\AccessManagerTest" classname="Drupal.Tests.Core.Access.AccessManagerTest" file="/var/www/lab01/core/tests/Drupal/Tests/Core/Access/AccessManagerTest.php" line="480" assertions="1" time="0.009883"/>
-+      <testcase name="testCheckException with data set #2" class="Drupal\Tests\Core\Access\AccessManagerTest" classname="Drupal.Tests.Core.Access.AccessManagerTest" file="/var/www/lab01/core/tests/Drupal/Tests/Core/Access/AccessManagerTest.php" line="480" assertions="1" time="0.009928"/>
-+      <testcase name="testCheckException with data set #3" class="Drupal\Tests\Core\Access\AccessManagerTest" classname="Drupal.Tests.Core.Access.AccessManagerTest" file="/var/www/lab01/core/tests/Drupal/Tests/Core/Access/AccessManagerTest.php" line="480" assertions="1" time="0.010005"/>
-+    </testsuite>
-+  </testsuite>
-+</testsuites>
+@@ -692,20 +693,17 @@ function simpletest_script_execute_batch($test_classes) {
+       }
+ 
+       try {
+-        $test_id = Database::getConnection('default', 'test-runner')
+-          ->insert('simpletest_test_id')
+-          ->useDefaults(['test_id'])
+-          ->execute();
++        $test_status = TestStatus::createNew(Database::getConnection('default', 'test-runner'));
+       }
+       catch (Exception $e) {
+         echo (string) $e;
+         exit(SIMPLETEST_SCRIPT_EXIT_EXCEPTION);
+       }
+-      $test_ids[] = $test_id;
++      $test_ids[] = $test_status->id();
+ 
+       $test_class = array_shift($test_classes);
+       // Fork a child process.
+-      $command = simpletest_script_command($test_id, $test_class);
++      $command = simpletest_script_command($test_status->id(), $test_class);
+       $process = proc_open($command, [], $pipes, NULL, NULL, ['bypass_shell' => TRUE]);
+ 
+       if (!is_resource($process)) {
+@@ -716,7 +714,7 @@ function simpletest_script_execute_batch($test_classes) {
+       // Register our new child.
+       $children[] = [
+         'process' => $process,
+-        'test_id' => $test_id,
++        'test_id' => $test_status->id(),
+         'class' => $test_class,
+         'pipes' => $pipes,
+       ];
+@@ -742,7 +740,16 @@ function simpletest_script_execute_batch($test_classes) {
+           // @see https://www.drupal.org/node/2780087
+           $total_status = max(SIMPLETEST_SCRIPT_EXIT_FAILURE, $total_status);
+           // Insert a fail for xml results.
+-          TestDatabase::insertAssert($child['test_id'], $child['class'], FALSE, $message, 'run-tests.sh check');
++          TestStatus::get(Database::getConnection('default', 'test-runner'), $child['test_id'])->insertLogEntry([
++            'test_id' => $child['test_id'],
++            'test_class' => $child['class'],
++            'status' => 'fail',
++            'message' => $message,
++            'message_group' => 'run-tests.sh check',
++            'function' => 'Unknown',
++            'line' => 0,
++            'file' => 'Unknown',
++          ]);
+           // Ensure that an error line is displayed for the class.
+           simpletest_script_reporter_display_summary(
+             $child['class'],
