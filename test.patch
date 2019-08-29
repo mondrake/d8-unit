@@ -1,91 +1,533 @@
-diff --git a/core/lib/Drupal/Core/ImageToolkit/ImageToolkitBase.php b/core/lib/Drupal/Core/ImageToolkit/ImageToolkitBase.php
-index ce0e283c8e..fd09811db3 100644
---- a/core/lib/Drupal/Core/ImageToolkit/ImageToolkitBase.php
-+++ b/core/lib/Drupal/Core/ImageToolkit/ImageToolkitBase.php
-@@ -131,6 +131,10 @@ public function apply($operation, array $arguments = []) {
-       $this->logger->warning($e->getMessage(), []);
-       return FALSE;
-     }
-+    catch (\Throwable $t) {
-+      $this->logger->error(get_class($t) . ': ' . $t->getMessage(), []);
-+      return FALSE;
-+    }
+diff --git a/core/lib/Drupal/Core/Test/TestDatabase.php b/core/lib/Drupal/Core/Test/TestDatabase.php
+index 03ff3d2f62..dea03e5760 100644
+--- a/core/lib/Drupal/Core/Test/TestDatabase.php
++++ b/core/lib/Drupal/Core/Test/TestDatabase.php
+@@ -179,96 +179,6 @@ protected function getLockFile($lock_id) {
+     return FileSystem::getOsTemporaryDirectory() . '/test_' . $lock_id;
    }
  
- }
-diff --git a/core/modules/system/tests/modules/image_test/src/Plugin/ImageToolkit/Operation/gd/RunTimeException.php b/core/modules/system/tests/modules/image_test/src/Plugin/ImageToolkit/Operation/gd/RunTimeException.php
+-  /**
+-   * Store an assertion from outside the testing context.
+-   *
+-   * This is useful for inserting assertions that can only be recorded after
+-   * the test case has been destroyed, such as PHP fatal errors. The caller
+-   * information is not automatically gathered since the caller is most likely
+-   * inserting the assertion on behalf of other code. In all other respects
+-   * the method behaves just like \Drupal\simpletest\TestBase::assert() in terms
+-   * of storing the assertion.
+-   *
+-   * @param string $test_id
+-   *   The test ID to which the assertion relates.
+-   * @param string $test_class
+-   *   The test class to store an assertion for.
+-   * @param bool|string $status
+-   *   A boolean or a string of 'pass' or 'fail'. TRUE means 'pass'.
+-   * @param string $message
+-   *   The assertion message.
+-   * @param string $group
+-   *   The assertion message group.
+-   * @param array $caller
+-   *   The an array containing the keys 'file' and 'line' that represent the
+-   *   file and line number of that file that is responsible for the assertion.
+-   *
+-   * @return int
+-   *   Message ID of the stored assertion.
+-   *
+-   * @internal
+-   */
+-  public static function insertAssert($test_id, $test_class, $status, $message = '', $group = 'Other', array $caller = []) {
+-    // Convert boolean status to string status.
+-    if (is_bool($status)) {
+-      $status = $status ? 'pass' : 'fail';
+-    }
+-
+-    $caller += [
+-      'function' => 'Unknown',
+-      'line' => 0,
+-      'file' => 'Unknown',
+-    ];
+-
+-    $assertion = [
+-      'test_id' => $test_id,
+-      'test_class' => $test_class,
+-      'status' => $status,
+-      'message' => $message,
+-      'message_group' => $group,
+-      'function' => $caller['function'],
+-      'line' => $caller['line'],
+-      'file' => $caller['file'],
+-    ];
+-
+-    return static::getConnection()
+-      ->insert('simpletest')
+-      ->fields($assertion)
+-      ->execute();
+-  }
+-
+-  /**
+-   * Get information about the last test that ran given a test ID.
+-   *
+-   * @param int $test_id
+-   *   The test ID to get the last test from.
+-   *
+-   * @return array
+-   *   Associative array containing the last database prefix used and the
+-   *   last test class that ran.
+-   *
+-   * @internal
+-   */
+-  public static function lastTestGet($test_id) {
+-    $connection = static::getConnection();
+-
+-    // Define a subquery to identify the latest 'message_id' given the
+-    // $test_id.
+-    $max_message_id_subquery = $connection
+-      ->select('simpletest', 'sub')
+-      ->condition('test_id', $test_id);
+-    $max_message_id_subquery->addExpression('MAX(message_id)', 'max_message_id');
+-
+-    // Run a select query to return 'last_prefix' from {simpletest_test_id} and
+-    // 'test_class' from {simpletest}.
+-    $select = $connection->select($max_message_id_subquery, 'st_sub');
+-    $select->join('simpletest', 'st', 'st.message_id = st_sub.max_message_id');
+-    $select->join('simpletest_test_id', 'sttid', 'st.test_id = sttid.test_id');
+-    $select->addField('sttid', 'last_prefix');
+-    $select->addField('st', 'test_class');
+-    return $select->execute()->fetchAssoc();
+-  }
+-
+   /**
+    * Reads the error log and reports any errors as assertion failures.
+    *
+@@ -293,15 +203,23 @@ public function logRead($test_id, $test_class) {
+         if (preg_match('/\[.*?\] (.*?): (.*?) in (.*) on line (\d+)/', $line, $match)) {
+           // Parse PHP fatal errors for example: PHP Fatal error: Call to
+           // undefined function break_me() in /path/to/file.php on line 17
+-          $caller = [
++          TestRun::get(static::getConnection(), $test_id)->insertLogEntry([
++            'test_class' => $test_class,
++            'status' => 'fail',
++            'message' => $match[2],
++            'message_group' => $match[1],
+             'line' => $match[4],
+             'file' => $match[3],
+-          ];
+-          static::insertAssert($test_id, $test_class, FALSE, $match[2], $match[1], $caller);
++          ]);
+         }
+         else {
+           // Unknown format, place the entire message in the log.
+-          static::insertAssert($test_id, $test_class, FALSE, $line, 'Fatal error');
++          TestRun::get(static::getConnection(), $test_id)->insertLogEntry([
++            'test_class' => $test_class,
++            'status' => 'fail',
++            'message' => $line,
++            'message_group' => 'Fatal error',
++          ]);
+         }
+         $found = TRUE;
+       }
+diff --git a/core/lib/Drupal/Core/Test/TestRun.php b/core/lib/Drupal/Core/Test/TestRun.php
 new file mode 100644
-index 0000000000..fb5cd39bdb
+index 0000000000..830f010750
 --- /dev/null
-+++ b/core/modules/system/tests/modules/image_test/src/Plugin/ImageToolkit/Operation/gd/RunTimeException.php
-@@ -0,0 +1,35 @@
++++ b/core/lib/Drupal/Core/Test/TestRun.php
+@@ -0,0 +1,128 @@
 +<?php
 +
-+namespace Drupal\image_test\Plugin\ImageToolkit\Operation\gd;
++namespace Drupal\Core\Test;
 +
-+use Drupal\system\Plugin\ImageToolkit\Operation\gd\GDImageToolkitOperationBase;
++use Drupal\Core\Database\Connection;
 +
 +/**
-+ * A GD2 operation that throws a RunTimeException.
 + *
-+ * @ImageToolkitOperation(
-+ *   id = "gd_run_time_exception",
-+ *   toolkit = "gd",
-+ *   operation = "run_time_exception",
-+ *   label = @Translation("RunTimeException"),
-+ *   description = @Translation("Throws a RunTimeException.")
-+ * )
 + */
-+class RunTimeException extends GDImageToolkitOperationBase {
++class TestRun {
++
++  protected $connection;
++  protected $testId;
++  protected $databasePrefix;
++  protected $testClass;
 +
 +  /**
-+   * {@inheritdoc}
++   * TestRun constructor.
 +   */
-+  protected function arguments() {
-+    // This operation does not use any parameters.
-+    return [];
++  public function __construct(Connection $connection, $test_id) {
++    $this->connection = $connection;
++    $this->testId = $test_id;
 +  }
 +
 +  /**
-+   * {@inheritdoc}
++   *
 +   */
-+  protected function execute(array $arguments) {
-+    throw new \RunTimeException('This operation throws a RunTimeException on purpose for testing');
++  public static function createNew(Connection $connection) {
++    $test_id = $connection->insert('simpletest_test_id')
++      ->useDefaults(['test_id'])
++      ->execute();
++    return new static($connection, $test_id);
++  }
++
++  /**
++   *
++   */
++  public static function get(Connection $connection, $test_id) {
++    return new static($connection, $test_id);
++  }
++
++  /**
++   *
++   */
++  public function id() {
++    return $this->testId;
++  }
++
++  /**
++   *
++   */
++  public function setDatabasePrefix($database_prefix) {
++    $this->databasePrefix = NULL;
++    $affected_rows = $this->connection->update('simpletest_test_id')
++      ->fields(['last_prefix' => $database_prefix])
++      ->condition('test_id', $this->testId)
++      ->execute();
++    if (!$affected_rows) {
++      throw new \RuntimeException('Failed to set up database prefix.');
++    }
++    $this->databasePrefix = $database_prefix;
++  }
++
++  /**
++   *
++   */
++  public function getDatabasePrefix() {
++    if (is_null($this->databasePrefix)) {
++      $this->lastTestGet();
++    }
++    return $this->databasePrefix;
++  }
++
++  /**
++   *
++   */
++  public function getTestClass() {
++    if (is_null($this->testClass)) {
++      $this->lastTestGet();
++    }
++    return $this->testClass;
++  }
++
++  /**
++   *
++   */
++  public function insertLogEntry(array $entry) {
++    $this->testClass = NULL;
++    $entry['test_id'] = $this->testId;
++    $entry = array_merge([
++      'function' => 'Unknown',
++      'line' => 0,
++      'file' => 'Unknown',
++    ], $entry);
++
++    return $this->connection->insert('simpletest')
++      ->fields($entry)
++      ->execute();
++  }
++
++  /**
++   * Get information about the last test that ran given a test ID.
++   *
++   * @return $this
++   */
++  protected function lastTestGet() {
++    // Define a subquery to identify the latest 'message_id' given the
++    // $test_id.
++    $max_message_id_subquery = $this->connection
++      ->select('simpletest', 'sub')
++      ->condition('test_id', $this->testId);
++    $max_message_id_subquery->addExpression('MAX(message_id)', 'max_message_id');
++
++    // Run a select query to return 'last_prefix' from {simpletest_test_id} and
++    // 'test_class' from {simpletest}.
++    $select = $this->connection->select($max_message_id_subquery, 'st_sub');
++    $select->join('simpletest', 'st', 'st.message_id = st_sub.max_message_id');
++    $select->join('simpletest_test_id', 'sttid', 'st.test_id = sttid.test_id');
++    $select->addField('sttid', 'last_prefix');
++    $select->addField('st', 'test_class');
++
++    $result = $select->execute()->fetchAssoc();
++
++    $this->databasePrefix = $result['last_prefix'];
++    $this->testClass = $result['test_class'];
 +  }
 +
 +}
-diff --git a/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php b/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php
-index 0496973a7d..c7f3f8d19f 100644
---- a/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php
-+++ b/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php
-@@ -43,7 +43,7 @@ class ToolkitGdTest extends KernelTestBase {
-    *
-    * @var array
-    */
--  public static $modules = ['system', 'simpletest'];
-+  public static $modules = ['system', 'simpletest', 'image_test'];
- 
-   /**
-    * {@inheritdoc}
-@@ -531,4 +531,21 @@ public function testMissingOperation() {
-     $this->assertFalse($image->apply('missing_op', []), 'Calling a missing image toolkit operation plugin fails.');
+diff --git a/core/modules/simpletest/simpletest.module b/core/modules/simpletest/simpletest.module
+index 6f8f5b5b32..77395a1861 100644
+--- a/core/modules/simpletest/simpletest.module
++++ b/core/modules/simpletest/simpletest.module
+@@ -13,6 +13,7 @@
+ use Drupal\Core\Test\JUnitConverter;
+ use Drupal\Core\Test\PhpUnitTestRunner;
+ use Drupal\Core\Test\TestDatabase;
++use Drupal\Core\Test\TestRun;
+ use Drupal\Core\Url;
+ use Drupal\simpletest\TestDiscovery;
+ use PHPUnit\Framework\TestCase;
+@@ -139,9 +140,7 @@ function simpletest_run_tests($test_list) {
+     unset($test_list['phpunit']);
    }
  
-+  /**
-+   * Tests creating an image that exceeds memory available.
-+   */
-+  public function testImageTooBig() {
-+    $image = $this->imageFactory->get();
-+    $this->assertFalse($image->createNew(50000, 50000));
-+  }
-+
-+  /**
-+   * Tests an operation that throws a RunTimeException.
-+   */
-+  public function testRunTimeExceptionThrowingOperation() {
-+    $image = $this->imageFactory->get();
-+    $image->createNew(50, 50);
-+    $this->assertFalse($image->apply('run_time_exception'));
-+  }
-+
+-  $test_id = \Drupal::database()->insert('simpletest_test_id')
+-    ->useDefaults(['test_id'])
+-    ->execute();
++  $test_run = TestRun::createNew(\Drupal::database());
+ 
+   // Clear out the previous verbose files.
+   try {
+@@ -158,7 +157,7 @@ function simpletest_run_tests($test_list) {
+   $batch = [
+     'title' => t('Running tests'),
+     'operations' => [
+-      ['_simpletest_batch_operation', [$test_list, $test_id]],
++      ['_simpletest_batch_operation', [$test_list, $test_run->id()]],
+     ],
+     'finished' => '_simpletest_batch_finished',
+     'progress_message' => '',
+@@ -169,7 +168,7 @@ function simpletest_run_tests($test_list) {
+ 
+   \Drupal::moduleHandler()->invokeAll('test_group_started');
+ 
+-  return $test_id;
++  return $test_run->id();
  }
+ 
+ /**
+@@ -209,13 +208,10 @@ function simpletest_process_phpunit_results($phpunit_results) {
+   // Insert the results of the PHPUnit test run into the database so the results
+   // are displayed along with Simpletest's results.
+   if (!empty($phpunit_results)) {
+-    $query = TestDatabase::getConnection()
+-      ->insert('simpletest')
+-      ->fields(array_keys($phpunit_results[0]));
++    $test_run = TestRun::get(TestDatabase::getConnection(), $phpunit_results[0]['test_id']);
+     foreach ($phpunit_results as $result) {
+-      $query->values($result);
++      $test_run->insertLogEntry($result);
+     }
+-    $query->execute();
+   }
+ }
+ 
+@@ -407,8 +403,8 @@ function _simpletest_batch_finished($success, $results, $operations, $elapsed) {
+     // Retrieve the last database prefix used for testing and the last test
+     // class that was run from. Use the information to read the lgo file
+     // in case any fatal errors caused the test to crash.
+-    $last_test = TestDatabase::lastTestGet($test_id);
+-    (new TestDatabase($last_test['last_prefix']))->logRead($test_id, $last_test['test_class']);
++    $test_run = TestRun::get(TestDatabase::getConnection(), $test_id);
++    (new TestDatabase($test_run->getDatabasePrefix()))->logRead($test_id, $test_run->getTestClass());
+ 
+     \Drupal::messenger()->addError(t('The test run did not successfully finish.'));
+     \Drupal::messenger()->addWarning(t('Use the <em>Clean environment</em> button to clean-up temporary files and tables.'));
+@@ -432,7 +428,8 @@ function _simpletest_batch_finished($success, $results, $operations, $elapsed) {
+  */
+ function simpletest_last_test_get($test_id) {
+   @trigger_error(__FUNCTION__ . ' is deprecated in drupal:8.8.0 and is removed from drupal:9.0.0. Use \Drupal\Core\Test\TestDatabase::lastTestGet() instead. See https://www.drupal.org/node/3075252', E_USER_DEPRECATED);
+-  return array_values(TestDatabase::lastTestGet($test_id));
++  $test_run = TestRun::get(TestDatabase::getConnection(), $test_id);
++  return [$test_run->getDatabasePrefix(), $test_run->getTestClass()];
+ }
+ 
+ /**
+@@ -496,7 +493,29 @@ function simpletest_log_read($test_id, $database_prefix, $test_class) {
+  */
+ function simpletest_insert_assert($test_id, $test_class, $status, $message = '', $group = 'Other', array $caller = []) {
+   @trigger_error(__FUNCTION__ . ' is deprecated in drupal:8.8.0 and is removed from drupal:9.0.0. Use \Drupal\Core\Test\TestDatabase::insertAssert() instead. See https://www.drupal.org/node/3075252', E_USER_DEPRECATED);
+-  TestDatabase::insertAssert($test_id, $test_class, $status, $message, $group, $caller);
++
++  // Convert boolean status to string status.
++  if (is_bool($status)) {
++    $status = $status ? 'pass' : 'fail';
++  }
++
++  $caller += [
++    'function' => 'Unknown',
++    'line' => 0,
++    'file' => 'Unknown',
++  ];
++
++  $assertion = [
++    'test_class' => $test_class,
++    'status' => $status,
++    'message' => $message,
++    'message_group' => $group,
++    'function' => $caller['function'],
++    'line' => $caller['line'],
++    'file' => $caller['file'],
++  ];
++
++  TestRun::get(TestDatabase::getConnection(), $test_id)->insertLogEntry($assertion);
+ }
+ 
+ /**
+diff --git a/core/modules/simpletest/src/TestBase.php b/core/modules/simpletest/src/TestBase.php
+index c3d5495fd0..57379e9e38 100644
+--- a/core/modules/simpletest/src/TestBase.php
++++ b/core/modules/simpletest/src/TestBase.php
+@@ -13,6 +13,7 @@
+ use Drupal\Core\StreamWrapper\PublicStream;
+ use Drupal\Core\Test\TestDatabase;
+ use Drupal\Core\Test\TestDiscovery;
++use Drupal\Core\Test\TestRun;
+ use Drupal\Core\Test\TestSetupTrait;
+ use Drupal\Core\Utility\Error;
+ use Drupal\Tests\AssertHelperTrait as BaseAssertHelperTrait;
+@@ -296,10 +297,7 @@ protected function checkRequirements() {
+    *   The message ID.
+    */
+   protected function storeAssertion(array $assertion) {
+-    return self::getDatabaseConnection()
+-      ->insert('simpletest', ['return' => Database::RETURN_INSERT_ID])
+-      ->fields($assertion)
+-      ->execute();
++    return TestRun::get(self::getDatabaseConnection(), $this->testId)->insertLogEntry($assertion);
+   }
+ 
+   /**
+@@ -416,10 +414,7 @@ public static function insertAssert($test_id, $test_class, $status, $message = '
+     ];
+ 
+     // We can't use storeAssertion() because this method is static.
+-    return self::getDatabaseConnection()
+-      ->insert('simpletest')
+-      ->fields($assertion)
+-      ->execute();
++    return TestRun::get(self::getDatabaseConnection(), $test_id)->insertLogEntry($assertion);
+   }
+ 
+   /**
+@@ -1041,13 +1036,7 @@ private function prepareDatabasePrefix() {
+     // As soon as the database prefix is set, the test might start to execute.
+     // All assertions as well as the SimpleTest batch operations are associated
+     // with the testId, so the database prefix has to be associated with it.
+-    $affected_rows = self::getDatabaseConnection()->update('simpletest_test_id')
+-      ->fields(['last_prefix' => $this->databasePrefix])
+-      ->condition('test_id', $this->testId)
+-      ->execute();
+-    if (!$affected_rows) {
+-      throw new \RuntimeException('Failed to set up database prefix.');
+-    }
++    TestRun::get(self::getDatabaseConnection(), $this->testId)->setDatabasePrefix($this->databasePrefix);
+   }
+ 
+   /**
+diff --git a/core/scripts/run-tests.sh b/core/scripts/run-tests.sh
+old mode 100755
+new mode 100644
+index f1cb4c0ce4..9054503094
+--- a/core/scripts/run-tests.sh
++++ b/core/scripts/run-tests.sh
+@@ -16,6 +16,7 @@
+ use Drupal\Core\StreamWrapper\PublicStream;
+ use Drupal\Core\Test\PhpUnitTestRunner;
+ use Drupal\Core\Test\TestDatabase;
++use Drupal\Core\Test\TestRun;
+ use Drupal\Core\Test\TestRunnerKernel;
+ use Drupal\simpletest\Form\SimpletestResultsForm;
+ use Drupal\Core\Test\TestDiscovery;
+@@ -692,20 +693,17 @@ function simpletest_script_execute_batch($test_classes) {
+       }
+ 
+       try {
+-        $test_id = Database::getConnection('default', 'test-runner')
+-          ->insert('simpletest_test_id')
+-          ->useDefaults(['test_id'])
+-          ->execute();
++        $test_run = TestRun::createNew(Database::getConnection('default', 'test-runner'));
+       }
+       catch (Exception $e) {
+         echo (string) $e;
+         exit(SIMPLETEST_SCRIPT_EXIT_EXCEPTION);
+       }
+-      $test_ids[] = $test_id;
++      $test_ids[] = $test_run->id();
+ 
+       $test_class = array_shift($test_classes);
+       // Fork a child process.
+-      $command = simpletest_script_command($test_id, $test_class);
++      $command = simpletest_script_command($test_run->id(), $test_class);
+       $process = proc_open($command, [], $pipes, NULL, NULL, ['bypass_shell' => TRUE]);
+ 
+       if (!is_resource($process)) {
+@@ -716,7 +714,7 @@ function simpletest_script_execute_batch($test_classes) {
+       // Register our new child.
+       $children[] = [
+         'process' => $process,
+-        'test_id' => $test_id,
++        'test_run' => $test_run,
+         'class' => $test_class,
+         'pipes' => $pipes,
+       ];
+@@ -742,17 +740,21 @@ function simpletest_script_execute_batch($test_classes) {
+           // @see https://www.drupal.org/node/2780087
+           $total_status = max(SIMPLETEST_SCRIPT_EXIT_FAILURE, $total_status);
+           // Insert a fail for xml results.
+-          TestDatabase::insertAssert($child['test_id'], $child['class'], FALSE, $message, 'run-tests.sh check');
++          $child['test_run']->insertLogEntry([
++            'test_class' => $child['class'],
++            'status' => 'fail',
++            'message' => $message,
++            'message_group' => 'run-tests.sh check',
++          ]);
+           // Ensure that an error line is displayed for the class.
+           simpletest_script_reporter_display_summary(
+             $child['class'],
+             ['#pass' => 0, '#fail' => 1, '#exception' => 0, '#debug' => 0]
+           );
+           if ($args['die-on-fail']) {
+-            $db_prefix = TestDatabase::lastTestGet($child['test_id'])['last_prefix'];
+-            $test_db = new TestDatabase($db_prefix);
++            $test_db = new TestDatabase($child['test_run']->getDatabasePrefix());
+             $test_directory = $test_db->getTestSitePath();
+-            echo 'Simpletest database and files kept and test exited immediately on fail so should be reproducible if you change settings.php to use the database prefix ' . $db_prefix . ' and config directories in ' . $test_directory . "\n";
++            echo 'Simpletest database and files kept and test exited immediately on fail so should be reproducible if you change settings.php to use the database prefix ' . $child['test_run']->getDatabasePrefix() . ' and config directories in ' . $test_directory . "\n";
+             $args['keep-results'] = TRUE;
+             // Exit repeat loop immediately.
+             $args['repeat'] = -1;
+@@ -760,7 +762,7 @@ function simpletest_script_execute_batch($test_classes) {
+         }
+         // Free-up space by removing any potentially created resources.
+         if (!$args['keep-results']) {
+-          simpletest_script_cleanup($child['test_id'], $child['class'], $status['exitcode']);
++          simpletest_script_cleanup($child['test_run'], $child['class'], $status['exitcode']);
+         }
+ 
+         // Remove this child.
+@@ -892,15 +894,15 @@ function simpletest_script_command($test_id, $test_class) {
+  *
+  * @see simpletest_script_run_one_test()
+  */
+-function simpletest_script_cleanup($test_id, $test_class, $exitcode) {
++function simpletest_script_cleanup(TestRun $test_run, $test_class, $exitcode) {
+   if (is_subclass_of($test_class, TestCase::class)) {
+     // PHPUnit test, move on.
+     return;
+   }
+   // Retrieve the last database prefix used for testing.
+   try {
+-    $last_test = TestDatabase::lastTestGet($test_id);
+-    $db_prefix = $last_test['last_prefix'];
++    $test_id = $test_run->id();
++    $db_prefix = $test_run->getDatabasePrefix();
+   }
+   catch (Exception $e) {
+     echo (string) $e;
+@@ -921,7 +923,7 @@ function simpletest_script_cleanup($test_id, $test_class, $exitcode) {
+ 
+   // Read the log file in case any fatal errors caused the test to crash.
+   try {
+-    (new TestDatabase($db_prefix))->logRead($test_id, $last_test['test_class']);
++    (new TestDatabase($db_prefix))->logRead($test_id, $test_run->getTestClass());
+   }
+   catch (Exception $e) {
+     echo (string) $e;
