@@ -1,8 +1,8 @@
 diff --git a/core/lib/Drupal/Core/Test/TestDatabase.php b/core/lib/Drupal/Core/Test/TestDatabase.php
-index 03ff3d2f62..dea03e5760 100644
+index 03ff3d2f62..788bfa777c 100644
 --- a/core/lib/Drupal/Core/Test/TestDatabase.php
 +++ b/core/lib/Drupal/Core/Test/TestDatabase.php
-@@ -179,96 +179,6 @@ protected function getLockFile($lock_id) {
+@@ -179,136 +179,6 @@ protected function getLockFile($lock_id) {
      return FileSystem::getOsTemporaryDirectory() . '/test_' . $lock_id;
    }
  
@@ -96,43 +96,55 @@ index 03ff3d2f62..dea03e5760 100644
 -    return $select->execute()->fetchAssoc();
 -  }
 -
-   /**
-    * Reads the error log and reports any errors as assertion failures.
-    *
-@@ -293,15 +203,23 @@ public function logRead($test_id, $test_class) {
-         if (preg_match('/\[.*?\] (.*?): (.*?) in (.*) on line (\d+)/', $line, $match)) {
-           // Parse PHP fatal errors for example: PHP Fatal error: Call to
-           // undefined function break_me() in /path/to/file.php on line 17
+-  /**
+-   * Reads the error log and reports any errors as assertion failures.
+-   *
+-   * The errors in the log should only be fatal errors since any other errors
+-   * will have been recorded by the error handler.
+-   *
+-   * @param int $test_id
+-   *   The test ID to which the log relates.
+-   * @param string $test_class
+-   *   The test class to which the log relates.
+-   *
+-   * @return bool
+-   *   Whether any fatal errors were found.
+-   *
+-   * @internal
+-   */
+-  public function logRead($test_id, $test_class) {
+-    $log = DRUPAL_ROOT . '/' . $this->getTestSitePath() . '/error.log';
+-    $found = FALSE;
+-    if (file_exists($log)) {
+-      foreach (file($log) as $line) {
+-        if (preg_match('/\[.*?\] (.*?): (.*?) in (.*) on line (\d+)/', $line, $match)) {
+-          // Parse PHP fatal errors for example: PHP Fatal error: Call to
+-          // undefined function break_me() in /path/to/file.php on line 17
 -          $caller = [
-+          TestRun::get(static::getConnection(), $test_id)->insertLogEntry([
-+            'test_class' => $test_class,
-+            'status' => 'fail',
-+            'message' => $match[2],
-+            'message_group' => $match[1],
-             'line' => $match[4],
-             'file' => $match[3],
+-            'line' => $match[4],
+-            'file' => $match[3],
 -          ];
 -          static::insertAssert($test_id, $test_class, FALSE, $match[2], $match[1], $caller);
-+          ]);
-         }
-         else {
-           // Unknown format, place the entire message in the log.
+-        }
+-        else {
+-          // Unknown format, place the entire message in the log.
 -          static::insertAssert($test_id, $test_class, FALSE, $line, 'Fatal error');
-+          TestRun::get(static::getConnection(), $test_id)->insertLogEntry([
-+            'test_class' => $test_class,
-+            'status' => 'fail',
-+            'message' => $line,
-+            'message_group' => 'Fatal error',
-+          ]);
-         }
-         $found = TRUE;
-       }
+-        }
+-        $found = TRUE;
+-      }
+-    }
+-    return $found;
+-  }
+-
+   /**
+    * Defines the database schema for run-tests.sh and simpletest module.
+    *
 diff --git a/core/lib/Drupal/Core/Test/TestRun.php b/core/lib/Drupal/Core/Test/TestRun.php
 new file mode 100644
-index 0000000000..6ea616909b
+index 0000000000..d1eea3fa9a
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Test/TestRun.php
-@@ -0,0 +1,172 @@
+@@ -0,0 +1,220 @@
 +<?php
 +
 +namespace Drupal\Core\Test;
@@ -304,9 +316,57 @@ index 0000000000..6ea616909b
 +    $this->testClass = $result['test_class'];
 +  }
 +
++  /**
++   * Reads the PHP error log and reports any errors as assertion failures.
++   *
++   * The errors in the log should only be fatal errors since any other errors
++   * will have been recorded by the error handler.
++   *
++   * @param \Drupal\Core\Test\TestDatabase $test_database
++   *   The test database to which the log relates.
++   * @param string $test_class
++   *   The test class to which the log relates.
++   *
++   * @return bool
++   *   Whether any fatal errors were found.
++   *
++   * @internal
++   */
++  public function processPhpErrorLogFile(TestDatabase $test_database, $test_class) {
++    $log = DRUPAL_ROOT . '/' . $test_database->getTestSitePath() . '/error.log';
++    $found = FALSE;
++    if (file_exists($log)) {
++      foreach (file($log) as $line) {
++        if (preg_match('/\[.*?\] (.*?): (.*?) in (.*) on line (\d+)/', $line, $match)) {
++          // Parse PHP fatal errors for example: PHP Fatal error: Call to
++          // undefined function break_me() in /path/to/file.php on line 17
++          $this->insertLogEntry([
++            'test_class' => $test_class,
++            'status' => 'fail',
++            'message' => $match[2],
++            'message_group' => $match[1],
++            'line' => $match[4],
++            'file' => $match[3],
++          ]);
++        }
++        else {
++          // Unknown format, place the entire message in the log.
++          $this->insertLogEntry([
++            'test_class' => $test_class,
++            'status' => 'fail',
++            'message' => $line,
++            'message_group' => 'Fatal error',
++          ]);
++        }
++        $found = TRUE;
++      }
++    }
++    return $found;
++  }
++
 +}
 diff --git a/core/modules/simpletest/simpletest.module b/core/modules/simpletest/simpletest.module
-index 6f8f5b5b32..6ce3666bab 100644
+index 6f8f5b5b32..d1ebd5300d 100644
 --- a/core/modules/simpletest/simpletest.module
 +++ b/core/modules/simpletest/simpletest.module
 @@ -13,6 +13,7 @@
@@ -362,14 +422,17 @@ index 6f8f5b5b32..6ce3666bab 100644
    }
  }
  
-@@ -407,8 +403,8 @@ function _simpletest_batch_finished($success, $results, $operations, $elapsed) {
+@@ -405,10 +401,10 @@ function _simpletest_batch_finished($success, $results, $operations, $elapsed) {
+     $test_id = $operations[0][1][1];
+ 
      // Retrieve the last database prefix used for testing and the last test
-     // class that was run from. Use the information to read the lgo file
+-    // class that was run from. Use the information to read the lgo file
++    // class that was run from. Use the information to read the log file
      // in case any fatal errors caused the test to crash.
 -    $last_test = TestDatabase::lastTestGet($test_id);
 -    (new TestDatabase($last_test['last_prefix']))->logRead($test_id, $last_test['test_class']);
 +    $test_run = TestRun::get(TestDatabase::getConnection(), $test_id);
-+    (new TestDatabase($test_run->getDatabasePrefix()))->logRead($test_id, $test_run->getTestClass());
++    $test_run->processPhpErrorLogFile(new TestDatabase($test_run->getDatabasePrefix()), $test_run->getTestClass());
  
      \Drupal::messenger()->addError(t('The test run did not successfully finish.'));
      \Drupal::messenger()->addWarning(t('Use the <em>Clean environment</em> button to clean-up temporary files and tables.'));
@@ -380,6 +443,17 @@ index 6f8f5b5b32..6ce3666bab 100644
 -  return array_values(TestDatabase::lastTestGet($test_id));
 +  $test_run = TestRun::get(TestDatabase::getConnection(), $test_id);
 +  return [$test_run->getDatabasePrefix(), $test_run->getTestClass()];
+ }
+ 
+ /**
+@@ -458,8 +455,8 @@ function simpletest_last_test_get($test_id) {
+  */
+ function simpletest_log_read($test_id, $database_prefix, $test_class) {
+   @trigger_error(__FUNCTION__ . ' is deprecated in drupal:8.8.0 and is removed from drupal:9.0.0. Use \Drupal\Core\Test\TestDatabase::logRead() instead. See https://www.drupal.org/node/3075252', E_USER_DEPRECATED);
+-  $test_db = new TestDatabase($database_prefix);
+-  return $test_db->logRead($test_id, $test_class);
++  $test_run = TestRun::get(TestDatabase::getConnection(), $test_id);
++  return $test_run->processPhpErrorLogFile(new TestDatabase($database_prefix), $test_class);
  }
  
  /**
@@ -434,10 +508,18 @@ index 6f8f5b5b32..6ce3666bab 100644
        // Clear test results.
        $connection->delete('simpletest')->execute();
 diff --git a/core/modules/simpletest/src/Form/SimpletestResultsForm.php b/core/modules/simpletest/src/Form/SimpletestResultsForm.php
-index 5db8846353..324a0b0d72 100644
+index 5db8846353..fa29a7b268 100644
 --- a/core/modules/simpletest/src/Form/SimpletestResultsForm.php
 +++ b/core/modules/simpletest/src/Form/SimpletestResultsForm.php
-@@ -218,13 +218,8 @@ public function submitForm(array &$form, FormStateInterface $form_state) {
+@@ -6,6 +6,7 @@
+ use Drupal\Core\Form\FormBase;
+ use Drupal\Core\Form\FormState;
+ use Drupal\Core\Form\FormStateInterface;
++use Drupal\Core\Test\TestRun;
+ use Drupal\Core\Url;
+ use Drupal\simpletest\TestDiscovery;
+ use Symfony\Component\DependencyInjection\ContainerInterface;
+@@ -218,13 +219,7 @@ public function submitForm(array &$form, FormStateInterface $form_state) {
     *   Array of results grouped by test_class.
     */
    protected function getResults($test_id) {
@@ -448,13 +530,12 @@ index 5db8846353..324a0b0d72 100644
 -      ->orderBy('message_id')
 -      ->execute()
 -      ->fetchAll();
-+    $test_run = TestRun::get($this->database, $test_id);
-+    return $test_run->getLogEntriesByTestClass();
++    return TestRun::get($this->database, $test_id)->getLogEntriesByTestClass();
    }
  
    /**
 diff --git a/core/modules/simpletest/src/TestBase.php b/core/modules/simpletest/src/TestBase.php
-index c3d5495fd0..57379e9e38 100644
+index c3d5495fd0..1a6512bad7 100644
 --- a/core/modules/simpletest/src/TestBase.php
 +++ b/core/modules/simpletest/src/TestBase.php
 @@ -13,6 +13,7 @@
@@ -504,10 +585,20 @@ index c3d5495fd0..57379e9e38 100644
    }
  
    /**
+@@ -1252,7 +1241,8 @@ private function restoreEnvironment() {
+ 
+     // In case a fatal error occurred that was not in the test process read the
+     // log to pick up any fatal errors.
+-    (new TestDatabase($this->databasePrefix))->logRead($this->testId, get_class($this));
++    TestRun::get(TestDatabase::getConnection(), $this->testId)
++      ->processPhpErrorLogFile(new TestDatabase($this->databasePrefix), get_class($this));
+ 
+     // Restore original dependency injection container.
+     $this->container = $this->originalContainer;
 diff --git a/core/scripts/run-tests.sh b/core/scripts/run-tests.sh
 old mode 100755
 new mode 100644
-index f1cb4c0ce4..ecae300736
+index f1cb4c0ce4..2629fcafae
 --- a/core/scripts/run-tests.sh
 +++ b/core/scripts/run-tests.sh
 @@ -16,6 +16,7 @@
@@ -538,7 +629,7 @@ index f1cb4c0ce4..ecae300736
        $test_class = array_shift($test_classes);
        // Fork a child process.
 -      $command = simpletest_script_command($test_id, $test_class);
-+      $command = simpletest_script_command($test_run->id(), $test_class);
++      $command = simpletest_script_command($test_run, $test_class);
        $process = proc_open($command, [], $pipes, NULL, NULL, ['bypass_shell' => TRUE]);
  
        if (!is_resource($process)) {
@@ -586,7 +677,25 @@ index f1cb4c0ce4..ecae300736
          }
  
          // Remove this child.
-@@ -892,15 +894,15 @@ function simpletest_script_command($test_id, $test_class) {
+@@ -848,7 +850,7 @@ function simpletest_script_run_one_test($test_id, $test_class) {
+  * @return string
+  *   The assembled command string.
+  */
+-function simpletest_script_command($test_id, $test_class) {
++function simpletest_script_command(TestRun $test_run, $test_class) {
+   global $args, $php;
+ 
+   $command = escapeshellarg($php) . ' ' . escapeshellarg('./core/scripts/' . $args['script']);
+@@ -860,7 +862,7 @@ function simpletest_script_command($test_id, $test_class) {
+     $command .= ' --dburl ' . escapeshellarg($args['dburl']);
+   }
+   $command .= ' --php ' . escapeshellarg($php);
+-  $command .= " --test-id $test_id";
++  $command .= " --test-id " . $test_run->id();
+   foreach (['verbose', 'keep-results', 'color', 'die-on-fail', 'suppress-deprecations'] as $arg) {
+     if ($args[$arg]) {
+       $command .= ' --' . $arg;
+@@ -892,15 +894,14 @@ function simpletest_script_command($test_id, $test_class) {
   *
   * @see simpletest_script_run_one_test()
   */
@@ -600,21 +709,34 @@ index f1cb4c0ce4..ecae300736
    try {
 -    $last_test = TestDatabase::lastTestGet($test_id);
 -    $db_prefix = $last_test['last_prefix'];
-+    $test_id = $test_run->id();
 +    $db_prefix = $test_run->getDatabasePrefix();
    }
    catch (Exception $e) {
      echo (string) $e;
-@@ -921,7 +923,7 @@ function simpletest_script_cleanup($test_id, $test_class, $exitcode) {
+@@ -909,7 +910,7 @@ function simpletest_script_cleanup($test_id, $test_class, $exitcode) {
+ 
+   // If no database prefix was found, then the test was not set up correctly.
+   if (empty($db_prefix)) {
+-    echo "\nFATAL $test_class: Found no database prefix for test ID $test_id. (Check whether setUp() is invoked correctly.)";
++    echo "\nFATAL $test_class: Found no database prefix for test ID " . $test_run->id() . ". (Check whether setUp() is invoked correctly.)";
+     return;
+   }
+ 
+@@ -917,11 +918,11 @@ function simpletest_script_cleanup($test_id, $test_class, $exitcode) {
+   $output = !empty($exitcode);
+   $messages = [];
+ 
+-  $messages[] = "- Found database prefix '$db_prefix' for test ID $test_id.";
++  $messages[] = "- Found database prefix '$db_prefix' for test ID " . $test_run->id() . ".";
  
    // Read the log file in case any fatal errors caused the test to crash.
    try {
 -    (new TestDatabase($db_prefix))->logRead($test_id, $last_test['test_class']);
-+    (new TestDatabase($db_prefix))->logRead($test_id, $test_run->getTestClass());
++    $test_run->processPhpErrorLogFile(new TestDatabase($db_prefix), $test_run->getTestClass());
    }
    catch (Exception $e) {
      echo (string) $e;
-@@ -1494,10 +1496,7 @@ function simpletest_script_load_messages_by_test_id($test_ids) {
+@@ -1494,10 +1495,7 @@ function simpletest_script_load_messages_by_test_id($test_ids) {
  
    foreach ($test_id_chunks as $test_id_chunk) {
      try {
@@ -626,7 +748,7 @@ index f1cb4c0ce4..ecae300736
      }
      catch (Exception $e) {
        echo (string) $e;
-@@ -1518,14 +1517,7 @@ function simpletest_script_open_browser() {
+@@ -1518,14 +1516,7 @@ function simpletest_script_open_browser() {
    global $test_ids;
  
    try {
