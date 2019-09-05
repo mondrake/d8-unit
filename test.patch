@@ -1,6 +1,6 @@
 diff --git a/core/lib/Drupal/Core/Test/SimpletestTestRunResultsStorage.php b/core/lib/Drupal/Core/Test/SimpletestTestRunResultsStorage.php
 new file mode 100644
-index 0000000000..88e7aee059
+index 0000000000..8c59f3c295
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Test/SimpletestTestRunResultsStorage.php
 @@ -0,0 +1,283 @@
@@ -121,7 +121,7 @@ index 0000000000..88e7aee059
 +   * @return array
 +   *   Array of results grouped by test_class.
 +   */
-+  public static function getLogEntriesByTestClassForMultipleTestIds(array $test_ids) {
++  public function getLogEntriesByTestClassForMultipleTestIds(array $test_ids) {
 +    return $this->connection->select('simpletest')
 +      ->fields('simpletest')
 +      ->condition('test_id', $test_ids, 'IN')
@@ -134,7 +134,7 @@ index 0000000000..88e7aee059
 +  /**
 +   *
 +   */
-+  public static function getAllTestIds() {
++  public function getAllTestIds() {
 +    return $this->connection->select('simpletest_test_id', 'stid')
 +      ->fields('stid')
 +      ->execute()
@@ -146,7 +146,7 @@ index 0000000000..88e7aee059
 +   *
 +   * @todo
 +   */
-+  protected function getCurrentTestRunState(TestRun $test_run) {
++  public function getCurrentTestRunState(TestRun $test_run) {
 +    // Define a subquery to identify the latest 'message_id' given the
 +    // $test_id.
 +    $max_message_id_subquery = $this->connection
@@ -762,7 +762,7 @@ index 4245027891..06669f2d59 100644
  
  /**
 diff --git a/core/modules/simpletest/simpletest.module b/core/modules/simpletest/simpletest.module
-index 3cc18b5943..145fe7fc7b 100644
+index 3cc18b5943..9fcc22dddf 100644
 --- a/core/modules/simpletest/simpletest.module
 +++ b/core/modules/simpletest/simpletest.module
 @@ -12,7 +12,9 @@
@@ -886,25 +886,26 @@ index 3cc18b5943..145fe7fc7b 100644
  }
  
  /**
-@@ -679,9 +699,10 @@ function simpletest_clean_temporary_directories() {
+@@ -679,9 +699,11 @@ function simpletest_clean_temporary_directories() {
   */
  function simpletest_clean_results_table($test_id = NULL) {
    if (\Drupal::config('simpletest.settings')->get('clear_results')) {
 -    $connection = TestDatabase::getConnection();
 +    $connection = SimpletestTestRunResultsStorage::getConnection();
++    $test_run_results_storage = new SimpletestTestRunResultsStorage($connection);
      if ($test_id) {
 -      $count = $connection->query('SELECT COUNT(test_id) FROM {simpletest_test_id} WHERE test_id = :test_id', [':test_id' => $test_id])->fetchField();
-+      $test_ids = TestRun::getAllTestIds($connection);
++      $test_ids = $test_run_results_storage->getAllTestIds();
 +      $count = isset($test_ids['test_id']) ? 1 : 0;
  
        $connection->delete('simpletest')
          ->condition('test_id', $test_id)
-@@ -691,7 +712,7 @@ function simpletest_clean_results_table($test_id = NULL) {
+@@ -691,7 +713,7 @@ function simpletest_clean_results_table($test_id = NULL) {
          ->execute();
      }
      else {
 -      $count = $connection->query('SELECT COUNT(test_id) FROM {simpletest_test_id}')->fetchField();
-+      $count = count(TestRun::getAllTestIds($connection));
++      $count = count($test_run_results_storage->getAllTestIds());
  
        // Clear test results.
        $connection->delete('simpletest')->execute();
@@ -1000,7 +1001,7 @@ index c3d5495fd0..edcf7c52b0 100644
      // Restore original dependency injection container.
      $this->container = $this->originalContainer;
 diff --git a/core/scripts/run-tests.sh b/core/scripts/run-tests.sh
-index f1cb4c0ce4..71a354eb25 100755
+index f1cb4c0ce4..d5d2698623 100755
 --- a/core/scripts/run-tests.sh
 +++ b/core/scripts/run-tests.sh
 @@ -15,7 +15,9 @@
@@ -1180,7 +1181,7 @@ index f1cb4c0ce4..71a354eb25 100755
    }
    catch (Exception $e) {
      echo (string) $e;
-@@ -1494,10 +1487,7 @@ function simpletest_script_load_messages_by_test_id($test_ids) {
+@@ -1494,10 +1487,8 @@ function simpletest_script_load_messages_by_test_id($test_ids) {
  
    foreach ($test_id_chunks as $test_id_chunk) {
      try {
@@ -1188,11 +1189,12 @@ index f1cb4c0ce4..71a354eb25 100755
 -        ->query("SELECT * FROM {simpletest} WHERE test_id IN ( :test_ids[] ) ORDER BY test_class, message_id", [
 -          ':test_ids[]' => $test_id_chunk,
 -        ])->fetchAll();
-+      $result_chunk = TestRun::getLogEntriesByTestClassForMultipleTestIds(Database::getConnection('default', 'test-runner'), $test_id_chunk);
++      $test_run_results_storage = new SimpletestTestRunResultsStorage(Database::getConnection('default', 'test-runner'));
++      $result_chunk = $test_run_results_storage->getLogEntriesByTestClassForMultipleTestIds($test_id_chunk);
      }
      catch (Exception $e) {
        echo (string) $e;
-@@ -1518,14 +1508,7 @@ function simpletest_script_open_browser() {
+@@ -1518,14 +1509,8 @@ function simpletest_script_open_browser() {
    global $test_ids;
  
    try {
@@ -1204,7 +1206,8 @@ index f1cb4c0ce4..71a354eb25 100755
 -      ->orderBy('message_id')
 -      ->execute()
 -      ->fetchAll();
-+    $results = TestRun::getLogEntriesByTestClassForMultipleTestIds(Database::getConnection('default', 'test-runner'), $test_ids);
++    $test_run_results_storage = new SimpletestTestRunResultsStorage(Database::getConnection('default', 'test-runner'));
++    $results = $test_run_results_storage->getLogEntriesByTestClassForMultipleTestIds($test_ids);
    }
    catch (Exception $e) {
      echo (string) $e;
