@@ -571,7 +571,7 @@ index 03ff3d2f62..5e060c058c 100644
  }
 diff --git a/core/lib/Drupal/Core/Test/TestRun.php b/core/lib/Drupal/Core/Test/TestRun.php
 new file mode 100644
-index 0000000000..fab410ea41
+index 0000000000..24f05ffe67
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Test/TestRun.php
 @@ -0,0 +1,143 @@
@@ -655,7 +655,7 @@ index 0000000000..fab410ea41
 +   *
 +   */
 +  public function insertLogEntry(array $entry) {
-+    $this->testClass = NULL;
++    $this->testClass = $entry(['test_class']);
 +    $this->testRunResultsStorage->insertLogEntry($this, $entry);
 +  }
 +
@@ -762,15 +762,16 @@ index 4245027891..06669f2d59 100644
  
  /**
 diff --git a/core/modules/simpletest/simpletest.module b/core/modules/simpletest/simpletest.module
-index 3cc18b5943..c27a7de729 100644
+index 3cc18b5943..145fe7fc7b 100644
 --- a/core/modules/simpletest/simpletest.module
 +++ b/core/modules/simpletest/simpletest.module
-@@ -13,6 +13,8 @@
+@@ -12,7 +12,9 @@
+ use Drupal\Core\Routing\RouteMatchInterface;
  use Drupal\Core\Test\JUnitConverter;
  use Drupal\Core\Test\PhpUnitTestRunner;
++use Drupal\Core\Test\SimpletestTestRunResultsStorage;
  use Drupal\Core\Test\TestDatabase;
 +use Drupal\Core\Test\TestRun;
-+use Drupal\Core\Test\SimpletestTestRunResultsStorage;
  use Drupal\Core\Url;
  use Drupal\simpletest\TestDiscovery;
  use PHPUnit\Framework\TestCase;
@@ -999,18 +1000,20 @@ index c3d5495fd0..46d81158d3 100644
      // Restore original dependency injection container.
      $this->container = $this->originalContainer;
 diff --git a/core/scripts/run-tests.sh b/core/scripts/run-tests.sh
-index f1cb4c0ce4..7f3ac90ff5 100755
+index f1cb4c0ce4..71a354eb25 100755
 --- a/core/scripts/run-tests.sh
 +++ b/core/scripts/run-tests.sh
-@@ -16,6 +16,7 @@
+@@ -15,7 +15,9 @@
+ use Drupal\Core\File\FileSystemInterface;
  use Drupal\Core\StreamWrapper\PublicStream;
  use Drupal\Core\Test\PhpUnitTestRunner;
++use Drupal\Core\Test\SimpletestTestRunResultsStorage;
  use Drupal\Core\Test\TestDatabase;
 +use Drupal\Core\Test\TestRun;
  use Drupal\Core\Test\TestRunnerKernel;
  use Drupal\simpletest\Form\SimpletestResultsForm;
  use Drupal\Core\Test\TestDiscovery;
-@@ -639,32 +640,23 @@ function simpletest_script_setup_database($new = FALSE) {
+@@ -639,32 +641,23 @@ function simpletest_script_setup_database($new = FALSE) {
    // Create the Simpletest schema.
    try {
      $connection = Database::getConnection('default', 'test-runner');
@@ -1036,7 +1039,7 @@ index f1cb4c0ce4..7f3ac90ff5 100755
 -        exit(SIMPLETEST_SCRIPT_EXIT_EXCEPTION);
 -      }
 +    try {
-+      TestRun::buildTestingResultsSchema($connection, !empty($args['keep-results-table']));
++      (new SimpletestTestRunResultsStorage($connection))->buildTestingResultsSchema(!empty($args['keep-results-table']));
 +    }
 +    catch (Exception $e) {
 +      echo (string) $e;
@@ -1046,11 +1049,11 @@ index f1cb4c0ce4..7f3ac90ff5 100755
    // Verify that the Simpletest database schema exists by checking one table.
    try {
 -    if (!$schema->tableExists('simpletest')) {
-+    if (!TestRun::validateTestingResultsSchema($connection)) {
++    if (!(new SimpletestTestRunResultsStorage())->validateTestingResultsSchema()) {
        simpletest_script_print_error('Missing Simpletest database schema. Either install Simpletest module or use the --sqlite parameter.');
        exit(SIMPLETEST_SCRIPT_EXIT_FAILURE);
      }
-@@ -692,20 +684,17 @@ function simpletest_script_execute_batch($test_classes) {
+@@ -692,20 +685,17 @@ function simpletest_script_execute_batch($test_classes) {
        }
  
        try {
@@ -1058,7 +1061,7 @@ index f1cb4c0ce4..7f3ac90ff5 100755
 -          ->insert('simpletest_test_id')
 -          ->useDefaults(['test_id'])
 -          ->execute();
-+        $test_run = TestRun::createNew(Database::getConnection('default', 'test-runner'));
++        $test_run = TestRun::createNew(new SimpletestTestRunResultsStorage(Database::getConnection('default', 'test-runner')));
        }
        catch (Exception $e) {
          echo (string) $e;
@@ -1074,7 +1077,7 @@ index f1cb4c0ce4..7f3ac90ff5 100755
        $process = proc_open($command, [], $pipes, NULL, NULL, ['bypass_shell' => TRUE]);
  
        if (!is_resource($process)) {
-@@ -716,7 +705,7 @@ function simpletest_script_execute_batch($test_classes) {
+@@ -716,7 +706,7 @@ function simpletest_script_execute_batch($test_classes) {
        // Register our new child.
        $children[] = [
          'process' => $process,
@@ -1083,7 +1086,7 @@ index f1cb4c0ce4..7f3ac90ff5 100755
          'class' => $test_class,
          'pipes' => $pipes,
        ];
-@@ -742,17 +731,21 @@ function simpletest_script_execute_batch($test_classes) {
+@@ -742,17 +732,21 @@ function simpletest_script_execute_batch($test_classes) {
            // @see https://www.drupal.org/node/2780087
            $total_status = max(SIMPLETEST_SCRIPT_EXIT_FAILURE, $total_status);
            // Insert a fail for xml results.
@@ -1109,7 +1112,7 @@ index f1cb4c0ce4..7f3ac90ff5 100755
              $args['keep-results'] = TRUE;
              // Exit repeat loop immediately.
              $args['repeat'] = -1;
-@@ -760,7 +753,7 @@ function simpletest_script_execute_batch($test_classes) {
+@@ -760,7 +754,7 @@ function simpletest_script_execute_batch($test_classes) {
          }
          // Free-up space by removing any potentially created resources.
          if (!$args['keep-results']) {
@@ -1118,7 +1121,7 @@ index f1cb4c0ce4..7f3ac90ff5 100755
          }
  
          // Remove this child.
-@@ -848,7 +841,7 @@ function simpletest_script_run_one_test($test_id, $test_class) {
+@@ -848,7 +842,7 @@ function simpletest_script_run_one_test($test_id, $test_class) {
   * @return string
   *   The assembled command string.
   */
@@ -1127,7 +1130,7 @@ index f1cb4c0ce4..7f3ac90ff5 100755
    global $args, $php;
  
    $command = escapeshellarg($php) . ' ' . escapeshellarg('./core/scripts/' . $args['script']);
-@@ -860,7 +853,7 @@ function simpletest_script_command($test_id, $test_class) {
+@@ -860,7 +854,7 @@ function simpletest_script_command($test_id, $test_class) {
      $command .= ' --dburl ' . escapeshellarg($args['dburl']);
    }
    $command .= ' --php ' . escapeshellarg($php);
@@ -1136,7 +1139,7 @@ index f1cb4c0ce4..7f3ac90ff5 100755
    foreach (['verbose', 'keep-results', 'color', 'die-on-fail', 'suppress-deprecations'] as $arg) {
      if ($args[$arg]) {
        $command .= ' --' . $arg;
-@@ -892,15 +885,14 @@ function simpletest_script_command($test_id, $test_class) {
+@@ -892,15 +886,14 @@ function simpletest_script_command($test_id, $test_class) {
   *
   * @see simpletest_script_run_one_test()
   */
@@ -1154,7 +1157,7 @@ index f1cb4c0ce4..7f3ac90ff5 100755
    }
    catch (Exception $e) {
      echo (string) $e;
-@@ -909,7 +901,7 @@ function simpletest_script_cleanup($test_id, $test_class, $exitcode) {
+@@ -909,7 +902,7 @@ function simpletest_script_cleanup($test_id, $test_class, $exitcode) {
  
    // If no database prefix was found, then the test was not set up correctly.
    if (empty($db_prefix)) {
@@ -1163,7 +1166,7 @@ index f1cb4c0ce4..7f3ac90ff5 100755
      return;
    }
  
-@@ -917,11 +909,11 @@ function simpletest_script_cleanup($test_id, $test_class, $exitcode) {
+@@ -917,11 +910,11 @@ function simpletest_script_cleanup($test_id, $test_class, $exitcode) {
    $output = !empty($exitcode);
    $messages = [];
  
@@ -1177,7 +1180,7 @@ index f1cb4c0ce4..7f3ac90ff5 100755
    }
    catch (Exception $e) {
      echo (string) $e;
-@@ -1494,10 +1486,7 @@ function simpletest_script_load_messages_by_test_id($test_ids) {
+@@ -1494,10 +1487,7 @@ function simpletest_script_load_messages_by_test_id($test_ids) {
  
    foreach ($test_id_chunks as $test_id_chunk) {
      try {
@@ -1189,7 +1192,7 @@ index f1cb4c0ce4..7f3ac90ff5 100755
      }
      catch (Exception $e) {
        echo (string) $e;
-@@ -1518,14 +1507,7 @@ function simpletest_script_open_browser() {
+@@ -1518,14 +1508,7 @@ function simpletest_script_open_browser() {
    global $test_ids;
  
    try {
