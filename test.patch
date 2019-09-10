@@ -1,9 +1,9 @@
 diff --git a/core/lib/Drupal/Core/Test/SimpletestTestRunResultsStorage.php b/core/lib/Drupal/Core/Test/SimpletestTestRunResultsStorage.php
 new file mode 100644
-index 0000000000..42c3d56332
+index 0000000000..942d3c8f99
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Test/SimpletestTestRunResultsStorage.php
-@@ -0,0 +1,274 @@
+@@ -0,0 +1,277 @@
 +<?php
 +
 +namespace Drupal\Core\Test;
@@ -17,6 +17,9 @@ index 0000000000..42c3d56332
 + */
 +class SimpletestTestRunResultsStorage implements TestRunResultsStorageInterface {
 +
++  /**
++   *
++   */
 +  protected $connection;
 +
 +  /**
@@ -279,7 +282,7 @@ index 0000000000..42c3d56332
 +
 +}
 diff --git a/core/lib/Drupal/Core/Test/TestDatabase.php b/core/lib/Drupal/Core/Test/TestDatabase.php
-index 03ff3d2f62..c0b55e8c10 100644
+index 70c5c084fe..c0b55e8c10 100644
 --- a/core/lib/Drupal/Core/Test/TestDatabase.php
 +++ b/core/lib/Drupal/Core/Test/TestDatabase.php
 @@ -3,8 +3,6 @@
@@ -329,7 +332,7 @@ index 03ff3d2f62..c0b55e8c10 100644
    /**
     * TestDatabase constructor.
     *
-@@ -179,231 +146,4 @@ protected function getLockFile($lock_id) {
+@@ -179,254 +146,4 @@ protected function getLockFile($lock_id) {
      return FileSystem::getOsTemporaryDirectory() . '/test_' . $lock_id;
    }
  
@@ -560,13 +563,36 @@ index 03ff3d2f62..c0b55e8c10 100644
 -    return $schema;
 -  }
 -
+-  /**
+-   * Inserts the parsed PHPUnit results into {simpletest}.
+-   *
+-   * @param array[] $phpunit_results
+-   *   An array of test results, as returned from
+-   *   \Drupal\Core\Test\JUnitConverter::xmlToRows(). These results are in a
+-   *   form suitable for inserting into the {simpletest} table of the test
+-   *   results database.
+-   *
+-   * @internal
+-   */
+-  public static function processPhpUnitResults($phpunit_results) {
+-    if ($phpunit_results) {
+-      $query = static::getConnection()
+-        ->insert('simpletest')
+-        ->fields(array_keys($phpunit_results[0]));
+-      foreach ($phpunit_results as $result) {
+-        $query->values($result);
+-      }
+-      $query->execute();
+-    }
+-  }
+-
  }
 diff --git a/core/lib/Drupal/Core/Test/TestRun.php b/core/lib/Drupal/Core/Test/TestRun.php
 new file mode 100644
-index 0000000000..fef4fdaf1d
+index 0000000000..179d493bbf
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Test/TestRun.php
-@@ -0,0 +1,143 @@
+@@ -0,0 +1,177 @@
 +<?php
 +
 +namespace Drupal\Core\Test;
@@ -576,9 +602,24 @@ index 0000000000..fef4fdaf1d
 + */
 +class TestRun {
 +
++  /**
++   *
++   */
 +  protected $testRunResultsStorage;
++
++  /**
++   *
++   */
 +  protected $testId;
++
++  /**
++   *
++   */
 +  protected $databasePrefix;
++
++  /**
++   *
++   */
 +  protected $testClass;
 +
 +  /**
@@ -648,7 +689,7 @@ index 0000000000..fef4fdaf1d
 +   */
 +  public function insertLogEntry(array $entry) {
 +    $this->testClass = $entry['test_class'];
-+    $this->testRunResultsStorage->insertLogEntry($this, $entry);
++    return $this->testRunResultsStorage->insertLogEntry($this, $entry);
 +  }
 +
 +  /**
@@ -707,6 +748,25 @@ index 0000000000..fef4fdaf1d
 +      }
 +    }
 +    return $found;
++  }
++
++  /**
++   * Inserts the parsed PHPUnit results into {simpletest}.
++   *
++   * @param array[] $phpunit_results
++   *   An array of test results, as returned from
++   *   \Drupal\Core\Test\JUnitConverter::xmlToRows(). These results are in a
++   *   form suitable for inserting into the {simpletest} table of the test
++   *   results database.
++   *
++   * @internal
++   */
++  public function processPhpUnitResults($phpunit_results) {
++    if (!empty($phpunit_results)) {
++      foreach ($phpunit_results as $result) {
++        $this->insertLogEntry($result);
++      }
++    }
 +  }
 +
 +}
@@ -817,7 +877,7 @@ index 4245027891..06669f2d59 100644
  
  /**
 diff --git a/core/modules/simpletest/simpletest.module b/core/modules/simpletest/simpletest.module
-index 3cc18b5943..9fcc22dddf 100644
+index 07a2588602..321922456d 100644
 --- a/core/modules/simpletest/simpletest.module
 +++ b/core/modules/simpletest/simpletest.module
 @@ -12,7 +12,9 @@
@@ -852,30 +912,34 @@ index 3cc18b5943..9fcc22dddf 100644
      'progress_message' => '',
 @@ -169,7 +169,7 @@ function simpletest_run_tests($test_list) {
  
-   \Drupal::moduleHandler()->invokeAll('test_group_started');
+   \Drupal::moduleHandler()->invokeAllDeprecated('Convert your test to a PHPUnit-based one and implement test listeners. See https://www.drupal.org/node/2934242', 'test_group_started');
  
 -  return $test_id;
 +  return $test_run->id();
  }
  
  /**
-@@ -209,13 +209,10 @@ function simpletest_process_phpunit_results($phpunit_results) {
-   // Insert the results of the PHPUnit test run into the database so the results
-   // are displayed along with Simpletest's results.
-   if (!empty($phpunit_results)) {
--    $query = TestDatabase::getConnection()
--      ->insert('simpletest')
--      ->fields(array_keys($phpunit_results[0]));
-+    $test_run = TestRun::get(new SimpletestTestRunResultsStorage(), $phpunit_results[0]['test_id']);
-     foreach ($phpunit_results as $result) {
--      $query->values($result);
-+      $test_run->insertLogEntry($result);
-     }
--    $query->execute();
-   }
+@@ -212,7 +212,8 @@ function simpletest_run_phpunit_tests($test_id, array $unescaped_test_classnames
+  */
+ function simpletest_process_phpunit_results($phpunit_results) {
+   @trigger_error(__FUNCTION__ . '() is deprecated in drupal:8.8.0 and is removed from drupal:9.0.0. Use \Drupal\Core\Test\TestDatabase::processPhpUnitResults() instead. See https://www.drupal.org/node/3075252', E_USER_DEPRECATED);
+-  TestDatabase::processPhpUnitResults($phpunit_results);
++  $test_run = TestRun::get(new SimpletestTestRunResultsStorage(), $phpunit_results[0]['test_id']);
++  $test_run->processPhpUnitResults($phpunit_results);
  }
  
-@@ -405,10 +402,10 @@ function _simpletest_batch_finished($success, $results, $operations, $elapsed) {
+ /**
+@@ -341,7 +342,8 @@ function _simpletest_batch_operation($test_list_init, $test_id, &$context) {
+   if (is_subclass_of($test_class, TestCase::class)) {
+     $runner = PhpUnitTestRunner::create(\Drupal::getContainer());
+     $phpunit_results = $runner->runTests($test_id, [$test_class]);
+-    TestDatabase::processPhpUnitResults($phpunit_results);
++    $test_run = TestRun::get(new SimpletestTestRunResultsStorage(), $phpunit_results[0]['test_id']);
++    $test_run->processPhpUnitResults($phpunit_results);
+     $test_results[$test_class] = simpletest_summarize_phpunit_result($phpunit_results)[$test_class];
+   }
+   else {
+@@ -401,10 +403,10 @@ function _simpletest_batch_finished($success, $results, $operations, $elapsed) {
      $test_id = $operations[0][1][1];
  
      // Retrieve the last database prefix used for testing and the last test
@@ -889,7 +953,7 @@ index 3cc18b5943..9fcc22dddf 100644
  
      \Drupal::messenger()->addError(t('The test run did not successfully finish.'));
      \Drupal::messenger()->addWarning(t('Use the <em>Clean environment</em> button to clean-up temporary files and tables.'));
-@@ -432,7 +429,8 @@ function _simpletest_batch_finished($success, $results, $operations, $elapsed) {
+@@ -428,7 +430,8 @@ function _simpletest_batch_finished($success, $results, $operations, $elapsed) {
   */
  function simpletest_last_test_get($test_id) {
    @trigger_error(__FUNCTION__ . ' is deprecated in drupal:8.8.0 and is removed from drupal:9.0.0. Use \Drupal\Core\Test\TestDatabase::lastTestGet() instead. See https://www.drupal.org/node/3075252', E_USER_DEPRECATED);
@@ -899,7 +963,7 @@ index 3cc18b5943..9fcc22dddf 100644
  }
  
  /**
-@@ -458,8 +456,8 @@ function simpletest_last_test_get($test_id) {
+@@ -454,8 +457,8 @@ function simpletest_last_test_get($test_id) {
   */
  function simpletest_log_read($test_id, $database_prefix, $test_class) {
    @trigger_error(__FUNCTION__ . ' is deprecated in drupal:8.8.0 and is removed from drupal:9.0.0. Use \Drupal\Core\Test\TestDatabase::logRead() instead. See https://www.drupal.org/node/3075252', E_USER_DEPRECATED);
@@ -910,7 +974,7 @@ index 3cc18b5943..9fcc22dddf 100644
  }
  
  /**
-@@ -496,7 +494,29 @@ function simpletest_log_read($test_id, $database_prefix, $test_class) {
+@@ -492,7 +495,29 @@ function simpletest_log_read($test_id, $database_prefix, $test_class) {
   */
  function simpletest_insert_assert($test_id, $test_class, $status, $message = '', $group = 'Other', array $caller = []) {
    @trigger_error(__FUNCTION__ . ' is deprecated in drupal:8.8.0 and is removed from drupal:9.0.0. Use \Drupal\Core\Test\TestDatabase::insertAssert() instead. See https://www.drupal.org/node/3075252', E_USER_DEPRECATED);
@@ -941,7 +1005,7 @@ index 3cc18b5943..9fcc22dddf 100644
  }
  
  /**
-@@ -679,9 +699,11 @@ function simpletest_clean_temporary_directories() {
+@@ -675,9 +700,11 @@ function simpletest_clean_temporary_directories() {
   */
  function simpletest_clean_results_table($test_id = NULL) {
    if (\Drupal::config('simpletest.settings')->get('clear_results')) {
@@ -955,7 +1019,7 @@ index 3cc18b5943..9fcc22dddf 100644
  
        $connection->delete('simpletest')
          ->condition('test_id', $test_id)
-@@ -691,7 +713,7 @@ function simpletest_clean_results_table($test_id = NULL) {
+@@ -687,7 +714,7 @@ function simpletest_clean_results_table($test_id = NULL) {
          ->execute();
      }
      else {
@@ -1057,7 +1121,7 @@ index c3d5495fd0..d1fbccb4e7 100644
      // Restore original dependency injection container.
      $this->container = $this->originalContainer;
 diff --git a/core/scripts/run-tests.sh b/core/scripts/run-tests.sh
-index f1cb4c0ce4..228e8c033f 100755
+index c4f910e202..385d13eab2 100755
 --- a/core/scripts/run-tests.sh
 +++ b/core/scripts/run-tests.sh
 @@ -15,7 +15,9 @@
@@ -1070,7 +1134,17 @@ index f1cb4c0ce4..228e8c033f 100755
  use Drupal\Core\Test\TestRunnerKernel;
  use Drupal\simpletest\Form\SimpletestResultsForm;
  use Drupal\Core\Test\TestDiscovery;
-@@ -639,32 +641,23 @@ function simpletest_script_setup_database($new = FALSE) {
+@@ -54,7 +56,8 @@
+ 
+ if ($args['execute-test']) {
+   simpletest_script_setup_database();
+-  simpletest_script_run_one_test($args['test-id'], $args['execute-test']);
++  $test_run = TestRun::get(new SimpletestTestRunResultsStorage(Database::getConnection('default', 'test-runner')), $args['test-id']);
++  simpletest_script_run_one_test($test_run, $args['execute-test']);
+   // Sub-process exited already; this is just for clarity.
+   exit(SIMPLETEST_SCRIPT_EXIT_SUCCESS);
+ }
+@@ -639,32 +642,23 @@ function simpletest_script_setup_database($new = FALSE) {
    // Create the Simpletest schema.
    try {
      $connection = Database::getConnection('default', 'test-runner');
@@ -1110,7 +1184,7 @@ index f1cb4c0ce4..228e8c033f 100755
        simpletest_script_print_error('Missing Simpletest database schema. Either install Simpletest module or use the --sqlite parameter.');
        exit(SIMPLETEST_SCRIPT_EXIT_FAILURE);
      }
-@@ -692,20 +685,17 @@ function simpletest_script_execute_batch($test_classes) {
+@@ -692,20 +686,17 @@ function simpletest_script_execute_batch($test_classes) {
        }
  
        try {
@@ -1134,7 +1208,7 @@ index f1cb4c0ce4..228e8c033f 100755
        $process = proc_open($command, [], $pipes, NULL, NULL, ['bypass_shell' => TRUE]);
  
        if (!is_resource($process)) {
-@@ -716,7 +706,7 @@ function simpletest_script_execute_batch($test_classes) {
+@@ -716,7 +707,7 @@ function simpletest_script_execute_batch($test_classes) {
        // Register our new child.
        $children[] = [
          'process' => $process,
@@ -1143,7 +1217,7 @@ index f1cb4c0ce4..228e8c033f 100755
          'class' => $test_class,
          'pipes' => $pipes,
        ];
-@@ -742,17 +732,21 @@ function simpletest_script_execute_batch($test_classes) {
+@@ -742,17 +733,21 @@ function simpletest_script_execute_batch($test_classes) {
            // @see https://www.drupal.org/node/2780087
            $total_status = max(SIMPLETEST_SCRIPT_EXIT_FAILURE, $total_status);
            // Insert a fail for xml results.
@@ -1169,7 +1243,7 @@ index f1cb4c0ce4..228e8c033f 100755
              $args['keep-results'] = TRUE;
              // Exit repeat loop immediately.
              $args['repeat'] = -1;
-@@ -760,7 +754,7 @@ function simpletest_script_execute_batch($test_classes) {
+@@ -760,7 +755,7 @@ function simpletest_script_execute_batch($test_classes) {
          }
          // Free-up space by removing any potentially created resources.
          if (!$args['keep-results']) {
@@ -1178,7 +1252,50 @@ index f1cb4c0ce4..228e8c033f 100755
          }
  
          // Remove this child.
-@@ -848,7 +842,7 @@ function simpletest_script_run_one_test($test_id, $test_class) {
+@@ -774,15 +769,15 @@ function simpletest_script_execute_batch($test_classes) {
+ /**
+  * Run a PHPUnit-based test.
+  */
+-function simpletest_script_run_phpunit($test_id, $class) {
++function simpletest_script_run_phpunit(TestRun $test_run, $class) {
+   $reflection = new \ReflectionClass($class);
+   if ($reflection->hasProperty('runLimit')) {
+     set_time_limit($reflection->getStaticPropertyValue('runLimit'));
+   }
+ 
+   $runner = PhpUnitTestRunner::create(\Drupal::getContainer());
+-  $results = $runner->runTests($test_id, [$class], $status);
+-  TestDatabase::processPhpUnitResults($results);
++  $results = $runner->runTests($test_run->id(), [$class], $status);
++  $test_run->processPhpUnitResults($results);
+ 
+   $summaries = $runner->summarizeResults($results);
+   foreach ($summaries as $class => $summary) {
+@@ -794,7 +789,7 @@ function simpletest_script_run_phpunit($test_id, $class) {
+ /**
+  * Run a single test, bootstrapping Drupal if needed.
+  */
+-function simpletest_script_run_one_test($test_id, $test_class) {
++function simpletest_script_run_one_test(TestRun $test_run, $test_class) {
+   global $args;
+ 
+   try {
+@@ -807,12 +802,12 @@ function simpletest_script_run_one_test($test_id, $test_class) {
+       // Use empty array to run all the test methods.
+       $methods = [];
+     }
+-    $test = new $class_name($test_id);
++    $test = new $class_name($test_run->id());
+     if ($args['suppress-deprecations']) {
+       putenv('SYMFONY_DEPRECATIONS_HELPER=disabled');
+     }
+     if (is_subclass_of($test_class, TestCase::class)) {
+-      $status = simpletest_script_run_phpunit($test_id, $test_class);
++      $status = simpletest_script_run_phpunit($test_run->id(), $test_class);
+     }
+     else {
+       $test->dieOnFail = (bool) $args['die-on-fail'];
+@@ -848,7 +843,7 @@ function simpletest_script_run_one_test($test_id, $test_class) {
   * @return string
   *   The assembled command string.
   */
@@ -1187,7 +1304,7 @@ index f1cb4c0ce4..228e8c033f 100755
    global $args, $php;
  
    $command = escapeshellarg($php) . ' ' . escapeshellarg('./core/scripts/' . $args['script']);
-@@ -860,7 +854,7 @@ function simpletest_script_command($test_id, $test_class) {
+@@ -860,7 +855,7 @@ function simpletest_script_command($test_id, $test_class) {
      $command .= ' --dburl ' . escapeshellarg($args['dburl']);
    }
    $command .= ' --php ' . escapeshellarg($php);
@@ -1196,7 +1313,7 @@ index f1cb4c0ce4..228e8c033f 100755
    foreach (['verbose', 'keep-results', 'color', 'die-on-fail', 'suppress-deprecations'] as $arg) {
      if ($args[$arg]) {
        $command .= ' --' . $arg;
-@@ -892,15 +886,14 @@ function simpletest_script_command($test_id, $test_class) {
+@@ -892,15 +887,14 @@ function simpletest_script_command($test_id, $test_class) {
   *
   * @see simpletest_script_run_one_test()
   */
@@ -1214,7 +1331,7 @@ index f1cb4c0ce4..228e8c033f 100755
    }
    catch (Exception $e) {
      echo (string) $e;
-@@ -909,7 +902,7 @@ function simpletest_script_cleanup($test_id, $test_class, $exitcode) {
+@@ -909,7 +903,7 @@ function simpletest_script_cleanup($test_id, $test_class, $exitcode) {
  
    // If no database prefix was found, then the test was not set up correctly.
    if (empty($db_prefix)) {
@@ -1223,7 +1340,7 @@ index f1cb4c0ce4..228e8c033f 100755
      return;
    }
  
-@@ -917,11 +910,11 @@ function simpletest_script_cleanup($test_id, $test_class, $exitcode) {
+@@ -917,11 +911,11 @@ function simpletest_script_cleanup($test_id, $test_class, $exitcode) {
    $output = !empty($exitcode);
    $messages = [];
  
@@ -1237,7 +1354,7 @@ index f1cb4c0ce4..228e8c033f 100755
    }
    catch (Exception $e) {
      echo (string) $e;
-@@ -1494,10 +1487,8 @@ function simpletest_script_load_messages_by_test_id($test_ids) {
+@@ -1494,10 +1488,8 @@ function simpletest_script_load_messages_by_test_id($test_ids) {
  
    foreach ($test_id_chunks as $test_id_chunk) {
      try {
@@ -1250,7 +1367,7 @@ index f1cb4c0ce4..228e8c033f 100755
      }
      catch (Exception $e) {
        echo (string) $e;
-@@ -1518,14 +1509,8 @@ function simpletest_script_open_browser() {
+@@ -1518,14 +1510,8 @@ function simpletest_script_open_browser() {
    global $test_ids;
  
    try {
