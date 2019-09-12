@@ -1,9 +1,123 @@
+diff --git a/core/lib/Drupal/Core/Test/EnvironmentCleaner.php b/core/lib/Drupal/Core/Test/EnvironmentCleaner.php
+index 31da3cfc07..89b74e0815 100644
+--- a/core/lib/Drupal/Core/Test/EnvironmentCleaner.php
++++ b/core/lib/Drupal/Core/Test/EnvironmentCleaner.php
+@@ -4,6 +4,8 @@
+ 
+ use Drupal\Core\Database\Connection;
+ use Drupal\Core\File\FileSystemInterface;
++use Drupal\Core\Test\TestRun;
++use Drupal\Core\Test\TestRunResultsStorageInterface;
+ use Symfony\Component\Console\Output\OutputInterface;
+ 
+ /**
+@@ -26,15 +28,9 @@ class EnvironmentCleaner implements EnvironmentCleanerInterface {
+   protected $testDatabase;
+ 
+   /**
+-   * Connection to the database where test results are stored.
+    *
+-   * This could be the same as $testDatabase, or it could be different.
+-   * run-tests.sh allows you to specify a different results database with the
+-   * --sqlite parameter.
+-   *
+-   * @var \Drupal\Core\Database\Connection
+    */
+-  protected $resultsDatabase;
++  protected $testRunResultsStorage;
+ 
+   /**
+    * The file system service.
+@@ -57,18 +53,16 @@ class EnvironmentCleaner implements EnvironmentCleanerInterface {
+    *   The path to the root of the Drupal installation.
+    * @param \Drupal\Core\Database\Connection $test_database
+    *   Connection to the database against which tests were run.
+-   * @param \Drupal\Core\Database\Connection $results_database
+-   *   Connection to the database where test results were stored. This could be
+-   *   the same as $test_database, or it could be different.
++   * @todo
+    * @param \Symfony\Component\Console\Output\OutputInterface $output
+    *   A symfony console output object.
+    * @param \Drupal\Core\File\FileSystemInterface $file_system
+    *   The file_system service.
+    */
+-  public function __construct($root, Connection $test_database, Connection $results_database, OutputInterface $output, FileSystemInterface $file_system) {
++  public function __construct($root, Connection $test_database, TestRunResultsStorageInterface $test_run_results_storage, OutputInterface $output, FileSystemInterface $file_system) {
+     $this->root = $root;
+     $this->testDatabase = $test_database;
+-    $this->resultsDatabase = $results_database;
++    $this->testRunResultsStorage = $test_run_results_storage;
+     $this->output = $output;
+     $this->fileSystem = $file_system;
+   }
+@@ -85,7 +79,7 @@ public function cleanEnvironment($clear_results = TRUE, $clear_temp_directories
+       $this->doCleanTemporaryDirectories();
+     }
+     if ($clear_results) {
+-      $count = $this->cleanResultsTable();
++      $count = $this->cleanResults();
+       $this->output->write('Test results removed: ' . $count);
+     }
+     else {
+@@ -168,27 +162,14 @@ protected function doCleanTemporaryDirectories() {
+   /**
+    * {@inheritdoc}
+    */
+-  public function cleanResultsTable($test_id = NULL) {
+-    $count = 0;
++  public function cleanResults($test_id = NULL) {
+     if ($test_id) {
+-      $count = $this->resultsDatabase->query('SELECT COUNT(test_id) FROM {simpletest_test_id} WHERE test_id = :test_id', [':test_id' => $test_id])->fetchField();
+-
+-      $this->resultsDatabase->delete('simpletest')
+-        ->condition('test_id', $test_id)
+-        ->execute();
+-      $this->resultsDatabase->delete('simpletest_test_id')
+-        ->condition('test_id', $test_id)
+-        ->execute();
++      $test_run = TestRun::get($this->testRunResultsStorage, $test_id);
++      return $test_run->removeResults();
+     }
+     else {
+-      $count = $this->resultsDatabase->query('SELECT COUNT(test_id) FROM {simpletest_test_id}')->fetchField();
+-
+-      // Clear test results.
+-      $this->resultsDatabase->delete('simpletest')->execute();
+-      $this->resultsDatabase->delete('simpletest_test_id')->execute();
++      return $this->testRunResultsStorage->cleanUp();
+     }
+-
+-    return $count;
+   }
+ 
+ }
+diff --git a/core/lib/Drupal/Core/Test/EnvironmentCleanerInterface.php b/core/lib/Drupal/Core/Test/EnvironmentCleanerInterface.php
+index 4487278ad2..dc5d40cdba 100644
+--- a/core/lib/Drupal/Core/Test/EnvironmentCleanerInterface.php
++++ b/core/lib/Drupal/Core/Test/EnvironmentCleanerInterface.php
+@@ -44,7 +44,7 @@ public function cleanDatabase();
+   public function cleanTemporaryDirectories();
+ 
+   /**
+-   * Clears test result tables from the results database.
++   * Clears test results from the results storage.
+    *
+    * @param $test_id
+    *   Test ID to remove results for, or NULL to remove all results.
+@@ -52,6 +52,6 @@ public function cleanTemporaryDirectories();
+    * @return int
+    *   The number of results that were removed.
+    */
+-  public function cleanResultsTable($test_id = NULL);
++  public function cleanResults($test_id = NULL);
+ 
+ }
 diff --git a/core/lib/Drupal/Core/Test/SimpletestTestRunResultsStorage.php b/core/lib/Drupal/Core/Test/SimpletestTestRunResultsStorage.php
 new file mode 100644
-index 0000000000..5865d35813
+index 0000000000..9fcbe352fc
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Test/SimpletestTestRunResultsStorage.php
-@@ -0,0 +1,269 @@
+@@ -0,0 +1,281 @@
 +<?php
 +
 +namespace Drupal\Core\Test;
@@ -31,16 +145,24 @@ index 0000000000..5865d35813
 +   * @see \Drupal\simpletest\TestBase::prepareEnvironment()
 +   */
 +  public static function getConnection() {
-+    // Check whether there is a backup of the original default connection.
-+    // @see TestBase::prepareEnvironment()
++    // Check whether there is a test runner connection.
++    // @see run-tests.sh
++    // @todo Convert Simpletest UI runner to create + use this connection, too.
 +    try {
-+      $connection = Database::getConnection('default', 'simpletest_original_default');
++      $connection = Database::getConnection('default', 'test-runner');
 +    }
 +    catch (ConnectionNotDefinedException $e) {
-+      // If TestBase::prepareEnvironment() or TestBase::restoreEnvironment()
-+      // failed, the test-specific database connection does not exist
-+      // yet/anymore, so fall back to the default of the (UI) test runner.
-+      $connection = Database::getConnection('default', 'default');
++      // Check whether there is a backup of the original default connection.
++      // @see TestBase::prepareEnvironment()
++      try {
++        $connection = Database::getConnection('default', 'simpletest_original_default');
++      }
++      catch (ConnectionNotDefinedException $e) {
++        // If TestBase::prepareEnvironment() or TestBase::restoreEnvironment()
++        // failed, the test-specific database connection does not exist
++        // yet/anymore, so fall back to the default of the (UI) test runner.
++        $connection = Database::getConnection('default', 'default');
++      }
 +    }
 +    return $connection;
 +  }
@@ -94,6 +216,21 @@ index 0000000000..5865d35813
 +  }
 +
 +  /**
++   *
++   */
++  public function removeResults(TestRun $test_run) {
++    $tx = $this->connection->startTransaction('delete_test_run');
++    $this->connection->delete('simpletest')
++      ->condition('test_id', $test_run->id())
++      ->execute();
++    $count = $this->connection->delete('simpletest_test_id')
++      ->condition('test_id', $test_run->id())
++      ->execute();
++    $tx = NULL;
++    return $count;
++  }
++
++  /**
 +   * {@inheritdoc}
 +   */
 +  public function getLogEntriesByTestClass(TestRun $test_run) {
@@ -104,29 +241,6 @@ index 0000000000..5865d35813
 +      ->orderBy('message_id')
 +      ->execute()
 +      ->fetchAll();
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function getLogEntriesByTestClassForMultipleTestIds(array $test_ids) {
-+    return $this->connection->select('simpletest')
-+      ->fields('simpletest')
-+      ->condition('test_id', $test_ids, 'IN')
-+      ->orderBy('test_class')
-+      ->orderBy('message_id')
-+      ->execute()
-+      ->fetchAll();
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function getAllTestIds() {
-+    return $this->connection->select('simpletest_test_id', 'stid')
-+      ->fields('stid')
-+      ->execute()
-+      ->fetchAllAssoc('test_id', \PDO::FETCH_ASSOC);
 +  }
 +
 +  /**
@@ -149,6 +263,18 @@ index 0000000000..5865d35813
 +    $select->addField('st', 'test_class');
 +
 +    return $select->execute()->fetchAssoc();
++  }
++
++  /**
++   *
++   */
++  public function cleanUp() {
++    // Clear test results.
++    $tx = $this->connection->startTransaction('delete_simpletest');
++    $this->connection->delete('simpletest')->execute();
++    $count = $this->connection->delete('simpletest_test_id')->execute();
++    $tx = NULL;
++    return $count;
 +  }
 +
 +  /**
@@ -274,7 +400,7 @@ index 0000000000..5865d35813
 +
 +}
 diff --git a/core/lib/Drupal/Core/Test/TestDatabase.php b/core/lib/Drupal/Core/Test/TestDatabase.php
-index 70c5c084fe..c0b55e8c10 100644
+index 115568f67b..e942ef86e2 100644
 --- a/core/lib/Drupal/Core/Test/TestDatabase.php
 +++ b/core/lib/Drupal/Core/Test/TestDatabase.php
 @@ -3,8 +3,6 @@
@@ -285,7 +411,7 @@ index 70c5c084fe..c0b55e8c10 100644
 -use Drupal\Core\Database\Database;
  
  /**
-  * Provides helper methods for interacting with the Simpletest database.
+  * Provides helper methods for interacting with the fixture database.
 @@ -26,37 +24,6 @@ class TestDatabase {
     */
    protected $databasePrefix;
@@ -581,10 +707,10 @@ index 70c5c084fe..c0b55e8c10 100644
  }
 diff --git a/core/lib/Drupal/Core/Test/TestRun.php b/core/lib/Drupal/Core/Test/TestRun.php
 new file mode 100644
-index 0000000000..179d493bbf
+index 0000000000..aef604fc6e
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Test/TestRun.php
-@@ -0,0 +1,177 @@
+@@ -0,0 +1,184 @@
 +<?php
 +
 +namespace Drupal\Core\Test;
@@ -695,6 +821,13 @@ index 0000000000..179d493bbf
 +  }
 +
 +  /**
++   *
++   */
++  public function removeResults() {
++    return $this->testRunResultsStorage->removeResults($this);
++  }
++
++  /**
 +   * Reads the PHP error log and reports any errors as assertion failures.
 +   *
 +   * The errors in the log should only be fatal errors since any other errors
@@ -764,10 +897,10 @@ index 0000000000..179d493bbf
 +}
 diff --git a/core/lib/Drupal/Core/Test/TestRunResultsStorageInterface.php b/core/lib/Drupal/Core/Test/TestRunResultsStorageInterface.php
 new file mode 100644
-index 0000000000..09cfbdab3d
+index 0000000000..1233de074b
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Test/TestRunResultsStorageInterface.php
-@@ -0,0 +1,65 @@
+@@ -0,0 +1,60 @@
 +<?php
 +
 +namespace Drupal\Core\Test;
@@ -801,19 +934,9 @@ index 0000000000..09cfbdab3d
 +  public function getLogEntriesByTestClass(TestRun $test_run);
 +
 +  /**
-+   * Get test results for multiple test runs.
-+   *
-+   * @todo
-+   *
-+   * @return array
-+   *   Array of results grouped by test_class.
-+   */
-+  public function getLogEntriesByTestClassForMultipleTestIds(array $test_ids);
-+
-+  /**
 +   *
 +   */
-+  public function getAllTestIds();
++  public function removeResults(TestRun $test_run);
 +
 +  /**
 +   * Get information about the last test that ran given a test ID.
@@ -821,6 +944,11 @@ index 0000000000..09cfbdab3d
 +   * @todo
 +   */
 +  public function getCurrentTestRunState(TestRun $test_run);
++
++  /**
++   *
++   */
++  public function cleanUp();
 +
 +  /**
 +   *
@@ -847,7 +975,7 @@ index 0625691022..295b985e4b 100644
  
    /**
 diff --git a/core/modules/simpletest/simpletest.install b/core/modules/simpletest/simpletest.install
-index 4245027891..06669f2d59 100644
+index ae3cf83239..9f7d72c39b 100644
 --- a/core/modules/simpletest/simpletest.install
 +++ b/core/modules/simpletest/simpletest.install
 @@ -7,7 +7,7 @@
@@ -869,10 +997,10 @@ index 4245027891..06669f2d59 100644
  
  /**
 diff --git a/core/modules/simpletest/simpletest.module b/core/modules/simpletest/simpletest.module
-index 07a2588602..cf960bd81e 100644
+index 5775c1d83d..0cfeeab99a 100644
 --- a/core/modules/simpletest/simpletest.module
 +++ b/core/modules/simpletest/simpletest.module
-@@ -12,7 +12,9 @@
+@@ -11,7 +11,9 @@
  use Drupal\Core\Routing\RouteMatchInterface;
  use Drupal\Core\Test\JUnitConverter;
  use Drupal\Core\Test\PhpUnitTestRunner;
@@ -882,7 +1010,7 @@ index 07a2588602..cf960bd81e 100644
  use Drupal\Core\Url;
  use Drupal\simpletest\TestDiscovery;
  use PHPUnit\Framework\TestCase;
-@@ -139,9 +141,7 @@ function simpletest_run_tests($test_list) {
+@@ -138,9 +140,7 @@ function simpletest_run_tests($test_list) {
      unset($test_list['phpunit']);
    }
  
@@ -893,7 +1021,7 @@ index 07a2588602..cf960bd81e 100644
  
    // Clear out the previous verbose files.
    try {
-@@ -158,7 +158,7 @@ function simpletest_run_tests($test_list) {
+@@ -157,7 +157,7 @@ function simpletest_run_tests($test_list) {
    $batch = [
      'title' => t('Running tests'),
      'operations' => [
@@ -902,7 +1030,7 @@ index 07a2588602..cf960bd81e 100644
      ],
      'finished' => '_simpletest_batch_finished',
      'progress_message' => '',
-@@ -169,7 +169,7 @@ function simpletest_run_tests($test_list) {
+@@ -168,7 +168,7 @@ function simpletest_run_tests($test_list) {
  
    \Drupal::moduleHandler()->invokeAllDeprecated('Convert your test to a PHPUnit-based one and implement test listeners. See https://www.drupal.org/node/2934242', 'test_group_started');
  
@@ -911,7 +1039,7 @@ index 07a2588602..cf960bd81e 100644
  }
  
  /**
-@@ -212,7 +212,11 @@ function simpletest_run_phpunit_tests($test_id, array $unescaped_test_classnames
+@@ -211,7 +211,11 @@ function simpletest_run_phpunit_tests($test_id, array $unescaped_test_classnames
   */
  function simpletest_process_phpunit_results($phpunit_results) {
    @trigger_error(__FUNCTION__ . '() is deprecated in drupal:8.8.0 and is removed from drupal:9.0.0. Use \Drupal\Core\Test\TestDatabase::processPhpUnitResults() instead. See https://www.drupal.org/node/3075252', E_USER_DEPRECATED);
@@ -924,7 +1052,7 @@ index 07a2588602..cf960bd81e 100644
  }
  
  /**
-@@ -341,7 +345,8 @@ function _simpletest_batch_operation($test_list_init, $test_id, &$context) {
+@@ -340,7 +344,8 @@ function _simpletest_batch_operation($test_list_init, $test_id, &$context) {
    if (is_subclass_of($test_class, TestCase::class)) {
      $runner = PhpUnitTestRunner::create(\Drupal::getContainer());
      $phpunit_results = $runner->runTests($test_id, [$test_class]);
@@ -934,7 +1062,7 @@ index 07a2588602..cf960bd81e 100644
      $test_results[$test_class] = simpletest_summarize_phpunit_result($phpunit_results)[$test_class];
    }
    else {
-@@ -401,10 +406,10 @@ function _simpletest_batch_finished($success, $results, $operations, $elapsed) {
+@@ -400,10 +405,10 @@ function _simpletest_batch_finished($success, $results, $operations, $elapsed) {
      $test_id = $operations[0][1][1];
  
      // Retrieve the last database prefix used for testing and the last test
@@ -948,7 +1076,7 @@ index 07a2588602..cf960bd81e 100644
  
      \Drupal::messenger()->addError(t('The test run did not successfully finish.'));
      \Drupal::messenger()->addWarning(t('Use the <em>Clean environment</em> button to clean-up temporary files and tables.'));
-@@ -428,7 +433,8 @@ function _simpletest_batch_finished($success, $results, $operations, $elapsed) {
+@@ -427,7 +432,8 @@ function _simpletest_batch_finished($success, $results, $operations, $elapsed) {
   */
  function simpletest_last_test_get($test_id) {
    @trigger_error(__FUNCTION__ . ' is deprecated in drupal:8.8.0 and is removed from drupal:9.0.0. Use \Drupal\Core\Test\TestDatabase::lastTestGet() instead. See https://www.drupal.org/node/3075252', E_USER_DEPRECATED);
@@ -958,7 +1086,7 @@ index 07a2588602..cf960bd81e 100644
  }
  
  /**
-@@ -454,8 +460,8 @@ function simpletest_last_test_get($test_id) {
+@@ -453,8 +459,8 @@ function simpletest_last_test_get($test_id) {
   */
  function simpletest_log_read($test_id, $database_prefix, $test_class) {
    @trigger_error(__FUNCTION__ . ' is deprecated in drupal:8.8.0 and is removed from drupal:9.0.0. Use \Drupal\Core\Test\TestDatabase::logRead() instead. See https://www.drupal.org/node/3075252', E_USER_DEPRECATED);
@@ -969,7 +1097,7 @@ index 07a2588602..cf960bd81e 100644
  }
  
  /**
-@@ -492,7 +498,29 @@ function simpletest_log_read($test_id, $database_prefix, $test_class) {
+@@ -491,7 +497,29 @@ function simpletest_log_read($test_id, $database_prefix, $test_class) {
   */
  function simpletest_insert_assert($test_id, $test_class, $status, $message = '', $group = 'Other', array $caller = []) {
    @trigger_error(__FUNCTION__ . ' is deprecated in drupal:8.8.0 and is removed from drupal:9.0.0. Use \Drupal\Core\Test\TestDatabase::insertAssert() instead. See https://www.drupal.org/node/3075252', E_USER_DEPRECATED);
@@ -1000,31 +1128,73 @@ index 07a2588602..cf960bd81e 100644
  }
  
  /**
-@@ -675,9 +703,11 @@ function simpletest_clean_temporary_directories() {
-  */
- function simpletest_clean_results_table($test_id = NULL) {
+@@ -663,7 +691,7 @@ function simpletest_clean_results_table($test_id = NULL) {
    if (\Drupal::config('simpletest.settings')->get('clear_results')) {
--    $connection = TestDatabase::getConnection();
-+    $connection = SimpletestTestRunResultsStorage::getConnection();
-+    $test_run_results_storage = new SimpletestTestRunResultsStorage($connection);
-     if ($test_id) {
--      $count = $connection->query('SELECT COUNT(test_id) FROM {simpletest_test_id} WHERE test_id = :test_id', [':test_id' => $test_id])->fetchField();
-+      $test_ids = $test_run_results_storage->getAllTestIds();
-+      $count = isset($test_ids['test_id']) ? 1 : 0;
+     /* @var $cleaner \Drupal\simpletest\EnvironmentCleanerService */
+     $cleaner = \Drupal::service('environment_cleaner');
+-    $count = $cleaner->cleanResultsTable($test_id);
++    $count = $cleaner->cleanResults($test_id);
+   }
+   return $count;
+ }
+diff --git a/core/modules/simpletest/src/EnvironmentCleanerFactory.php b/core/modules/simpletest/src/EnvironmentCleanerFactory.php
+index dc48b50a21..aa1f9d0bb8 100644
+--- a/core/modules/simpletest/src/EnvironmentCleanerFactory.php
++++ b/core/modules/simpletest/src/EnvironmentCleanerFactory.php
+@@ -3,7 +3,7 @@
+ namespace Drupal\simpletest;
  
-       $connection->delete('simpletest')
-         ->condition('test_id', $test_id)
-@@ -687,7 +717,7 @@ function simpletest_clean_results_table($test_id = NULL) {
-         ->execute();
+ use Drupal\Core\DependencyInjection\Container;
+-use Drupal\Core\Test\TestDatabase;
++use Drupal\Core\Test\SimpletestTestRunResultsStorage;
+ use Drupal\Core\Database\Database;
+ 
+ /**
+@@ -41,7 +41,7 @@ public function createCleaner() {
+     $cleaner = new EnvironmentCleanerService(
+       $this->container->get('app.root'),
+       Database::getConnection(),
+-      TestDatabase::getConnection(),
++      new SimpletestTestRunResultsStorage(),
+       $this->container->get('messenger'),
+       $this->container->get('string_translation'),
+       $this->container->get('config.factory'),
+diff --git a/core/modules/simpletest/src/EnvironmentCleanerService.php b/core/modules/simpletest/src/EnvironmentCleanerService.php
+index b4de5789ea..25fabf5f02 100644
+--- a/core/modules/simpletest/src/EnvironmentCleanerService.php
++++ b/core/modules/simpletest/src/EnvironmentCleanerService.php
+@@ -50,17 +50,15 @@ class EnvironmentCleanerService extends EnvironmentCleaner {
+    *   The path to the root of the Drupal installation.
+    * @param \Drupal\Core\Database\Connection $test_database
+    *   Connection to the database against which tests were run.
+-   * @param \Drupal\Core\Database\Connection $results_database
+-   *   Connection to the database where test results were stored. This could be
+-   *   the same as $test_database, or it could be different.
++   * @todo
+    * @param \Drupal\Core\StringTranslation\TranslationInterface|null $translation
+    *   (optional) The translation service. If none is supplied, this class will
+    *   attempt to discover one using \Drupal.
+    */
+-  public function __construct($root, Connection $test_database, Connection $results_database, MessengerInterface $messenger, TranslationInterface $translation, ConfigFactory $config, CacheBackendInterface $cache_default, FileSystem $file_system) {
++  public function __construct($root, Connection $test_database, TestRunResultsStorageInterface $test_run_results_storage, MessengerInterface $messenger, TranslationInterface $translation, ConfigFactory $config, CacheBackendInterface $cache_default, FileSystem $file_system) {
+     $this->root = $root;
+     $this->testDatabase = $test_database;
+-    $this->resultsDatabase = $results_database;
++    $this->testRunResultsStorage = $test_run_results_storage;
+     $this->messenger = $messenger;
+     $this->translation = $translation;
+     $this->configFactory = $config;
+@@ -82,7 +80,7 @@ public function cleanEnvironment($clear_results = TRUE, $clear_temp_directories
+       $this->cleanTemporaryDirectories();
      }
-     else {
--      $count = $connection->query('SELECT COUNT(test_id) FROM {simpletest_test_id}')->fetchField();
-+      $count = count($test_run_results_storage->getAllTestIds());
- 
-       // Clear test results.
-       $connection->delete('simpletest')->execute();
+     if ($clear_results) {
+-      $results_removed = $this->cleanResultsTable();
++      $results_removed = $this->cleanResults();
+     }
+     $this->cacheDefault->delete('simpletest');
+     $this->cacheDefault->delete('simpletest_phpunit');
 diff --git a/core/modules/simpletest/src/Form/SimpletestResultsForm.php b/core/modules/simpletest/src/Form/SimpletestResultsForm.php
-index 5db8846353..bae9309b75 100644
+index adc1d4a5bb..616caee683 100644
 --- a/core/modules/simpletest/src/Form/SimpletestResultsForm.php
 +++ b/core/modules/simpletest/src/Form/SimpletestResultsForm.php
 @@ -6,6 +6,8 @@
@@ -1033,10 +1203,19 @@ index 5db8846353..bae9309b75 100644
  use Drupal\Core\Form\FormStateInterface;
 +use Drupal\Core\Test\SimpletestTestRunResultsStorage;
 +use Drupal\Core\Test\TestRun;
+ use Drupal\Core\Test\EnvironmentCleanerInterface;
  use Drupal\Core\Url;
  use Drupal\simpletest\TestDiscovery;
- use Symfony\Component\DependencyInjection\ContainerInterface;
-@@ -218,13 +220,7 @@ public function submitForm(array &$form, FormStateInterface $form_state) {
+@@ -172,7 +174,7 @@ public function buildForm(array $form, FormStateInterface $form_state, $test_id
+     ];
+ 
+     if (is_numeric($test_id)) {
+-      $this->cleaner->cleanResultsTable($test_id);
++      $this->cleaner->cleanResults($test_id);
+     }
+ 
+     return $form;
+@@ -228,13 +230,7 @@ public function submitForm(array &$form, FormStateInterface $form_state) {
     *   Array of results grouped by test_class.
     */
    protected function getResults($test_id) {
@@ -1115,13 +1294,26 @@ index c3d5495fd0..d1fbccb4e7 100644
  
      // Restore original dependency injection container.
      $this->container = $this->originalContainer;
+diff --git a/core/modules/simpletest/tests/src/Kernel/DeprecatedCleanupTest.php b/core/modules/simpletest/tests/src/Kernel/DeprecatedCleanupTest.php
+index ec29a76768..0f68cdadb4 100644
+--- a/core/modules/simpletest/tests/src/Kernel/DeprecatedCleanupTest.php
++++ b/core/modules/simpletest/tests/src/Kernel/DeprecatedCleanupTest.php
+@@ -54,7 +54,7 @@ public function cleanEnvironment($clear_results = TRUE, $clear_temp_directories
+ 
+   }
+ 
+-  public function cleanResultsTable($test_id = NULL) {
++  public function cleanResults($test_id = NULL) {
+ 
+   }
+ 
 diff --git a/core/scripts/run-tests.sh b/core/scripts/run-tests.sh
-index c4f910e202..2b6aa0353c 100755
+index c3f9d1a73a..6bf38beedc 100755
 --- a/core/scripts/run-tests.sh
 +++ b/core/scripts/run-tests.sh
-@@ -15,7 +15,9 @@
- use Drupal\Core\File\FileSystemInterface;
+@@ -16,7 +16,9 @@
  use Drupal\Core\StreamWrapper\PublicStream;
+ use Drupal\Core\Test\EnvironmentCleaner;
  use Drupal\Core\Test\PhpUnitTestRunner;
 +use Drupal\Core\Test\SimpletestTestRunResultsStorage;
  use Drupal\Core\Test\TestDatabase;
@@ -1129,7 +1321,7 @@ index c4f910e202..2b6aa0353c 100755
  use Drupal\Core\Test\TestRunnerKernel;
  use Drupal\simpletest\Form\SimpletestResultsForm;
  use Drupal\Core\Test\TestDiscovery;
-@@ -54,7 +56,9 @@
+@@ -56,7 +58,9 @@
  
  if ($args['execute-test']) {
    simpletest_script_setup_database();
@@ -1140,7 +1332,7 @@ index c4f910e202..2b6aa0353c 100755
    // Sub-process exited already; this is just for clarity.
    exit(SIMPLETEST_SCRIPT_EXIT_SUCCESS);
  }
-@@ -124,6 +128,10 @@
+@@ -126,12 +130,16 @@
  
  simpletest_script_setup_database(TRUE);
  
@@ -1150,8 +1342,15 @@ index c4f910e202..2b6aa0353c 100755
 +
  if ($args['clean']) {
    // Clean up left-over tables and directories.
-   try {
-@@ -155,7 +163,7 @@
+   $cleaner = new EnvironmentCleaner(
+     DRUPAL_ROOT,
+     Database::getConnection(),
+-    TestDatabase::getConnection(),
++    $test_run_results_storage,
+     new ConsoleOutput(),
+     \Drupal::service('file_system')
+   );
+@@ -164,7 +172,7 @@
  }
  
  // Execute tests.
@@ -1160,7 +1359,7 @@ index c4f910e202..2b6aa0353c 100755
  
  // Stop the timer.
  simpletest_script_reporter_timer_stop();
-@@ -168,14 +176,14 @@
+@@ -177,14 +185,14 @@
  
  // Display results before database is cleared.
  if ($args['browser']) {
@@ -1178,13 +1377,26 @@ index c4f910e202..2b6aa0353c 100755
  }
  
  // Clean up all test results.
-@@ -601,8 +609,17 @@ function simpletest_script_setup_database($new = FALSE) {
+@@ -193,11 +201,11 @@
+     $cleaner = new EnvironmentCleaner(
+       DRUPAL_ROOT,
+       Database::getConnection(),
+-      TestDatabase::getConnection(),
++      $test_run_results_storage,
+       new ConsoleOutput(),
+       \Drupal::service('file_system')
+     );
+-    $cleaner->cleanResultsTable();
++    $cleaner->cleanResults();
+   }
+   catch (Exception $e) {
+     echo (string) $e;
+@@ -617,8 +625,17 @@ function simpletest_script_setup_database($new = FALSE) {
      exit(SIMPLETEST_SCRIPT_EXIT_FAILURE);
    }
    Database::addConnectionInfo('default', 'default', $databases['default']['default']);
 +}
- 
--  // If no --sqlite parameter has been passed, then Simpletest module is assumed
++
 +/**
 + *
 + */
@@ -1192,12 +1404,13 @@ index c4f910e202..2b6aa0353c 100755
 +  global $args;
 +
 +  $databases['default'] = Database::getConnectionInfo('default');
-+
+ 
+-  // If no --sqlite parameter has been passed, then Simpletest module is assumed
 +    // If no --sqlite parameter has been passed, then Simpletest module is assumed
    // to be installed, so the test runner database connection is the default
    // database connection.
    if (empty($args['sqlite'])) {
-@@ -638,33 +655,24 @@ function simpletest_script_setup_database($new = FALSE) {
+@@ -654,33 +671,24 @@ function simpletest_script_setup_database($new = FALSE) {
  
    // Create the Simpletest schema.
    try {
@@ -1239,7 +1452,7 @@ index c4f910e202..2b6aa0353c 100755
        simpletest_script_print_error('Missing Simpletest database schema. Either install Simpletest module or use the --sqlite parameter.');
        exit(SIMPLETEST_SCRIPT_EXIT_FAILURE);
      }
-@@ -673,12 +681,14 @@ function simpletest_script_setup_database($new = FALSE) {
+@@ -689,12 +697,14 @@ function simpletest_script_setup_database($new = FALSE) {
      echo (string) $e;
      exit(SIMPLETEST_SCRIPT_EXIT_EXCEPTION);
    }
@@ -1255,7 +1468,7 @@ index c4f910e202..2b6aa0353c 100755
    global $args, $test_ids;
  
    $total_status = SIMPLETEST_SCRIPT_EXIT_SUCCESS;
-@@ -692,20 +702,17 @@ function simpletest_script_execute_batch($test_classes) {
+@@ -708,20 +718,17 @@ function simpletest_script_execute_batch($test_classes) {
        }
  
        try {
@@ -1279,7 +1492,7 @@ index c4f910e202..2b6aa0353c 100755
        $process = proc_open($command, [], $pipes, NULL, NULL, ['bypass_shell' => TRUE]);
  
        if (!is_resource($process)) {
-@@ -716,7 +723,7 @@ function simpletest_script_execute_batch($test_classes) {
+@@ -732,7 +739,7 @@ function simpletest_script_execute_batch($test_classes) {
        // Register our new child.
        $children[] = [
          'process' => $process,
@@ -1288,7 +1501,7 @@ index c4f910e202..2b6aa0353c 100755
          'class' => $test_class,
          'pipes' => $pipes,
        ];
-@@ -742,17 +749,21 @@ function simpletest_script_execute_batch($test_classes) {
+@@ -758,17 +765,21 @@ function simpletest_script_execute_batch($test_classes) {
            // @see https://www.drupal.org/node/2780087
            $total_status = max(SIMPLETEST_SCRIPT_EXIT_FAILURE, $total_status);
            // Insert a fail for xml results.
@@ -1314,7 +1527,7 @@ index c4f910e202..2b6aa0353c 100755
              $args['keep-results'] = TRUE;
              // Exit repeat loop immediately.
              $args['repeat'] = -1;
-@@ -760,7 +771,7 @@ function simpletest_script_execute_batch($test_classes) {
+@@ -776,7 +787,7 @@ function simpletest_script_execute_batch($test_classes) {
          }
          // Free-up space by removing any potentially created resources.
          if (!$args['keep-results']) {
@@ -1323,7 +1536,7 @@ index c4f910e202..2b6aa0353c 100755
          }
  
          // Remove this child.
-@@ -774,15 +785,15 @@ function simpletest_script_execute_batch($test_classes) {
+@@ -790,15 +801,15 @@ function simpletest_script_execute_batch($test_classes) {
  /**
   * Run a PHPUnit-based test.
   */
@@ -1342,7 +1555,7 @@ index c4f910e202..2b6aa0353c 100755
  
    $summaries = $runner->summarizeResults($results);
    foreach ($summaries as $class => $summary) {
-@@ -794,7 +805,7 @@ function simpletest_script_run_phpunit($test_id, $class) {
+@@ -810,7 +821,7 @@ function simpletest_script_run_phpunit($test_id, $class) {
  /**
   * Run a single test, bootstrapping Drupal if needed.
   */
@@ -1351,7 +1564,7 @@ index c4f910e202..2b6aa0353c 100755
    global $args;
  
    try {
-@@ -807,12 +818,12 @@ function simpletest_script_run_one_test($test_id, $test_class) {
+@@ -823,12 +834,12 @@ function simpletest_script_run_one_test($test_id, $test_class) {
        // Use empty array to run all the test methods.
        $methods = [];
      }
@@ -1366,7 +1579,7 @@ index c4f910e202..2b6aa0353c 100755
      }
      else {
        $test->dieOnFail = (bool) $args['die-on-fail'];
-@@ -848,7 +859,7 @@ function simpletest_script_run_one_test($test_id, $test_class) {
+@@ -864,7 +875,7 @@ function simpletest_script_run_one_test($test_id, $test_class) {
   * @return string
   *   The assembled command string.
   */
@@ -1375,7 +1588,7 @@ index c4f910e202..2b6aa0353c 100755
    global $args, $php;
  
    $command = escapeshellarg($php) . ' ' . escapeshellarg('./core/scripts/' . $args['script']);
-@@ -860,7 +871,7 @@ function simpletest_script_command($test_id, $test_class) {
+@@ -876,7 +887,7 @@ function simpletest_script_command($test_id, $test_class) {
      $command .= ' --dburl ' . escapeshellarg($args['dburl']);
    }
    $command .= ' --php ' . escapeshellarg($php);
@@ -1384,7 +1597,7 @@ index c4f910e202..2b6aa0353c 100755
    foreach (['verbose', 'keep-results', 'color', 'die-on-fail', 'suppress-deprecations'] as $arg) {
      if ($args[$arg]) {
        $command .= ' --' . $arg;
-@@ -892,15 +903,14 @@ function simpletest_script_command($test_id, $test_class) {
+@@ -908,15 +919,14 @@ function simpletest_script_command($test_id, $test_class) {
   *
   * @see simpletest_script_run_one_test()
   */
@@ -1402,7 +1615,7 @@ index c4f910e202..2b6aa0353c 100755
    }
    catch (Exception $e) {
      echo (string) $e;
-@@ -909,7 +919,7 @@ function simpletest_script_cleanup($test_id, $test_class, $exitcode) {
+@@ -925,7 +935,7 @@ function simpletest_script_cleanup($test_id, $test_class, $exitcode) {
  
    // If no database prefix was found, then the test was not set up correctly.
    if (empty($db_prefix)) {
@@ -1411,7 +1624,7 @@ index c4f910e202..2b6aa0353c 100755
      return;
    }
  
-@@ -917,11 +927,11 @@ function simpletest_script_cleanup($test_id, $test_class, $exitcode) {
+@@ -933,11 +943,11 @@ function simpletest_script_cleanup($test_id, $test_class, $exitcode) {
    $output = !empty($exitcode);
    $messages = [];
  
@@ -1425,7 +1638,7 @@ index c4f910e202..2b6aa0353c 100755
    }
    catch (Exception $e) {
      echo (string) $e;
-@@ -1227,11 +1237,11 @@ function simpletest_script_reporter_display_summary($class, $results) {
+@@ -1243,11 +1253,11 @@ function simpletest_script_reporter_display_summary($class, $results) {
  /**
   * Display jUnit XML test results.
   */
@@ -1439,7 +1652,7 @@ index c4f910e202..2b6aa0353c 100755
    }
    catch (Exception $e) {
      echo (string) $e;
-@@ -1320,7 +1330,7 @@ function simpletest_script_reporter_timer_stop() {
+@@ -1336,7 +1346,7 @@ function simpletest_script_reporter_timer_stop() {
  /**
   * Display test results.
   */
@@ -1448,7 +1661,7 @@ index c4f910e202..2b6aa0353c 100755
    global $args, $test_ids, $results_map;
  
    if ($args['verbose']) {
-@@ -1329,7 +1339,7 @@ function simpletest_script_reporter_display_results() {
+@@ -1345,7 +1355,7 @@ function simpletest_script_reporter_display_results() {
      echo "---------------------\n";
  
      try {
@@ -1457,7 +1670,7 @@ index c4f910e202..2b6aa0353c 100755
      }
      catch (Exception $e) {
        echo (string) $e;
-@@ -1479,7 +1489,7 @@ function simpletest_script_print_alternatives($string, $array, $degree = 4) {
+@@ -1495,7 +1505,7 @@ function simpletest_script_print_alternatives($string, $array, $degree = 4) {
   * @return array
   *   Array of simpletest messages from the database.
   */
@@ -1466,7 +1679,7 @@ index c4f910e202..2b6aa0353c 100755
    global $args;
    $results = [];
  
-@@ -1494,10 +1504,7 @@ function simpletest_script_load_messages_by_test_id($test_ids) {
+@@ -1510,10 +1520,11 @@ function simpletest_script_load_messages_by_test_id($test_ids) {
  
    foreach ($test_id_chunks as $test_id_chunk) {
      try {
@@ -1474,11 +1687,15 @@ index c4f910e202..2b6aa0353c 100755
 -        ->query("SELECT * FROM {simpletest} WHERE test_id IN ( :test_ids[] ) ORDER BY test_class, message_id", [
 -          ':test_ids[]' => $test_id_chunk,
 -        ])->fetchAll();
-+      $result_chunk = $test_run_results_storage->getLogEntriesByTestClassForMultipleTestIds($test_id_chunk);
++      $result_chunk = []:
++      foreach ($test_id_chunk as $test_id) {
++        $test_run = TestRun::get($test_run_results_storage, $test_id);
++        $result_chunk = array_merge($result_chunk, $test_run->getLogEntriesByTestClass());
++      }
      }
      catch (Exception $e) {
        echo (string) $e;
-@@ -1514,18 +1521,11 @@ function simpletest_script_load_messages_by_test_id($test_ids) {
+@@ -1530,18 +1541,15 @@ function simpletest_script_load_messages_by_test_id($test_ids) {
  /**
   * Display test results.
   */
@@ -1495,7 +1712,37 @@ index c4f910e202..2b6aa0353c 100755
 -      ->orderBy('message_id')
 -      ->execute()
 -      ->fetchAll();
-+    $results = $test_run_results_storage->getLogEntriesByTestClassForMultipleTestIds($test_ids);
++    $results = []:
++    foreach ($test_ids as $test_id) {
++      $test_run = TestRun::get($test_run_results_storage, $test_id);
++      $results = array_merge($results, $test_run->getLogEntriesByTestClass());
++    }
    }
    catch (Exception $e) {
      echo (string) $e;
+diff --git a/core/tests/Drupal/KernelTests/Core/Test/EnvironmentCleanerTest.php b/core/tests/Drupal/KernelTests/Core/Test/EnvironmentCleanerTest.php
+index 0ca6692600..308dc9a8be 100644
+--- a/core/tests/Drupal/KernelTests/Core/Test/EnvironmentCleanerTest.php
++++ b/core/tests/Drupal/KernelTests/Core/Test/EnvironmentCleanerTest.php
+@@ -4,6 +4,7 @@
+ 
+ use Drupal\Core\Database\Connection;
+ use Drupal\Core\Test\EnvironmentCleaner;
++use Drupal\Core\Test\TestRunResultsStorageInterface;
+ use Drupal\KernelTests\KernelTestBase;
+ use org\bovigo\vfs\vfsStream;
+ use Symfony\Component\Console\Output\NullOutput;
+@@ -30,11 +31,12 @@ public function testDoCleanTemporaryDirectories() {
+     ]);
+ 
+     $connection = $this->prophesize(Connection::class);
++    $test_run_results_storage = $this->prophesize(TestRunResultsStorageInterface::class);
+ 
+     $cleaner = new EnvironmentCleaner(
+       vfsStream::url('cleanup_test'),
+       $connection->reveal(),
+-      $connection->reveal(),
++      $test_run_results_storage->reveal(),
+       new NullOutput(),
+       \Drupal::service('file_system')
+     );
