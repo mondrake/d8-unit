@@ -1,20 +1,2122 @@
-diff --git a/core/tests/Drupal/FunctionalTests/Bootstrap/UncaughtExceptionTest.php b/core/tests/Drupal/FunctionalTests/Bootstrap/UncaughtExceptionTest.php
-index 1a0f19e971..1ce306e362 100644
---- a/core/tests/Drupal/FunctionalTests/Bootstrap/UncaughtExceptionTest.php
-+++ b/core/tests/Drupal/FunctionalTests/Bootstrap/UncaughtExceptionTest.php
-@@ -274,6 +274,7 @@ public function testLoggerException() {
+diff --git a/core/lib/Drupal/Core/Test/EnvironmentCleaner.php b/core/lib/Drupal/Core/Test/EnvironmentCleaner.php
+index 31da3cfc07..89b74e0815 100644
+--- a/core/lib/Drupal/Core/Test/EnvironmentCleaner.php
++++ b/core/lib/Drupal/Core/Test/EnvironmentCleaner.php
+@@ -4,6 +4,8 @@
  
-     // Find fatal error logged to the error.log
-     $errors = file(\Drupal::root() . '/' . $this->siteDirectory . '/error.log');
-+    throw new \Exception(var_export($errors, true));
-     $this->assertIdentical(count($errors), 8, 'The error + the error that the logging service is broken has been written to the error log.');
-     $this->assertTrue(strpos($errors[0], 'Failed to log error') !== FALSE, 'The error handling logs when an error could not be logged to the logger.');
+ use Drupal\Core\Database\Connection;
+ use Drupal\Core\File\FileSystemInterface;
++use Drupal\Core\Test\TestRun;
++use Drupal\Core\Test\TestRunResultsStorageInterface;
+ use Symfony\Component\Console\Output\OutputInterface;
  
-@@ -303,6 +304,7 @@ protected function assertErrorLogged($error_message) {
+ /**
+@@ -26,15 +28,9 @@ class EnvironmentCleaner implements EnvironmentCleanerInterface {
+   protected $testDatabase;
+ 
+   /**
+-   * Connection to the database where test results are stored.
+    *
+-   * This could be the same as $testDatabase, or it could be different.
+-   * run-tests.sh allows you to specify a different results database with the
+-   * --sqlite parameter.
+-   *
+-   * @var \Drupal\Core\Database\Connection
+    */
+-  protected $resultsDatabase;
++  protected $testRunResultsStorage;
+ 
+   /**
+    * The file system service.
+@@ -57,18 +53,16 @@ class EnvironmentCleaner implements EnvironmentCleanerInterface {
+    *   The path to the root of the Drupal installation.
+    * @param \Drupal\Core\Database\Connection $test_database
+    *   Connection to the database against which tests were run.
+-   * @param \Drupal\Core\Database\Connection $results_database
+-   *   Connection to the database where test results were stored. This could be
+-   *   the same as $test_database, or it could be different.
++   * @todo
+    * @param \Symfony\Component\Console\Output\OutputInterface $output
+    *   A symfony console output object.
+    * @param \Drupal\Core\File\FileSystemInterface $file_system
+    *   The file_system service.
+    */
+-  public function __construct($root, Connection $test_database, Connection $results_database, OutputInterface $output, FileSystemInterface $file_system) {
++  public function __construct($root, Connection $test_database, TestRunResultsStorageInterface $test_run_results_storage, OutputInterface $output, FileSystemInterface $file_system) {
+     $this->root = $root;
+     $this->testDatabase = $test_database;
+-    $this->resultsDatabase = $results_database;
++    $this->testRunResultsStorage = $test_run_results_storage;
+     $this->output = $output;
+     $this->fileSystem = $file_system;
+   }
+@@ -85,7 +79,7 @@ public function cleanEnvironment($clear_results = TRUE, $clear_temp_directories
+       $this->doCleanTemporaryDirectories();
+     }
+     if ($clear_results) {
+-      $count = $this->cleanResultsTable();
++      $count = $this->cleanResults();
+       $this->output->write('Test results removed: ' . $count);
+     }
+     else {
+@@ -168,27 +162,14 @@ protected function doCleanTemporaryDirectories() {
+   /**
+    * {@inheritdoc}
+    */
+-  public function cleanResultsTable($test_id = NULL) {
+-    $count = 0;
++  public function cleanResults($test_id = NULL) {
+     if ($test_id) {
+-      $count = $this->resultsDatabase->query('SELECT COUNT(test_id) FROM {simpletest_test_id} WHERE test_id = :test_id', [':test_id' => $test_id])->fetchField();
+-
+-      $this->resultsDatabase->delete('simpletest')
+-        ->condition('test_id', $test_id)
+-        ->execute();
+-      $this->resultsDatabase->delete('simpletest_test_id')
+-        ->condition('test_id', $test_id)
+-        ->execute();
++      $test_run = TestRun::get($this->testRunResultsStorage, $test_id);
++      return $test_run->removeResults();
+     }
+     else {
+-      $count = $this->resultsDatabase->query('SELECT COUNT(test_id) FROM {simpletest_test_id}')->fetchField();
+-
+-      // Clear test results.
+-      $this->resultsDatabase->delete('simpletest')->execute();
+-      $this->resultsDatabase->delete('simpletest_test_id')->execute();
++      return $this->testRunResultsStorage->cleanUp();
+     }
+-
+-    return $count;
+   }
+ 
+ }
+diff --git a/core/lib/Drupal/Core/Test/EnvironmentCleanerInterface.php b/core/lib/Drupal/Core/Test/EnvironmentCleanerInterface.php
+index 4487278ad2..dc5d40cdba 100644
+--- a/core/lib/Drupal/Core/Test/EnvironmentCleanerInterface.php
++++ b/core/lib/Drupal/Core/Test/EnvironmentCleanerInterface.php
+@@ -44,7 +44,7 @@ public function cleanDatabase();
+   public function cleanTemporaryDirectories();
+ 
+   /**
+-   * Clears test result tables from the results database.
++   * Clears test results from the results storage.
+    *
+    * @param $test_id
+    *   Test ID to remove results for, or NULL to remove all results.
+@@ -52,6 +52,6 @@ public function cleanTemporaryDirectories();
+    * @return int
+    *   The number of results that were removed.
+    */
+-  public function cleanResultsTable($test_id = NULL);
++  public function cleanResults($test_id = NULL);
+ 
+ }
+diff --git a/core/lib/Drupal/Core/Test/SimpletestTestRunResultsStorage.php b/core/lib/Drupal/Core/Test/SimpletestTestRunResultsStorage.php
+new file mode 100644
+index 0000000000..9fcbe352fc
+--- /dev/null
++++ b/core/lib/Drupal/Core/Test/SimpletestTestRunResultsStorage.php
+@@ -0,0 +1,281 @@
++<?php
++
++namespace Drupal\Core\Test;
++
++use Drupal\Core\Database\Database;
++use Drupal\Core\Database\Connection;
++use Drupal\Core\Database\ConnectionNotDefinedException;
++
++/**
++ *
++ */
++class SimpletestTestRunResultsStorage implements TestRunResultsStorageInterface {
++
++  /**
++   *
++   */
++  protected $connection;
++
++  /**
++   * Returns the database connection to the site running Simpletest.
++   *
++   * @return \Drupal\Core\Database\Connection
++   *   The database connection to use for inserting assertions.
++   *
++   * @see \Drupal\simpletest\TestBase::prepareEnvironment()
++   */
++  public static function getConnection() {
++    // Check whether there is a test runner connection.
++    // @see run-tests.sh
++    // @todo Convert Simpletest UI runner to create + use this connection, too.
++    try {
++      $connection = Database::getConnection('default', 'test-runner');
++    }
++    catch (ConnectionNotDefinedException $e) {
++      // Check whether there is a backup of the original default connection.
++      // @see TestBase::prepareEnvironment()
++      try {
++        $connection = Database::getConnection('default', 'simpletest_original_default');
++      }
++      catch (ConnectionNotDefinedException $e) {
++        // If TestBase::prepareEnvironment() or TestBase::restoreEnvironment()
++        // failed, the test-specific database connection does not exist
++        // yet/anymore, so fall back to the default of the (UI) test runner.
++        $connection = Database::getConnection('default', 'default');
++      }
++    }
++    return $connection;
++  }
++
++  /**
++   * SimpletestTestRunResultsStorage constructor.
++   */
++  public function __construct(Connection $connection = NULL) {
++    if (is_null($connection)) {
++      $connection = static::getConnection();
++    }
++    $this->connection = $connection;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function createNew() {
++    return $this->connection->insert('simpletest_test_id')
++      ->useDefaults(['test_id'])
++      ->execute();
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function setDatabasePrefix(TestRun $test_run, $database_prefix) {
++    $affected_rows = $this->connection->update('simpletest_test_id')
++      ->fields(['last_prefix' => $database_prefix])
++      ->condition('test_id', $test_run->id())
++      ->execute();
++    if (!$affected_rows) {
++      throw new \RuntimeException('Failed to set up database prefix.');
++    }
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function insertLogEntry(TestRun $test_run, array $entry) {
++    $entry['test_id'] = $test_run->id();
++    $entry = array_merge([
++      'function' => 'Unknown',
++      'line' => 0,
++      'file' => 'Unknown',
++    ], $entry);
++
++    return $this->connection->insert('simpletest')
++      ->fields($entry)
++      ->execute();
++  }
++
++  /**
++   *
++   */
++  public function removeResults(TestRun $test_run) {
++    $tx = $this->connection->startTransaction('delete_test_run');
++    $this->connection->delete('simpletest')
++      ->condition('test_id', $test_run->id())
++      ->execute();
++    $count = $this->connection->delete('simpletest_test_id')
++      ->condition('test_id', $test_run->id())
++      ->execute();
++    $tx = NULL;
++    return $count;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function getLogEntriesByTestClass(TestRun $test_run) {
++    return $this->connection->select('simpletest')
++      ->fields('simpletest')
++      ->condition('test_id', $test_run->id())
++      ->orderBy('test_class')
++      ->orderBy('message_id')
++      ->execute()
++      ->fetchAll();
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function getCurrentTestRunState(TestRun $test_run) {
++    // Define a subquery to identify the latest 'message_id' given the
++    // $test_id.
++    $max_message_id_subquery = $this->connection
++      ->select('simpletest', 'sub')
++      ->condition('test_id', $test_run->id());
++    $max_message_id_subquery->addExpression('MAX(message_id)', 'max_message_id');
++
++    // Run a select query to return 'last_prefix' from {simpletest_test_id} and
++    // 'test_class' from {simpletest}.
++    $select = $this->connection->select($max_message_id_subquery, 'st_sub');
++    $select->join('simpletest', 'st', 'st.message_id = st_sub.max_message_id');
++    $select->join('simpletest_test_id', 'sttid', 'st.test_id = sttid.test_id');
++    $select->addField('sttid', 'last_prefix', 'db_prefix');
++    $select->addField('st', 'test_class');
++
++    return $select->execute()->fetchAssoc();
++  }
++
++  /**
++   *
++   */
++  public function cleanUp() {
++    // Clear test results.
++    $tx = $this->connection->startTransaction('delete_simpletest');
++    $this->connection->delete('simpletest')->execute();
++    $count = $this->connection->delete('simpletest_test_id')->execute();
++    $tx = NULL;
++    return $count;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function buildTestingResultsEnvironment($keep_results) {
++    $schema = $this->connection->schema();
++    foreach (static::testingResultsSchema() as $name => $table_spec) {
++      $table_exists = $schema->tableExists($name);
++      if (!$keep_results && $table_exists) {
++        $this->connection->truncate($name)->execute();
++      }
++      if (!$table_exists) {
++        $schema->createTable($name, $table_spec);
++      }
++    }
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function validateTestingResultsEnvironment() {
++    $schema = $this->connection->schema();
++    return $schema->tableExists('simpletest') && $schema->tableExists('simpletest_test_id');
++  }
++
++  /**
++   * Defines the database schema for run-tests.sh and simpletest module.
++   *
++   * @return array
++   *   Array suitable for use in a hook_schema() implementation.
++   *
++   * @internal
++   */
++  public static function testingResultsSchema() {
++    $schema['simpletest'] = [
++      'description' => 'Stores simpletest messages',
++      'fields' => [
++        'message_id' => [
++          'type' => 'serial',
++          'not null' => TRUE,
++          'description' => 'Primary Key: Unique simpletest message ID.',
++        ],
++        'test_id' => [
++          'type' => 'int',
++          'not null' => TRUE,
++          'default' => 0,
++          'description' => 'Test ID, messages belonging to the same ID are reported together',
++        ],
++        'test_class' => [
++          'type' => 'varchar_ascii',
++          'length' => 255,
++          'not null' => TRUE,
++          'default' => '',
++          'description' => 'The name of the class that created this message.',
++        ],
++        'status' => [
++          'type' => 'varchar',
++          'length' => 9,
++          'not null' => TRUE,
++          'default' => '',
++          'description' => 'Message status. Core understands pass, fail, exception.',
++        ],
++        'message' => [
++          'type' => 'text',
++          'not null' => TRUE,
++          'description' => 'The message itself.',
++        ],
++        'message_group' => [
++          'type' => 'varchar_ascii',
++          'length' => 255,
++          'not null' => TRUE,
++          'default' => '',
++          'description' => 'The message group this message belongs to. For example: warning, browser, user.',
++        ],
++        'function' => [
++          'type' => 'varchar_ascii',
++          'length' => 255,
++          'not null' => TRUE,
++          'default' => '',
++          'description' => 'Name of the assertion function or method that created this message.',
++        ],
++        'line' => [
++          'type' => 'int',
++          'not null' => TRUE,
++          'default' => 0,
++          'description' => 'Line number on which the function is called.',
++        ],
++        'file' => [
++          'type' => 'varchar',
++          'length' => 255,
++          'not null' => TRUE,
++          'default' => '',
++          'description' => 'Name of the file where the function is called.',
++        ],
++      ],
++      'primary key' => ['message_id'],
++      'indexes' => [
++        'reporter' => ['test_class', 'message_id'],
++      ],
++    ];
++    $schema['simpletest_test_id'] = [
++      'description' => 'Stores simpletest test IDs, used to auto-increment the test ID so that a fresh test ID is used.',
++      'fields' => [
++        'test_id' => [
++          'type' => 'serial',
++          'not null' => TRUE,
++          'description' => 'Primary Key: Unique simpletest ID used to group test results together. Each time a set of tests
++                            are run a new test ID is used.',
++        ],
++        'last_prefix' => [
++          'type' => 'varchar',
++          'length' => 60,
++          'not null' => FALSE,
++          'default' => '',
++          'description' => 'The last database prefix used during testing.',
++        ],
++      ],
++      'primary key' => ['test_id'],
++    ];
++    return $schema;
++  }
++
++}
+diff --git a/core/lib/Drupal/Core/Test/TestDatabase.php b/core/lib/Drupal/Core/Test/TestDatabase.php
+index 115568f67b..e942ef86e2 100644
+--- a/core/lib/Drupal/Core/Test/TestDatabase.php
++++ b/core/lib/Drupal/Core/Test/TestDatabase.php
+@@ -3,8 +3,6 @@
+ namespace Drupal\Core\Test;
+ 
+ use Drupal\Component\FileSystem\FileSystem;
+-use Drupal\Core\Database\ConnectionNotDefinedException;
+-use Drupal\Core\Database\Database;
+ 
+ /**
+  * Provides helper methods for interacting with the fixture database.
+@@ -26,37 +24,6 @@ class TestDatabase {
+    */
+   protected $databasePrefix;
+ 
+-  /**
+-   * Returns the database connection to the site running Simpletest.
+-   *
+-   * @return \Drupal\Core\Database\Connection
+-   *   The database connection to use for inserting assertions.
+-   *
+-   * @see \Drupal\simpletest\TestBase::prepareEnvironment()
+-   */
+-  public static function getConnection() {
+-    // Check whether there is a test runner connection.
+-    // @see run-tests.sh
+-    // @todo Convert Simpletest UI runner to create + use this connection, too.
+-    try {
+-      $connection = Database::getConnection('default', 'test-runner');
+-    }
+-    catch (ConnectionNotDefinedException $e) {
+-      // Check whether there is a backup of the original default connection.
+-      // @see TestBase::prepareEnvironment()
+-      try {
+-        $connection = Database::getConnection('default', 'simpletest_original_default');
+-      }
+-      catch (ConnectionNotDefinedException $e) {
+-        // If TestBase::prepareEnvironment() or TestBase::restoreEnvironment()
+-        // failed, the test-specific database connection does not exist
+-        // yet/anymore, so fall back to the default of the (UI) test runner.
+-        $connection = Database::getConnection('default', 'default');
+-      }
+-    }
+-    return $connection;
+-  }
+-
+   /**
+    * TestDatabase constructor.
+    *
+@@ -179,254 +146,4 @@ protected function getLockFile($lock_id) {
+     return FileSystem::getOsTemporaryDirectory() . '/test_' . $lock_id;
+   }
+ 
+-  /**
+-   * Store an assertion from outside the testing context.
+-   *
+-   * This is useful for inserting assertions that can only be recorded after
+-   * the test case has been destroyed, such as PHP fatal errors. The caller
+-   * information is not automatically gathered since the caller is most likely
+-   * inserting the assertion on behalf of other code. In all other respects
+-   * the method behaves just like \Drupal\simpletest\TestBase::assert() in terms
+-   * of storing the assertion.
+-   *
+-   * @param string $test_id
+-   *   The test ID to which the assertion relates.
+-   * @param string $test_class
+-   *   The test class to store an assertion for.
+-   * @param bool|string $status
+-   *   A boolean or a string of 'pass' or 'fail'. TRUE means 'pass'.
+-   * @param string $message
+-   *   The assertion message.
+-   * @param string $group
+-   *   The assertion message group.
+-   * @param array $caller
+-   *   The an array containing the keys 'file' and 'line' that represent the
+-   *   file and line number of that file that is responsible for the assertion.
+-   *
+-   * @return int
+-   *   Message ID of the stored assertion.
+-   *
+-   * @internal
+-   */
+-  public static function insertAssert($test_id, $test_class, $status, $message = '', $group = 'Other', array $caller = []) {
+-    // Convert boolean status to string status.
+-    if (is_bool($status)) {
+-      $status = $status ? 'pass' : 'fail';
+-    }
+-
+-    $caller += [
+-      'function' => 'Unknown',
+-      'line' => 0,
+-      'file' => 'Unknown',
+-    ];
+-
+-    $assertion = [
+-      'test_id' => $test_id,
+-      'test_class' => $test_class,
+-      'status' => $status,
+-      'message' => $message,
+-      'message_group' => $group,
+-      'function' => $caller['function'],
+-      'line' => $caller['line'],
+-      'file' => $caller['file'],
+-    ];
+-
+-    return static::getConnection()
+-      ->insert('simpletest')
+-      ->fields($assertion)
+-      ->execute();
+-  }
+-
+-  /**
+-   * Get information about the last test that ran given a test ID.
+-   *
+-   * @param int $test_id
+-   *   The test ID to get the last test from.
+-   *
+-   * @return array
+-   *   Associative array containing the last database prefix used and the
+-   *   last test class that ran.
+-   *
+-   * @internal
+-   */
+-  public static function lastTestGet($test_id) {
+-    $connection = static::getConnection();
+-
+-    // Define a subquery to identify the latest 'message_id' given the
+-    // $test_id.
+-    $max_message_id_subquery = $connection
+-      ->select('simpletest', 'sub')
+-      ->condition('test_id', $test_id);
+-    $max_message_id_subquery->addExpression('MAX(message_id)', 'max_message_id');
+-
+-    // Run a select query to return 'last_prefix' from {simpletest_test_id} and
+-    // 'test_class' from {simpletest}.
+-    $select = $connection->select($max_message_id_subquery, 'st_sub');
+-    $select->join('simpletest', 'st', 'st.message_id = st_sub.max_message_id');
+-    $select->join('simpletest_test_id', 'sttid', 'st.test_id = sttid.test_id');
+-    $select->addField('sttid', 'last_prefix');
+-    $select->addField('st', 'test_class');
+-    return $select->execute()->fetchAssoc();
+-  }
+-
+-  /**
+-   * Reads the error log and reports any errors as assertion failures.
+-   *
+-   * The errors in the log should only be fatal errors since any other errors
+-   * will have been recorded by the error handler.
+-   *
+-   * @param int $test_id
+-   *   The test ID to which the log relates.
+-   * @param string $test_class
+-   *   The test class to which the log relates.
+-   *
+-   * @return bool
+-   *   Whether any fatal errors were found.
+-   *
+-   * @internal
+-   */
+-  public function logRead($test_id, $test_class) {
+-    $log = DRUPAL_ROOT . '/' . $this->getTestSitePath() . '/error.log';
+-    $found = FALSE;
+-    if (file_exists($log)) {
+-      foreach (file($log) as $line) {
+-        if (preg_match('/\[.*?\] (.*?): (.*?) in (.*) on line (\d+)/', $line, $match)) {
+-          // Parse PHP fatal errors for example: PHP Fatal error: Call to
+-          // undefined function break_me() in /path/to/file.php on line 17
+-          $caller = [
+-            'line' => $match[4],
+-            'file' => $match[3],
+-          ];
+-          static::insertAssert($test_id, $test_class, FALSE, $match[2], $match[1], $caller);
+-        }
+-        else {
+-          // Unknown format, place the entire message in the log.
+-          static::insertAssert($test_id, $test_class, FALSE, $line, 'Fatal error');
+-        }
+-        $found = TRUE;
+-      }
+-    }
+-    return $found;
+-  }
+-
+-  /**
+-   * Defines the database schema for run-tests.sh and simpletest module.
+-   *
+-   * @return array
+-   *   Array suitable for use in a hook_schema() implementation.
+-   *
+-   * @internal
+-   */
+-  public static function testingSchema() {
+-    $schema['simpletest'] = [
+-      'description' => 'Stores simpletest messages',
+-      'fields' => [
+-        'message_id' => [
+-          'type' => 'serial',
+-          'not null' => TRUE,
+-          'description' => 'Primary Key: Unique simpletest message ID.',
+-        ],
+-        'test_id' => [
+-          'type' => 'int',
+-          'not null' => TRUE,
+-          'default' => 0,
+-          'description' => 'Test ID, messages belonging to the same ID are reported together',
+-        ],
+-        'test_class' => [
+-          'type' => 'varchar_ascii',
+-          'length' => 255,
+-          'not null' => TRUE,
+-          'default' => '',
+-          'description' => 'The name of the class that created this message.',
+-        ],
+-        'status' => [
+-          'type' => 'varchar',
+-          'length' => 9,
+-          'not null' => TRUE,
+-          'default' => '',
+-          'description' => 'Message status. Core understands pass, fail, exception.',
+-        ],
+-        'message' => [
+-          'type' => 'text',
+-          'not null' => TRUE,
+-          'description' => 'The message itself.',
+-        ],
+-        'message_group' => [
+-          'type' => 'varchar_ascii',
+-          'length' => 255,
+-          'not null' => TRUE,
+-          'default' => '',
+-          'description' => 'The message group this message belongs to. For example: warning, browser, user.',
+-        ],
+-        'function' => [
+-          'type' => 'varchar_ascii',
+-          'length' => 255,
+-          'not null' => TRUE,
+-          'default' => '',
+-          'description' => 'Name of the assertion function or method that created this message.',
+-        ],
+-        'line' => [
+-          'type' => 'int',
+-          'not null' => TRUE,
+-          'default' => 0,
+-          'description' => 'Line number on which the function is called.',
+-        ],
+-        'file' => [
+-          'type' => 'varchar',
+-          'length' => 255,
+-          'not null' => TRUE,
+-          'default' => '',
+-          'description' => 'Name of the file where the function is called.',
+-        ],
+-      ],
+-      'primary key' => ['message_id'],
+-      'indexes' => [
+-        'reporter' => ['test_class', 'message_id'],
+-      ],
+-    ];
+-    $schema['simpletest_test_id'] = [
+-      'description' => 'Stores simpletest test IDs, used to auto-increment the test ID so that a fresh test ID is used.',
+-      'fields' => [
+-        'test_id' => [
+-          'type' => 'serial',
+-          'not null' => TRUE,
+-          'description' => 'Primary Key: Unique simpletest ID used to group test results together. Each time a set of tests
+-                            are run a new test ID is used.',
+-        ],
+-        'last_prefix' => [
+-          'type' => 'varchar',
+-          'length' => 60,
+-          'not null' => FALSE,
+-          'default' => '',
+-          'description' => 'The last database prefix used during testing.',
+-        ],
+-      ],
+-      'primary key' => ['test_id'],
+-    ];
+-    return $schema;
+-  }
+-
+-  /**
+-   * Inserts the parsed PHPUnit results into {simpletest}.
+-   *
+-   * @param array[] $phpunit_results
+-   *   An array of test results, as returned from
+-   *   \Drupal\Core\Test\JUnitConverter::xmlToRows(). These results are in a
+-   *   form suitable for inserting into the {simpletest} table of the test
+-   *   results database.
+-   *
+-   * @internal
+-   */
+-  public static function processPhpUnitResults($phpunit_results) {
+-    if ($phpunit_results) {
+-      $query = static::getConnection()
+-        ->insert('simpletest')
+-        ->fields(array_keys($phpunit_results[0]));
+-      foreach ($phpunit_results as $result) {
+-        $query->values($result);
+-      }
+-      $query->execute();
+-    }
+-  }
+-
+ }
+diff --git a/core/lib/Drupal/Core/Test/TestRun.php b/core/lib/Drupal/Core/Test/TestRun.php
+new file mode 100644
+index 0000000000..68bb032bf0
+--- /dev/null
++++ b/core/lib/Drupal/Core/Test/TestRun.php
+@@ -0,0 +1,183 @@
++<?php
++
++namespace Drupal\Core\Test;
++
++/**
++ *
++ */
++class TestRun {
++
++  /**
++   *
++   */
++  protected $testRunResultsStorage;
++
++  /**
++   *
++   */
++  protected $testId;
++
++  /**
++   *
++   */
++  protected $databasePrefix;
++
++  /**
++   *
++   */
++  protected $testClass;
++
++  /**
++   * TestRun constructor.
++   */
++  public function __construct(TestRunResultsStorageInterface $test_run_results_storage, $test_id) {
++    $this->testRunResultsStorage = $test_run_results_storage;
++    $this->testId = $test_id;
++  }
++
++  /**
++   *
++   */
++  public static function createNew(TestRunResultsStorageInterface $test_run_results_storage) {
++    $test_id = $test_run_results_storage->createNew();
++    return new static($test_run_results_storage, $test_id);
++  }
++
++  /**
++   *
++   */
++  public static function get(TestRunResultsStorageInterface $test_run_results_storage, $test_id) {
++    return new static($test_run_results_storage, $test_id);
++  }
++
++  /**
++   *
++   */
++  public function id() {
++    return $this->testId;
++  }
++
++  /**
++   *
++   */
++  public function setDatabasePrefix($database_prefix) {
++    $this->databasePrefix = $database_prefix;
++    $this->testRunResultsStorage->setDatabasePrefix($this, $database_prefix);
++  }
++
++  /**
++   *
++   */
++  public function getDatabasePrefix() {
++    if (is_null($this->databasePrefix)) {
++      $state = $this->testRunResultsStorage->getCurrentTestRunState($this);
++      $this->databasePrefix = $state['db_prefix'];
++      $this->testClass = $state['test_class'];
++    }
++    return $this->databasePrefix;
++  }
++
++  /**
++   *
++   */
++  public function getTestClass() {
++    if (is_null($this->testClass)) {
++      $state = $this->testRunResultsStorage->getCurrentTestRunState($this);
++      $this->databasePrefix = $state['db_prefix'];
++      $this->testClass = $state['test_class'];
++    }
++    return $this->testClass;
++  }
++
++  /**
++   *
++   */
++  public function insertLogEntry(array $entry) {
++    $this->testClass = $entry['test_class'];
++    return $this->testRunResultsStorage->insertLogEntry($this, $entry);
++  }
++
++  /**
++   * Get test results for the test run.
++   *
++   * @return array
++   *   Array of results grouped by test_class.
++   */
++  public function getLogEntriesByTestClass() {
++    return $this->testRunResultsStorage->getLogEntriesByTestClass($this);
++  }
++
++  /**
++   *
++   */
++  public function removeResults() {
++    return $this->testRunResultsStorage->removeResults($this);
++  }
++
++  /**
++   * Reads the PHP error log and reports any errors as assertion failures.
++   *
++   * The errors in the log should only be fatal errors since any other errors
++   * will have been recorded by the error handler.
++   *
++   * @param string $error_log_path
++   *   The path of log file.
++   * @param string $test_class
++   *   The test class to which the log relates.
++   *
++   * @return bool
++   *   Whether any fatal errors were found.
++   *
++   * @internal
++   */
++  public function processPhpErrorLogFile($error_log_path, $test_class) {
++    $found = FALSE;
++    if (file_exists($error_log_path)) {
++      foreach (file($error_log_path) as $line) {
++        if (preg_match('/\[.*?\] (.*?): (.*?) in (.*) on line (\d+)/', $line, $match)) {
++          // Parse PHP fatal errors for example: PHP Fatal error: Call to
++          // undefined function break_me() in /path/to/file.php on line 17
++          $this->insertLogEntry([
++            'test_class' => $test_class,
++            'status' => 'fail',
++            'message' => $match[2],
++            'message_group' => $match[1],
++            'line' => $match[4],
++            'file' => $match[3],
++          ]);
++        }
++        else {
++          // Unknown format, place the entire message in the log.
++          $this->insertLogEntry([
++            'test_class' => $test_class,
++            'status' => 'fail',
++            'message' => $line,
++            'message_group' => 'Fatal error',
++          ]);
++        }
++        $found = TRUE;
++      }
++    }
++    return $found;
++  }
++
++  /**
++   * Inserts the parsed PHPUnit results into {simpletest}.
++   *
++   * @param array[] $phpunit_results
++   *   An array of test results, as returned from
++   *   \Drupal\Core\Test\JUnitConverter::xmlToRows(). These results are in a
++   *   form suitable for inserting into the {simpletest} table of the test
++   *   results database.
++   *
++   * @internal
++   */
++  public function processPhpUnitResults($phpunit_results) {
++    if (!empty($phpunit_results)) {
++      foreach ($phpunit_results as $result) {
++        $this->insertLogEntry($result);
++      }
++    }
++  }
++
++}
+diff --git a/core/lib/Drupal/Core/Test/TestRunResultsStorageInterface.php b/core/lib/Drupal/Core/Test/TestRunResultsStorageInterface.php
+new file mode 100644
+index 0000000000..1233de074b
+--- /dev/null
++++ b/core/lib/Drupal/Core/Test/TestRunResultsStorageInterface.php
+@@ -0,0 +1,60 @@
++<?php
++
++namespace Drupal\Core\Test;
++
++/**
++ *
++ */
++interface TestRunResultsStorageInterface {
++
++  /**
++   *
++   */
++  public function createNew();
++
++  /**
++   *
++   */
++  public function setDatabasePrefix(TestRun $test_run, $database_prefix);
++
++  /**
++   *
++   */
++  public function insertLogEntry(TestRun $test_run, array $entry);
++
++  /**
++   * Get test results for the test run.
++   *
++   * @return array
++   *   Array of results grouped by test_class.
++   */
++  public function getLogEntriesByTestClass(TestRun $test_run);
++
++  /**
++   *
++   */
++  public function removeResults(TestRun $test_run);
++
++  /**
++   * Get information about the last test that ran given a test ID.
++   *
++   * @todo
++   */
++  public function getCurrentTestRunState(TestRun $test_run);
++
++  /**
++   *
++   */
++  public function cleanUp();
++
++  /**
++   *
++   */
++  public function buildTestingResultsEnvironment($keep_results);
++
++  /**
++   *
++   */
++  public function validateTestingResultsEnvironment();
++
++}
+diff --git a/core/lib/Drupal/Core/Test/TestSetupTrait.php b/core/lib/Drupal/Core/Test/TestSetupTrait.php
+index 0625691022..295b985e4b 100644
+--- a/core/lib/Drupal/Core/Test/TestSetupTrait.php
++++ b/core/lib/Drupal/Core/Test/TestSetupTrait.php
+@@ -117,7 +117,7 @@ trait TestSetupTrait {
+    *   The database connection to use for inserting assertions.
+    */
+   public static function getDatabaseConnection() {
+-    return TestDatabase::getConnection();
++    return SimpletestTestRunResultsStorage::getConnection();
+   }
+ 
+   /**
+diff --git a/core/modules/simpletest/simpletest.install b/core/modules/simpletest/simpletest.install
+index ae3cf83239..9f7d72c39b 100644
+--- a/core/modules/simpletest/simpletest.install
++++ b/core/modules/simpletest/simpletest.install
+@@ -7,7 +7,7 @@
+ 
+ use Drupal\Component\Utility\Environment;
+ use Drupal\Core\File\Exception\FileException;
+-use Drupal\Core\Test\TestDatabase;
++use Drupal\Core\Test\SimpletestTestRunResultsStorage;
+ use PHPUnit\Framework\TestCase;
+ 
+ /**
+@@ -79,7 +79,7 @@ function simpletest_requirements($phase) {
+  * Implements hook_schema().
+  */
+ function simpletest_schema() {
+-  return TestDatabase::testingSchema();
++  return SimpletestTestRunResultsStorage::testingResultsSchema();
+ }
+ 
+ /**
+diff --git a/core/modules/simpletest/simpletest.module b/core/modules/simpletest/simpletest.module
+index 5775c1d83d..635184111e 100644
+--- a/core/modules/simpletest/simpletest.module
++++ b/core/modules/simpletest/simpletest.module
+@@ -11,7 +11,9 @@
+ use Drupal\Core\Routing\RouteMatchInterface;
+ use Drupal\Core\Test\JUnitConverter;
+ use Drupal\Core\Test\PhpUnitTestRunner;
++use Drupal\Core\Test\SimpletestTestRunResultsStorage;
+ use Drupal\Core\Test\TestDatabase;
++use Drupal\Core\Test\TestRun;
+ use Drupal\Core\Url;
+ use Drupal\simpletest\TestDiscovery;
+ use PHPUnit\Framework\TestCase;
+@@ -138,9 +140,7 @@ function simpletest_run_tests($test_list) {
+     unset($test_list['phpunit']);
+   }
+ 
+-  $test_id = \Drupal::database()->insert('simpletest_test_id')
+-    ->useDefaults(['test_id'])
+-    ->execute();
++  $test_run = TestRun::createNew(new SimpletestTestRunResultsStorage(\Drupal::database()));
+ 
+   // Clear out the previous verbose files.
+   try {
+@@ -157,7 +157,7 @@ function simpletest_run_tests($test_list) {
+   $batch = [
+     'title' => t('Running tests'),
+     'operations' => [
+-      ['_simpletest_batch_operation', [$test_list, $test_id]],
++      ['_simpletest_batch_operation', [$test_list, $test_run->id()]],
+     ],
+     'finished' => '_simpletest_batch_finished',
+     'progress_message' => '',
+@@ -168,7 +168,7 @@ function simpletest_run_tests($test_list) {
+ 
+   \Drupal::moduleHandler()->invokeAllDeprecated('Convert your test to a PHPUnit-based one and implement test listeners. See https://www.drupal.org/node/2934242', 'test_group_started');
+ 
+-  return $test_id;
++  return $test_run->id();
+ }
+ 
+ /**
+@@ -211,7 +211,11 @@ function simpletest_run_phpunit_tests($test_id, array $unescaped_test_classnames
+  */
+ function simpletest_process_phpunit_results($phpunit_results) {
+   @trigger_error(__FUNCTION__ . '() is deprecated in drupal:8.8.0 and is removed from drupal:9.0.0. Use \Drupal\Core\Test\TestDatabase::processPhpUnitResults() instead. See https://www.drupal.org/node/3075252', E_USER_DEPRECATED);
+-  TestDatabase::processPhpUnitResults($phpunit_results);
++  if (empty($phpunit_results)) {
++    return;
++  }
++  $test_run = TestRun::get(new SimpletestTestRunResultsStorage(), $phpunit_results[0]['test_id']);
++  $test_run->processPhpUnitResults($phpunit_results);
+ }
+ 
+ /**
+@@ -340,7 +344,8 @@ function _simpletest_batch_operation($test_list_init, $test_id, &$context) {
+   if (is_subclass_of($test_class, TestCase::class)) {
+     $runner = PhpUnitTestRunner::create(\Drupal::getContainer());
+     $phpunit_results = $runner->runTests($test_id, [$test_class]);
+-    TestDatabase::processPhpUnitResults($phpunit_results);
++    $test_run = TestRun::get(new SimpletestTestRunResultsStorage(), $phpunit_results[0]['test_id']);
++    $test_run->processPhpUnitResults($phpunit_results);
+     $test_results[$test_class] = simpletest_summarize_phpunit_result($phpunit_results)[$test_class];
+   }
+   else {
+@@ -400,10 +405,11 @@ function _simpletest_batch_finished($success, $results, $operations, $elapsed) {
+     $test_id = $operations[0][1][1];
+ 
+     // Retrieve the last database prefix used for testing and the last test
+-    // class that was run from. Use the information to read the lgo file
++    // class that was run from. Use the information to read the log file
+     // in case any fatal errors caused the test to crash.
+-    $last_test = TestDatabase::lastTestGet($test_id);
+-    (new TestDatabase($last_test['last_prefix']))->logRead($test_id, $last_test['test_class']);
++    $test_run = TestRun::get(new SimpletestTestRunResultsStorage(), $test_id);
++    $log_path = \Drupal::root() . '/' . (new TestDatabase($test_run->getDatabasePrefix()))->getTestSitePath() . '/error.log';
++    $test_run->processPhpErrorLogFile($log_path, $test_run->getTestClass());
+ 
+     \Drupal::messenger()->addError(t('The test run did not successfully finish.'));
+     \Drupal::messenger()->addWarning(t('Use the <em>Clean environment</em> button to clean-up temporary files and tables.'));
+@@ -427,7 +433,8 @@ function _simpletest_batch_finished($success, $results, $operations, $elapsed) {
+  */
+ function simpletest_last_test_get($test_id) {
+   @trigger_error(__FUNCTION__ . ' is deprecated in drupal:8.8.0 and is removed from drupal:9.0.0. Use \Drupal\Core\Test\TestDatabase::lastTestGet() instead. See https://www.drupal.org/node/3075252', E_USER_DEPRECATED);
+-  return array_values(TestDatabase::lastTestGet($test_id));
++  $test_run = TestRun::get(new SimpletestTestRunResultsStorage(), $test_id);
++  return [$test_run->getDatabasePrefix(), $test_run->getTestClass()];
+ }
+ 
+ /**
+@@ -453,8 +460,9 @@ function simpletest_last_test_get($test_id) {
+  */
+ function simpletest_log_read($test_id, $database_prefix, $test_class) {
+   @trigger_error(__FUNCTION__ . ' is deprecated in drupal:8.8.0 and is removed from drupal:9.0.0. Use \Drupal\Core\Test\TestDatabase::logRead() instead. See https://www.drupal.org/node/3075252', E_USER_DEPRECATED);
+-  $test_db = new TestDatabase($database_prefix);
+-  return $test_db->logRead($test_id, $test_class);
++  $test_run = TestRun::get(new SimpletestTestRunResultsStorage(), $test_id);
++  $log_path = \Drupal::root() . '/' . (new TestDatabase($database_prefix))->getTestSitePath() . '/error.log';
++  return $test_run->processPhpErrorLogFile($log_path, $test_class);
+ }
+ 
+ /**
+@@ -491,7 +499,29 @@ function simpletest_log_read($test_id, $database_prefix, $test_class) {
+  */
+ function simpletest_insert_assert($test_id, $test_class, $status, $message = '', $group = 'Other', array $caller = []) {
+   @trigger_error(__FUNCTION__ . ' is deprecated in drupal:8.8.0 and is removed from drupal:9.0.0. Use \Drupal\Core\Test\TestDatabase::insertAssert() instead. See https://www.drupal.org/node/3075252', E_USER_DEPRECATED);
+-  TestDatabase::insertAssert($test_id, $test_class, $status, $message, $group, $caller);
++
++  // Convert boolean status to string status.
++  if (is_bool($status)) {
++    $status = $status ? 'pass' : 'fail';
++  }
++
++  $caller += [
++    'function' => 'Unknown',
++    'line' => 0,
++    'file' => 'Unknown',
++  ];
++
++  $assertion = [
++    'test_class' => $test_class,
++    'status' => $status,
++    'message' => $message,
++    'message_group' => $group,
++    'function' => $caller['function'],
++    'line' => $caller['line'],
++    'file' => $caller['file'],
++  ];
++
++  TestRun::get(new SimpletestTestRunResultsStorage(), $test_id)->insertLogEntry($assertion);
+ }
+ 
+ /**
+@@ -663,7 +693,7 @@ function simpletest_clean_results_table($test_id = NULL) {
+   if (\Drupal::config('simpletest.settings')->get('clear_results')) {
+     /* @var $cleaner \Drupal\simpletest\EnvironmentCleanerService */
+     $cleaner = \Drupal::service('environment_cleaner');
+-    $count = $cleaner->cleanResultsTable($test_id);
++    $count = $cleaner->cleanResults($test_id);
+   }
+   return $count;
+ }
+diff --git a/core/modules/simpletest/src/EnvironmentCleanerFactory.php b/core/modules/simpletest/src/EnvironmentCleanerFactory.php
+index dc48b50a21..aa1f9d0bb8 100644
+--- a/core/modules/simpletest/src/EnvironmentCleanerFactory.php
++++ b/core/modules/simpletest/src/EnvironmentCleanerFactory.php
+@@ -3,7 +3,7 @@
+ namespace Drupal\simpletest;
+ 
+ use Drupal\Core\DependencyInjection\Container;
+-use Drupal\Core\Test\TestDatabase;
++use Drupal\Core\Test\SimpletestTestRunResultsStorage;
+ use Drupal\Core\Database\Database;
+ 
+ /**
+@@ -41,7 +41,7 @@ public function createCleaner() {
+     $cleaner = new EnvironmentCleanerService(
+       $this->container->get('app.root'),
+       Database::getConnection(),
+-      TestDatabase::getConnection(),
++      new SimpletestTestRunResultsStorage(),
+       $this->container->get('messenger'),
+       $this->container->get('string_translation'),
+       $this->container->get('config.factory'),
+diff --git a/core/modules/simpletest/src/EnvironmentCleanerService.php b/core/modules/simpletest/src/EnvironmentCleanerService.php
+index b4de5789ea..cd45ca748e 100644
+--- a/core/modules/simpletest/src/EnvironmentCleanerService.php
++++ b/core/modules/simpletest/src/EnvironmentCleanerService.php
+@@ -9,6 +9,7 @@
+ use Drupal\Core\Cache\CacheBackendInterface;
+ use Drupal\Core\File\FileSystem;
+ use Drupal\Core\Test\EnvironmentCleaner;
++use Drupal\Core\Test\TestRunResultsStorageInterface;
+ 
+ /**
+  * Uses containerized services to perform post-test cleanup.
+@@ -50,17 +51,15 @@ class EnvironmentCleanerService extends EnvironmentCleaner {
+    *   The path to the root of the Drupal installation.
+    * @param \Drupal\Core\Database\Connection $test_database
+    *   Connection to the database against which tests were run.
+-   * @param \Drupal\Core\Database\Connection $results_database
+-   *   Connection to the database where test results were stored. This could be
+-   *   the same as $test_database, or it could be different.
++   * @todo
+    * @param \Drupal\Core\StringTranslation\TranslationInterface|null $translation
+    *   (optional) The translation service. If none is supplied, this class will
+    *   attempt to discover one using \Drupal.
+    */
+-  public function __construct($root, Connection $test_database, Connection $results_database, MessengerInterface $messenger, TranslationInterface $translation, ConfigFactory $config, CacheBackendInterface $cache_default, FileSystem $file_system) {
++  public function __construct($root, Connection $test_database, TestRunResultsStorageInterface $test_run_results_storage, MessengerInterface $messenger, TranslationInterface $translation, ConfigFactory $config, CacheBackendInterface $cache_default, FileSystem $file_system) {
+     $this->root = $root;
+     $this->testDatabase = $test_database;
+-    $this->resultsDatabase = $results_database;
++    $this->testRunResultsStorage = $test_run_results_storage;
+     $this->messenger = $messenger;
+     $this->translation = $translation;
+     $this->configFactory = $config;
+@@ -82,7 +81,7 @@ public function cleanEnvironment($clear_results = TRUE, $clear_temp_directories
+       $this->cleanTemporaryDirectories();
+     }
+     if ($clear_results) {
+-      $results_removed = $this->cleanResultsTable();
++      $results_removed = $this->cleanResults();
+     }
+     $this->cacheDefault->delete('simpletest');
+     $this->cacheDefault->delete('simpletest_phpunit');
+diff --git a/core/modules/simpletest/src/Form/SimpletestResultsForm.php b/core/modules/simpletest/src/Form/SimpletestResultsForm.php
+index adc1d4a5bb..616caee683 100644
+--- a/core/modules/simpletest/src/Form/SimpletestResultsForm.php
++++ b/core/modules/simpletest/src/Form/SimpletestResultsForm.php
+@@ -6,6 +6,8 @@
+ use Drupal\Core\Form\FormBase;
+ use Drupal\Core\Form\FormState;
+ use Drupal\Core\Form\FormStateInterface;
++use Drupal\Core\Test\SimpletestTestRunResultsStorage;
++use Drupal\Core\Test\TestRun;
+ use Drupal\Core\Test\EnvironmentCleanerInterface;
+ use Drupal\Core\Url;
+ use Drupal\simpletest\TestDiscovery;
+@@ -172,7 +174,7 @@ public function buildForm(array $form, FormStateInterface $form_state, $test_id
+     ];
+ 
+     if (is_numeric($test_id)) {
+-      $this->cleaner->cleanResultsTable($test_id);
++      $this->cleaner->cleanResults($test_id);
      }
  
-     $content = file_get_contents($error_log_filename);
-+    throw new \Exception(var_export(file($error_log_filename), true));
-     $rows = explode(PHP_EOL, $content);
+     return $form;
+@@ -228,13 +230,7 @@ public function submitForm(array &$form, FormStateInterface $form_state) {
+    *   Array of results grouped by test_class.
+    */
+   protected function getResults($test_id) {
+-    return $this->database->select('simpletest')
+-      ->fields('simpletest')
+-      ->condition('test_id', $test_id)
+-      ->orderBy('test_class')
+-      ->orderBy('message_id')
+-      ->execute()
+-      ->fetchAll();
++    return TestRun::get((new SimpletestTestRunResultsStorage($this->database)), $test_id)->getLogEntriesByTestClass();
+   }
  
-     // We iterate over the rows in order to be able to remove the logged error
+   /**
+diff --git a/core/modules/simpletest/src/TestBase.php b/core/modules/simpletest/src/TestBase.php
+index c3d5495fd0..d2c39efc7e 100644
+--- a/core/modules/simpletest/src/TestBase.php
++++ b/core/modules/simpletest/src/TestBase.php
+@@ -11,8 +11,10 @@
+ use Drupal\Core\File\FileSystemInterface;
+ use Drupal\Core\Site\Settings;
+ use Drupal\Core\StreamWrapper\PublicStream;
++use Drupal\Core\Test\SimpletestTestRunResultsStorage;
+ use Drupal\Core\Test\TestDatabase;
+ use Drupal\Core\Test\TestDiscovery;
++use Drupal\Core\Test\TestRun;
+ use Drupal\Core\Test\TestSetupTrait;
+ use Drupal\Core\Utility\Error;
+ use Drupal\Tests\AssertHelperTrait as BaseAssertHelperTrait;
+@@ -296,10 +298,7 @@ protected function checkRequirements() {
+    *   The message ID.
+    */
+   protected function storeAssertion(array $assertion) {
+-    return self::getDatabaseConnection()
+-      ->insert('simpletest', ['return' => Database::RETURN_INSERT_ID])
+-      ->fields($assertion)
+-      ->execute();
++    return TestRun::get(new SimpletestTestRunResultsStorage(self::getDatabaseConnection()), $this->testId)->insertLogEntry($assertion);
+   }
+ 
+   /**
+@@ -416,10 +415,7 @@ public static function insertAssert($test_id, $test_class, $status, $message = '
+     ];
+ 
+     // We can't use storeAssertion() because this method is static.
+-    return self::getDatabaseConnection()
+-      ->insert('simpletest')
+-      ->fields($assertion)
+-      ->execute();
++    return TestRun::get(new SimpletestTestRunResultsStorage(self::getDatabaseConnection()), $test_id)->insertLogEntry($assertion);
+   }
+ 
+   /**
+@@ -1041,13 +1037,7 @@ private function prepareDatabasePrefix() {
+     // As soon as the database prefix is set, the test might start to execute.
+     // All assertions as well as the SimpleTest batch operations are associated
+     // with the testId, so the database prefix has to be associated with it.
+-    $affected_rows = self::getDatabaseConnection()->update('simpletest_test_id')
+-      ->fields(['last_prefix' => $this->databasePrefix])
+-      ->condition('test_id', $this->testId)
+-      ->execute();
+-    if (!$affected_rows) {
+-      throw new \RuntimeException('Failed to set up database prefix.');
+-    }
++    TestRun::get(new SimpletestTestRunResultsStorage(self::getDatabaseConnection()), $this->testId)->setDatabasePrefix($this->databasePrefix);
+   }
+ 
+   /**
+@@ -1252,7 +1242,9 @@ private function restoreEnvironment() {
+ 
+     // In case a fatal error occurred that was not in the test process read the
+     // log to pick up any fatal errors.
+-    (new TestDatabase($this->databasePrefix))->logRead($this->testId, get_class($this));
++    $test_run = TestRun::get(new SimpletestTestRunResultsStorage(self::getDatabaseConnection()), $this->testId);
++    $log_path = \Drupal::root() . '/' . (new TestDatabase($this->databasePrefix))->getTestSitePath() . '/error.log';
++    $test_run->processPhpErrorLogFile($log_path, get_class($this));
+ 
+     // Restore original dependency injection container.
+     $this->container = $this->originalContainer;
+diff --git a/core/modules/simpletest/tests/src/Kernel/DeprecatedCleanupTest.php b/core/modules/simpletest/tests/src/Kernel/DeprecatedCleanupTest.php
+index ec29a76768..0f68cdadb4 100644
+--- a/core/modules/simpletest/tests/src/Kernel/DeprecatedCleanupTest.php
++++ b/core/modules/simpletest/tests/src/Kernel/DeprecatedCleanupTest.php
+@@ -54,7 +54,7 @@ public function cleanEnvironment($clear_results = TRUE, $clear_temp_directories
+ 
+   }
+ 
+-  public function cleanResultsTable($test_id = NULL) {
++  public function cleanResults($test_id = NULL) {
+ 
+   }
+ 
+diff --git a/core/scripts/run-tests.sh b/core/scripts/run-tests.sh
+index c3f9d1a73a..e0a35eef4d 100755
+--- a/core/scripts/run-tests.sh
++++ b/core/scripts/run-tests.sh
+@@ -16,7 +16,9 @@
+ use Drupal\Core\StreamWrapper\PublicStream;
+ use Drupal\Core\Test\EnvironmentCleaner;
+ use Drupal\Core\Test\PhpUnitTestRunner;
++use Drupal\Core\Test\SimpletestTestRunResultsStorage;
+ use Drupal\Core\Test\TestDatabase;
++use Drupal\Core\Test\TestRun;
+ use Drupal\Core\Test\TestRunnerKernel;
+ use Drupal\simpletest\Form\SimpletestResultsForm;
+ use Drupal\Core\Test\TestDiscovery;
+@@ -56,7 +58,9 @@
+ 
+ if ($args['execute-test']) {
+   simpletest_script_setup_database();
+-  simpletest_script_run_one_test($args['test-id'], $args['execute-test']);
++  $test_run_results_storage = script_setup_test_run_results_storage();
++  $test_run = TestRun::get($test_run_results_storage, $args['test-id']);
++  simpletest_script_run_one_test($test_run, $args['execute-test']);
+   // Sub-process exited already; this is just for clarity.
+   exit(SIMPLETEST_SCRIPT_EXIT_SUCCESS);
+ }
+@@ -126,12 +130,16 @@
+ 
+ simpletest_script_setup_database(TRUE);
+ 
++// Setup the test run results storage environment. Currently, this coincides
++// with the simpletest database schema.
++$test_run_results_storage = script_setup_test_run_results_storage(TRUE);
++
+ if ($args['clean']) {
+   // Clean up left-over tables and directories.
+   $cleaner = new EnvironmentCleaner(
+     DRUPAL_ROOT,
+     Database::getConnection(),
+-    TestDatabase::getConnection(),
++    $test_run_results_storage,
+     new ConsoleOutput(),
+     \Drupal::service('file_system')
+   );
+@@ -164,7 +172,7 @@
+ }
+ 
+ // Execute tests.
+-$status = simpletest_script_execute_batch($tests_to_run);
++$status = simpletest_script_execute_batch($test_run_results_storage, $tests_to_run);
+ 
+ // Stop the timer.
+ simpletest_script_reporter_timer_stop();
+@@ -177,14 +185,14 @@
+ 
+ // Display results before database is cleared.
+ if ($args['browser']) {
+-  simpletest_script_open_browser();
++  simpletest_script_open_browser($test_run_results_storage);
+ }
+ else {
+-  simpletest_script_reporter_display_results();
++  simpletest_script_reporter_display_results($test_run_results_storage);
+ }
+ 
+ if ($args['xml']) {
+-  simpletest_script_reporter_write_xml_results();
++  simpletest_script_reporter_write_xml_results($test_run_results_storage);
+ }
+ 
+ // Clean up all test results.
+@@ -193,11 +201,11 @@
+     $cleaner = new EnvironmentCleaner(
+       DRUPAL_ROOT,
+       Database::getConnection(),
+-      TestDatabase::getConnection(),
++      $test_run_results_storage,
+       new ConsoleOutput(),
+       \Drupal::service('file_system')
+     );
+-    $cleaner->cleanResultsTable();
++    $cleaner->cleanResults();
+   }
+   catch (Exception $e) {
+     echo (string) $e;
+@@ -617,8 +625,17 @@ function simpletest_script_setup_database($new = FALSE) {
+     exit(SIMPLETEST_SCRIPT_EXIT_FAILURE);
+   }
+   Database::addConnectionInfo('default', 'default', $databases['default']['default']);
++}
++
++/**
++ *
++ */
++function script_setup_test_run_results_storage($new = FALSE) {
++  global $args;
++
++  $databases['default'] = Database::getConnectionInfo('default');
+ 
+-  // If no --sqlite parameter has been passed, then Simpletest module is assumed
++    // If no --sqlite parameter has been passed, then Simpletest module is assumed
+   // to be installed, so the test runner database connection is the default
+   // database connection.
+   if (empty($args['sqlite'])) {
+@@ -654,33 +671,24 @@ function simpletest_script_setup_database($new = FALSE) {
+ 
+   // Create the Simpletest schema.
+   try {
+-    $connection = Database::getConnection('default', 'test-runner');
+-    $schema = $connection->schema();
++    $test_run_results_storage = new SimpletestTestRunResultsStorage(Database::getConnection('default', 'test-runner'));
+   }
+   catch (\PDOException $e) {
+     simpletest_script_print_error($databases['test-runner']['default']['driver'] . ': ' . $e->getMessage());
+     exit(SIMPLETEST_SCRIPT_EXIT_FAILURE);
+   }
+   if ($new && $sqlite) {
+-    foreach (TestDatabase::testingSchema() as $name => $table_spec) {
+-      try {
+-        $table_exists = $schema->tableExists($name);
+-        if (empty($args['keep-results-table']) && $table_exists) {
+-          $connection->truncate($name)->execute();
+-        }
+-        if (!$table_exists) {
+-          $schema->createTable($name, $table_spec);
+-        }
+-      }
+-      catch (Exception $e) {
+-        echo (string) $e;
+-        exit(SIMPLETEST_SCRIPT_EXIT_EXCEPTION);
+-      }
++    try {
++      $test_run_results_storage->buildTestingResultsEnvironment(!empty($args['keep-results-table']));
++    }
++    catch (Exception $e) {
++      echo (string) $e;
++      exit(SIMPLETEST_SCRIPT_EXIT_EXCEPTION);
+     }
+   }
+   // Verify that the Simpletest database schema exists by checking one table.
+   try {
+-    if (!$schema->tableExists('simpletest')) {
++    if (!$test_run_results_storage->validateTestingResultsEnvironment()) {
+       simpletest_script_print_error('Missing Simpletest database schema. Either install Simpletest module or use the --sqlite parameter.');
+       exit(SIMPLETEST_SCRIPT_EXIT_FAILURE);
+     }
+@@ -689,12 +697,14 @@ function simpletest_script_setup_database($new = FALSE) {
+     echo (string) $e;
+     exit(SIMPLETEST_SCRIPT_EXIT_EXCEPTION);
+   }
++
++  return $test_run_results_storage;
+ }
+ 
+ /**
+  * Execute a batch of tests.
+  */
+-function simpletest_script_execute_batch($test_classes) {
++function simpletest_script_execute_batch(SimpletestTestRunResultsStorage $test_run_results_storage, $test_classes) {
+   global $args, $test_ids;
+ 
+   $total_status = SIMPLETEST_SCRIPT_EXIT_SUCCESS;
+@@ -708,20 +718,17 @@ function simpletest_script_execute_batch($test_classes) {
+       }
+ 
+       try {
+-        $test_id = Database::getConnection('default', 'test-runner')
+-          ->insert('simpletest_test_id')
+-          ->useDefaults(['test_id'])
+-          ->execute();
++        $test_run = TestRun::createNew($test_run_results_storage);
+       }
+       catch (Exception $e) {
+         echo (string) $e;
+         exit(SIMPLETEST_SCRIPT_EXIT_EXCEPTION);
+       }
+-      $test_ids[] = $test_id;
++      $test_ids[] = $test_run->id();
+ 
+       $test_class = array_shift($test_classes);
+       // Fork a child process.
+-      $command = simpletest_script_command($test_id, $test_class);
++      $command = simpletest_script_command($test_run, $test_class);
+       $process = proc_open($command, [], $pipes, NULL, NULL, ['bypass_shell' => TRUE]);
+ 
+       if (!is_resource($process)) {
+@@ -732,7 +739,7 @@ function simpletest_script_execute_batch($test_classes) {
+       // Register our new child.
+       $children[] = [
+         'process' => $process,
+-        'test_id' => $test_id,
++        'test_run' => $test_run,
+         'class' => $test_class,
+         'pipes' => $pipes,
+       ];
+@@ -758,17 +765,21 @@ function simpletest_script_execute_batch($test_classes) {
+           // @see https://www.drupal.org/node/2780087
+           $total_status = max(SIMPLETEST_SCRIPT_EXIT_FAILURE, $total_status);
+           // Insert a fail for xml results.
+-          TestDatabase::insertAssert($child['test_id'], $child['class'], FALSE, $message, 'run-tests.sh check');
++          $child['test_run']->insertLogEntry([
++            'test_class' => $child['class'],
++            'status' => 'fail',
++            'message' => $message,
++            'message_group' => 'run-tests.sh check',
++          ]);
+           // Ensure that an error line is displayed for the class.
+           simpletest_script_reporter_display_summary(
+             $child['class'],
+             ['#pass' => 0, '#fail' => 1, '#exception' => 0, '#debug' => 0]
+           );
+           if ($args['die-on-fail']) {
+-            $db_prefix = TestDatabase::lastTestGet($child['test_id'])['last_prefix'];
+-            $test_db = new TestDatabase($db_prefix);
++            $test_db = new TestDatabase($child['test_run']->getDatabasePrefix());
+             $test_directory = $test_db->getTestSitePath();
+-            echo 'Simpletest database and files kept and test exited immediately on fail so should be reproducible if you change settings.php to use the database prefix ' . $db_prefix . ' and config directories in ' . $test_directory . "\n";
++            echo 'Simpletest database and files kept and test exited immediately on fail so should be reproducible if you change settings.php to use the database prefix ' . $child['test_run']->getDatabasePrefix() . ' and config directories in ' . $test_directory . "\n";
+             $args['keep-results'] = TRUE;
+             // Exit repeat loop immediately.
+             $args['repeat'] = -1;
+@@ -776,7 +787,7 @@ function simpletest_script_execute_batch($test_classes) {
+         }
+         // Free-up space by removing any potentially created resources.
+         if (!$args['keep-results']) {
+-          simpletest_script_cleanup($child['test_id'], $child['class'], $status['exitcode']);
++          simpletest_script_cleanup($child['test_run'], $child['class'], $status['exitcode']);
+         }
+ 
+         // Remove this child.
+@@ -790,15 +801,15 @@ function simpletest_script_execute_batch($test_classes) {
+ /**
+  * Run a PHPUnit-based test.
+  */
+-function simpletest_script_run_phpunit($test_id, $class) {
++function simpletest_script_run_phpunit(TestRun $test_run, $class) {
+   $reflection = new \ReflectionClass($class);
+   if ($reflection->hasProperty('runLimit')) {
+     set_time_limit($reflection->getStaticPropertyValue('runLimit'));
+   }
+ 
+   $runner = PhpUnitTestRunner::create(\Drupal::getContainer());
+-  $results = $runner->runTests($test_id, [$class], $status);
+-  TestDatabase::processPhpUnitResults($results);
++  $results = $runner->runTests($test_run->id(), [$class], $status);
++  $test_run->processPhpUnitResults($results);
+ 
+   $summaries = $runner->summarizeResults($results);
+   foreach ($summaries as $class => $summary) {
+@@ -810,7 +821,7 @@ function simpletest_script_run_phpunit($test_id, $class) {
+ /**
+  * Run a single test, bootstrapping Drupal if needed.
+  */
+-function simpletest_script_run_one_test($test_id, $test_class) {
++function simpletest_script_run_one_test(TestRun $test_run, $test_class) {
+   global $args;
+ 
+   try {
+@@ -823,12 +834,12 @@ function simpletest_script_run_one_test($test_id, $test_class) {
+       // Use empty array to run all the test methods.
+       $methods = [];
+     }
+-    $test = new $class_name($test_id);
++    $test = new $class_name($test_run->id());
+     if ($args['suppress-deprecations']) {
+       putenv('SYMFONY_DEPRECATIONS_HELPER=disabled');
+     }
+     if (is_subclass_of($test_class, TestCase::class)) {
+-      $status = simpletest_script_run_phpunit($test_id, $test_class);
++      $status = simpletest_script_run_phpunit($test_run, $test_class);
+     }
+     else {
+       $test->dieOnFail = (bool) $args['die-on-fail'];
+@@ -864,7 +875,7 @@ function simpletest_script_run_one_test($test_id, $test_class) {
+  * @return string
+  *   The assembled command string.
+  */
+-function simpletest_script_command($test_id, $test_class) {
++function simpletest_script_command(TestRun $test_run, $test_class) {
+   global $args, $php;
+ 
+   $command = escapeshellarg($php) . ' ' . escapeshellarg('./core/scripts/' . $args['script']);
+@@ -876,7 +887,7 @@ function simpletest_script_command($test_id, $test_class) {
+     $command .= ' --dburl ' . escapeshellarg($args['dburl']);
+   }
+   $command .= ' --php ' . escapeshellarg($php);
+-  $command .= " --test-id $test_id";
++  $command .= " --test-id " . $test_run->id();
+   foreach (['verbose', 'keep-results', 'color', 'die-on-fail', 'suppress-deprecations'] as $arg) {
+     if ($args[$arg]) {
+       $command .= ' --' . $arg;
+@@ -908,15 +919,14 @@ function simpletest_script_command($test_id, $test_class) {
+  *
+  * @see simpletest_script_run_one_test()
+  */
+-function simpletest_script_cleanup($test_id, $test_class, $exitcode) {
++function simpletest_script_cleanup(TestRun $test_run, $test_class, $exitcode) {
+   if (is_subclass_of($test_class, TestCase::class)) {
+     // PHPUnit test, move on.
+     return;
+   }
+   // Retrieve the last database prefix used for testing.
+   try {
+-    $last_test = TestDatabase::lastTestGet($test_id);
+-    $db_prefix = $last_test['last_prefix'];
++    $db_prefix = $test_run->getDatabasePrefix();
+   }
+   catch (Exception $e) {
+     echo (string) $e;
+@@ -925,7 +935,7 @@ function simpletest_script_cleanup($test_id, $test_class, $exitcode) {
+ 
+   // If no database prefix was found, then the test was not set up correctly.
+   if (empty($db_prefix)) {
+-    echo "\nFATAL $test_class: Found no database prefix for test ID $test_id. (Check whether setUp() is invoked correctly.)";
++    echo "\nFATAL $test_class: Found no database prefix for test ID " . $test_run->id() . ". (Check whether setUp() is invoked correctly.)";
+     return;
+   }
+ 
+@@ -933,11 +943,12 @@ function simpletest_script_cleanup($test_id, $test_class, $exitcode) {
+   $output = !empty($exitcode);
+   $messages = [];
+ 
+-  $messages[] = "- Found database prefix '$db_prefix' for test ID $test_id.";
++  $messages[] = "- Found database prefix '$db_prefix' for test ID " . $test_run->id() . ".";
+ 
+   // Read the log file in case any fatal errors caused the test to crash.
+   try {
+-    (new TestDatabase($db_prefix))->logRead($test_id, $last_test['test_class']);
++    $log_path = \Drupal::root() . '/' . (new TestDatabase($db_prefix))->getTestSitePath() . '/error.log';
++    $test_run->processPhpErrorLogFile($log_path, $test_run->getTestClass());
+   }
+   catch (Exception $e) {
+     echo (string) $e;
+@@ -1243,11 +1254,11 @@ function simpletest_script_reporter_display_summary($class, $results) {
+ /**
+  * Display jUnit XML test results.
+  */
+-function simpletest_script_reporter_write_xml_results() {
++function simpletest_script_reporter_write_xml_results(SimpletestTestRunResultsStorage $test_run_results_storage) {
+   global $args, $test_ids, $results_map;
+ 
+   try {
+-    $results = simpletest_script_load_messages_by_test_id($test_ids);
++    $results = simpletest_script_load_messages_by_test_id($test_run_results_storage, $test_ids);
+   }
+   catch (Exception $e) {
+     echo (string) $e;
+@@ -1336,7 +1347,7 @@ function simpletest_script_reporter_timer_stop() {
+ /**
+  * Display test results.
+  */
+-function simpletest_script_reporter_display_results() {
++function simpletest_script_reporter_display_results(SimpletestTestRunResultsStorage $test_run_results_storage) {
+   global $args, $test_ids, $results_map;
+ 
+   if ($args['verbose']) {
+@@ -1345,7 +1356,7 @@ function simpletest_script_reporter_display_results() {
+     echo "---------------------\n";
+ 
+     try {
+-      $results = simpletest_script_load_messages_by_test_id($test_ids);
++      $results = simpletest_script_load_messages_by_test_id($test_run_results_storage, $test_ids);
+     }
+     catch (Exception $e) {
+       echo (string) $e;
+@@ -1495,7 +1506,7 @@ function simpletest_script_print_alternatives($string, $array, $degree = 4) {
+  * @return array
+  *   Array of simpletest messages from the database.
+  */
+-function simpletest_script_load_messages_by_test_id($test_ids) {
++function simpletest_script_load_messages_by_test_id(SimpletestTestRunResultsStorage $test_run_results_storage, $test_ids) {
+   global $args;
+   $results = [];
+ 
+@@ -1510,10 +1521,11 @@ function simpletest_script_load_messages_by_test_id($test_ids) {
+ 
+   foreach ($test_id_chunks as $test_id_chunk) {
+     try {
+-      $result_chunk = Database::getConnection('default', 'test-runner')
+-        ->query("SELECT * FROM {simpletest} WHERE test_id IN ( :test_ids[] ) ORDER BY test_class, message_id", [
+-          ':test_ids[]' => $test_id_chunk,
+-        ])->fetchAll();
++      $result_chunk = [];
++      foreach ($test_id_chunk as $test_id) {
++        $test_run = TestRun::get($test_run_results_storage, $test_id);
++        $result_chunk = array_merge($result_chunk, $test_run->getLogEntriesByTestClass());
++      }
+     }
+     catch (Exception $e) {
+       echo (string) $e;
+@@ -1530,18 +1542,15 @@ function simpletest_script_load_messages_by_test_id($test_ids) {
+ /**
+  * Display test results.
+  */
+-function simpletest_script_open_browser() {
++function simpletest_script_open_browser(SimpletestTestRunResultsStorage $test_run_results_storage) {
+   global $test_ids;
+ 
+   try {
+-    $connection = Database::getConnection('default', 'test-runner');
+-    $results = $connection->select('simpletest')
+-      ->fields('simpletest')
+-      ->condition('test_id', $test_ids, 'IN')
+-      ->orderBy('test_class')
+-      ->orderBy('message_id')
+-      ->execute()
+-      ->fetchAll();
++    $results = [];
++    foreach ($test_ids as $test_id) {
++      $test_run = TestRun::get($test_run_results_storage, $test_id);
++      $results = array_merge($results, $test_run->getLogEntriesByTestClass());
++    }
+   }
+   catch (Exception $e) {
+     echo (string) $e;
+diff --git a/core/tests/Drupal/KernelTests/Core/Test/EnvironmentCleanerTest.php b/core/tests/Drupal/KernelTests/Core/Test/EnvironmentCleanerTest.php
+index 0ca6692600..308dc9a8be 100644
+--- a/core/tests/Drupal/KernelTests/Core/Test/EnvironmentCleanerTest.php
++++ b/core/tests/Drupal/KernelTests/Core/Test/EnvironmentCleanerTest.php
+@@ -4,6 +4,7 @@
+ 
+ use Drupal\Core\Database\Connection;
+ use Drupal\Core\Test\EnvironmentCleaner;
++use Drupal\Core\Test\TestRunResultsStorageInterface;
+ use Drupal\KernelTests\KernelTestBase;
+ use org\bovigo\vfs\vfsStream;
+ use Symfony\Component\Console\Output\NullOutput;
+@@ -30,11 +31,12 @@ public function testDoCleanTemporaryDirectories() {
+     ]);
+ 
+     $connection = $this->prophesize(Connection::class);
++    $test_run_results_storage = $this->prophesize(TestRunResultsStorageInterface::class);
+ 
+     $cleaner = new EnvironmentCleaner(
+       vfsStream::url('cleanup_test'),
+       $connection->reveal(),
+-      $connection->reveal(),
++      $test_run_results_storage->reveal(),
+       new NullOutput(),
+       \Drupal::service('file_system')
+     );
+diff --git a/core/tests/Drupal/KernelTests/Core/Test/SimpletestTestRunResultsStorageTest.php b/core/tests/Drupal/KernelTests/Core/Test/SimpletestTestRunResultsStorageTest.php
+new file mode 100644
+index 0000000000..cb9f6b2010
+--- /dev/null
++++ b/core/tests/Drupal/KernelTests/Core/Test/SimpletestTestRunResultsStorageTest.php
+@@ -0,0 +1,180 @@
++<?php
++
++namespace Drupal\KernelTests\Core\Test;
++
++use Drupal\Core\Database\Database;
++use Drupal\Core\Test\TestRun;
++use Drupal\Core\Test\SimpletestTestRunResultsStorage;
++use Drupal\KernelTests\KernelTestBase;
++
++/**
++ * @coversDefaultClass \Drupal\Core\Test\SimpletestTestRunResultsStorage
++ * @group Test
++ */
++class SimpletestTestRunResultsStorageTest extends KernelTestBase {
++
++  /**
++   * The database connection for testing.
++   *
++   * NOTE: this is the connection to the fixture database to allow testing the
++   * storage class, NOT the database where actual tests results are stored.
++   *
++   * @var \Drupal\Core\Database\Connection
++   */
++  protected $connection;
++
++  /**
++   *
++   */
++  protected $testRunResultsStorage;
++
++  /**
++   * {@inheritdoc}
++   */
++  public function setUp() {
++    parent::setUp();
++    $this->connection = Database::getConnection();
++    $this->testRunResultsStorage = new SimpletestTestRunResultsStorage($this->connection);
++  }
++
++  /**
++   * @covers ::buildTestingResultsEnvironment
++   * @covers ::validateTestingResultsEnvironment
++   */
++  public function testBuildNewEnvironment() {
++    $schema = $this->connection->schema();
++
++    $this->assertFalse($schema->tableExists('simpletest'));
++    $this->assertFalse($schema->tableExists('simpletest_test_id'));
++    $this->assertFalse($this->testRunResultsStorage->validateTestingResultsEnvironment());
++
++    $this->testRunResultsStorage->buildTestingResultsEnvironment(FALSE);
++
++    $this->assertTrue($schema->tableExists('simpletest'));
++    $this->assertTrue($schema->tableExists('simpletest_test_id'));
++    $this->assertTrue($this->testRunResultsStorage->validateTestingResultsEnvironment());
++  }
++
++  /**
++   * @covers ::buildTestingResultsEnvironment
++   * @covers ::validateTestingResultsEnvironment
++   * @covers ::createNew
++   * @covers ::insertLogEntry
++   * @covers ::cleanUp
++   */
++  public function testBuildEnvironmentKeepingExistingResults() {
++    $schema = $this->connection->schema();
++
++    // Initial build of the environment.
++    $this->testRunResultsStorage->buildTestingResultsEnvironment(FALSE);
++
++    $this->assertEquals(1, $this->testRunResultsStorage->createNew());
++    $test_run = TestRun::get($this->testRunResultsStorage, 1);
++    $this->assertEquals(1, $this->testRunResultsStorage->insertLogEntry($test_run, $this->getTestLogEntry('Test\GroundControl')));
++    $this->assertEquals(1, $this->connection->select('simpletest')->countQuery()->execute()->fetchField());
++    $this->assertEquals(1, $this->connection->select('simpletest_test_id')->countQuery()->execute()->fetchField());
++
++    // Build the environment again, keeping results. Results should be kept.
++    $this->testRunResultsStorage->buildTestingResultsEnvironment(TRUE);
++    $this->assertTrue($schema->tableExists('simpletest'));
++    $this->assertTrue($schema->tableExists('simpletest_test_id'));
++    $this->assertTrue($this->testRunResultsStorage->validateTestingResultsEnvironment());
++    $this->assertEquals(1, $this->connection->select('simpletest')->countQuery()->execute()->fetchField());
++    $this->assertEquals(1, $this->connection->select('simpletest_test_id')->countQuery()->execute()->fetchField());
++
++    $this->assertEquals(2, $this->testRunResultsStorage->createNew());
++    $test_run = TestRun::get($this->testRunResultsStorage, 2);
++    $this->assertEquals(2, $this->testRunResultsStorage->insertLogEntry($test_run, $this->getTestLogEntry('Test\GroundControl')));
++    $this->assertEquals(2, $this->connection->select('simpletest')->countQuery()->execute()->fetchField());
++    $this->assertEquals(2, $this->connection->select('simpletest_test_id')->countQuery()->execute()->fetchField());
++
++    // Cleanup the environment.
++    $this->assertEquals(2, $this->testRunResultsStorage->cleanUp());
++    $this->assertEquals(0, $this->connection->select('simpletest')->countQuery()->execute()->fetchField());
++    $this->assertEquals(0, $this->connection->select('simpletest_test_id')->countQuery()->execute()->fetchField());
++  }
++
++  /**
++   * @covers ::buildTestingResultsEnvironment
++   * @covers ::createNew
++   * @covers ::insertLogEntry
++   * @covers ::setDatabasePrefix
++   * @covers ::removeResults
++   */
++  public function testGetCurrentTestRunState() {
++    $this->testRunResultsStorage->buildTestingResultsEnvironment(FALSE);
++
++    $this->assertEquals(1, $this->testRunResultsStorage->createNew());
++    $test_run_1 = TestRun::get($this->testRunResultsStorage, 1);
++    $this->testRunResultsStorage->setDatabasePrefix($test_run_1, 'oddity1234');
++    $this->assertEquals(1, $this->testRunResultsStorage->insertLogEntry($test_run_1, $this->getTestLogEntry('Test\GroundControl')));
++    $this->assertEquals([
++      'db_prefix' => 'oddity1234',
++      'test_class' => 'Test\GroundControl',
++    ], $this->testRunResultsStorage->getCurrentTestRunState($test_run_1));
++
++    // Add another test run.
++    $this->assertEquals(2, $this->testRunResultsStorage->createNew());
++    $test_run_2 = TestRun::get($this->testRunResultsStorage, 2);
++    $this->assertEquals(2, $this->testRunResultsStorage->insertLogEntry($test_run_2, $this->getTestLogEntry('Test\GroundControl')));
++
++    // Remove test run 1 results.
++    $this->assertEquals(1, $this->testRunResultsStorage->removeResults($test_run_1));
++    $this->assertEquals(1, $this->connection->select('simpletest')->countQuery()->execute()->fetchField());
++    $this->assertEquals(1, $this->connection->select('simpletest_test_id')->countQuery()->execute()->fetchField());
++  }
++
++  /**
++   * @covers ::buildTestingResultsEnvironment
++   * @covers ::createNew
++   * @covers ::insertLogEntry
++   * @covers ::setDatabasePrefix
++   * @covers ::getLogEntriesByTestClass
++   */
++  public function testGetLogEntriesByTestClass() {
++    $this->testRunResultsStorage->buildTestingResultsEnvironment(FALSE);
++
++    $this->assertEquals(1, $this->testRunResultsStorage->createNew());
++    $test_run = TestRun::get($this->testRunResultsStorage, 1);
++    $this->testRunResultsStorage->setDatabasePrefix($test_run, 'oddity1234');
++    $this->assertEquals(1, $this->testRunResultsStorage->insertLogEntry($test_run, $this->getTestLogEntry('Test\PlanetEarth')));
++    $this->assertEquals(2, $this->testRunResultsStorage->insertLogEntry($test_run, $this->getTestLogEntry('Test\GroundControl')));
++    $this->assertEquals([
++      0 => (object) [
++       'message_id' => 2,
++       'test_id' => 1,
++       'test_class' => 'Test\GroundControl',
++       'status' => 'pass',
++       'message' => 'Major Tom',
++       'message_group' => 'other',
++       'function' => 'Unknown',
++       'line' => 0,
++       'file' => 'Unknown',
++      ],
++      1 => (object) [
++       'message_id' => 1,
++       'test_id' => 1,
++       'test_class' => 'Test\PlanetEarth',
++       'status' => 'pass',
++       'message' => 'Major Tom',
++       'message_group' => 'other',
++       'function' => 'Unknown',
++       'line' => 0,
++       'file' => 'Unknown',
++      ],
++    ], $this->testRunResultsStorage->getLogEntriesByTestClass($test_run));
++  }
++
++  /**
++   *
++   */
++  protected function getTestLogEntry($test_class) {
++    return [
++      'test_class' => $test_class,
++      'status' => 'pass',
++      'message' => 'Major Tom',
++      'message_group' => 'other',
++    ];
++  }
++
++}
+diff --git a/core/tests/Drupal/KernelTests/Core/Test/TestRunTest.php b/core/tests/Drupal/KernelTests/Core/Test/TestRunTest.php
+new file mode 100644
+index 0000000000..af45d1d24a
+--- /dev/null
++++ b/core/tests/Drupal/KernelTests/Core/Test/TestRunTest.php
+@@ -0,0 +1,171 @@
++<?php
++
++namespace Drupal\KernelTests\Core\Test;
++
++use Drupal\Core\Database\Database;
++use Drupal\Core\Test\TestRun;
++use Drupal\Core\Test\SimpletestTestRunResultsStorage;
++use Drupal\KernelTests\KernelTestBase;
++
++/**
++ * @coversDefaultClass \Drupal\Core\Test\TestRun
++ * @group Test
++ */
++class TestRunTest extends KernelTestBase {
++
++  /**
++   * The database connection for testing.
++   *
++   * NOTE: this is the connection to the fixture database to allow testing the
++   * storage class, NOT the database where actual tests results are stored.
++   *
++   * @var \Drupal\Core\Database\Connection
++   */
++  protected $connection;
++
++  /**
++   *
++   */
++  protected $testRunResultsStorage;
++
++  /**
++   * {@inheritdoc}
++   */
++  public function setUp() {
++    parent::setUp();
++    $this->connection = Database::getConnection();
++    $this->testRunResultsStorage = new SimpletestTestRunResultsStorage($this->connection);
++    $this->testRunResultsStorage->buildTestingResultsEnvironment(FALSE);
++  }
++
++  /**
++   * @covers ::createNew
++   * @covers ::get
++   * @covers ::id
++   * @covers ::insertLogEntry
++   * @covers ::setDatabasePrefix
++   * @covers ::getDatabasePrefix
++   * @covers ::getTestClass
++   */
++  public function testCreateAndGet() {
++    // Test ::createNew.
++    $test_run = TestRun::createNew($this->testRunResultsStorage);
++    $this->assertEquals(1, $test_run->id());
++    $this->assertEquals(0, $this->connection->select('simpletest')->countQuery()->execute()->fetchField());
++    $this->assertEquals(1, $this->connection->select('simpletest_test_id')->countQuery()->execute()->fetchField());
++
++    $test_run->setDatabasePrefix('oddity1234');
++    $this->assertEquals('oddity1234', $test_run->getDatabasePrefix());
++    $this->assertEquals('oddity1234', $this->connection->select('simpletest_test_id', 's')->fields('s', ['last_prefix'])->execute()->fetchField());
++
++    $this->assertEquals(1, $test_run->insertLogEntry($this->getTestLogEntry('Test\GroundControl')));
++    $this->assertEquals('oddity1234', $test_run->getDatabasePrefix());
++    $this->assertEquals('Test\GroundControl', $test_run->getTestClass());
++    $this->assertEquals(1, $this->connection->select('simpletest')->countQuery()->execute()->fetchField());
++    $this->assertEquals(1, $this->connection->select('simpletest_test_id')->countQuery()->execute()->fetchField());
++
++    // Explicitly void the $test_run variable.
++    $test_run = NULL;
++
++    // Test ::get.
++    $test_run = TestRun::get($this->testRunResultsStorage, 1);
++    $this->assertEquals(1, $test_run->id());
++    $this->assertEquals('oddity1234', $test_run->getDatabasePrefix());
++    $this->assertEquals('Test\GroundControl', $test_run->getTestClass());
++  }
++
++  /**
++   * @covers ::createNew
++   * @covers ::id
++   * @covers ::insertLogEntry
++   * @covers ::setDatabasePrefix
++   */
++  public function testCreateAndRemove() {
++    $test_run_1 = TestRun::createNew($this->testRunResultsStorage);
++    $test_run_1->setDatabasePrefix('oddity1234');
++    $test_run_1->insertLogEntry($this->getTestLogEntry('Test\GroundControl'));
++    $this->assertEquals(1, $test_run_1->id());
++    $this->assertEquals(1, $this->connection->select('simpletest')->countQuery()->execute()->fetchField());
++    $this->assertEquals(1, $this->connection->select('simpletest_test_id')->countQuery()->execute()->fetchField());
++
++    $test_run_2 = TestRun::createNew($this->testRunResultsStorage);
++    $test_run_2->setDatabasePrefix('oddity5678');
++    $test_run_2->insertLogEntry($this->getTestLogEntry('Test\PlanetEarth'));
++    $this->assertEquals(2, $test_run_2->id());
++    $this->assertEquals(2, $this->connection->select('simpletest')->countQuery()->execute()->fetchField());
++    $this->assertEquals(2, $this->connection->select('simpletest_test_id')->countQuery()->execute()->fetchField());
++
++    $this->assertEquals(1, $test_run_1->removeResults());
++    $this->assertEquals(1, $this->connection->select('simpletest')->countQuery()->execute()->fetchField());
++    $this->assertEquals(1, $this->connection->select('simpletest_test_id')->countQuery()->execute()->fetchField());
++  }
++
++  /**
++   * @covers ::createNew
++   * @covers ::insertLogEntry
++   * @covers ::setDatabasePrefix
++   * @covers ::insertLogEntry
++   * @covers ::getLogEntriesByTestClass
++   * @covers ::getDatabasePrefix
++   * @covers ::getTestClass
++   */
++  public function testGetLogEntriesByTestClass() {
++    $test_run = TestRun::createNew($this->testRunResultsStorage);
++    $test_run->setDatabasePrefix('oddity1234');
++    $this->assertEquals(1, $test_run->insertLogEntry($this->getTestLogEntry('Test\PlanetEarth')));
++    $this->assertEquals(2, $test_run->insertLogEntry($this->getTestLogEntry('Test\GroundControl')));
++    $this->assertEquals([
++      0 => (object) [
++       'message_id' => 2,
++       'test_id' => 1,
++       'test_class' => 'Test\GroundControl',
++       'status' => 'pass',
++       'message' => 'Major Tom',
++       'message_group' => 'other',
++       'function' => 'Unknown',
++       'line' => 0,
++       'file' => 'Unknown',
++      ],
++      1 => (object) [
++       'message_id' => 1,
++       'test_id' => 1,
++       'test_class' => 'Test\PlanetEarth',
++       'status' => 'pass',
++       'message' => 'Major Tom',
++       'message_group' => 'other',
++       'function' => 'Unknown',
++       'line' => 0,
++       'file' => 'Unknown',
++      ],
++    ], $test_run->getLogEntriesByTestClass());
++    $this->assertEquals('oddity1234', $test_run->getDatabasePrefix());
++    $this->assertEquals('Test\GroundControl', $test_run->getTestClass());
++  }
++
++  /**
++   *
++   */
++  public function testProcessPhpErrorLogFile() {
++    $this->markTestIncomplete();
++  }
++
++  /**
++   *
++   */
++  public function testProcessPhpUnitResults() {
++    $this->markTestIncomplete();
++  }
++
++  /**
++   *
++   */
++  protected function getTestLogEntry($test_class) {
++    return [
++      'test_class' => $test_class,
++      'status' => 'pass',
++      'message' => 'Major Tom',
++      'message_group' => 'other',
++    ];
++  }
++
++}
