@@ -1,42 +1,21 @@
 diff --git a/core/scripts/run-tests.sh b/core/scripts/run-tests.sh
-index 9d3f3894eb..29b82f471c 100755
+index 9d3f3894eb..033a732888 100755
 --- a/core/scripts/run-tests.sh
 +++ b/core/scripts/run-tests.sh
-@@ -11,17 +11,19 @@
- use Drupal\Component\Uuid\Php;
- use Drupal\Core\Asset\AttachedAssets;
- use Drupal\Core\Database\Database;
-+use Drupal\Core\StreamWrapper\PublicStream;
- use Drupal\Core\File\Exception\FileException;
- use Drupal\Core\File\FileSystemInterface;
--use Drupal\Core\StreamWrapper\PublicStream;
- use Drupal\Core\Test\EnvironmentCleaner;
- use Drupal\Core\Test\PhpUnitTestRunner;
+@@ -19,11 +19,11 @@
  use Drupal\Core\Test\RunTests\TestFileParser;
  use Drupal\Core\Test\TestDatabase;
  use Drupal\Core\Test\TestRunnerKernel;
 -use Drupal\simpletest\Form\SimpletestResultsForm;
  use Drupal\Core\Test\TestDiscovery;
-+use Drupal\simpletest\Form\SimpletestResultsForm;
  use PHPUnit\Framework\TestCase;
-+use Symfony\Component\Console\Helper\Table;
-+use Symfony\Component\Console\Helper\TableCell;
  use Symfony\Component\Console\Output\ConsoleOutput;
  use Symfony\Component\HttpFoundation\Request;
++use Drupal\simpletest\TestBase;
  
-@@ -179,9 +181,10 @@
- // Display results before database is cleared.
- if ($args['browser']) {
-   simpletest_script_open_browser();
-+  trigger_error('The --browser option is deprecated in drupal:8.8.0 and is removed from drupal:9.0.0. Use --verbose instead. See https://www.drupal.org/node/3083549', E_USER_DEPRECATED);
- }
- else {
--  simpletest_script_reporter_display_results();
-+  simpletest_script_reporter_display_results($args['table']);
- }
- 
- if ($args['xml']) {
-@@ -317,7 +320,7 @@ function simpletest_script_help() {
+ // Define some colors for display.
+ // A nice calming green.
+@@ -317,7 +317,7 @@ function simpletest_script_help() {
                test database and configuration directories. Use in combination
                with --repeat for debugging random test failures.
  
@@ -45,15 +24,15 @@ index 9d3f3894eb..29b82f471c 100755
                if you want to also view any pages rendered in the simpletest
                browser you need to add --verbose to the command line.
  
-@@ -399,6 +402,7 @@ function simpletest_script_parse_args() {
-     'die-on-fail' => FALSE,
-     'suppress-deprecations' => FALSE,
-     'browser' => FALSE,
-+    'table' => FALSE,
-     // Used internally.
-     'test-id' => 0,
-     'execute-test' => '',
-@@ -815,6 +819,9 @@ function simpletest_script_run_one_test($test_id, $test_class) {
+@@ -450,6 +450,7 @@ function simpletest_script_parse_args() {
+   }
+ 
+   if ($args['browser']) {
++    trigger_error('The --browser option is deprecated in drupal:8.8.0 and is removed from drupal:9.0.0. Use --verbose instead. See https://www.drupal.org/node/3083549', E_USER_DEPRECATED);
+     $args['keep-results'] = TRUE;
+   }
+   return [$args, $count];
+@@ -815,6 +816,9 @@ function simpletest_script_run_one_test($test_id, $test_class) {
    global $args;
  
    try {
@@ -63,105 +42,19 @@ index 9d3f3894eb..29b82f471c 100755
      if (strpos($test_class, '::') > 0) {
        list($class_name, $method) = explode('::', $test_class, 2);
        $methods = [$method];
-@@ -831,7 +838,10 @@ function simpletest_script_run_one_test($test_id, $test_class) {
+@@ -831,7 +835,10 @@ function simpletest_script_run_one_test($test_id, $test_class) {
      if (is_subclass_of($test_class, TestCase::class)) {
        $status = simpletest_script_run_phpunit($test_id, $test_class);
      }
 -    else {
 +    // If we aren't running a PHPUnit-based test, then we might have a
 +    // Simpletest-based one. Ensure that: 1) The simpletest framework exists,
-+    // and 2) That our test belongs to that framework.
-+    elseif (class_exists('\Drupal\simpletest\TestBase') && is_subclass_of($test_class, '\Drupal\simpletest\TestBase')) {
++    // and 2) that our test belongs to that framework.
++    elseif (class_exists(TestBase::class) && is_subclass_of($test_class, TestBase::class)) {
        $test->dieOnFail = (bool) $args['die-on-fail'];
        $test->verbose = (bool) $args['verbose'];
        $test->run($methods);
-@@ -1316,20 +1326,63 @@ function simpletest_script_reporter_display_results() {
-       echo (string) $e;
-       exit(SIMPLETEST_SCRIPT_EXIT_EXCEPTION);
-     }
--    $test_class = '';
--    foreach ($results as $result) {
-+
-+    // Get the first result.
-+    $result = !empty($results) ? array_shift($results): NULL;
-+    while ($result) {
-       if (isset($results_map[$result->status])) {
--        if ($result->test_class != $test_class) {
--          // Display test class every time results are for new test class.
--          echo "\n\n---- $result->test_class ----\n\n\n";
--          $test_class = $result->test_class;
--
--          // Print table header.
--          echo "Status    Group      Filename          Line Function                            \n";
--          echo "--------------------------------------------------------------------------------\n";
-+        $test_class = $result->test_class;
-+        $messages = [];
-+        $table = (new Table(new ConsoleOutput()))->setHeaders([
-+          [new TableCell($result->test_class, ['colspan' => 5])],
-+          ['Status', 'Group', 'Filename', 'Line', 'Function'],
-+        ]);
-+        while ($result && $test_class === $result->test_class) {
-+          $row = [
-+            $results_map[$result->status],
-+            $result->message_group,
-+            basename($result->file),
-+            $result->line,
-+            $result->function
-+          ];
-+          array_walk($row, function (&$value) use ($result) {
-+            $value = "\033[" . simpletest_script_color_code($result->status) . "m" . $value . "\033[0m";
-+          });
-+          $table->addRow($row);
-+
-+          // Save any messages so they can be output after the table. This
-+          // allows the full PHPUnit error output to be displayed.
-+          if (!empty($result->message)) {
-+            $message = trim(strip_tags($result->message));
-+            if ($args['non-html']) {
-+              $message = Html::decodeEntities($message, ENT_QUOTES, 'UTF-8');
-+            }
-+            // If we're dealing with PHPUnit save messages until after the table
-+            // is rendered.
-+            if (is_subclass_of($test_class, TestCase::class)) {
-+              $messages[] = $message;
-+            }
-+            else {
-+              $table->addRow([new TableCell('    ' . $message, ['colspan' => 5])]);
-+            }
-+          }
-+          // Get the next result.
-+          $result = !empty($results) ? array_shift($results) : NULL;
-         }
-+        $table->render();
- 
--        simpletest_script_format_result($result);
-+        // Render any messages left over.
-+        foreach ($messages as $message) {
-+          $lines = explode("\n", wordwrap($message), 76);
-+          foreach ($lines as $line) {
-+            echo $line . "\n";
-+          }
-+        }
-+
-+        if ($result) {
-+          // Add some space before printing the next table.
-+          echo "\n\n";
-+        }
-       }
-     }
-   }
-@@ -1340,6 +1393,10 @@ function simpletest_script_reporter_display_results() {
-  *
-  * @param object $result
-  *   The result object to format.
-+ *
-+ * @deprecated in drupal:8.8.0 and is removed from drupal:9.0.0.
-+ *
-+ * @see https://www.drupal.org/node/3083549
-  */
- function simpletest_script_format_result($result) {
-   global $args, $results_map, $color;
-@@ -1494,6 +1551,14 @@ function simpletest_script_load_messages_by_test_id($test_ids) {
+@@ -1494,6 +1501,14 @@ function simpletest_script_load_messages_by_test_id($test_ids) {
  
  /**
   * Display test results.
@@ -176,3 +69,279 @@ index 9d3f3894eb..29b82f471c 100755
   */
  function simpletest_script_open_browser() {
    global $test_ids;
+@@ -1515,16 +1530,19 @@ function simpletest_script_open_browser() {
+ 
+   // Get the results form.
+   $form = [];
+-  SimpletestResultsForm::addResultForm($form, $results);
++  simpletest_script_add_result_form($form, $results);
+ 
+   // Get the assets to make the details element collapsible and theme the result
+   // form.
+-  $assets = new AttachedAssets();
+-  $assets->setLibraries([
++  $libraries = [
+     'core/drupal.collapse',
+     'system/admin',
+-    'simpletest/drupal.simpletest',
+-  ]);
++  ];
++  if (\Drupal::moduleHandler()->moduleExists('simpletest')) {
++    $libraries[] = 'simpletest/drupal.simpletest';
++  }
++  $assets = new AttachedAssets();
++  $assets->setLibraries($libraries);
+   $resolver = \Drupal::service('asset.resolver');
+   list($js_assets_header, $js_assets_footer) = $resolver->getJsAssets($assets, FALSE);
+   $js_collection_renderer = \Drupal::service('asset.js.collection_renderer');
+@@ -1570,3 +1588,250 @@ function simpletest_script_open_browser() {
+     print 'Open file://' . realpath($filename) . ' in your browser to see the verbose output.';
+   }
+ }
++
++/**
++ * Adds the result form to a $form.
++ *
++ * Allows run-tests.sh to generate a results page completely external to Drupal.
++ * This is why the UI strings are not wrapped in t().
++ *
++ * @param array $form
++ *   The form to attach the results to.
++ * @param array $results
++ *   The simpletest results.
++ *
++ * @return array
++ *   A list of tests the passed and failed. The array has two keys, 'pass' and
++ *   'fail'. Each contains a list of test classes.
++ *
++ * @deprecated in drupal:8.8.0 and is removed from drupal:9.0.0. This function
++ *   supports the --browser option in this script. Use the --verbose option
++ *   instead.
++ *
++ * @see https://www.drupal.org/node/3083549
++ * @see simpletest_script_open_browser()
++ *
++ * @todo Remove this in https://www.drupal.org/project/drupal/issues/3075490.
++ */
++function simpletest_script_add_result_form(array &$form, array $results) {
++
++  $summaryTemplate = <<<'TWIG'
++<div class="simpletest-{{ fail + exception == 0 ? 'pass' : 'fail' }}">
++{{ label }} {{ items|join(', ') }}
++</div>
++TWIG;
++
++  // Transform the test results to be grouped by test class.
++  $test_results = [];
++  foreach ($results as $result) {
++    if (!isset($test_results[$result->test_class])) {
++      $test_results[$result->test_class] = [];
++    }
++    $test_results[$result->test_class][] = $result;
++  }
++
++  $image_status_map = simpletest_script_build_status_image_map();
++
++  // Keep track of which test cases passed or failed.
++  $filter = [
++    'pass' => [],
++    'fail' => [],
++  ];
++
++  // Summary result widget.
++  $form['result'] = [
++    '#type' => 'fieldset',
++    '#title' => 'Results',
++    // Because this is used in a theme-less situation need to provide a
++    // default.
++    '#attributes' => [],
++  ];
++
++  // Add summary line.
++  $form['result']['summary'] = $summary = [
++    '#type' => 'inline_template',
++    '#template' => $summaryTemplate,
++    // Fill in the context for the template after we've tallied results in
++    // #pass, #fail, etc.
++    '#context' => [],
++    '#pass' => 0,
++    '#fail' => 0,
++    '#exception' => 0,
++    '#debug' => 0,
++  ];
++
++  \Drupal::service('test_discovery')->registerTestNamespaces();
++
++  // Cycle through each test group.
++  $header = [
++    'Message',
++    'Group',
++    'Filename',
++    'Line',
++    'Function',
++    ['colspan' => 2, 'data' => 'Status'],
++  ];
++  $form['result']['results'] = [];
++  foreach ($test_results as $group => $assertions) {
++    // Create group details with summary information.
++    $info = TestDiscovery::getTestInfo($group);
++    $form['result']['results'][$group] = [
++      '#type' => 'details',
++      '#title' => $info['name'],
++      '#open' => TRUE,
++      '#description' => $info['description'],
++    ];
++    $form['result']['results'][$group]['summary'] = $summary;
++    $group_summary = & $form['result']['results'][$group]['summary'];
++
++    // Create table of assertions for the group.
++    $rows = [];
++    foreach ($assertions as $assertion) {
++      $row = [];
++      $row[] = ['data' => ['#markup' => $assertion->message]];
++      $row[] = $assertion->message_group;
++      $row[] = \Drupal::service('file_system')->basename(($assertion->file));
++      $row[] = $assertion->line;
++      $row[] = $assertion->function;
++      $row[] = ['data' => $image_status_map[$assertion->status]];
++
++      $class = 'simpletest-' . $assertion->status;
++      if ($assertion->message_group == 'Debug') {
++        $class = 'simpletest-debug';
++      }
++      $rows[] = ['data' => $row, 'class' => [$class]];
++
++      $group_summary['#' . $assertion->status]++;
++      $form['result']['summary']['#' . $assertion->status]++;
++    }
++    $form['result']['results'][$group]['table'] = [
++      '#type' => 'table',
++      '#header' => $header,
++      '#rows' => $rows,
++    ];
++
++    $group_summary['#context'] = simpletest_script_build_summary_context(
++      $group_summary['#pass'],
++      $group_summary['#fail'],
++      $group_summary['#exception'],
++      $group_summary['#debug']
++    );
++
++    // Set summary information.
++    $group_summary['#ok'] = $group_summary['#fail'] + $group_summary['#exception'] == 0;
++    $form['result']['results'][$group]['#open'] = !$group_summary['#ok'];
++
++    // Store test group (class) as for use in filter.
++    $filter[$group_summary['#ok'] ? 'pass' : 'fail'][] = $group;
++  }
++
++  // Now that we've tallied all the results, we can compute the context for
++  // the results summary template.
++
++  $form['result']['summary']['#context'] = simpletest_script_build_summary_context(
++    $form['result']['summary']['#pass'],
++    $form['result']['summary']['#fail'],
++    $form['result']['summary']['#exception'],
++    $form['result']['summary']['#debug']
++  );
++
++  // Overall summary status.
++  $form['result']['summary']['#ok'] = $form['result']['summary']['#fail'] + $form['result']['summary']['#exception'] == 0;
++
++  return $filter;
++}
++
++/**
++ * Builds the status image map.
++ *
++ * @return string[]
++ *   Render array of icons for status displays.
++ *
++ * @deprecated in drupal:8.8.0 and is removed from drupal:9.0.0. This function
++ *   supports the --browser option in this script. Use the --verbose option
++ *   instead.
++ *
++ * @see https://www.drupal.org/node/3083549
++ *
++ * @todo Remove this in https://www.drupal.org/project/drupal/issues/3075490.
++ */
++function simpletest_script_build_status_image_map() {
++  $image_pass = [
++    '#theme' => 'image',
++    '#uri' => 'core/misc/icons/73b355/check.svg',
++    '#width' => 18,
++    '#height' => 18,
++    '#alt' => 'Pass',
++  ];
++  $image_fail = [
++    '#theme' => 'image',
++    '#uri' => 'core/misc/icons/e32700/error.svg',
++    '#width' => 18,
++    '#height' => 18,
++    '#alt' => 'Fail',
++  ];
++  $image_exception = [
++    '#theme' => 'image',
++    '#uri' => 'core/misc/icons/e29700/warning.svg',
++    '#width' => 18,
++    '#height' => 18,
++    '#alt' => 'Exception',
++  ];
++  $image_debug = [
++    '#theme' => 'image',
++    '#uri' => 'core/misc/icons/e29700/warning.svg',
++    '#width' => 18,
++    '#height' => 18,
++    '#alt' => 'Debug',
++  ];
++  return [
++    'pass' => $image_pass,
++    'fail' => $image_fail,
++    'exception' => $image_exception,
++    'debug' => $image_debug,
++  ];
++}
++
++/**
++ * Assemble the context for the twig template.
++ *
++ * @param int $pass
++ *   The count of passing tests.
++ * @param int $fail
++ *   The count of failing tests.
++ * @param int $exception
++ *   The count of tests that threw an exception.
++ * @param int $debug
++ *   The count of debug messages present.
++ * @param string $label
++ *   An optional label for the summary line.
++ *
++ * @return string[]
++ *   The context for the twig template.
++ *
++ * @deprecated in drupal:8.8.0 and is removed from drupal:9.0.0. This function
++ *   supports the --browser option in this script. Use the --verbose option
++ *   instead.
++ *
++ * @see https://www.drupal.org/node/3083549
++ *
++ * @todo Remove this in https://www.drupal.org/project/drupal/issues/3075490.
++ */
++function simpletest_script_build_summary_context($pass, $fail, $exception, $debug, $label = NULL) {
++  $context = [];
++  $translation = \Drupal::translation();
++
++  $context['label'] = $label;
++  $context['pass'] = $pass;
++  $context['fail'] = $fail;
++  $context['exception'] = $exception;
++  $context['debug'] = $debug;
++
++  $context['items']['pass'] = $translation->formatPlural($pass, '1 pass', '@count passes');
++  $context['items']['fail'] = $translation->formatPlural($fail, '1 fail', '@count fails');
++  $context['items']['exception'] = $translation->formatPlural($exception, '1 exception', '@count exceptions');
++  if ($debug) {
++    $context['items']['debug'] = $translation->formatPlural($debug, '1 debug message', '@count debug messages');
++  }
++  return $context;
++}
