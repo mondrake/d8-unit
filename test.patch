@@ -1,8 +1,136 @@
+diff --git a/core/modules/simpletest/simpletest.module b/core/modules/simpletest/simpletest.module
+index 5775c1d83d..11d2eb5e5e 100644
+--- a/core/modules/simpletest/simpletest.module
++++ b/core/modules/simpletest/simpletest.module
+@@ -5,14 +5,20 @@
+  * Provides testing functionality.
+  */
+ 
++use Drupal\Component\Uuid\Php;
++use Drupal\Core\Asset\AttachedAssets;
+ use Drupal\Core\Asset\AttachedAssetsInterface;
++use Drupal\Core\Database\Database;
+ use Drupal\Core\File\Exception\FileException;
++use Drupal\Core\File\FileSystemInterface;
+ use Drupal\Core\Render\Element;
+ use Drupal\Core\Routing\RouteMatchInterface;
++use Drupal\Core\StreamWrapper\PublicStream;
+ use Drupal\Core\Test\JUnitConverter;
+ use Drupal\Core\Test\PhpUnitTestRunner;
+ use Drupal\Core\Test\TestDatabase;
+ use Drupal\Core\Url;
++use Drupal\simpletest\Form\SimpletestResultsForm;
+ use Drupal\simpletest\TestDiscovery;
+ use PHPUnit\Framework\TestCase;
+ 
+@@ -732,3 +738,91 @@ function simpletest_phpunit_testcase_to_row($test_id, \SimpleXMLElement $test_ca
+   @trigger_error(__FUNCTION__ . ' is deprecated in drupal:8.8.0 and is removed from drupal:9.0.0. Use \Drupal\Core\Test\JUnitConverter::convertTestCaseToSimpletestRow() instead. See https://www.drupal.org/node/2948547', E_USER_DEPRECATED);
+   return JUnitConverter::convertTestCaseToSimpletestRow($test_id, $test_case);
+ }
++
++/**
++ * Display test results from run-tests.sh in a browser.
++ *
++ * @internal
++ *   This function is only used by run-tests.sh
++ *
++ * @deprecated in drupal:8.8.0 and is removed from drupal:9.0.0. This function
++ *   supports the --browser option in this script. Use the --verbose option
++ *   instead.
++ *
++ * @see https://www.drupal.org/node/3083549
++ */
++function _simpletest_run_tests_script_open_browser() {
++  global $test_ids;
++
++  try {
++    $connection = Database::getConnection('default', 'test-runner');
++    $results = $connection->select('simpletest')
++      ->fields('simpletest')
++      ->condition('test_id', $test_ids, 'IN')
++      ->orderBy('test_class')
++      ->orderBy('message_id')
++      ->execute()
++      ->fetchAll();
++  }
++  catch (Exception $e) {
++    echo (string) $e;
++    exit(SIMPLETEST_SCRIPT_EXIT_EXCEPTION);
++  }
++
++  // Get the results form.
++  $form = [];
++  SimpletestResultsForm::addResultForm($form, $results);
++
++  // Get the assets to make the details element collapsible and theme the result
++  // form.
++  $assets = new AttachedAssets();
++  $assets->setLibraries([
++    'core/drupal.collapse',
++    'system/admin',
++    'simpletest/drupal.simpletest',
++  ]);
++  $resolver = \Drupal::service('asset.resolver');
++  list($js_assets_header, $js_assets_footer) = $resolver->getJsAssets($assets, FALSE);
++  $js_collection_renderer = \Drupal::service('asset.js.collection_renderer');
++  $js_assets_header = $js_collection_renderer->render($js_assets_header);
++  $js_assets_footer = $js_collection_renderer->render($js_assets_footer);
++  $css_assets = \Drupal::service('asset.css.collection_renderer')->render($resolver->getCssAssets($assets, FALSE));
++
++  // Make the html page to write to disk.
++  $render_service = \Drupal::service('renderer');
++  $html = '<head>' . $render_service->renderPlain($js_assets_header) . $render_service->renderPlain($css_assets) . '</head><body>' . $render_service->renderPlain($form) . $render_service->renderPlain($js_assets_footer) . '</body>';
++
++  // Ensure we have assets verbose directory - tests with no verbose output will
++  // not have created one.
++  $directory = PublicStream::basePath() . '/simpletest/verbose';
++  \Drupal::service('file_system')->prepareDirectory($directory, FileSystemInterface::CREATE_DIRECTORY | FileSystemInterface::MODIFY_PERMISSIONS);
++  $php = new Php();
++  $uuid = $php->generate();
++  $filename = $directory . '/results-' . $uuid . '.html';
++  $base_url = getenv('SIMPLETEST_BASE_URL');
++  if (empty($base_url)) {
++    simpletest_script_print_error("--browser needs argument --url.");
++  }
++  $url = $base_url . '/' . PublicStream::basePath() . '/simpletest/verbose/results-' . $uuid . '.html';
++  file_put_contents($filename, $html);
++
++  // See if we can find an OS helper to open URLs in default browser.
++  $browser = FALSE;
++  if (shell_exec('which xdg-open')) {
++    $browser = 'xdg-open';
++  }
++  elseif (shell_exec('which open')) {
++    $browser = 'open';
++  }
++  elseif (substr(PHP_OS, 0, 3) == 'WIN') {
++    $browser = 'start';
++  }
++
++  if ($browser) {
++    shell_exec($browser . ' ' . escapeshellarg($url));
++  }
++  else {
++    // Can't find assets valid browser.
++    print 'Open file://' . realpath($filename) . ' in your browser to see the verbose output.';
++  }
++}
 diff --git a/core/scripts/run-tests.sh b/core/scripts/run-tests.sh
-index 9d3f3894eb..2c7cf3f1f9 100755
+index 9d3f3894eb..45fcd3bac3 100755
 --- a/core/scripts/run-tests.sh
 +++ b/core/scripts/run-tests.sh
-@@ -19,11 +19,11 @@
+@@ -8,18 +8,13 @@
+ use Drupal\Component\FileSystem\FileSystem;
+ use Drupal\Component\Utility\Html;
+ use Drupal\Component\Utility\Timer;
+-use Drupal\Component\Uuid\Php;
+-use Drupal\Core\Asset\AttachedAssets;
+ use Drupal\Core\Database\Database;
+ use Drupal\Core\File\Exception\FileException;
+-use Drupal\Core\File\FileSystemInterface;
+-use Drupal\Core\StreamWrapper\PublicStream;
+ use Drupal\Core\Test\EnvironmentCleaner;
+ use Drupal\Core\Test\PhpUnitTestRunner;
  use Drupal\Core\Test\RunTests\TestFileParser;
  use Drupal\Core\Test\TestDatabase;
  use Drupal\Core\Test\TestRunnerKernel;
@@ -10,12 +138,7 @@ index 9d3f3894eb..2c7cf3f1f9 100755
  use Drupal\Core\Test\TestDiscovery;
  use PHPUnit\Framework\TestCase;
  use Symfony\Component\Console\Output\ConsoleOutput;
- use Symfony\Component\HttpFoundation\Request;
-+use Drupal\simpletest\TestBase;
- 
- // Define some colors for display.
- // A nice calming green.
-@@ -317,7 +317,7 @@ function simpletest_script_help() {
+@@ -317,7 +312,7 @@ function simpletest_script_help() {
                test database and configuration directories. Use in combination
                with --repeat for debugging random test failures.
  
@@ -24,15 +147,15 @@ index 9d3f3894eb..2c7cf3f1f9 100755
                if you want to also view any pages rendered in the simpletest
                browser you need to add --verbose to the command line.
  
-@@ -450,6 +450,7 @@ function simpletest_script_parse_args() {
+@@ -450,6 +445,7 @@ function simpletest_script_parse_args() {
    }
  
    if ($args['browser']) {
-+    trigger_error('The --browser option is deprecated in drupal:8.8.0 and is removed from drupal:9.0.0. Use --verbose instead. See https://www.drupal.org/node/3083549', E_USER_DEPRECATED);
++    simpletest_script_print_error('The --browser option is deprecated in drupal:8.8.0 and is removed from drupal:9.0.0. Use --verbose instead. See https://www.drupal.org/node/3083549');
      $args['keep-results'] = TRUE;
    }
    return [$args, $count];
-@@ -815,6 +816,9 @@ function simpletest_script_run_one_test($test_id, $test_class) {
+@@ -815,6 +811,9 @@ function simpletest_script_run_one_test($test_id, $test_class) {
    global $args;
  
    try {
@@ -42,7 +165,7 @@ index 9d3f3894eb..2c7cf3f1f9 100755
      if (strpos($test_class, '::') > 0) {
        list($class_name, $method) = explode('::', $test_class, 2);
        $methods = [$method];
-@@ -831,7 +835,10 @@ function simpletest_script_run_one_test($test_id, $test_class) {
+@@ -831,7 +830,10 @@ function simpletest_script_run_one_test($test_id, $test_class) {
      if (is_subclass_of($test_class, TestCase::class)) {
        $status = simpletest_script_run_phpunit($test_id, $test_class);
      }
@@ -50,11 +173,24 @@ index 9d3f3894eb..2c7cf3f1f9 100755
 +    // If we aren't running a PHPUnit-based test, then we might have a
 +    // Simpletest-based one. Ensure that: 1) The simpletest framework exists,
 +    // and 2) that our test belongs to that framework.
-+    elseif (class_exists(TestBase::class) && is_subclass_of($test_class, TestBase::class)) {
++    elseif (class_exists('Drupal\simpletest\TestBase') && is_subclass_of($test_class, 'Drupal\simpletest\TestBase')) {
        $test->dieOnFail = (bool) $args['die-on-fail'];
        $test->verbose = (bool) $args['verbose'];
        $test->run($methods);
-@@ -1494,6 +1501,14 @@ function simpletest_script_load_messages_by_test_id($test_ids) {
+@@ -843,6 +845,12 @@ function simpletest_script_run_one_test($test_id, $test_class) {
+         $status = SIMPLETEST_SCRIPT_EXIT_FAILURE;
+       }
+     }
++    // If the test is not a PHPUnit test, and either we don't have the
++    // Simpletest module or the \Drupal\simpletest\TestBase class available.
++    else {
++      simpletest_script_print_error(sprintf('Can not run %s. If this is a WebTestBase test the simpletest module must be installed. See https://www.drupal.org/node/3030340', $test_class));
++      $status = SIMPLETEST_SCRIPT_EXIT_FAILURE;
++    }
+ 
+     exit($status);
+   }
+@@ -1494,79 +1502,21 @@ function simpletest_script_load_messages_by_test_id($test_ids) {
  
  /**
   * Display test results.
@@ -68,292 +204,83 @@ index 9d3f3894eb..2c7cf3f1f9 100755
 + * @todo Remove this in https://www.drupal.org/project/drupal/issues/3075490.
   */
  function simpletest_script_open_browser() {
-   global $test_ids;
-@@ -1515,16 +1530,19 @@ function simpletest_script_open_browser() {
- 
-   // Get the results form.
-   $form = [];
+-  global $test_ids;
+-
+-  try {
+-    $connection = Database::getConnection('default', 'test-runner');
+-    $results = $connection->select('simpletest')
+-      ->fields('simpletest')
+-      ->condition('test_id', $test_ids, 'IN')
+-      ->orderBy('test_class')
+-      ->orderBy('message_id')
+-      ->execute()
+-      ->fetchAll();
+-  }
+-  catch (Exception $e) {
+-    echo (string) $e;
+-    exit(SIMPLETEST_SCRIPT_EXIT_EXCEPTION);
+-  }
+-
+-  // Get the results form.
+-  $form = [];
 -  SimpletestResultsForm::addResultForm($form, $results);
-+  simpletest_script_add_result_form($form, $results);
- 
-   // Get the assets to make the details element collapsible and theme the result
-   // form.
+-
+-  // Get the assets to make the details element collapsible and theme the result
+-  // form.
 -  $assets = new AttachedAssets();
 -  $assets->setLibraries([
-+  $libraries = [
-     'core/drupal.collapse',
-     'system/admin',
+-    'core/drupal.collapse',
+-    'system/admin',
 -    'simpletest/drupal.simpletest',
 -  ]);
-+  ];
-+  if (\Drupal::moduleHandler()->moduleExists('simpletest')) {
-+    $libraries[] = 'simpletest/drupal.simpletest';
-+  }
-+  $assets = new AttachedAssets();
-+  $assets->setLibraries($libraries);
-   $resolver = \Drupal::service('asset.resolver');
-   list($js_assets_header, $js_assets_footer) = $resolver->getJsAssets($assets, FALSE);
-   $js_collection_renderer = \Drupal::service('asset.js.collection_renderer');
-@@ -1549,7 +1567,10 @@ function simpletest_script_open_browser() {
-   }
-   $url = $base_url . '/' . PublicStream::basePath() . '/simpletest/verbose/results-' . $uuid . '.html';
-   file_put_contents($filename, $html);
+-  $resolver = \Drupal::service('asset.resolver');
+-  list($js_assets_header, $js_assets_footer) = $resolver->getJsAssets($assets, FALSE);
+-  $js_collection_renderer = \Drupal::service('asset.js.collection_renderer');
+-  $js_assets_header = $js_collection_renderer->render($js_assets_header);
+-  $js_assets_footer = $js_collection_renderer->render($js_assets_footer);
+-  $css_assets = \Drupal::service('asset.css.collection_renderer')->render($resolver->getCssAssets($assets, FALSE));
 -
-+echo("\n\n");
-+echo($filename);
-+echo("\n\n");
-+echo($html);
-   // See if we can find an OS helper to open URLs in default browser.
-   $browser = FALSE;
-   if (shell_exec('which xdg-open')) {
-@@ -1570,3 +1591,250 @@ function simpletest_script_open_browser() {
-     print 'Open file://' . realpath($filename) . ' in your browser to see the verbose output.';
+-  // Make the html page to write to disk.
+-  $render_service = \Drupal::service('renderer');
+-  $html = '<head>' . $render_service->renderPlain($js_assets_header) . $render_service->renderPlain($css_assets) . '</head><body>' . $render_service->renderPlain($form) . $render_service->renderPlain($js_assets_footer) . '</body>';
+-
+-  // Ensure we have assets verbose directory - tests with no verbose output will
+-  // not have created one.
+-  $directory = PublicStream::basePath() . '/simpletest/verbose';
+-  \Drupal::service('file_system')->prepareDirectory($directory, FileSystemInterface::CREATE_DIRECTORY | FileSystemInterface::MODIFY_PERMISSIONS);
+-  $php = new Php();
+-  $uuid = $php->generate();
+-  $filename = $directory . '/results-' . $uuid . '.html';
+-  $base_url = getenv('SIMPLETEST_BASE_URL');
+-  if (empty($base_url)) {
+-    simpletest_script_print_error("--browser needs argument --url.");
+-  }
+-  $url = $base_url . '/' . PublicStream::basePath() . '/simpletest/verbose/results-' . $uuid . '.html';
+-  file_put_contents($filename, $html);
+-
+-  // See if we can find an OS helper to open URLs in default browser.
+-  $browser = FALSE;
+-  if (shell_exec('which xdg-open')) {
+-    $browser = 'xdg-open';
+-  }
+-  elseif (shell_exec('which open')) {
+-    $browser = 'open';
+-  }
+-  elseif (substr(PHP_OS, 0, 3) == 'WIN') {
+-    $browser = 'start';
+-  }
+-
+-  if ($browser) {
+-    shell_exec($browser . ' ' . escapeshellarg($url));
+-  }
+-  else {
+-    // Can't find assets valid browser.
+-    print 'Open file://' . realpath($filename) . ' in your browser to see the verbose output.';
++  // Note: the user already has received a message about the deprecation in CLI
++  // so we trigger an error just in case this method has been used as API.
++  @trigger_error('The --browser option is deprecated in drupal:8.8.0 and is removed from drupal:9.0.0. Use --verbose instead. See https://www.drupal.org/node/3083549', E_USER_DEPRECATED);
++  if (function_exists('_simpletest_run_tests_script_open_browser')) {
++    return _simpletest_run_tests_script_open_browser();
    }
++  simpletest_script_print_error('In order to use the --browser option the Simpletest module must be available. See https://www.drupal.org/node/3083549.');
  }
-+
-+/**
-+ * Adds the result form to a $form.
-+ *
-+ * Allows run-tests.sh to generate a results page completely external to Drupal.
-+ * This is why the UI strings are not wrapped in t().
-+ *
-+ * @param array $form
-+ *   The form to attach the results to.
-+ * @param array $results
-+ *   The simpletest results.
-+ *
-+ * @return array
-+ *   A list of tests the passed and failed. The array has two keys, 'pass' and
-+ *   'fail'. Each contains a list of test classes.
-+ *
-+ * @deprecated in drupal:8.8.0 and is removed from drupal:9.0.0. This function
-+ *   supports the --browser option in this script. Use the --verbose option
-+ *   instead.
-+ *
-+ * @see https://www.drupal.org/node/3083549
-+ * @see simpletest_script_open_browser()
-+ *
-+ * @todo Remove this in https://www.drupal.org/project/drupal/issues/3075490.
-+ */
-+function simpletest_script_add_result_form(array &$form, array $results) {
-+
-+  $summaryTemplate = <<<'TWIG'
-+<div class="simpletest-{{ fail + exception == 0 ? 'pass' : 'fail' }}">
-+{{ label }} {{ items|join(', ') }}
-+</div>
-+TWIG;
-+
-+  // Transform the test results to be grouped by test class.
-+  $test_results = [];
-+  foreach ($results as $result) {
-+    if (!isset($test_results[$result->test_class])) {
-+      $test_results[$result->test_class] = [];
-+    }
-+    $test_results[$result->test_class][] = $result;
-+  }
-+
-+  $image_status_map = simpletest_script_build_status_image_map();
-+
-+  // Keep track of which test cases passed or failed.
-+  $filter = [
-+    'pass' => [],
-+    'fail' => [],
-+  ];
-+
-+  // Summary result widget.
-+  $form['result'] = [
-+    '#type' => 'fieldset',
-+    '#title' => 'Results',
-+    // Because this is used in a theme-less situation need to provide a
-+    // default.
-+    '#attributes' => [],
-+  ];
-+
-+  // Add summary line.
-+  $form['result']['summary'] = $summary = [
-+    '#type' => 'inline_template',
-+    '#template' => $summaryTemplate,
-+    // Fill in the context for the template after we've tallied results in
-+    // #pass, #fail, etc.
-+    '#context' => [],
-+    '#pass' => 0,
-+    '#fail' => 0,
-+    '#exception' => 0,
-+    '#debug' => 0,
-+  ];
-+
-+  \Drupal::service('test_discovery')->registerTestNamespaces();
-+
-+  // Cycle through each test group.
-+  $header = [
-+    'Message',
-+    'Group',
-+    'Filename',
-+    'Line',
-+    'Function',
-+    ['colspan' => 2, 'data' => 'Status'],
-+  ];
-+  $form['result']['results'] = [];
-+  foreach ($test_results as $group => $assertions) {
-+    // Create group details with summary information.
-+    $info = TestDiscovery::getTestInfo($group);
-+    $form['result']['results'][$group] = [
-+      '#type' => 'details',
-+      '#title' => $info['name'],
-+      '#open' => TRUE,
-+      '#description' => $info['description'],
-+    ];
-+    $form['result']['results'][$group]['summary'] = $summary;
-+    $group_summary = & $form['result']['results'][$group]['summary'];
-+
-+    // Create table of assertions for the group.
-+    $rows = [];
-+    foreach ($assertions as $assertion) {
-+      $row = [];
-+      $row[] = ['data' => ['#markup' => $assertion->message]];
-+      $row[] = $assertion->message_group;
-+      $row[] = \Drupal::service('file_system')->basename(($assertion->file));
-+      $row[] = $assertion->line;
-+      $row[] = $assertion->function;
-+      $row[] = ['data' => $image_status_map[$assertion->status]];
-+
-+      $class = 'simpletest-' . $assertion->status;
-+      if ($assertion->message_group == 'Debug') {
-+        $class = 'simpletest-debug';
-+      }
-+      $rows[] = ['data' => $row, 'class' => [$class]];
-+
-+      $group_summary['#' . $assertion->status]++;
-+      $form['result']['summary']['#' . $assertion->status]++;
-+    }
-+    $form['result']['results'][$group]['table'] = [
-+      '#type' => 'table',
-+      '#header' => $header,
-+      '#rows' => $rows,
-+    ];
-+
-+    $group_summary['#context'] = simpletest_script_build_summary_context(
-+      $group_summary['#pass'],
-+      $group_summary['#fail'],
-+      $group_summary['#exception'],
-+      $group_summary['#debug']
-+    );
-+
-+    // Set summary information.
-+    $group_summary['#ok'] = $group_summary['#fail'] + $group_summary['#exception'] == 0;
-+    $form['result']['results'][$group]['#open'] = !$group_summary['#ok'];
-+
-+    // Store test group (class) as for use in filter.
-+    $filter[$group_summary['#ok'] ? 'pass' : 'fail'][] = $group;
-+  }
-+
-+  // Now that we've tallied all the results, we can compute the context for
-+  // the results summary template.
-+
-+  $form['result']['summary']['#context'] = simpletest_script_build_summary_context(
-+    $form['result']['summary']['#pass'],
-+    $form['result']['summary']['#fail'],
-+    $form['result']['summary']['#exception'],
-+    $form['result']['summary']['#debug']
-+  );
-+
-+  // Overall summary status.
-+  $form['result']['summary']['#ok'] = $form['result']['summary']['#fail'] + $form['result']['summary']['#exception'] == 0;
-+
-+  return $filter;
-+}
-+
-+/**
-+ * Builds the status image map.
-+ *
-+ * @return string[]
-+ *   Render array of icons for status displays.
-+ *
-+ * @deprecated in drupal:8.8.0 and is removed from drupal:9.0.0. This function
-+ *   supports the --browser option in this script. Use the --verbose option
-+ *   instead.
-+ *
-+ * @see https://www.drupal.org/node/3083549
-+ *
-+ * @todo Remove this in https://www.drupal.org/project/drupal/issues/3075490.
-+ */
-+function simpletest_script_build_status_image_map() {
-+  $image_pass = [
-+    '#theme' => 'image',
-+    '#uri' => 'core/misc/icons/73b355/check.svg',
-+    '#width' => 18,
-+    '#height' => 18,
-+    '#alt' => 'Pass',
-+  ];
-+  $image_fail = [
-+    '#theme' => 'image',
-+    '#uri' => 'core/misc/icons/e32700/error.svg',
-+    '#width' => 18,
-+    '#height' => 18,
-+    '#alt' => 'Fail',
-+  ];
-+  $image_exception = [
-+    '#theme' => 'image',
-+    '#uri' => 'core/misc/icons/e29700/warning.svg',
-+    '#width' => 18,
-+    '#height' => 18,
-+    '#alt' => 'Exception',
-+  ];
-+  $image_debug = [
-+    '#theme' => 'image',
-+    '#uri' => 'core/misc/icons/e29700/warning.svg',
-+    '#width' => 18,
-+    '#height' => 18,
-+    '#alt' => 'Debug',
-+  ];
-+  return [
-+    'pass' => $image_pass,
-+    'fail' => $image_fail,
-+    'exception' => $image_exception,
-+    'debug' => $image_debug,
-+  ];
-+}
-+
-+/**
-+ * Assemble the context for the twig template.
-+ *
-+ * @param int $pass
-+ *   The count of passing tests.
-+ * @param int $fail
-+ *   The count of failing tests.
-+ * @param int $exception
-+ *   The count of tests that threw an exception.
-+ * @param int $debug
-+ *   The count of debug messages present.
-+ * @param string $label
-+ *   An optional label for the summary line.
-+ *
-+ * @return string[]
-+ *   The context for the twig template.
-+ *
-+ * @deprecated in drupal:8.8.0 and is removed from drupal:9.0.0. This function
-+ *   supports the --browser option in this script. Use the --verbose option
-+ *   instead.
-+ *
-+ * @see https://www.drupal.org/node/3083549
-+ *
-+ * @todo Remove this in https://www.drupal.org/project/drupal/issues/3075490.
-+ */
-+function simpletest_script_build_summary_context($pass, $fail, $exception, $debug, $label = NULL) {
-+  $context = [];
-+  $translation = \Drupal::translation();
-+
-+  $context['label'] = $label;
-+  $context['pass'] = $pass;
-+  $context['fail'] = $fail;
-+  $context['exception'] = $exception;
-+  $context['debug'] = $debug;
-+
-+  $context['items']['pass'] = $translation->formatPlural($pass, '1 pass', '@count passes');
-+  $context['items']['fail'] = $translation->formatPlural($fail, '1 fail', '@count fails');
-+  $context['items']['exception'] = $translation->formatPlural($exception, '1 exception', '@count exceptions');
-+  if ($debug) {
-+    $context['items']['debug'] = $translation->formatPlural($debug, '1 debug message', '@count debug messages');
-+  }
-+  return $context;
-+}
