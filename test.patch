@@ -1,286 +1,3866 @@
-diff --git a/core/modules/simpletest/simpletest.module b/core/modules/simpletest/simpletest.module
-index 5775c1d83d..11d2eb5e5e 100644
---- a/core/modules/simpletest/simpletest.module
-+++ b/core/modules/simpletest/simpletest.module
-@@ -5,14 +5,20 @@
-  * Provides testing functionality.
-  */
- 
-+use Drupal\Component\Uuid\Php;
-+use Drupal\Core\Asset\AttachedAssets;
- use Drupal\Core\Asset\AttachedAssetsInterface;
-+use Drupal\Core\Database\Database;
- use Drupal\Core\File\Exception\FileException;
-+use Drupal\Core\File\FileSystemInterface;
- use Drupal\Core\Render\Element;
- use Drupal\Core\Routing\RouteMatchInterface;
-+use Drupal\Core\StreamWrapper\PublicStream;
- use Drupal\Core\Test\JUnitConverter;
- use Drupal\Core\Test\PhpUnitTestRunner;
- use Drupal\Core\Test\TestDatabase;
- use Drupal\Core\Url;
-+use Drupal\simpletest\Form\SimpletestResultsForm;
- use Drupal\simpletest\TestDiscovery;
- use PHPUnit\Framework\TestCase;
- 
-@@ -732,3 +738,91 @@ function simpletest_phpunit_testcase_to_row($test_id, \SimpleXMLElement $test_ca
-   @trigger_error(__FUNCTION__ . ' is deprecated in drupal:8.8.0 and is removed from drupal:9.0.0. Use \Drupal\Core\Test\JUnitConverter::convertTestCaseToSimpletestRow() instead. See https://www.drupal.org/node/2948547', E_USER_DEPRECATED);
-   return JUnitConverter::convertTestCaseToSimpletestRow($test_id, $test_case);
- }
+diff --git a/core/composer.json b/core/composer.json
+index 8a5d3bdf89..4b8d317b74 100644
+--- a/core/composer.json
++++ b/core/composer.json
+@@ -31,7 +31,7 @@
+         "symfony/process": "~3.4.0",
+         "symfony/polyfill-iconv": "^1.0",
+         "symfony/yaml": "~3.4.5",
+-        "typo3/phar-stream-wrapper": "^2.1.1",
++        "typo3/phar-stream-wrapper": "dev-master",
+         "twig/twig": "^1.38.2",
+         "doctrine/common": "^2.5",
+         "doctrine/annotations": "^1.2",
+diff --git a/core/drupalci.yml b/core/drupalci.yml
+index 6ce07ee7ad..3f85299d47 100644
+--- a/core/drupalci.yml
++++ b/core/drupalci.yml
+@@ -15,6 +15,10 @@ build:
+         sniff-all-files: false
+         halt-on-fail: false
+     testing:
++      container_command:
++        commands:
++          - "sudo -u www-data /usr/local/bin/composer update mikey179/vfsstream --with-dependencies --no-progress"
++          - "sudo -u www-data /usr/local/bin/composer require typo3/phar-stream-wrapper:dev-master --no-progress"
+       # run_tests task is executed several times in order of performance speeds.
+       # halt-on-fail can be set on the run_tests tasks in order to fail fast.
+       # suppress-deprecations is false in order to be alerted to usages of
+diff --git a/core/lib/Drupal/Component/Annotation/Doctrine/DocParser.php b/core/lib/Drupal/Component/Annotation/Doctrine/DocParser.php
+new file mode 100644
+index 0000000000..1e784a245c
+--- /dev/null
++++ b/core/lib/Drupal/Component/Annotation/Doctrine/DocParser.php
+@@ -0,0 +1,1126 @@
++<?php
++// @codingStandardsIgnoreFile
++
++namespace Drupal\Component\Annotation\Doctrine;
++
++use Doctrine\Common\Annotations\Annotation\Attribute;
++use Doctrine\Common\Annotations\Annotation\Enum;
++use Doctrine\Common\Annotations\Annotation\Target;
++use Doctrine\Common\Annotations\Annotation\Attributes;
++use Doctrine\Common\Annotations\AnnotationException;
++use Doctrine\Common\Annotations\AnnotationRegistry;
++use Doctrine\Common\Annotations\DocLexer;
 +
 +/**
-+ * Display test results from run-tests.sh in a browser.
++ * A parser for docblock annotations.
++ *
++ * This class is a near-copy of Doctrine\Common\Annotations\DocParser, which is
++ * part of the Doctrine project: <http://www.doctrine-project.org>
++ *
++ * This is from v.1.2.7.
++ *
++ * This Drupal version allows for ignoring annotations when namespaces are
++ * present.
 + *
 + * @internal
-+ *   This function is only used by run-tests.sh
-+ *
-+ * @deprecated in drupal:8.8.0 and is removed from drupal:9.0.0. This function
-+ *   supports the --browser option in this script. Use the --verbose option
-+ *   instead.
-+ *
-+ * @see https://www.drupal.org/node/3083549
 + */
-+function _simpletest_run_tests_script_open_browser() {
-+  global $test_ids;
++final class DocParser
++{
++    /**
++     * An array of all valid tokens for a class name.
++     *
++     * @var array
++     */
++    private static $classIdentifiers = array(
++        DocLexer::T_IDENTIFIER,
++        DocLexer::T_TRUE,
++        DocLexer::T_FALSE,
++        DocLexer::T_NULL
++    );
 +
-+  try {
-+    $connection = Database::getConnection('default', 'test-runner');
-+    $results = $connection->select('simpletest')
-+      ->fields('simpletest')
-+      ->condition('test_id', $test_ids, 'IN')
-+      ->orderBy('test_class')
-+      ->orderBy('message_id')
-+      ->execute()
-+      ->fetchAll();
-+  }
-+  catch (Exception $e) {
-+    echo (string) $e;
-+    exit(SIMPLETEST_SCRIPT_EXIT_EXCEPTION);
-+  }
++    /**
++     * The lexer.
++     *
++     * @var \Doctrine\Common\Annotations\DocLexer
++     */
++    private $lexer;
 +
-+  // Get the results form.
-+  $form = [];
-+  SimpletestResultsForm::addResultForm($form, $results);
++    /**
++     * Current target context.
++     *
++     * @var string
++     */
++    private $target;
 +
-+  // Get the assets to make the details element collapsible and theme the result
-+  // form.
-+  $assets = new AttachedAssets();
-+  $assets->setLibraries([
-+    'core/drupal.collapse',
-+    'system/admin',
-+    'simpletest/drupal.simpletest',
-+  ]);
-+  $resolver = \Drupal::service('asset.resolver');
-+  list($js_assets_header, $js_assets_footer) = $resolver->getJsAssets($assets, FALSE);
-+  $js_collection_renderer = \Drupal::service('asset.js.collection_renderer');
-+  $js_assets_header = $js_collection_renderer->render($js_assets_header);
-+  $js_assets_footer = $js_collection_renderer->render($js_assets_footer);
-+  $css_assets = \Drupal::service('asset.css.collection_renderer')->render($resolver->getCssAssets($assets, FALSE));
++    /**
++     * Doc parser used to collect annotation target.
++     *
++     * @var \Doctrine\Common\Annotations\DocParser
++     */
++    private static $metadataParser;
 +
-+  // Make the html page to write to disk.
-+  $render_service = \Drupal::service('renderer');
-+  $html = '<head>' . $render_service->renderPlain($js_assets_header) . $render_service->renderPlain($css_assets) . '</head><body>' . $render_service->renderPlain($form) . $render_service->renderPlain($js_assets_footer) . '</body>';
++    /**
++     * Flag to control if the current annotation is nested or not.
++     *
++     * @var boolean
++     */
++    private $isNestedAnnotation = false;
 +
-+  // Ensure we have assets verbose directory - tests with no verbose output will
-+  // not have created one.
-+  $directory = PublicStream::basePath() . '/simpletest/verbose';
-+  \Drupal::service('file_system')->prepareDirectory($directory, FileSystemInterface::CREATE_DIRECTORY | FileSystemInterface::MODIFY_PERMISSIONS);
-+  $php = new Php();
-+  $uuid = $php->generate();
-+  $filename = $directory . '/results-' . $uuid . '.html';
-+  $base_url = getenv('SIMPLETEST_BASE_URL');
-+  if (empty($base_url)) {
-+    simpletest_script_print_error("--browser needs argument --url.");
-+  }
-+  $url = $base_url . '/' . PublicStream::basePath() . '/simpletest/verbose/results-' . $uuid . '.html';
-+  file_put_contents($filename, $html);
++    /**
++     * Hashmap containing all use-statements that are to be used when parsing
++     * the given doc block.
++     *
++     * @var array
++     */
++    private $imports = array();
 +
-+  // See if we can find an OS helper to open URLs in default browser.
-+  $browser = FALSE;
-+  if (shell_exec('which xdg-open')) {
-+    $browser = 'xdg-open';
-+  }
-+  elseif (shell_exec('which open')) {
-+    $browser = 'open';
-+  }
-+  elseif (substr(PHP_OS, 0, 3) == 'WIN') {
-+    $browser = 'start';
-+  }
++    /**
++     * This hashmap is used internally to cache results of class_exists()
++     * look-ups.
++     *
++     * @var array
++     */
++    private $classExists = array();
 +
-+  if ($browser) {
-+    shell_exec($browser . ' ' . escapeshellarg($url));
-+  }
-+  else {
-+    // Can't find assets valid browser.
-+    print 'Open file://' . realpath($filename) . ' in your browser to see the verbose output.';
-+  }
-+}
-diff --git a/core/scripts/run-tests.sh b/core/scripts/run-tests.sh
-index 9d3f3894eb..45fcd3bac3 100755
---- a/core/scripts/run-tests.sh
-+++ b/core/scripts/run-tests.sh
-@@ -8,18 +8,13 @@
- use Drupal\Component\FileSystem\FileSystem;
- use Drupal\Component\Utility\Html;
- use Drupal\Component\Utility\Timer;
--use Drupal\Component\Uuid\Php;
--use Drupal\Core\Asset\AttachedAssets;
- use Drupal\Core\Database\Database;
- use Drupal\Core\File\Exception\FileException;
--use Drupal\Core\File\FileSystemInterface;
--use Drupal\Core\StreamWrapper\PublicStream;
- use Drupal\Core\Test\EnvironmentCleaner;
- use Drupal\Core\Test\PhpUnitTestRunner;
- use Drupal\Core\Test\RunTests\TestFileParser;
- use Drupal\Core\Test\TestDatabase;
- use Drupal\Core\Test\TestRunnerKernel;
--use Drupal\simpletest\Form\SimpletestResultsForm;
- use Drupal\Core\Test\TestDiscovery;
- use PHPUnit\Framework\TestCase;
- use Symfony\Component\Console\Output\ConsoleOutput;
-@@ -317,7 +312,7 @@ function simpletest_script_help() {
-               test database and configuration directories. Use in combination
-               with --repeat for debugging random test failures.
- 
--  --browser   Opens the results in the browser. This enforces --keep-results and
-+  --browser   Deprecated, use --verbose instead. This enforces --keep-results and
-               if you want to also view any pages rendered in the simpletest
-               browser you need to add --verbose to the command line.
- 
-@@ -450,6 +445,7 @@ function simpletest_script_parse_args() {
-   }
- 
-   if ($args['browser']) {
-+    simpletest_script_print_error('The --browser option is deprecated in drupal:8.8.0 and is removed from drupal:9.0.0. Use --verbose instead. See https://www.drupal.org/node/3083549');
-     $args['keep-results'] = TRUE;
-   }
-   return [$args, $count];
-@@ -815,6 +811,9 @@ function simpletest_script_run_one_test($test_id, $test_class) {
-   global $args;
- 
-   try {
-+    // Default to status = success. This could mean that we didn't discover any
-+    // tests and that none ran.
-+    $status = SIMPLETEST_SCRIPT_EXIT_SUCCESS;
-     if (strpos($test_class, '::') > 0) {
-       list($class_name, $method) = explode('::', $test_class, 2);
-       $methods = [$method];
-@@ -831,7 +830,10 @@ function simpletest_script_run_one_test($test_id, $test_class) {
-     if (is_subclass_of($test_class, TestCase::class)) {
-       $status = simpletest_script_run_phpunit($test_id, $test_class);
-     }
--    else {
-+    // If we aren't running a PHPUnit-based test, then we might have a
-+    // Simpletest-based one. Ensure that: 1) The simpletest framework exists,
-+    // and 2) that our test belongs to that framework.
-+    elseif (class_exists('Drupal\simpletest\TestBase') && is_subclass_of($test_class, 'Drupal\simpletest\TestBase')) {
-       $test->dieOnFail = (bool) $args['die-on-fail'];
-       $test->verbose = (bool) $args['verbose'];
-       $test->run($methods);
-@@ -843,6 +845,12 @@ function simpletest_script_run_one_test($test_id, $test_class) {
-         $status = SIMPLETEST_SCRIPT_EXIT_FAILURE;
-       }
-     }
-+    // If the test is not a PHPUnit test, and either we don't have the
-+    // Simpletest module or the \Drupal\simpletest\TestBase class available.
-+    else {
-+      simpletest_script_print_error(sprintf('Can not run %s. If this is a WebTestBase test the simpletest module must be installed. See https://www.drupal.org/node/3030340', $test_class));
-+      $status = SIMPLETEST_SCRIPT_EXIT_FAILURE;
++    /**
++     * Whether annotations that have not been imported should be ignored.
++     *
++     * @var boolean
++     */
++    private $ignoreNotImportedAnnotations = false;
++
++    /**
++     * An array of default namespaces if operating in simple mode.
++     *
++     * @var array
++     */
++    private $namespaces = array();
++
++    /**
++     * A list with annotations that are not causing exceptions when not resolved to an annotation class.
++     *
++     * The names must be the raw names as used in the class, not the fully qualified
++     * class names.
++     *
++     * @var array
++     */
++    private $ignoredAnnotationNames = array();
++
++    /**
++     * @var string
++     */
++    private $context = '';
++
++    /**
++     * Hash-map for caching annotation metadata.
++     *
++     * @var array
++     */
++    private static $annotationMetadata = array(
++        'Doctrine\Common\Annotations\Annotation\Target' => array(
++            'is_annotation'    => true,
++            'has_constructor'  => true,
++            'properties'       => array(),
++            'targets_literal'  => 'ANNOTATION_CLASS',
++            'targets'          => Target::TARGET_CLASS,
++            'default_property' => 'value',
++            'attribute_types'  => array(
++                'value'  => array(
++                    'required'  => false,
++                    'type'      =>'array',
++                    'array_type'=>'string',
++                    'value'     =>'array<string>'
++                )
++             ),
++        ),
++        'Doctrine\Common\Annotations\Annotation\Attribute' => array(
++            'is_annotation'    => true,
++            'has_constructor'  => false,
++            'targets_literal'  => 'ANNOTATION_ANNOTATION',
++            'targets'          => Target::TARGET_ANNOTATION,
++            'default_property' => 'name',
++            'properties'       => array(
++                'name'      => 'name',
++                'type'      => 'type',
++                'required'  => 'required'
++            ),
++            'attribute_types'  => array(
++                'value'  => array(
++                    'required'  => true,
++                    'type'      =>'string',
++                    'value'     =>'string'
++                ),
++                'type'  => array(
++                    'required'  =>true,
++                    'type'      =>'string',
++                    'value'     =>'string'
++                ),
++                'required'  => array(
++                    'required'  =>false,
++                    'type'      =>'boolean',
++                    'value'     =>'boolean'
++                )
++             ),
++        ),
++        'Doctrine\Common\Annotations\Annotation\Attributes' => array(
++            'is_annotation'    => true,
++            'has_constructor'  => false,
++            'targets_literal'  => 'ANNOTATION_CLASS',
++            'targets'          => Target::TARGET_CLASS,
++            'default_property' => 'value',
++            'properties'       => array(
++                'value' => 'value'
++            ),
++            'attribute_types'  => array(
++                'value' => array(
++                    'type'      =>'array',
++                    'required'  =>true,
++                    'array_type'=>'Doctrine\Common\Annotations\Annotation\Attribute',
++                    'value'     =>'array<Doctrine\Common\Annotations\Annotation\Attribute>'
++                )
++             ),
++        ),
++        'Doctrine\Common\Annotations\Annotation\Enum' => array(
++            'is_annotation'    => true,
++            'has_constructor'  => true,
++            'targets_literal'  => 'ANNOTATION_PROPERTY',
++            'targets'          => Target::TARGET_PROPERTY,
++            'default_property' => 'value',
++            'properties'       => array(
++                'value' => 'value'
++            ),
++            'attribute_types'  => array(
++                'value' => array(
++                    'type'      => 'array',
++                    'required'  => true,
++                ),
++                'literal' => array(
++                    'type'      => 'array',
++                    'required'  => false,
++                ),
++             ),
++        ),
++    );
++
++    /**
++     * Hash-map for handle types declaration.
++     *
++     * @var array
++     */
++    private static $typeMap = array(
++        'float'     => 'double',
++        'bool'      => 'boolean',
++        // allow uppercase Boolean in honor of George Boole
++        'Boolean'   => 'boolean',
++        'int'       => 'integer',
++    );
++
++    /**
++     * Constructs a new DocParser.
++     */
++    public function __construct()
++    {
++        $this->lexer = new DocLexer;
 +    }
- 
-     exit($status);
-   }
-@@ -1494,79 +1502,21 @@ function simpletest_script_load_messages_by_test_id($test_ids) {
- 
- /**
-  * Display test results.
++
++    /**
++     * Sets the annotation names that are ignored during the parsing process.
++     *
++     * The names are supposed to be the raw names as used in the class, not the
++     * fully qualified class names.
++     *
++     * @param array $names
++     *
++     * @return void
++     */
++    public function setIgnoredAnnotationNames(array $names)
++    {
++        $this->ignoredAnnotationNames = $names;
++    }
++
++    /**
++     * Sets ignore on not-imported annotations.
++     *
++     * @param boolean $bool
++     *
++     * @return void
++     */
++    public function setIgnoreNotImportedAnnotations($bool)
++    {
++        $this->ignoreNotImportedAnnotations = (boolean) $bool;
++    }
++
++    /**
++     * Sets the default namespaces.
++     *
++     * @param array $namespace
++     *
++     * @return void
++     *
++     * @throws \RuntimeException
++     */
++    public function addNamespace($namespace)
++    {
++        if ($this->imports) {
++            throw new \RuntimeException('You must either use addNamespace(), or setImports(), but not both.');
++        }
++
++        $this->namespaces[] = $namespace;
++    }
++
++    /**
++     * Sets the imports.
++     *
++     * @param array $imports
++     *
++     * @return void
++     *
++     * @throws \RuntimeException
++     */
++    public function setImports(array $imports)
++    {
++        if ($this->namespaces) {
++            throw new \RuntimeException('You must either use addNamespace(), or setImports(), but not both.');
++        }
++
++        $this->imports = $imports;
++    }
++
++    /**
++     * Sets current target context as bitmask.
++     *
++     * @param integer $target
++     *
++     * @return void
++     */
++    public function setTarget($target)
++    {
++        $this->target = $target;
++    }
++
++    /**
++     * Parses the given docblock string for annotations.
++     *
++     * @param string $input   The docblock string to parse.
++     * @param string $context The parsing context.
++     *
++     * @return array Array of annotations. If no annotations are found, an empty array is returned.
++     */
++    public function parse($input, $context = '')
++    {
++        $pos = $this->findInitialTokenPosition($input);
++        if ($pos === null) {
++            return array();
++        }
++
++        $this->context = $context;
++
++        $this->lexer->setInput(trim(substr($input, $pos), '* /'));
++        $this->lexer->moveNext();
++
++        return $this->Annotations();
++    }
++
++    /**
++     * Finds the first valid annotation
++     *
++     * @param string $input The docblock string to parse
++     *
++     * @return int|null
++     */
++    private function findInitialTokenPosition($input)
++    {
++        $pos = 0;
++
++        // search for first valid annotation
++        while (($pos = strpos($input, '@', $pos)) !== false) {
++            // if the @ is preceded by a space or * it is valid
++            if ($pos === 0 || $input[$pos - 1] === ' ' || $input[$pos - 1] === '*') {
++                return $pos;
++            }
++
++            $pos++;
++        }
++
++        return null;
++    }
++
++    /**
++     * Attempts to match the given token with the current lookahead token.
++     * If they match, updates the lookahead token; otherwise raises a syntax error.
++     *
++     * @param integer $token Type of token.
++     *
++     * @return boolean True if tokens match; false otherwise.
++     */
++    private function match($token)
++    {
++        if ( ! $this->lexer->isNextToken($token) ) {
++            $this->syntaxError($this->lexer->getLiteral($token));
++        }
++
++        return $this->lexer->moveNext();
++    }
++
++    /**
++     * Attempts to match the current lookahead token with any of the given tokens.
++     *
++     * If any of them matches, this method updates the lookahead token; otherwise
++     * a syntax error is raised.
++     *
++     * @param array $tokens
++     *
++     * @return boolean
++     */
++    private function matchAny(array $tokens)
++    {
++        if ( ! $this->lexer->isNextTokenAny($tokens)) {
++            $this->syntaxError(implode(' or ', array_map(array($this->lexer, 'getLiteral'), $tokens)));
++        }
++
++        return $this->lexer->moveNext();
++    }
++
++    /**
++     * Generates a new syntax error.
++     *
++     * @param string     $expected Expected string.
++     * @param array|null $token    Optional token.
++     *
++     * @return void
++     *
++     * @throws AnnotationException
++     */
++    private function syntaxError($expected, $token = null)
++    {
++        if ($token === null) {
++            $token = $this->lexer->lookahead;
++        }
++
++        $message  = sprintf('Expected %s, got ', $expected);
++        $message .= ($this->lexer->lookahead === null)
++            ? 'end of string'
++            : sprintf("'%s' at position %s", $token['value'], $token['position']);
++
++        if (strlen($this->context)) {
++            $message .= ' in ' . $this->context;
++        }
++
++        $message .= '.';
++
++        throw AnnotationException::syntaxError($message);
++    }
++
++    /**
++     * Attempts to check if a class exists or not. This never goes through the PHP autoloading mechanism
++     * but uses the {@link AnnotationRegistry} to load classes.
++     *
++     * @param string $fqcn
++     *
++     * @return boolean
++     */
++    private function classExists($fqcn)
++    {
++        if (isset($this->classExists[$fqcn])) {
++            return $this->classExists[$fqcn];
++        }
++
++        // first check if the class already exists, maybe loaded through another AnnotationReader
++        if (class_exists($fqcn, false)) {
++            return $this->classExists[$fqcn] = true;
++        }
++
++        // final check, does this class exist?
++        return $this->classExists[$fqcn] = AnnotationRegistry::loadAnnotationClass($fqcn);
++    }
++
++    /**
++     * Collects parsing metadata for a given annotation class
++     *
++     * @param string $name The annotation name
++     *
++     * @return void
++     */
++    private function collectAnnotationMetadata($name)
++    {
++        if (self::$metadataParser === null) {
++            self::$metadataParser = new self();
++
++            self::$metadataParser->setIgnoreNotImportedAnnotations(true);
++            self::$metadataParser->setIgnoredAnnotationNames($this->ignoredAnnotationNames);
++            self::$metadataParser->setImports(array(
++                'enum'          => 'Doctrine\Common\Annotations\Annotation\Enum',
++                'target'        => 'Doctrine\Common\Annotations\Annotation\Target',
++                'attribute'     => 'Doctrine\Common\Annotations\Annotation\Attribute',
++                'attributes'    => 'Doctrine\Common\Annotations\Annotation\Attributes'
++            ));
++        }
++
++        $class      = new \ReflectionClass($name);
++        $docComment = $class->getDocComment();
++
++        // Sets default values for annotation metadata
++        $metadata = array(
++            'default_property' => null,
++            'has_constructor'  => (null !== $constructor = $class->getConstructor()) && $constructor->getNumberOfParameters() > 0,
++            'properties'       => array(),
++            'property_types'   => array(),
++            'attribute_types'  => array(),
++            'targets_literal'  => null,
++            'targets'          => Target::TARGET_ALL,
++            'is_annotation'    => false !== strpos($docComment, '@Annotation'),
++        );
++
++        // verify that the class is really meant to be an annotation
++        if ($metadata['is_annotation']) {
++            self::$metadataParser->setTarget(Target::TARGET_CLASS);
++
++            foreach (self::$metadataParser->parse($docComment, 'class @' . $name) as $annotation) {
++                if ($annotation instanceof Target) {
++                    $metadata['targets']         = $annotation->targets;
++                    $metadata['targets_literal'] = $annotation->literal;
++
++                    continue;
++                }
++
++                if ($annotation instanceof Attributes) {
++                    foreach ($annotation->value as $attribute) {
++                        $this->collectAttributeTypeMetadata($metadata, $attribute);
++                    }
++                }
++            }
++
++            // if not has a constructor will inject values into public properties
++            if (false === $metadata['has_constructor']) {
++                // collect all public properties
++                foreach ($class->getProperties(\ReflectionProperty::IS_PUBLIC) as $property) {
++                    $metadata['properties'][$property->name] = $property->name;
++
++                    if (false === ($propertyComment = $property->getDocComment())) {
++                        continue;
++                    }
++
++                    $attribute = new Attribute();
++
++                    $attribute->required = (false !== strpos($propertyComment, '@Required'));
++                    $attribute->name     = $property->name;
++                    $attribute->type     = (false !== strpos($propertyComment, '@var') && preg_match('/@var\s+([^\s]+)/',$propertyComment, $matches))
++                        ? $matches[1]
++                        : 'mixed';
++
++                    $this->collectAttributeTypeMetadata($metadata, $attribute);
++
++                    // checks if the property has @Enum
++                    if (false !== strpos($propertyComment, '@Enum')) {
++                        $context = 'property ' . $class->name . "::\$" . $property->name;
++
++                        self::$metadataParser->setTarget(Target::TARGET_PROPERTY);
++
++                        foreach (self::$metadataParser->parse($propertyComment, $context) as $annotation) {
++                            if ( ! $annotation instanceof Enum) {
++                                continue;
++                            }
++
++                            $metadata['enum'][$property->name]['value']   = $annotation->value;
++                            $metadata['enum'][$property->name]['literal'] = ( ! empty($annotation->literal))
++                                ? $annotation->literal
++                                : $annotation->value;
++                        }
++                    }
++                }
++
++                // choose the first property as default property
++                $metadata['default_property'] = reset($metadata['properties']);
++            }
++        }
++
++        self::$annotationMetadata[$name] = $metadata;
++    }
++
++    /**
++     * Collects parsing metadata for a given attribute.
++     *
++     * @param array     $metadata
++     * @param Attribute $attribute
++     *
++     * @return void
++     */
++    private function collectAttributeTypeMetadata(&$metadata, Attribute $attribute)
++    {
++        // handle internal type declaration
++        $type = isset(self::$typeMap[$attribute->type])
++            ? self::$typeMap[$attribute->type]
++            : $attribute->type;
++
++        // handle the case if the property type is mixed
++        if ('mixed' === $type) {
++            return;
++        }
++
++        // Evaluate type
++        switch (true) {
++            // Checks if the property has array<type>
++            case (false !== $pos = strpos($type, '<')):
++                $arrayType  = substr($type, $pos + 1, -1);
++                $type       = 'array';
++
++                if (isset(self::$typeMap[$arrayType])) {
++                    $arrayType = self::$typeMap[$arrayType];
++                }
++
++                $metadata['attribute_types'][$attribute->name]['array_type'] = $arrayType;
++                break;
++
++            // Checks if the property has type[]
++            case (false !== $pos = strrpos($type, '[')):
++                $arrayType  = substr($type, 0, $pos);
++                $type       = 'array';
++
++                if (isset(self::$typeMap[$arrayType])) {
++                    $arrayType = self::$typeMap[$arrayType];
++                }
++
++                $metadata['attribute_types'][$attribute->name]['array_type'] = $arrayType;
++                break;
++        }
++
++        $metadata['attribute_types'][$attribute->name]['type']     = $type;
++        $metadata['attribute_types'][$attribute->name]['value']    = $attribute->type;
++        $metadata['attribute_types'][$attribute->name]['required'] = $attribute->required;
++    }
++
++    /**
++     * Annotations ::= Annotation {[ "*" ]* [Annotation]}*
++     *
++     * @return array
++     */
++    private function Annotations()
++    {
++        $annotations = array();
++
++        while (null !== $this->lexer->lookahead) {
++            if (DocLexer::T_AT !== $this->lexer->lookahead['type']) {
++                $this->lexer->moveNext();
++                continue;
++            }
++
++            // make sure the @ is preceded by non-catchable pattern
++            if (null !== $this->lexer->token && $this->lexer->lookahead['position'] === $this->lexer->token['position'] + strlen($this->lexer->token['value'])) {
++                $this->lexer->moveNext();
++                continue;
++            }
++
++            // make sure the @ is followed by either a namespace separator, or
++            // an identifier token
++            if ((null === $peek = $this->lexer->glimpse())
++                || (DocLexer::T_NAMESPACE_SEPARATOR !== $peek['type'] && !in_array($peek['type'], self::$classIdentifiers, true))
++                || $peek['position'] !== $this->lexer->lookahead['position'] + 1) {
++                $this->lexer->moveNext();
++                continue;
++            }
++
++            $this->isNestedAnnotation = false;
++            if (false !== $annot = $this->Annotation()) {
++                $annotations[] = $annot;
++            }
++        }
++
++        return $annotations;
++    }
++
++    /**
++     * Annotation     ::= "@" AnnotationName MethodCall
++     * AnnotationName ::= QualifiedName | SimpleName
++     * QualifiedName  ::= NameSpacePart "\" {NameSpacePart "\"}* SimpleName
++     * NameSpacePart  ::= identifier | null | false | true
++     * SimpleName     ::= identifier | null | false | true
++     *
++     * @return mixed False if it is not a valid annotation.
++     *
++     * @throws AnnotationException
++     */
++    private function Annotation()
++    {
++        $this->match(DocLexer::T_AT);
++
++        // check if we have an annotation
++        $name = $this->Identifier();
++
++        // only process names which are not fully qualified, yet
++        // fully qualified names must start with a \
++        $originalName = $name;
++
++        if ('\\' !== $name[0]) {
++            $alias = (false === $pos = strpos($name, '\\'))? $name : substr($name, 0, $pos);
++            $found = false;
++
++            if ($this->namespaces) {
++                if (isset($this->ignoredAnnotationNames[$name])) {
++                    return false;
++                }
++                foreach ($this->namespaces as $namespace) {
++                    if ($this->classExists($namespace.'\\'.$name)) {
++                        $name = $namespace.'\\'.$name;
++                        $found = true;
++                        break;
++                    }
++                }
++            } elseif (isset($this->imports[$loweredAlias = strtolower($alias)])) {
++                $found = true;
++                $name  = (false !== $pos)
++                    ? $this->imports[$loweredAlias] . substr($name, $pos)
++                    : $this->imports[$loweredAlias];
++            } elseif ( ! isset($this->ignoredAnnotationNames[$name])
++                && isset($this->imports['__NAMESPACE__'])
++                && $this->classExists($this->imports['__NAMESPACE__'] . '\\' . $name)
++            ) {
++                $name  = $this->imports['__NAMESPACE__'].'\\'.$name;
++                $found = true;
++            } elseif (! isset($this->ignoredAnnotationNames[$name]) && $this->classExists($name)) {
++                $found = true;
++            }
++
++            if ( ! $found) {
++                if ($this->ignoreNotImportedAnnotations || isset($this->ignoredAnnotationNames[$name])) {
++                    return false;
++                }
++
++                throw AnnotationException::semanticalError(sprintf('The annotation "@%s" in %s was never imported. Did you maybe forget to add a "use" statement for this annotation?', $name, $this->context));
++            }
++        }
++
++        if ( ! $this->classExists($name)) {
++            throw AnnotationException::semanticalError(sprintf('The annotation "@%s" in %s does not exist, or could not be auto-loaded.', $name, $this->context));
++        }
++
++        // at this point, $name contains the fully qualified class name of the
++        // annotation, and it is also guaranteed that this class exists, and
++        // that it is loaded
++
++
++        // collects the metadata annotation only if there is not yet
++        if ( ! isset(self::$annotationMetadata[$name])) {
++            $this->collectAnnotationMetadata($name);
++        }
++
++        // verify that the class is really meant to be an annotation and not just any ordinary class
++        if (self::$annotationMetadata[$name]['is_annotation'] === false) {
++            if (isset($this->ignoredAnnotationNames[$originalName])) {
++                return false;
++            }
++
++            throw AnnotationException::semanticalError(sprintf('The class "%s" is not annotated with @Annotation. Are you sure this class can be used as annotation? If so, then you need to add @Annotation to the _class_ doc comment of "%s". If it is indeed no annotation, then you need to add @IgnoreAnnotation("%s") to the _class_ doc comment of %s.', $name, $name, $originalName, $this->context));
++        }
++
++        //if target is nested annotation
++        $target = $this->isNestedAnnotation ? Target::TARGET_ANNOTATION : $this->target;
++
++        // Next will be nested
++        $this->isNestedAnnotation = true;
++
++        //if annotation does not support current target
++        if (0 === (self::$annotationMetadata[$name]['targets'] & $target) && $target) {
++            throw AnnotationException::semanticalError(
++                sprintf('Annotation @%s is not allowed to be declared on %s. You may only use this annotation on these code elements: %s.',
++                     $originalName, $this->context, self::$annotationMetadata[$name]['targets_literal'])
++            );
++        }
++
++        $values = $this->MethodCall();
++
++        if (isset(self::$annotationMetadata[$name]['enum'])) {
++            // checks all declared attributes
++            foreach (self::$annotationMetadata[$name]['enum'] as $property => $enum) {
++                // checks if the attribute is a valid enumerator
++                if (isset($values[$property]) && ! in_array($values[$property], $enum['value'])) {
++                    throw AnnotationException::enumeratorError($property, $name, $this->context, $enum['literal'], $values[$property]);
++                }
++            }
++        }
++
++        // checks all declared attributes
++        foreach (self::$annotationMetadata[$name]['attribute_types'] as $property => $type) {
++            if ($property === self::$annotationMetadata[$name]['default_property']
++                && !isset($values[$property]) && isset($values['value'])) {
++                $property = 'value';
++            }
++
++            // handle a not given attribute or null value
++            if (!isset($values[$property])) {
++                if ($type['required']) {
++                    throw AnnotationException::requiredError($property, $originalName, $this->context, 'a(n) '.$type['value']);
++                }
++
++                continue;
++            }
++
++            if ($type['type'] === 'array') {
++                // handle the case of a single value
++                if ( ! is_array($values[$property])) {
++                    $values[$property] = array($values[$property]);
++                }
++
++                // checks if the attribute has array type declaration, such as "array<string>"
++                if (isset($type['array_type'])) {
++                    foreach ($values[$property] as $item) {
++                        if (gettype($item) !== $type['array_type'] && !$item instanceof $type['array_type']) {
++                            throw AnnotationException::attributeTypeError($property, $originalName, $this->context, 'either a(n) '.$type['array_type'].', or an array of '.$type['array_type'].'s', $item);
++                        }
++                    }
++                }
++            } elseif (gettype($values[$property]) !== $type['type'] && !$values[$property] instanceof $type['type']) {
++                throw AnnotationException::attributeTypeError($property, $originalName, $this->context, 'a(n) '.$type['value'], $values[$property]);
++            }
++        }
++
++        // check if the annotation expects values via the constructor,
++        // or directly injected into public properties
++        if (self::$annotationMetadata[$name]['has_constructor'] === true) {
++            return new $name($values);
++        }
++
++        $instance = new $name();
++
++        foreach ($values as $property => $value) {
++            if (!isset(self::$annotationMetadata[$name]['properties'][$property])) {
++                if ('value' !== $property) {
++                    throw AnnotationException::creationError(sprintf('The annotation @%s declared on %s does not have a property named "%s". Available properties: %s', $originalName, $this->context, $property, implode(', ', self::$annotationMetadata[$name]['properties'])));
++                }
++
++                // handle the case if the property has no annotations
++                if ( ! $property = self::$annotationMetadata[$name]['default_property']) {
++                    throw AnnotationException::creationError(sprintf('The annotation @%s declared on %s does not accept any values, but got %s.', $originalName, $this->context, json_encode($values)));
++                }
++            }
++
++            $instance->{$property} = $value;
++        }
++
++        return $instance;
++    }
++
++    /**
++     * MethodCall ::= ["(" [Values] ")"]
++     *
++     * @return array
++     */
++    private function MethodCall()
++    {
++        $values = array();
++
++        if ( ! $this->lexer->isNextToken(DocLexer::T_OPEN_PARENTHESIS)) {
++            return $values;
++        }
++
++        $this->match(DocLexer::T_OPEN_PARENTHESIS);
++
++        if ( ! $this->lexer->isNextToken(DocLexer::T_CLOSE_PARENTHESIS)) {
++            $values = $this->Values();
++        }
++
++        $this->match(DocLexer::T_CLOSE_PARENTHESIS);
++
++        return $values;
++    }
++
++    /**
++     * Values ::= Array | Value {"," Value}* [","]
++     *
++     * @return array
++     */
++    private function Values()
++    {
++        $values = array($this->Value());
++
++        while ($this->lexer->isNextToken(DocLexer::T_COMMA)) {
++            $this->match(DocLexer::T_COMMA);
++
++            if ($this->lexer->isNextToken(DocLexer::T_CLOSE_PARENTHESIS)) {
++                break;
++            }
++
++            $token = $this->lexer->lookahead;
++            $value = $this->Value();
++
++            if ( ! is_object($value) && ! is_array($value)) {
++                $this->syntaxError('Value', $token);
++            }
++
++            $values[] = $value;
++        }
++
++        foreach ($values as $k => $value) {
++            if (is_object($value) && $value instanceof \stdClass) {
++                $values[$value->name] = $value->value;
++            } else if ( ! isset($values['value'])){
++                $values['value'] = $value;
++            } else {
++                if ( ! is_array($values['value'])) {
++                    $values['value'] = array($values['value']);
++                }
++
++                $values['value'][] = $value;
++            }
++
++            unset($values[$k]);
++        }
++
++        return $values;
++    }
++
++    /**
++     * Constant ::= integer | string | float | boolean
++     *
++     * @return mixed
++     *
++     * @throws AnnotationException
++     */
++    private function Constant()
++    {
++        $identifier = $this->Identifier();
++
++        if ( ! defined($identifier) && false !== strpos($identifier, '::') && '\\' !== $identifier[0]) {
++            list($className, $const) = explode('::', $identifier);
++
++            $alias = (false === $pos = strpos($className, '\\')) ? $className : substr($className, 0, $pos);
++            $found = false;
++
++            switch (true) {
++                case !empty ($this->namespaces):
++                    foreach ($this->namespaces as $ns) {
++                        if (class_exists($ns.'\\'.$className) || interface_exists($ns.'\\'.$className)) {
++                             $className = $ns.'\\'.$className;
++                             $found = true;
++                             break;
++                        }
++                    }
++                    break;
++
++                case isset($this->imports[$loweredAlias = strtolower($alias)]):
++                    $found     = true;
++                    $className = (false !== $pos)
++                        ? $this->imports[$loweredAlias] . substr($className, $pos)
++                        : $this->imports[$loweredAlias];
++                    break;
++
++                default:
++                    if(isset($this->imports['__NAMESPACE__'])) {
++                        $ns = $this->imports['__NAMESPACE__'];
++
++                        if (class_exists($ns.'\\'.$className) || interface_exists($ns.'\\'.$className)) {
++                            $className = $ns.'\\'.$className;
++                            $found = true;
++                        }
++                    }
++                    break;
++            }
++
++            if ($found) {
++                 $identifier = $className . '::' . $const;
++            }
++        }
++
++        // checks if identifier ends with ::class, \strlen('::class') === 7
++        $classPos = stripos($identifier, '::class');
++        if ($classPos === strlen($identifier) - 7) {
++            return substr($identifier, 0, $classPos);
++        }
++
++        if (!defined($identifier)) {
++            throw AnnotationException::semanticalErrorConstants($identifier, $this->context);
++        }
++
++        return constant($identifier);
++    }
++
++    /**
++     * Identifier ::= string
++     *
++     * @return string
++     */
++    private function Identifier()
++    {
++        // check if we have an annotation
++        if ( ! $this->lexer->isNextTokenAny(self::$classIdentifiers)) {
++            $this->syntaxError('namespace separator or identifier');
++        }
++
++        $this->lexer->moveNext();
++
++        $className = $this->lexer->token['value'];
++
++        $position = isset($this->lexer->lookahead) ? $this->lexer->lookahead['position'] : null;
++        while ($position === ($this->lexer->token['position'] + strlen($this->lexer->token['value']))
++                && $this->lexer->isNextToken(DocLexer::T_NAMESPACE_SEPARATOR)) {
++
++            $this->match(DocLexer::T_NAMESPACE_SEPARATOR);
++            $this->matchAny(self::$classIdentifiers);
++
++            $className .= '\\' . $this->lexer->token['value'];
++
++            $position = isset($this->lexer->lookahead) ? $this->lexer->lookahead['position'] : null;
++        }
++
++        return $className;
++    }
++
++    /**
++     * Value ::= PlainValue | FieldAssignment
++     *
++     * @return mixed
++     */
++    private function Value()
++    {
++        $peek = $this->lexer->glimpse();
++
++        if (DocLexer::T_EQUALS === $peek['type']) {
++            return $this->FieldAssignment();
++        }
++
++        return $this->PlainValue();
++    }
++
++    /**
++     * PlainValue ::= integer | string | float | boolean | Array | Annotation
++     *
++     * @return mixed
++     */
++    private function PlainValue()
++    {
++        if ($this->lexer->isNextToken(DocLexer::T_OPEN_CURLY_BRACES)) {
++            return $this->Arrayx();
++        }
++
++        if ($this->lexer->isNextToken(DocLexer::T_AT)) {
++            return $this->Annotation();
++        }
++
++        if ($this->lexer->isNextToken(DocLexer::T_IDENTIFIER)) {
++            return $this->Constant();
++        }
++
++        switch ($this->lexer->lookahead['type']) {
++            case DocLexer::T_STRING:
++                $this->match(DocLexer::T_STRING);
++                return $this->lexer->token['value'];
++
++            case DocLexer::T_INTEGER:
++                $this->match(DocLexer::T_INTEGER);
++                return (int)$this->lexer->token['value'];
++
++            case DocLexer::T_FLOAT:
++                $this->match(DocLexer::T_FLOAT);
++                return (float)$this->lexer->token['value'];
++
++            case DocLexer::T_TRUE:
++                $this->match(DocLexer::T_TRUE);
++                return true;
++
++            case DocLexer::T_FALSE:
++                $this->match(DocLexer::T_FALSE);
++                return false;
++
++            case DocLexer::T_NULL:
++                $this->match(DocLexer::T_NULL);
++                return null;
++
++            default:
++                $this->syntaxError('PlainValue');
++        }
++    }
++
++    /**
++     * FieldAssignment ::= FieldName "=" PlainValue
++     * FieldName ::= identifier
++     *
++     * @return array
++     */
++    private function FieldAssignment()
++    {
++        $this->match(DocLexer::T_IDENTIFIER);
++        $fieldName = $this->lexer->token['value'];
++
++        $this->match(DocLexer::T_EQUALS);
++
++        $item = new \stdClass();
++        $item->name  = $fieldName;
++        $item->value = $this->PlainValue();
++
++        return $item;
++    }
++
++    /**
++     * Array ::= "{" ArrayEntry {"," ArrayEntry}* [","] "}"
++     *
++     * @return array
++     */
++    private function Arrayx()
++    {
++        $array = $values = array();
++
++        $this->match(DocLexer::T_OPEN_CURLY_BRACES);
++
++        // If the array is empty, stop parsing and return.
++        if ($this->lexer->isNextToken(DocLexer::T_CLOSE_CURLY_BRACES)) {
++            $this->match(DocLexer::T_CLOSE_CURLY_BRACES);
++
++            return $array;
++        }
++
++        $values[] = $this->ArrayEntry();
++
++        while ($this->lexer->isNextToken(DocLexer::T_COMMA)) {
++            $this->match(DocLexer::T_COMMA);
++
++            // optional trailing comma
++            if ($this->lexer->isNextToken(DocLexer::T_CLOSE_CURLY_BRACES)) {
++                break;
++            }
++
++            $values[] = $this->ArrayEntry();
++        }
++
++        $this->match(DocLexer::T_CLOSE_CURLY_BRACES);
++
++        foreach ($values as $value) {
++            list ($key, $val) = $value;
++
++            if ($key !== null) {
++                $array[$key] = $val;
++            } else {
++                $array[] = $val;
++            }
++        }
++
++        return $array;
++    }
++
++    /**
++     * ArrayEntry ::= Value | KeyValuePair
++     * KeyValuePair ::= Key ("=" | ":") PlainValue | Constant
++     * Key ::= string | integer | Constant
++     *
++     * @return array
++     */
++    private function ArrayEntry()
++    {
++        $peek = $this->lexer->glimpse();
++
++        if (DocLexer::T_EQUALS === $peek['type']
++                || DocLexer::T_COLON === $peek['type']) {
++
++            if ($this->lexer->isNextToken(DocLexer::T_IDENTIFIER)) {
++                $key = $this->Constant();
++            } else {
++                $this->matchAny(array(DocLexer::T_INTEGER, DocLexer::T_STRING));
++                $key = $this->lexer->token['value'];
++            }
++
++            $this->matchAny(array(DocLexer::T_EQUALS, DocLexer::T_COLON));
++
++            return array($key, $this->PlainValue());
++        }
++
++        return array(null, $this->Value());
++    }
++}
+diff --git a/core/lib/Drupal/Component/Annotation/Doctrine/SimpleAnnotationReader.php b/core/lib/Drupal/Component/Annotation/Doctrine/SimpleAnnotationReader.php
+new file mode 100644
+index 0000000000..20f6d19dfc
+--- /dev/null
++++ b/core/lib/Drupal/Component/Annotation/Doctrine/SimpleAnnotationReader.php
+@@ -0,0 +1,142 @@
++<?php
++// @codingStandardsIgnoreFile
++
++namespace Drupal\Component\Annotation\Doctrine;
++
++use Doctrine\Common\Annotations\Reader;
++
++/**
++ * Simple Annotation Reader.
 + *
-+ * @deprecated in drupal:8.8.0 and is removed from drupal:9.0.0. This function
-+ *   supports the --browser option in this script. Use the --verbose option
-+ *   instead.
++ * This class is a near-copy of
++ * Doctrine\Common\Annotations\SimpleAnnotationReader, which is part of the
++ * Doctrine project: <http://www.doctrine-project.org>
 + *
-+ * @see https://www.drupal.org/node/3083549
++ * Drupal adds its own version of DocParser and allows for ignoring common
++ * annotations.
 + *
-+ * @todo Remove this in https://www.drupal.org/project/drupal/issues/3075490.
-  */
- function simpletest_script_open_browser() {
--  global $test_ids;
--
--  try {
--    $connection = Database::getConnection('default', 'test-runner');
--    $results = $connection->select('simpletest')
--      ->fields('simpletest')
--      ->condition('test_id', $test_ids, 'IN')
--      ->orderBy('test_class')
--      ->orderBy('message_id')
--      ->execute()
--      ->fetchAll();
--  }
--  catch (Exception $e) {
--    echo (string) $e;
--    exit(SIMPLETEST_SCRIPT_EXIT_EXCEPTION);
--  }
--
--  // Get the results form.
--  $form = [];
--  SimpletestResultsForm::addResultForm($form, $results);
--
--  // Get the assets to make the details element collapsible and theme the result
--  // form.
--  $assets = new AttachedAssets();
--  $assets->setLibraries([
--    'core/drupal.collapse',
--    'system/admin',
--    'simpletest/drupal.simpletest',
--  ]);
--  $resolver = \Drupal::service('asset.resolver');
--  list($js_assets_header, $js_assets_footer) = $resolver->getJsAssets($assets, FALSE);
--  $js_collection_renderer = \Drupal::service('asset.js.collection_renderer');
--  $js_assets_header = $js_collection_renderer->render($js_assets_header);
--  $js_assets_footer = $js_collection_renderer->render($js_assets_footer);
--  $css_assets = \Drupal::service('asset.css.collection_renderer')->render($resolver->getCssAssets($assets, FALSE));
--
--  // Make the html page to write to disk.
--  $render_service = \Drupal::service('renderer');
--  $html = '<head>' . $render_service->renderPlain($js_assets_header) . $render_service->renderPlain($css_assets) . '</head><body>' . $render_service->renderPlain($form) . $render_service->renderPlain($js_assets_footer) . '</body>';
--
--  // Ensure we have assets verbose directory - tests with no verbose output will
--  // not have created one.
--  $directory = PublicStream::basePath() . '/simpletest/verbose';
--  \Drupal::service('file_system')->prepareDirectory($directory, FileSystemInterface::CREATE_DIRECTORY | FileSystemInterface::MODIFY_PERMISSIONS);
--  $php = new Php();
--  $uuid = $php->generate();
--  $filename = $directory . '/results-' . $uuid . '.html';
--  $base_url = getenv('SIMPLETEST_BASE_URL');
--  if (empty($base_url)) {
--    simpletest_script_print_error("--browser needs argument --url.");
--  }
--  $url = $base_url . '/' . PublicStream::basePath() . '/simpletest/verbose/results-' . $uuid . '.html';
--  file_put_contents($filename, $html);
--
--  // See if we can find an OS helper to open URLs in default browser.
--  $browser = FALSE;
--  if (shell_exec('which xdg-open')) {
--    $browser = 'xdg-open';
--  }
--  elseif (shell_exec('which open')) {
--    $browser = 'open';
--  }
--  elseif (substr(PHP_OS, 0, 3) == 'WIN') {
--    $browser = 'start';
--  }
--
--  if ($browser) {
--    shell_exec($browser . ' ' . escapeshellarg($url));
--  }
--  else {
--    // Can't find assets valid browser.
--    print 'Open file://' . realpath($filename) . ' in your browser to see the verbose output.';
-+  // Note: the user already has received a message about the deprecation in CLI
-+  // so we trigger an error just in case this method has been used as API.
-+  @trigger_error('The --browser option is deprecated in drupal:8.8.0 and is removed from drupal:9.0.0. Use --verbose instead. See https://www.drupal.org/node/3083549', E_USER_DEPRECATED);
-+  if (function_exists('_simpletest_run_tests_script_open_browser')) {
-+    return _simpletest_run_tests_script_open_browser();
-   }
-+  simpletest_script_print_error('In order to use the --browser option the Simpletest module must be available. See https://www.drupal.org/node/3083549.');
- }
++ * @internal
++ */
++final class SimpleAnnotationReader implements Reader
++{
++
++    protected $ignoredAnnotations = [
++      'addtogroup' => TRUE,
++      'code' => TRUE,
++      'defgroup' => TRUE,
++      'deprecated' => TRUE,
++      'endcode' => TRUE,
++      'endlink' => TRUE,
++      'file' => TRUE,
++      'ingroup' => TRUE,
++      'group' => TRUE,
++      'link' => TRUE,
++      'mainpage' => TRUE,
++      'param' => TRUE,
++      'ref' => TRUE,
++      'return' => TRUE,
++      'section' => TRUE,
++      'see' => TRUE,
++      'subsection' => TRUE,
++      'throws' => TRUE,
++      'todo' => TRUE,
++      'var' => TRUE,
++      '{' => TRUE,
++      '}' => TRUE,
++    ];
++
++    /**
++     * @var DocParser
++     */
++    private $parser;
++
++    /**
++     * Constructor.
++     *
++     * Initializes a new SimpleAnnotationReader.
++     */
++    public function __construct()
++    {
++        $this->parser = new DocParser();
++        $this->parser->setIgnoreNotImportedAnnotations(true);
++        $this->parser->setIgnoredAnnotationNames($this->ignoredAnnotations);
++    }
++
++    /**
++     * Adds a namespace in which we will look for annotations.
++     *
++     * @param string $namespace
++     *
++     * @return void
++     */
++    public function addNamespace($namespace)
++    {
++        $this->parser->addNamespace($namespace);
++    }
++
++    /**
++     * {@inheritDoc}
++     */
++    public function getClassAnnotations(\ReflectionClass $class)
++    {
++        return $this->parser->parse($class->getDocComment(), 'class '.$class->getName());
++    }
++
++    /**
++     * {@inheritDoc}
++     */
++    public function getMethodAnnotations(\ReflectionMethod $method)
++    {
++        return $this->parser->parse($method->getDocComment(), 'method '.$method->getDeclaringClass()->name.'::'.$method->getName().'()');
++    }
++
++    /**
++     * {@inheritDoc}
++     */
++    public function getPropertyAnnotations(\ReflectionProperty $property)
++    {
++        return $this->parser->parse($property->getDocComment(), 'property '.$property->getDeclaringClass()->name.'::$'.$property->getName());
++    }
++
++    /**
++     * {@inheritDoc}
++     */
++    public function getClassAnnotation(\ReflectionClass $class, $annotationName)
++    {
++        foreach ($this->getClassAnnotations($class) as $annot) {
++            if ($annot instanceof $annotationName) {
++                return $annot;
++            }
++        }
++
++        return null;
++    }
++
++    /**
++     * {@inheritDoc}
++     */
++    public function getMethodAnnotation(\ReflectionMethod $method, $annotationName)
++    {
++        foreach ($this->getMethodAnnotations($method) as $annot) {
++            if ($annot instanceof $annotationName) {
++                return $annot;
++            }
++        }
++
++        return null;
++    }
++
++    /**
++     * {@inheritDoc}
++     */
++    public function getPropertyAnnotation(\ReflectionProperty $property, $annotationName)
++    {
++        foreach ($this->getPropertyAnnotations($property) as $annot) {
++            if ($annot instanceof $annotationName) {
++                return $annot;
++            }
++        }
++
++        return null;
++    }
++}
+diff --git a/core/lib/Drupal/Component/Annotation/Plugin/Discovery/AnnotatedClassDiscovery.php b/core/lib/Drupal/Component/Annotation/Plugin/Discovery/AnnotatedClassDiscovery.php
+index 61213cfcac..e008ed5ed7 100644
+--- a/core/lib/Drupal/Component/Annotation/Plugin/Discovery/AnnotatedClassDiscovery.php
++++ b/core/lib/Drupal/Component/Annotation/Plugin/Discovery/AnnotatedClassDiscovery.php
+@@ -5,8 +5,8 @@
+ use Drupal\Component\Annotation\AnnotationInterface;
+ use Drupal\Component\FileCache\FileCacheFactory;
+ use Drupal\Component\Plugin\Discovery\DiscoveryInterface;
++use Drupal\Component\Annotation\Doctrine\SimpleAnnotationReader;
+ use Drupal\Component\Annotation\Reflection\MockFileFinder;
+-use Doctrine\Common\Annotations\SimpleAnnotationReader;
+ use Doctrine\Common\Annotations\AnnotationRegistry;
+ use Doctrine\Common\Reflection\StaticReflectionParser;
+ use Drupal\Component\Plugin\Discovery\DiscoveryTrait;
+diff --git a/core/lib/Drupal/Component/Annotation/composer.json b/core/lib/Drupal/Component/Annotation/composer.json
+index 49e0ced813..490d17556c 100644
+--- a/core/lib/Drupal/Component/Annotation/composer.json
++++ b/core/lib/Drupal/Component/Annotation/composer.json
+@@ -7,7 +7,7 @@
+   "require": {
+     "php": ">=7.0.8",
+     "doctrine/common": "^2.5",
+-    "doctrine/annotations": "1.2.*",
++    "doctrine/annotations": "^1.2",
+     "drupal/core-file-cache": "^8.2",
+     "drupal/core-plugin": "^8.2",
+     "drupal/core-utility": "^8.2"
+diff --git a/core/lib/Drupal/Core/Security/PharExtensionInterceptor.php b/core/lib/Drupal/Core/Security/PharExtensionInterceptor.php
+index a13e8ce819..0d8e8e8304 100644
+--- a/core/lib/Drupal/Core/Security/PharExtensionInterceptor.php
++++ b/core/lib/Drupal/Core/Security/PharExtensionInterceptor.php
+@@ -31,7 +31,7 @@ class PharExtensionInterceptor implements Assertable {
+    * @throws \TYPO3\PharStreamWrapper\Exception
+    *   Thrown when the file is not allowed to execute.
+    */
+-  public function assert($path, $command) {
++  public function assert(string $path, string $command): bool {
+     if ($this->baseFileContainsPharExtension($path)) {
+       return TRUE;
+     }
+diff --git a/core/tests/Drupal/Tests/Component/Annotation/Doctrine/DocParserIgnoredClassesTest.php b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/DocParserIgnoredClassesTest.php
+new file mode 100644
+index 0000000000..addbec1a74
+--- /dev/null
++++ b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/DocParserIgnoredClassesTest.php
+@@ -0,0 +1,43 @@
++<?php
++
++namespace Drupal\Tests\Component\Annotation\Doctrine;
++
++use Drupal\Component\Annotation\Doctrine\DocParser;
++use PHPUnit\Framework\TestCase;
++
++/**
++ * @coversDefaultClass \Drupal\Component\Annotation\Doctrine\DocParser
++ *
++ * @group Annotation
++ */
++class DocParserIgnoredClassesTest extends TestCase {
++
++  /**
++   * Ensure annotations can be ignored when namespaces are present.
++   *
++   * Drupal's DocParser should never use class_exists() on an ignored
++   * annotation, including cases where namespaces are set.
++   */
++  public function testIgnoredAnnotationSkippedBeforeReflection() {
++    $annotation = 'neverReflectThis';
++    $parser = new DocParser();
++    $parser->setIgnoredAnnotationNames([$annotation => TRUE]);
++    $parser->addNamespace('\\Arbitrary\\Namespace');
++
++    // Register our class loader which will fail if the parser tries to
++    // autoload disallowed annotations.
++    $autoloader = function ($class_name) use ($annotation) {
++      $name_array = explode('\\', $class_name);
++      $name = array_pop($name_array);
++      if ($name == $annotation) {
++        $this->fail('Attempted to autoload an ignored annotation: ' . $name);
++      }
++    };
++    spl_autoload_register($autoloader, TRUE, TRUE);
++    // Perform the parse.
++    $this->assertEmpty($parser->parse('@neverReflectThis'));
++    // Clean up after ourselves.
++    spl_autoload_unregister($autoloader);
++  }
++
++}
+diff --git a/core/tests/Drupal/Tests/Component/Annotation/Doctrine/DocParserTest.php b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/DocParserTest.php
+new file mode 100644
+index 0000000000..ab21511e78
+--- /dev/null
++++ b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/DocParserTest.php
+@@ -0,0 +1,1377 @@
++<?php
++// @codingStandardsIgnoreFile
++
++namespace Drupal\Tests\Component\Annotation\Doctrine;
++
++use Doctrine\Common\Annotations\DocParser;
++use Doctrine\Common\Annotations\AnnotationRegistry;
++use Doctrine\Common\Annotations\Annotation\Target;
++use Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationWithConstants;
++use Drupal\Tests\Component\Annotation\Doctrine\Fixtures\ClassWithConstants;
++use Drupal\Tests\Component\Annotation\Doctrine\Fixtures\IntefaceWithConstants;
++use PHPUnit\Framework\TestCase;
++
++/**
++ * @coversDefaultClass \Drupal\Component\Annotation\Doctrine\DocParser
++ *
++ * @group Annotation
++ */
++class DocParserTest extends TestCase
++{
++    public function testNestedArraysWithNestedAnnotation()
++    {
++        $parser = $this->createTestParser();
++
++        // Nested arrays with nested annotations
++        $result = $parser->parse('@Name(foo={1,2, {"key"=@Name}})');
++        $annot = $result[0];
++
++        $this->assertTrue($annot instanceof Name);
++        $this->assertNull($annot->value);
++        $this->assertEquals(3, count($annot->foo));
++        $this->assertEquals(1, $annot->foo[0]);
++        $this->assertEquals(2, $annot->foo[1]);
++        $this->assertTrue(is_array($annot->foo[2]));
++
++        $nestedArray = $annot->foo[2];
++        $this->assertTrue(isset($nestedArray['key']));
++        $this->assertTrue($nestedArray['key'] instanceof Name);
++    }
++
++    public function testBasicAnnotations()
++    {
++        $parser = $this->createTestParser();
++
++        // Marker annotation
++        $result = $parser->parse("@Name");
++        $annot = $result[0];
++        $this->assertTrue($annot instanceof Name);
++        $this->assertNull($annot->value);
++        $this->assertNull($annot->foo);
++
++        // Associative arrays
++        $result = $parser->parse('@Name(foo={"key1" = "value1"})');
++        $annot = $result[0];
++        $this->assertNull($annot->value);
++        $this->assertTrue(is_array($annot->foo));
++        $this->assertTrue(isset($annot->foo['key1']));
++
++        // Numerical arrays
++        $result = $parser->parse('@Name({2="foo", 4="bar"})');
++        $annot = $result[0];
++        $this->assertTrue(is_array($annot->value));
++        $this->assertEquals('foo', $annot->value[2]);
++        $this->assertEquals('bar', $annot->value[4]);
++        $this->assertFalse(isset($annot->value[0]));
++        $this->assertFalse(isset($annot->value[1]));
++        $this->assertFalse(isset($annot->value[3]));
++
++        // Multiple values
++        $result = $parser->parse('@Name(@Name, @Name)');
++        $annot = $result[0];
++
++        $this->assertTrue($annot instanceof Name);
++        $this->assertTrue(is_array($annot->value));
++        $this->assertTrue($annot->value[0] instanceof Name);
++        $this->assertTrue($annot->value[1] instanceof Name);
++
++        // Multiple types as values
++        $result = $parser->parse('@Name(foo="Bar", @Name, {"key1"="value1", "key2"="value2"})');
++        $annot = $result[0];
++
++        $this->assertTrue($annot instanceof Name);
++        $this->assertTrue(is_array($annot->value));
++        $this->assertTrue($annot->value[0] instanceof Name);
++        $this->assertTrue(is_array($annot->value[1]));
++        $this->assertEquals('value1', $annot->value[1]['key1']);
++        $this->assertEquals('value2', $annot->value[1]['key2']);
++
++        // Complete docblock
++        $docblock = <<<DOCBLOCK
++/**
++ * Some nifty class.
++ *
++ * @author Mr.X
++ * @Name(foo="bar")
++ */
++DOCBLOCK;
++
++        $result = $parser->parse($docblock);
++        $this->assertEquals(1, count($result));
++        $annot = $result[0];
++        $this->assertTrue($annot instanceof Name);
++        $this->assertEquals("bar", $annot->foo);
++        $this->assertNull($annot->value);
++   }
++
++    public function testDefaultValueAnnotations()
++    {
++        $parser = $this->createTestParser();
++
++        // Array as first value
++        $result = $parser->parse('@Name({"key1"="value1"})');
++        $annot = $result[0];
++
++        $this->assertTrue($annot instanceof Name);
++        $this->assertTrue(is_array($annot->value));
++        $this->assertEquals('value1', $annot->value['key1']);
++
++        // Array as first value and additional values
++        $result = $parser->parse('@Name({"key1"="value1"}, foo="bar")');
++        $annot = $result[0];
++
++        $this->assertTrue($annot instanceof Name);
++        $this->assertTrue(is_array($annot->value));
++        $this->assertEquals('value1', $annot->value['key1']);
++        $this->assertEquals('bar', $annot->foo);
++    }
++
++    public function testNamespacedAnnotations()
++    {
++        $parser = new DocParser;
++        $parser->setIgnoreNotImportedAnnotations(true);
++
++        $docblock = <<<DOCBLOCK
++/**
++ * Some nifty class.
++ *
++ * @package foo
++ * @subpackage bar
++ * @author Mr.X <mr@x.com>
++ * @Drupal\Tests\Component\Annotation\Doctrine\Name(foo="bar")
++ * @ignore
++ */
++DOCBLOCK;
++
++        $result = $parser->parse($docblock);
++        $this->assertEquals(1, count($result));
++        $annot = $result[0];
++        $this->assertTrue($annot instanceof Name);
++        $this->assertEquals("bar", $annot->foo);
++    }
++
++    /**
++     * @group debug
++     */
++    public function testTypicalMethodDocBlock()
++    {
++        $parser = $this->createTestParser();
++
++        $docblock = <<<DOCBLOCK
++/**
++ * Some nifty method.
++ *
++ * @since 2.0
++ * @Drupal\Tests\Component\Annotation\Doctrine\Name(foo="bar")
++ * @param string \$foo This is foo.
++ * @param mixed \$bar This is bar.
++ * @return string Foo and bar.
++ * @This is irrelevant
++ * @Marker
++ */
++DOCBLOCK;
++
++        $result = $parser->parse($docblock);
++        $this->assertEquals(2, count($result));
++        $this->assertTrue(isset($result[0]));
++        $this->assertTrue(isset($result[1]));
++        $annot = $result[0];
++        $this->assertTrue($annot instanceof Name);
++        $this->assertEquals("bar", $annot->foo);
++        $marker = $result[1];
++        $this->assertTrue($marker instanceof Marker);
++    }
++
++
++    public function testAnnotationWithoutConstructor()
++    {
++        $parser = $this->createTestParser();
++
++
++        $docblock = <<<DOCBLOCK
++/**
++ * @SomeAnnotationClassNameWithoutConstructor("Some data")
++ */
++DOCBLOCK;
++
++        $result     = $parser->parse($docblock);
++        $this->assertEquals(count($result), 1);
++        $annot      = $result[0];
++
++        $this->assertNotNull($annot);
++        $this->assertTrue($annot instanceof SomeAnnotationClassNameWithoutConstructor);
++
++        $this->assertNull($annot->name);
++        $this->assertNotNull($annot->data);
++        $this->assertEquals($annot->data, "Some data");
++
++
++
++
++$docblock = <<<DOCBLOCK
++/**
++ * @SomeAnnotationClassNameWithoutConstructor(name="Some Name", data = "Some data")
++ */
++DOCBLOCK;
++
++
++        $result     = $parser->parse($docblock);
++        $this->assertEquals(count($result), 1);
++        $annot      = $result[0];
++
++        $this->assertNotNull($annot);
++        $this->assertTrue($annot instanceof SomeAnnotationClassNameWithoutConstructor);
++
++        $this->assertEquals($annot->name, "Some Name");
++        $this->assertEquals($annot->data, "Some data");
++
++
++
++
++$docblock = <<<DOCBLOCK
++/**
++ * @SomeAnnotationClassNameWithoutConstructor(data = "Some data")
++ */
++DOCBLOCK;
++
++        $result     = $parser->parse($docblock);
++        $this->assertEquals(count($result), 1);
++        $annot      = $result[0];
++
++        $this->assertEquals($annot->data, "Some data");
++        $this->assertNull($annot->name);
++
++
++        $docblock = <<<DOCBLOCK
++/**
++ * @SomeAnnotationClassNameWithoutConstructor(name = "Some name")
++ */
++DOCBLOCK;
++
++        $result     = $parser->parse($docblock);
++        $this->assertEquals(count($result), 1);
++        $annot      = $result[0];
++
++        $this->assertEquals($annot->name, "Some name");
++        $this->assertNull($annot->data);
++
++        $docblock = <<<DOCBLOCK
++/**
++ * @SomeAnnotationClassNameWithoutConstructor("Some data")
++ */
++DOCBLOCK;
++
++        $result     = $parser->parse($docblock);
++        $this->assertEquals(count($result), 1);
++        $annot      = $result[0];
++
++        $this->assertEquals($annot->data, "Some data");
++        $this->assertNull($annot->name);
++
++
++
++        $docblock = <<<DOCBLOCK
++/**
++ * @SomeAnnotationClassNameWithoutConstructor("Some data",name = "Some name")
++ */
++DOCBLOCK;
++
++        $result     = $parser->parse($docblock);
++        $this->assertEquals(count($result), 1);
++        $annot      = $result[0];
++
++        $this->assertEquals($annot->name, "Some name");
++        $this->assertEquals($annot->data, "Some data");
++
++
++        $docblock = <<<DOCBLOCK
++/**
++ * @SomeAnnotationWithConstructorWithoutParams(name = "Some name")
++ */
++DOCBLOCK;
++
++        $result     = $parser->parse($docblock);
++        $this->assertEquals(count($result), 1);
++        $annot      = $result[0];
++
++        $this->assertEquals($annot->name, "Some name");
++        $this->assertEquals($annot->data, "Some data");
++
++        $docblock = <<<DOCBLOCK
++/**
++ * @SomeAnnotationClassNameWithoutConstructorAndProperties()
++ */
++DOCBLOCK;
++
++        $result     = $parser->parse($docblock);
++        $this->assertEquals(count($result), 1);
++        $this->assertTrue($result[0] instanceof SomeAnnotationClassNameWithoutConstructorAndProperties);
++    }
++
++    public function testAnnotationTarget()
++    {
++
++        $parser = new DocParser;
++        $parser->setImports(array(
++            '__NAMESPACE__' => 'Drupal\Tests\Component\Annotation\Doctrine\Fixtures',
++        ));
++        $class  = new \ReflectionClass('Drupal\Tests\Component\Annotation\Doctrine\Fixtures\ClassWithValidAnnotationTarget');
++
++
++        $context    = 'class ' . $class->getName();
++        $docComment = $class->getDocComment();
++
++        $parser->setTarget(Target::TARGET_CLASS);
++        $this->assertNotNull($parser->parse($docComment,$context));
++
++
++        $property   = $class->getProperty('foo');
++        $docComment = $property->getDocComment();
++        $context    = 'property ' . $class->getName() . "::\$" . $property->getName();
++
++        $parser->setTarget(Target::TARGET_PROPERTY);
++        $this->assertNotNull($parser->parse($docComment,$context));
++
++
++
++        $method     = $class->getMethod('someFunction');
++        $docComment = $property->getDocComment();
++        $context    = 'method ' . $class->getName() . '::' . $method->getName() . '()';
++
++        $parser->setTarget(Target::TARGET_METHOD);
++        $this->assertNotNull($parser->parse($docComment,$context));
++
++
++        try {
++            $class      = new \ReflectionClass('Drupal\Tests\Component\Annotation\Doctrine\Fixtures\ClassWithInvalidAnnotationTargetAtClass');
++            $context    = 'class ' . $class->getName();
++            $docComment = $class->getDocComment();
++
++            $parser->setTarget(Target::TARGET_CLASS);
++            $parser->parse($docComment, $context);
++
++            $this->fail();
++        } catch (\Doctrine\Common\Annotations\AnnotationException $exc) {
++            $this->assertNotNull($exc->getMessage());
++        }
++
++
++        try {
++
++            $class      = new \ReflectionClass('Drupal\Tests\Component\Annotation\Doctrine\Fixtures\ClassWithInvalidAnnotationTargetAtMethod');
++            $method     = $class->getMethod('functionName');
++            $docComment = $method->getDocComment();
++            $context    = 'method ' . $class->getName() . '::' . $method->getName() . '()';
++
++            $parser->setTarget(Target::TARGET_METHOD);
++            $parser->parse($docComment, $context);
++
++            $this->fail();
++        } catch (\Doctrine\Common\Annotations\AnnotationException $exc) {
++            $this->assertNotNull($exc->getMessage());
++        }
++
++
++        try {
++            $class      = new \ReflectionClass('Drupal\Tests\Component\Annotation\Doctrine\Fixtures\ClassWithInvalidAnnotationTargetAtProperty');
++            $property   = $class->getProperty('foo');
++            $docComment = $property->getDocComment();
++            $context    = 'property ' . $class->getName() . "::\$" . $property->getName();
++
++            $parser->setTarget(Target::TARGET_PROPERTY);
++            $parser->parse($docComment, $context);
++
++            $this->fail();
++        } catch (\Doctrine\Common\Annotations\AnnotationException $exc) {
++            $this->assertNotNull($exc->getMessage());
++        }
++
++    }
++
++    public function getAnnotationVarTypeProviderValid()
++    {
++        //({attribute name}, {attribute value})
++         return array(
++            // mixed type
++            array('mixed', '"String Value"'),
++            array('mixed', 'true'),
++            array('mixed', 'false'),
++            array('mixed', '1'),
++            array('mixed', '1.2'),
++            array('mixed', '@Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationTargetAll'),
++
++            // boolean type
++            array('boolean', 'true'),
++            array('boolean', 'false'),
++
++            // alias for internal type boolean
++            array('bool', 'true'),
++            array('bool', 'false'),
++
++            // integer type
++            array('integer', '0'),
++            array('integer', '1'),
++            array('integer', '123456789'),
++            array('integer', '9223372036854775807'),
++
++            // alias for internal type double
++            array('float', '0.1'),
++            array('float', '1.2'),
++            array('float', '123.456'),
++
++            // string type
++            array('string', '"String Value"'),
++            array('string', '"true"'),
++            array('string', '"123"'),
++
++              // array type
++            array('array', '{@AnnotationExtendsAnnotationTargetAll}'),
++            array('array', '{@AnnotationExtendsAnnotationTargetAll,@AnnotationExtendsAnnotationTargetAll}'),
++
++            array('arrayOfIntegers', '1'),
++            array('arrayOfIntegers', '{1}'),
++            array('arrayOfIntegers', '{1,2,3,4}'),
++            array('arrayOfAnnotations', '@AnnotationExtendsAnnotationTargetAll'),
++            array('arrayOfAnnotations', '{@Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationTargetAll}'),
++            array('arrayOfAnnotations', '{@AnnotationExtendsAnnotationTargetAll, @Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationTargetAll}'),
++
++            // annotation instance
++            array('annotation', '@Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationTargetAll'),
++            array('annotation', '@AnnotationExtendsAnnotationTargetAll'),
++        );
++    }
++
++    public function getAnnotationVarTypeProviderInvalid()
++    {
++         //({attribute name}, {type declared type}, {attribute value} , {given type or class})
++         return array(
++            // boolean type
++            array('boolean','boolean','1','integer'),
++            array('boolean','boolean','1.2','double'),
++            array('boolean','boolean','"str"','string'),
++            array('boolean','boolean','{1,2,3}','array'),
++            array('boolean','boolean','@Name', 'an instance of Drupal\Tests\Component\Annotation\Doctrine\Name'),
++
++            // alias for internal type boolean
++            array('bool','bool', '1','integer'),
++            array('bool','bool', '1.2','double'),
++            array('bool','bool', '"str"','string'),
++            array('bool','bool', '{"str"}','array'),
++
++            // integer type
++            array('integer','integer', 'true','boolean'),
++            array('integer','integer', 'false','boolean'),
++            array('integer','integer', '1.2','double'),
++            array('integer','integer', '"str"','string'),
++            array('integer','integer', '{"str"}','array'),
++            array('integer','integer', '{1,2,3,4}','array'),
++
++            // alias for internal type double
++            array('float','float', 'true','boolean'),
++            array('float','float', 'false','boolean'),
++            array('float','float', '123','integer'),
++            array('float','float', '"str"','string'),
++            array('float','float', '{"str"}','array'),
++            array('float','float', '{12.34}','array'),
++            array('float','float', '{1,2,3}','array'),
++
++            // string type
++            array('string','string', 'true','boolean'),
++            array('string','string', 'false','boolean'),
++            array('string','string', '12','integer'),
++            array('string','string', '1.2','double'),
++            array('string','string', '{"str"}','array'),
++            array('string','string', '{1,2,3,4}','array'),
++
++             // annotation instance
++            array('annotation','Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationTargetAll', 'true','boolean'),
++            array('annotation','Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationTargetAll', 'false','boolean'),
++            array('annotation','Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationTargetAll', '12','integer'),
++            array('annotation','Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationTargetAll', '1.2','double'),
++            array('annotation','Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationTargetAll', '{"str"}','array'),
++            array('annotation','Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationTargetAll', '{1,2,3,4}','array'),
++            array('annotation','Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationTargetAll', '@Name','an instance of Drupal\Tests\Component\Annotation\Doctrine\Name'),
++        );
++    }
++
++    public function getAnnotationVarTypeArrayProviderInvalid()
++    {
++         //({attribute name}, {type declared type}, {attribute value} , {given type or class})
++         return array(
++            array('arrayOfIntegers', 'integer', 'true', 'boolean'),
++            array('arrayOfIntegers', 'integer', 'false', 'boolean'),
++            array('arrayOfIntegers', 'integer', '{true,true}', 'boolean'),
++            array('arrayOfIntegers', 'integer', '{1,true}', 'boolean'),
++            array('arrayOfIntegers', 'integer', '{1,2,1.2}', 'double'),
++            array('arrayOfIntegers', 'integer', '{1,2,"str"}', 'string'),
++
++            array('arrayOfStrings', 'string', 'true', 'boolean'),
++            array('arrayOfStrings', 'string', 'false', 'boolean'),
++            array('arrayOfStrings', 'string', '{true,true}', 'boolean'),
++            array('arrayOfStrings', 'string', '{"foo",true}', 'boolean'),
++            array('arrayOfStrings', 'string', '{"foo","bar",1.2}', 'double'),
++            array('arrayOfStrings', 'string', '1', 'integer'),
++
++            array('arrayOfAnnotations', 'Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationTargetAll', 'true', 'boolean'),
++            array('arrayOfAnnotations', 'Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationTargetAll', 'false', 'boolean'),
++            array('arrayOfAnnotations', 'Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationTargetAll', '{@Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationTargetAll,true}', 'boolean'),
++            array('arrayOfAnnotations', 'Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationTargetAll', '{@Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationTargetAll,true}', 'boolean'),
++            array('arrayOfAnnotations', 'Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationTargetAll', '{@Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationTargetAll,1.2}', 'double'),
++            array('arrayOfAnnotations', 'Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationTargetAll', '{@Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationTargetAll,@AnnotationExtendsAnnotationTargetAll,"str"}', 'string'),
++        );
++    }
++
++    /**
++     * @dataProvider getAnnotationVarTypeProviderValid
++     */
++    public function testAnnotationWithVarType($attribute, $value)
++    {
++        $parser     = $this->createTestParser();
++        $context    = 'property SomeClassName::$invalidProperty.';
++        $docblock   = sprintf('@Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationWithVarType(%s = %s)',$attribute, $value);
++        $parser->setTarget(Target::TARGET_PROPERTY);
++
++        $result = $parser->parse($docblock, $context);
++
++        $this->assertTrue(sizeof($result) === 1);
++        $this->assertInstanceOf('Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationWithVarType', $result[0]);
++        $this->assertNotNull($result[0]->$attribute);
++    }
++
++    /**
++     * @dataProvider getAnnotationVarTypeProviderInvalid
++     */
++    public function testAnnotationWithVarTypeError($attribute,$type,$value,$given)
++    {
++        $parser     = $this->createTestParser();
++        $context    = 'property SomeClassName::invalidProperty.';
++        $docblock   = sprintf('@Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationWithVarType(%s = %s)',$attribute, $value);
++        $parser->setTarget(Target::TARGET_PROPERTY);
++
++        try {
++            $parser->parse($docblock, $context);
++            $this->fail();
++        } catch (\Doctrine\Common\Annotations\AnnotationException $exc) {
++            $this->assertContains("[Type Error] Attribute \"$attribute\" of @Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationWithVarType declared on property SomeClassName::invalidProperty. expects a(n) $type, but got $given.", $exc->getMessage());
++        }
++    }
++
++
++    /**
++     * @dataProvider getAnnotationVarTypeArrayProviderInvalid
++     */
++    public function testAnnotationWithVarTypeArrayError($attribute,$type,$value,$given)
++    {
++        $parser     = $this->createTestParser();
++        $context    = 'property SomeClassName::invalidProperty.';
++        $docblock   = sprintf('@Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationWithVarType(%s = %s)',$attribute, $value);
++        $parser->setTarget(Target::TARGET_PROPERTY);
++
++        try {
++            $parser->parse($docblock, $context);
++            $this->fail();
++        } catch (\Doctrine\Common\Annotations\AnnotationException $exc) {
++            $this->assertContains("[Type Error] Attribute \"$attribute\" of @Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationWithVarType declared on property SomeClassName::invalidProperty. expects either a(n) $type, or an array of {$type}s, but got $given.", $exc->getMessage());
++        }
++    }
++
++    /**
++     * @dataProvider getAnnotationVarTypeProviderValid
++     */
++    public function testAnnotationWithAttributes($attribute, $value)
++    {
++        $parser     = $this->createTestParser();
++        $context    = 'property SomeClassName::$invalidProperty.';
++        $docblock   = sprintf('@Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationWithAttributes(%s = %s)',$attribute, $value);
++        $parser->setTarget(Target::TARGET_PROPERTY);
++
++        $result = $parser->parse($docblock, $context);
++
++        $this->assertTrue(sizeof($result) === 1);
++        $this->assertInstanceOf('Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationWithAttributes', $result[0]);
++        $getter = "get".ucfirst($attribute);
++        $this->assertNotNull($result[0]->$getter());
++    }
++
++   /**
++     * @dataProvider getAnnotationVarTypeProviderInvalid
++     */
++    public function testAnnotationWithAttributesError($attribute,$type,$value,$given)
++    {
++        $parser     = $this->createTestParser();
++        $context    = 'property SomeClassName::invalidProperty.';
++        $docblock   = sprintf('@Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationWithAttributes(%s = %s)',$attribute, $value);
++        $parser->setTarget(Target::TARGET_PROPERTY);
++
++        try {
++            $parser->parse($docblock, $context);
++            $this->fail();
++        } catch (\Doctrine\Common\Annotations\AnnotationException $exc) {
++            $this->assertContains("[Type Error] Attribute \"$attribute\" of @Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationWithAttributes declared on property SomeClassName::invalidProperty. expects a(n) $type, but got $given.", $exc->getMessage());
++        }
++    }
++
++
++   /**
++     * @dataProvider getAnnotationVarTypeArrayProviderInvalid
++     */
++    public function testAnnotationWithAttributesWithVarTypeArrayError($attribute,$type,$value,$given)
++    {
++        $parser     = $this->createTestParser();
++        $context    = 'property SomeClassName::invalidProperty.';
++        $docblock   = sprintf('@Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationWithAttributes(%s = %s)',$attribute, $value);
++        $parser->setTarget(Target::TARGET_PROPERTY);
++
++        try {
++            $parser->parse($docblock, $context);
++            $this->fail();
++        } catch (\Doctrine\Common\Annotations\AnnotationException $exc) {
++            $this->assertContains("[Type Error] Attribute \"$attribute\" of @Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationWithAttributes declared on property SomeClassName::invalidProperty. expects either a(n) $type, or an array of {$type}s, but got $given.", $exc->getMessage());
++        }
++    }
++
++    public function testAnnotationWithRequiredAttributes()
++    {
++        $parser     = $this->createTestParser();
++        $context    = 'property SomeClassName::invalidProperty.';
++        $parser->setTarget(Target::TARGET_PROPERTY);
++
++
++        $docblock   = '@Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationWithRequiredAttributes("Some Value", annot = @Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationTargetAnnotation)';
++        $result     = $parser->parse($docblock);
++
++        $this->assertTrue(sizeof($result) === 1);
++        $this->assertInstanceOf('Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationWithRequiredAttributes', $result[0]);
++        $this->assertEquals("Some Value",$result[0]->getValue());
++        $this->assertInstanceOf('Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationTargetAnnotation', $result[0]->getAnnot());
++
++
++        $docblock   = '@Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationWithRequiredAttributes("Some Value")';
++        try {
++            $result = $parser->parse($docblock,$context);
++            $this->fail();
++        } catch (\Doctrine\Common\Annotations\AnnotationException $exc) {
++            $this->assertContains('Attribute "annot" of @Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationWithRequiredAttributes declared on property SomeClassName::invalidProperty. expects a(n) Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationTargetAnnotation. This value should not be null.', $exc->getMessage());
++        }
++
++        $docblock   = '@Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationWithRequiredAttributes(annot = @Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationTargetAnnotation)';
++        try {
++            $result = $parser->parse($docblock,$context);
++            $this->fail();
++        } catch (\Doctrine\Common\Annotations\AnnotationException $exc) {
++            $this->assertContains('Attribute "value" of @Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationWithRequiredAttributes declared on property SomeClassName::invalidProperty. expects a(n) string. This value should not be null.', $exc->getMessage());
++        }
++
++    }
++
++    public function testAnnotationWithRequiredAttributesWithoutContructor()
++    {
++        $parser     = $this->createTestParser();
++        $context    = 'property SomeClassName::invalidProperty.';
++        $parser->setTarget(Target::TARGET_PROPERTY);
++
++
++        $docblock   = '@Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationWithRequiredAttributesWithoutContructor("Some Value", annot = @Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationTargetAnnotation)';
++        $result     = $parser->parse($docblock);
++
++        $this->assertTrue(sizeof($result) === 1);
++        $this->assertInstanceOf('Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationWithRequiredAttributesWithoutContructor', $result[0]);
++        $this->assertEquals("Some Value", $result[0]->value);
++        $this->assertInstanceOf('Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationTargetAnnotation', $result[0]->annot);
++
++
++        $docblock   = '@Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationWithRequiredAttributesWithoutContructor("Some Value")';
++        try {
++            $result = $parser->parse($docblock,$context);
++            $this->fail();
++        } catch (\Doctrine\Common\Annotations\AnnotationException $exc) {
++            $this->assertContains('Attribute "annot" of @Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationWithRequiredAttributesWithoutContructor declared on property SomeClassName::invalidProperty. expects a(n) Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationTargetAnnotation. This value should not be null.', $exc->getMessage());
++        }
++
++        $docblock   = '@Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationWithRequiredAttributesWithoutContructor(annot = @Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationTargetAnnotation)';
++        try {
++            $result = $parser->parse($docblock,$context);
++            $this->fail();
++        } catch (\Doctrine\Common\Annotations\AnnotationException $exc) {
++            $this->assertContains('Attribute "value" of @Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationWithRequiredAttributesWithoutContructor declared on property SomeClassName::invalidProperty. expects a(n) string. This value should not be null.', $exc->getMessage());
++        }
++
++    }
++
++    /**
++     * @expectedException \Doctrine\Common\Annotations\AnnotationException
++     * @expectedExceptionMessage Attribute "value" of @Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationEnum declared on property SomeClassName::invalidProperty. accept only [ONE, TWO, THREE], but got FOUR.
++     */
++    public function testAnnotationEnumeratorException()
++    {
++        $parser     = $this->createTestParser();
++        $context    = 'property SomeClassName::invalidProperty.';
++        $docblock   = '@Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationEnum("FOUR")';
++
++        $parser->setIgnoreNotImportedAnnotations(false);
++        $parser->setTarget(Target::TARGET_PROPERTY);
++        $parser->parse($docblock, $context);
++    }
++
++    /**
++     * @expectedException \Doctrine\Common\Annotations\AnnotationException
++     * @expectedExceptionMessage Attribute "value" of @Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationEnumLiteral declared on property SomeClassName::invalidProperty. accept only [AnnotationEnumLiteral::ONE, AnnotationEnumLiteral::TWO, AnnotationEnumLiteral::THREE], but got 4.
++     */
++    public function testAnnotationEnumeratorLiteralException()
++    {
++        $parser     = $this->createTestParser();
++        $context    = 'property SomeClassName::invalidProperty.';
++        $docblock   = '@Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationEnumLiteral(4)';
++
++        $parser->setIgnoreNotImportedAnnotations(false);
++        $parser->setTarget(Target::TARGET_PROPERTY);
++        $parser->parse($docblock, $context);
++    }
++
++    /**
++     * @expectedException \InvalidArgumentException
++     * @expectedExceptionMessage @Enum supports only scalar values "array" given.
++     */
++    public function testAnnotationEnumInvalidTypeDeclarationException()
++    {
++        $parser     = $this->createTestParser();
++        $docblock   = '@Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationEnumInvalid("foo")';
++
++        $parser->setIgnoreNotImportedAnnotations(false);
++        $parser->parse($docblock);
++    }
++
++    /**
++     * @expectedException \InvalidArgumentException
++     * @expectedExceptionMessage Undefined enumerator value "3" for literal "AnnotationEnumLiteral::THREE".
++     */
++    public function testAnnotationEnumInvalidLiteralDeclarationException()
++    {
++        $parser     = $this->createTestParser();
++        $docblock   = '@Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationEnumLiteralInvalid("foo")';
++
++        $parser->setIgnoreNotImportedAnnotations(false);
++        $parser->parse($docblock);
++    }
++
++    public function getConstantsProvider()
++    {
++        $provider[] = array(
++            '@AnnotationWithConstants(PHP_EOL)',
++            PHP_EOL
++        );
++        $provider[] = array(
++            '@AnnotationWithConstants(AnnotationWithConstants::INTEGER)',
++            AnnotationWithConstants::INTEGER
++        );
++        $provider[] = array(
++            '@Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationWithConstants(AnnotationWithConstants::STRING)',
++            AnnotationWithConstants::STRING
++        );
++        $provider[] = array(
++            '@AnnotationWithConstants(Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationWithConstants::FLOAT)',
++            AnnotationWithConstants::FLOAT
++        );
++        $provider[] = array(
++            '@AnnotationWithConstants(ClassWithConstants::SOME_VALUE)',
++            ClassWithConstants::SOME_VALUE
++        );
++        $provider[] = array(
++            '@AnnotationWithConstants(ClassWithConstants::OTHER_KEY_)',
++            ClassWithConstants::OTHER_KEY_
++        );
++        $provider[] = array(
++            '@AnnotationWithConstants(ClassWithConstants::OTHER_KEY_2)',
++            ClassWithConstants::OTHER_KEY_2
++        );
++        $provider[] = array(
++            '@AnnotationWithConstants(Drupal\Tests\Component\Annotation\Doctrine\Fixtures\ClassWithConstants::SOME_VALUE)',
++            ClassWithConstants::SOME_VALUE
++        );
++        $provider[] = array(
++            '@AnnotationWithConstants(IntefaceWithConstants::SOME_VALUE)',
++            IntefaceWithConstants::SOME_VALUE
++        );
++        $provider[] = array(
++            '@AnnotationWithConstants(\Drupal\Tests\Component\Annotation\Doctrine\Fixtures\IntefaceWithConstants::SOME_VALUE)',
++            IntefaceWithConstants::SOME_VALUE
++        );
++        $provider[] = array(
++            '@AnnotationWithConstants({AnnotationWithConstants::STRING, AnnotationWithConstants::INTEGER, AnnotationWithConstants::FLOAT})',
++            array(AnnotationWithConstants::STRING, AnnotationWithConstants::INTEGER, AnnotationWithConstants::FLOAT)
++        );
++        $provider[] = array(
++            '@AnnotationWithConstants({
++                AnnotationWithConstants::STRING = AnnotationWithConstants::INTEGER
++             })',
++            array(AnnotationWithConstants::STRING => AnnotationWithConstants::INTEGER)
++        );
++        $provider[] = array(
++            '@AnnotationWithConstants({
++                Drupal\Tests\Component\Annotation\Doctrine\Fixtures\IntefaceWithConstants::SOME_KEY = AnnotationWithConstants::INTEGER
++             })',
++            array(IntefaceWithConstants::SOME_KEY => AnnotationWithConstants::INTEGER)
++        );
++        $provider[] = array(
++            '@AnnotationWithConstants({
++                \Drupal\Tests\Component\Annotation\Doctrine\Fixtures\IntefaceWithConstants::SOME_KEY = AnnotationWithConstants::INTEGER
++             })',
++            array(IntefaceWithConstants::SOME_KEY => AnnotationWithConstants::INTEGER)
++        );
++        $provider[] = array(
++            '@AnnotationWithConstants({
++                AnnotationWithConstants::STRING = AnnotationWithConstants::INTEGER,
++                ClassWithConstants::SOME_KEY = ClassWithConstants::SOME_VALUE,
++                Drupal\Tests\Component\Annotation\Doctrine\Fixtures\ClassWithConstants::SOME_KEY = IntefaceWithConstants::SOME_VALUE
++             })',
++            array(
++                AnnotationWithConstants::STRING => AnnotationWithConstants::INTEGER,
++                ClassWithConstants::SOME_KEY    => ClassWithConstants::SOME_VALUE,
++                ClassWithConstants::SOME_KEY    => IntefaceWithConstants::SOME_VALUE
++            )
++        );
++        $provider[] = array(
++            '@AnnotationWithConstants(AnnotationWithConstants::class)',
++            'Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationWithConstants'
++        );
++        $provider[] = array(
++            '@AnnotationWithConstants({AnnotationWithConstants::class = AnnotationWithConstants::class})',
++            array('Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationWithConstants' => 'Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationWithConstants')
++        );
++        $provider[] = array(
++            '@AnnotationWithConstants(Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationWithConstants::class)',
++            'Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationWithConstants'
++        );
++        $provider[] = array(
++            '@Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationWithConstants(Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationWithConstants::class)',
++            'Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationWithConstants'
++        );
++        return $provider;
++    }
++
++    /**
++     * @dataProvider getConstantsProvider
++     */
++    public function testSupportClassConstants($docblock, $expected)
++    {
++        $parser = $this->createTestParser();
++        $parser->setImports(array(
++            'classwithconstants'        => 'Drupal\Tests\Component\Annotation\Doctrine\Fixtures\ClassWithConstants',
++            'intefacewithconstants'     => 'Drupal\Tests\Component\Annotation\Doctrine\Fixtures\IntefaceWithConstants',
++            'annotationwithconstants'   => 'Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationWithConstants'
++        ));
++
++        $result = $parser->parse($docblock);
++        $this->assertInstanceOf('\Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationWithConstants', $annotation = $result[0]);
++        $this->assertEquals($expected, $annotation->value);
++    }
++
++    /**
++     * @expectedException \Doctrine\Common\Annotations\AnnotationException
++     * @expectedExceptionMessage The annotation @SomeAnnotationClassNameWithoutConstructorAndProperties declared on  does not accept any values, but got {"value":"Foo"}.
++     */
++    public function testWithoutConstructorWhenIsNotDefaultValue()
++    {
++        $parser     = $this->createTestParser();
++        $docblock   = <<<DOCBLOCK
++/**
++ * @SomeAnnotationClassNameWithoutConstructorAndProperties("Foo")
++ */
++DOCBLOCK;
++
++
++        $parser->setTarget(Target::TARGET_CLASS);
++        $parser->parse($docblock);
++    }
++
++    /**
++     * @expectedException \Doctrine\Common\Annotations\AnnotationException
++     * @expectedExceptionMessage The annotation @SomeAnnotationClassNameWithoutConstructorAndProperties declared on  does not accept any values, but got {"value":"Foo"}.
++     */
++    public function testWithoutConstructorWhenHasNoProperties()
++    {
++        $parser     = $this->createTestParser();
++        $docblock   = <<<DOCBLOCK
++/**
++ * @SomeAnnotationClassNameWithoutConstructorAndProperties(value = "Foo")
++ */
++DOCBLOCK;
++
++        $parser->setTarget(Target::TARGET_CLASS);
++        $parser->parse($docblock);
++    }
++
++    /**
++     * @expectedException \Doctrine\Common\Annotations\AnnotationException
++     * @expectedExceptionMessage Expected namespace separator or identifier, got ')' at position 24 in class @Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationWithTargetSyntaxError.
++     */
++    public function testAnnotationTargetSyntaxError()
++    {
++        $parser     = $this->createTestParser();
++        $context    = 'class ' . 'SomeClassName';
++        $docblock   = <<<DOCBLOCK
++/**
++ * @Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationWithTargetSyntaxError()
++ */
++DOCBLOCK;
++
++        $parser->setTarget(Target::TARGET_CLASS);
++        $parser->parse($docblock,$context);
++    }
++
++    /**
++     * @expectedException \InvalidArgumentException
++     * @expectedExceptionMessage Invalid Target "Foo". Available targets: [ALL, CLASS, METHOD, PROPERTY, ANNOTATION]
++     */
++    public function testAnnotationWithInvalidTargetDeclarationError()
++    {
++        $parser     = $this->createTestParser();
++        $context    = 'class ' . 'SomeClassName';
++        $docblock   = <<<DOCBLOCK
++/**
++ * @AnnotationWithInvalidTargetDeclaration()
++ */
++DOCBLOCK;
++
++        $parser->setTarget(Target::TARGET_CLASS);
++        $parser->parse($docblock,$context);
++    }
++
++    /**
++     * @expectedException \InvalidArgumentException
++     * @expectedExceptionMessage @Target expects either a string value, or an array of strings, "NULL" given.
++     */
++    public function testAnnotationWithTargetEmptyError()
++    {
++        $parser     = $this->createTestParser();
++        $context    = 'class ' . 'SomeClassName';
++        $docblock   = <<<DOCBLOCK
++/**
++ * @AnnotationWithTargetEmpty()
++ */
++DOCBLOCK;
++
++        $parser->setTarget(Target::TARGET_CLASS);
++        $parser->parse($docblock,$context);
++    }
++
++    /**
++     * @group DDC-575
++     */
++    public function testRegressionDDC575()
++    {
++        $parser = $this->createTestParser();
++
++        $docblock = <<<DOCBLOCK
++/**
++ * @Name
++ *
++ * Will trigger error.
++ */
++DOCBLOCK;
++
++        $result = $parser->parse($docblock);
++
++        $this->assertInstanceOf("Drupal\Tests\Component\Annotation\Doctrine\Name", $result[0]);
++
++        $docblock = <<<DOCBLOCK
++/**
++ * @Name
++ * @Marker
++ *
++ * Will trigger error.
++ */
++DOCBLOCK;
++
++        $result = $parser->parse($docblock);
++
++        $this->assertInstanceOf("Drupal\Tests\Component\Annotation\Doctrine\Name", $result[0]);
++    }
++
++    /**
++     * @group DDC-77
++     */
++    public function testAnnotationWithoutClassIsIgnoredWithoutWarning()
++    {
++        $parser = new DocParser();
++        $parser->setIgnoreNotImportedAnnotations(true);
++        $result = $parser->parse("@param");
++
++        $this->assertEquals(0, count($result));
++    }
++
++    /**
++     * @group DCOM-168
++     */
++    public function testNotAnAnnotationClassIsIgnoredWithoutWarning()
++    {
++        $parser = new DocParser();
++        $parser->setIgnoreNotImportedAnnotations(true);
++        $parser->setIgnoredAnnotationNames(array('PHPUnit_Framework_TestCase' => true));
++        $result = $parser->parse('@PHPUnit_Framework_TestCase');
++
++        $this->assertEquals(0, count($result));
++    }
++
++    /**
++     * @expectedException \Doctrine\Common\Annotations\AnnotationException
++     * @expectedExceptionMessage Expected PlainValue, got ''' at position 10.
++     */
++    public function testAnnotationDontAcceptSingleQuotes()
++    {
++        $parser = $this->createTestParser();
++        $parser->parse("@Name(foo='bar')");
++    }
++
++    /**
++     * @group DCOM-41
++     */
++    public function testAnnotationDoesntThrowExceptionWhenAtSignIsNotFollowedByIdentifier()
++    {
++        $parser = new DocParser();
++        $result = $parser->parse("'@'");
++
++        $this->assertEquals(0, count($result));
++    }
++
++    /**
++     * @group DCOM-41
++     * @expectedException \Doctrine\Common\Annotations\AnnotationException
++     */
++    public function testAnnotationThrowsExceptionWhenAtSignIsNotFollowedByIdentifierInNestedAnnotation()
++    {
++        $parser = new DocParser();
++        $parser->parse("@Drupal\Tests\Component\Annotation\Doctrine\Name(@')");
++    }
++
++    /**
++     * @group DCOM-56
++     */
++    public function testAutoloadAnnotation()
++    {
++        $this->assertFalse(class_exists('Drupal\Tests\Component\Annotation\Doctrine\Fixture\Annotation\Autoload', false), 'Pre-condition: Drupal\Tests\Component\Annotation\Doctrine\Fixture\Annotation\Autoload not allowed to be loaded.');
++
++        $parser = new DocParser();
++
++        AnnotationRegistry::registerAutoloadNamespace('Drupal\Tests\Component\Annotation\Doctrine\Fixtures\Annotation', __DIR__ . '/../../../../');
++
++        $parser->setImports(array(
++            'autoload' => 'Drupal\Tests\Component\Annotation\Doctrine\Fixtures\Annotation\Autoload',
++        ));
++        $annotations = $parser->parse('@Autoload');
++
++        $this->assertEquals(1, count($annotations));
++        $this->assertInstanceOf('Drupal\Tests\Component\Annotation\Doctrine\Fixtures\Annotation\Autoload', $annotations[0]);
++    }
++
++    public function createTestParser()
++    {
++        $parser = new DocParser();
++        $parser->setIgnoreNotImportedAnnotations(true);
++        $parser->setImports(array(
++            'name' => 'Drupal\Tests\Component\Annotation\Doctrine\Name',
++            '__NAMESPACE__' => 'Drupal\Tests\Component\Annotation\Doctrine',
++        ));
++
++        return $parser;
++    }
++
++    /**
++     * @group DDC-78
++     * @expectedException \Doctrine\Common\Annotations\AnnotationException
++     * @expectedExceptionMessage Expected PlainValue, got ''' at position 10 in class \Drupal\Tests\Component\Annotation\Doctrine\Name
++     */
++    public function testSyntaxErrorWithContextDescription()
++    {
++        $parser = $this->createTestParser();
++        $parser->parse("@Name(foo='bar')", "class \Drupal\Tests\Component\Annotation\Doctrine\Name");
++    }
++
++    /**
++     * @group DDC-183
++     */
++    public function   testSyntaxErrorWithUnknownCharacters()
++    {
++        $docblock = <<<DOCBLOCK
++/**
++ * @test at.
++ */
++class A {
++}
++DOCBLOCK;
++
++        //$lexer = new \Doctrine\Common\Annotations\Lexer();
++        //$lexer->setInput(trim($docblock, '/ *'));
++        //var_dump($lexer);
++
++        try {
++            $parser = $this->createTestParser();
++            $result = $parser->parse($docblock);
++            $this->assertTrue(is_array($result) && empty($result));
++        } catch (\Exception $e) {
++            $this->fail($e->getMessage());
++        }
++    }
++
++    /**
++     * @group DCOM-14
++     */
++    public function testIgnorePHPDocThrowTag()
++    {
++        $docblock = <<<DOCBLOCK
++/**
++ * @throws \RuntimeException
++ */
++class A {
++}
++DOCBLOCK;
++
++        try {
++            $parser = $this->createTestParser();
++            $result = $parser->parse($docblock);
++            $this->assertTrue(is_array($result) && empty($result));
++        } catch (\Exception $e) {
++            $this->fail($e->getMessage());
++        }
++    }
++
++    /**
++     * @group DCOM-38
++     */
++    public function testCastInt()
++    {
++        $parser = $this->createTestParser();
++
++        $result = $parser->parse("@Name(foo=1234)");
++        $annot = $result[0];
++        $this->assertInternalType('int', $annot->foo);
++    }
++
++    /**
++     * @group DCOM-38
++     */
++    public function testCastNegativeInt()
++    {
++        $parser = $this->createTestParser();
++
++        $result = $parser->parse("@Name(foo=-1234)");
++        $annot = $result[0];
++        $this->assertInternalType('int', $annot->foo);
++    }
++
++    /**
++     * @group DCOM-38
++     */
++    public function testCastFloat()
++    {
++        $parser = $this->createTestParser();
++
++        $result = $parser->parse("@Name(foo=1234.345)");
++        $annot = $result[0];
++        $this->assertInternalType('float', $annot->foo);
++    }
++
++    /**
++     * @group DCOM-38
++     */
++    public function testCastNegativeFloat()
++    {
++        $parser = $this->createTestParser();
++
++        $result = $parser->parse("@Name(foo=-1234.345)");
++        $annot = $result[0];
++        $this->assertInternalType('float', $annot->foo);
++
++        $result = $parser->parse("@Marker(-1234.345)");
++        $annot = $result[0];
++        $this->assertInternalType('float', $annot->value);
++    }
++
++    public function testReservedKeywordsInAnnotations()
++    {
++        if (PHP_VERSION_ID >= 70000) {
++            $this->markTestSkipped('This test requires PHP 5.6 or lower.');
++        }
++        require 'ReservedKeywordsClasses.php';
++
++        $parser = $this->createTestParser();
++
++        $result = $parser->parse('@Drupal\Tests\Component\Annotation\Doctrine\True');
++        $this->assertTrue($result[0] instanceof True);
++        $result = $parser->parse('@Drupal\Tests\Component\Annotation\Doctrine\False');
++        $this->assertTrue($result[0] instanceof False);
++        $result = $parser->parse('@Drupal\Tests\Component\Annotation\Doctrine\Null');
++        $this->assertTrue($result[0] instanceof Null);
++
++        $result = $parser->parse('@True');
++        $this->assertTrue($result[0] instanceof True);
++        $result = $parser->parse('@False');
++        $this->assertTrue($result[0] instanceof False);
++        $result = $parser->parse('@Null');
++        $this->assertTrue($result[0] instanceof Null);
++    }
++
++     /**
++     * @expectedException \Doctrine\Common\Annotations\AnnotationException
++     * @expectedExceptionMessage [Creation Error] The annotation @SomeAnnotationClassNameWithoutConstructor declared on some class does not have a property named "invalidaProperty". Available properties: data, name
++     */
++    public function testSetValuesExeption()
++    {
++        $docblock = <<<DOCBLOCK
++/**
++ * @SomeAnnotationClassNameWithoutConstructor(invalidaProperty = "Some val")
++ */
++DOCBLOCK;
++
++        $this->createTestParser()->parse($docblock, 'some class');
++    }
++
++    /**
++     * @expectedException \Doctrine\Common\Annotations\AnnotationException
++     * @expectedExceptionMessage [Syntax Error] Expected Doctrine\Common\Annotations\DocLexer::T_IDENTIFIER or Doctrine\Common\Annotations\DocLexer::T_TRUE or Doctrine\Common\Annotations\DocLexer::T_FALSE or Doctrine\Common\Annotations\DocLexer::T_NULL, got '3.42' at position 5.
++     */
++    public function testInvalidIdentifierInAnnotation()
++    {
++        $parser = $this->createTestParser();
++        $parser->parse('@Foo\3.42');
++    }
++
++    public function testTrailingCommaIsAllowed()
++    {
++        $parser = $this->createTestParser();
++
++        $annots = $parser->parse('@Name({
++            "Foo",
++            "Bar",
++        })');
++        $this->assertEquals(1, count($annots));
++        $this->assertEquals(array('Foo', 'Bar'), $annots[0]->value);
++    }
++
++    public function testDefaultAnnotationValueIsNotOverwritten()
++    {
++        $parser = $this->createTestParser();
++
++        $annots = $parser->parse('@Drupal\Tests\Component\Annotation\Doctrine\Fixtures\Annotation\AnnotWithDefaultValue');
++        $this->assertEquals(1, count($annots));
++        $this->assertEquals('bar', $annots[0]->foo);
++    }
++
++    public function testArrayWithColon()
++    {
++        $parser = $this->createTestParser();
++
++        $annots = $parser->parse('@Name({"foo": "bar"})');
++        $this->assertEquals(1, count($annots));
++        $this->assertEquals(array('foo' => 'bar'), $annots[0]->value);
++    }
++
++    /**
++     * @expectedException \Doctrine\Common\Annotations\AnnotationException
++     * @expectedExceptionMessage [Semantical Error] Couldn't find constant foo.
++     */
++    public function testInvalidContantName()
++    {
++        $parser = $this->createTestParser();
++        $parser->parse('@Name(foo: "bar")');
++    }
++
++    /**
++     * Tests parsing empty arrays.
++     */
++    public function testEmptyArray()
++    {
++        $parser = $this->createTestParser();
++
++        $annots = $parser->parse('@Name({"foo": {}})');
++        $this->assertEquals(1, count($annots));
++        $this->assertEquals(array('foo' => array()), $annots[0]->value);
++    }
++
++    public function testKeyHasNumber()
++    {
++        $parser = $this->createTestParser();
++        $annots = $parser->parse('@SettingsAnnotation(foo="test", bar2="test")');
++
++        $this->assertEquals(1, count($annots));
++        $this->assertEquals(array('foo' => 'test', 'bar2' => 'test'), $annots[0]->settings);
++    }
++
++    /**
++     * @group 44
++     */
++    public function testSupportsEscapedQuotedValues()
++    {
++        $result = $this->createTestParser()->parse('@Drupal\Tests\Component\Annotation\Doctrine\Name(foo="""bar""")');
++
++        $this->assertCount(1, $result);
++
++        $this->assertTrue($result[0] instanceof Name);
++        $this->assertEquals('"bar"', $result[0]->foo);
++    }
++}
++
++/** @Annotation */
++class SettingsAnnotation
++{
++    public $settings;
++
++    public function __construct($settings)
++    {
++        $this->settings = $settings;
++    }
++}
++
++/** @Annotation */
++class SomeAnnotationClassNameWithoutConstructor
++{
++    public $data;
++    public $name;
++}
++
++/** @Annotation */
++class SomeAnnotationWithConstructorWithoutParams
++{
++    function __construct()
++    {
++        $this->data = "Some data";
++    }
++    public $data;
++    public $name;
++}
++
++/** @Annotation */
++class SomeAnnotationClassNameWithoutConstructorAndProperties{}
++
++/**
++ * @Annotation
++ * @Target("Foo")
++ */
++class AnnotationWithInvalidTargetDeclaration{}
++
++/**
++ * @Annotation
++ * @Target
++ */
++class AnnotationWithTargetEmpty{}
++
++/** @Annotation */
++class AnnotationExtendsAnnotationTargetAll extends \Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationTargetAll
++{
++}
++
++/** @Annotation */
++class Name extends \Doctrine\Common\Annotations\Annotation {
++    public $foo;
++}
++
++/** @Annotation */
++class Marker {
++    public $value;
++}
++
++namespace Drupal\Tests\Component\Annotation\Doctrine\FooBar;
++
++/** @Annotation */
++class Name extends \Doctrine\Common\Annotations\Annotation {
++}
+diff --git a/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/Annotation/AnnotWithDefaultValue.php b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/Annotation/AnnotWithDefaultValue.php
+new file mode 100644
+index 0000000000..d6a0471ff9
+--- /dev/null
++++ b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/Annotation/AnnotWithDefaultValue.php
+@@ -0,0 +1,11 @@
++<?php
++// @codingStandardsIgnoreFile
++
++namespace Drupal\Tests\Component\Annotation\Doctrine\Fixtures\Annotation;
++
++/** @Annotation */
++class AnnotWithDefaultValue
++{
++    /** @var string */
++    public $foo = 'bar';
++}
+diff --git a/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/Annotation/Autoload.php b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/Annotation/Autoload.php
+new file mode 100644
+index 0000000000..c386fb8b36
+--- /dev/null
++++ b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/Annotation/Autoload.php
+@@ -0,0 +1,11 @@
++<?php
++// @codingStandardsIgnoreFile
++
++namespace Drupal\Tests\Component\Annotation\Doctrine\Fixtures\Annotation;
++
++/**
++ * @Annotation
++ */
++class Autoload
++{
++}
+diff --git a/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/Annotation/Route.php b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/Annotation/Route.php
+new file mode 100644
+index 0000000000..4cb6dfc2cb
+--- /dev/null
++++ b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/Annotation/Route.php
+@@ -0,0 +1,12 @@
++<?php
++// @codingStandardsIgnoreFile
++
++namespace Drupal\Tests\Component\Annotation\Doctrine\Fixtures\Annotation;
++
++/** @Annotation */
++class Route
++{
++    /** @var string @Required */
++    public $pattern;
++    public $name;
++}
+diff --git a/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/Annotation/Secure.php b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/Annotation/Secure.php
+new file mode 100644
+index 0000000000..80dfeaf736
+--- /dev/null
++++ b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/Annotation/Secure.php
+@@ -0,0 +1,19 @@
++<?php
++// @codingStandardsIgnoreFile
++
++namespace Drupal\Tests\Component\Annotation\Doctrine\Fixtures\Annotation;
++
++/** @Annotation */
++class Secure
++{
++    private $roles;
++
++    public function __construct(array $values)
++    {
++        if (is_string($values['value'])) {
++            $values['value'] = array($values['value']);
++        }
++
++        $this->roles = $values['value'];
++    }
++}
+diff --git a/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/Annotation/Template.php b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/Annotation/Template.php
+new file mode 100644
+index 0000000000..7e21c4d043
+--- /dev/null
++++ b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/Annotation/Template.php
+@@ -0,0 +1,15 @@
++<?php
++// @codingStandardsIgnoreFile
++
++namespace Drupal\Tests\Component\Annotation\Doctrine\Fixtures\Annotation;
++
++/** @Annotation */
++class Template
++{
++    private $name;
++
++    public function __construct(array $values)
++    {
++        $this->name = isset($values['value']) ? $values['value'] : null;
++    }
++}
+diff --git a/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/Annotation/Version.php b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/Annotation/Version.php
+new file mode 100644
+index 0000000000..a0b4b0d041
+--- /dev/null
++++ b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/Annotation/Version.php
+@@ -0,0 +1,12 @@
++<?php
++// @codingStandardsIgnoreFile
++
++namespace Drupal\Tests\Component\Annotation\Doctrine\Fixtures\Annotation;
++
++/**
++ * @Annotation
++ * @Target("PROPERTY")
++ */
++final class Version
++{
++}
+diff --git a/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/AnnotationEnum.php b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/AnnotationEnum.php
+new file mode 100644
+index 0000000000..51b0f03619
+--- /dev/null
++++ b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/AnnotationEnum.php
+@@ -0,0 +1,22 @@
++<?php
++// @codingStandardsIgnoreFile
++
++namespace Drupal\Tests\Component\Annotation\Doctrine\Fixtures;
++
++/**
++ * @Annotation
++ * @Target("ALL")
++ */
++final class AnnotationEnum
++{
++    const ONE   = 'ONE';
++    const TWO   = 'TWO';
++    const THREE = 'THREE';
++
++    /**
++     * @var mixed
++     *
++     * @Enum({"ONE","TWO","THREE"})
++     */
++    public $value;
++}
+diff --git a/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/AnnotationEnumInvalid.php b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/AnnotationEnumInvalid.php
+new file mode 100644
+index 0000000000..65ca53181a
+--- /dev/null
++++ b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/AnnotationEnumInvalid.php
+@@ -0,0 +1,18 @@
++<?php
++// @codingStandardsIgnoreFile
++
++namespace Drupal\Tests\Component\Annotation\Doctrine\Fixtures;
++
++/**
++ * @Annotation
++ * @Target("ALL")
++ */
++final class AnnotationEnumInvalid
++{
++    /**
++     * @var mixed
++     *
++     * @Enum({1, 2, "foo", "bar", {"foo":"bar"}})
++     */
++    public $value;
++}
+diff --git a/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/AnnotationEnumLiteral.php b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/AnnotationEnumLiteral.php
+new file mode 100644
+index 0000000000..258ed5f0ed
+--- /dev/null
++++ b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/AnnotationEnumLiteral.php
+@@ -0,0 +1,35 @@
++<?php
++// @codingStandardsIgnoreFile
++
++namespace Drupal\Tests\Component\Annotation\Doctrine\Fixtures;
++
++use Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationEnumLiteral as SelfEnum;
++
++/**
++ * @Annotation
++ * @Target("ALL")
++ */
++final class AnnotationEnumLiteral
++{
++    const ONE   = 1;
++    const TWO   = 2;
++    const THREE = 3;
++
++    /**
++     * @var mixed
++     *
++     * @Enum(
++     *      value = {
++     *          1,
++     *          2,
++     *          3,
++     *      },
++     *      literal = {
++     *          1 : "AnnotationEnumLiteral::ONE",
++     *          2 : "AnnotationEnumLiteral::TWO",
++     *          3 : "AnnotationEnumLiteral::THREE",
++     *      }
++     * )
++     */
++    public $value;
++}
+diff --git a/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/AnnotationEnumLiteralInvalid.php b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/AnnotationEnumLiteralInvalid.php
+new file mode 100644
+index 0000000000..ed87697126
+--- /dev/null
++++ b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/AnnotationEnumLiteralInvalid.php
+@@ -0,0 +1,32 @@
++<?php
++// @codingStandardsIgnoreFile
++
++namespace Drupal\Tests\Component\Annotation\Doctrine\Fixtures;
++
++/**
++ * @Annotation
++ * @Target("ALL")
++ */
++final class AnnotationEnumLiteralInvalid
++{
++    const ONE   = 1;
++    const TWO   = 2;
++    const THREE = 3;
++
++    /**
++     * @var mixed
++     *
++     * @Enum(
++     *      value = {
++     *          1,
++     *          2
++     *      },
++     *      literal = {
++     *          1 : "AnnotationEnumLiteral::ONE",
++     *          2 : "AnnotationEnumLiteral::TWO",
++     *          3 : "AnnotationEnumLiteral::THREE"
++     *      }
++     * )
++     */
++    public $value;
++}
+diff --git a/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/AnnotationTargetAll.php b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/AnnotationTargetAll.php
+new file mode 100644
+index 0000000000..d361ca0f05
+--- /dev/null
++++ b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/AnnotationTargetAll.php
+@@ -0,0 +1,15 @@
++<?php
++// @codingStandardsIgnoreFile
++
++namespace Drupal\Tests\Component\Annotation\Doctrine\Fixtures;
++
++/**
++ * @Annotation
++ * @Target("ALL")
++ */
++class AnnotationTargetAll
++{
++    public $data;
++    public $name;
++    public $target;
++}
+diff --git a/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/AnnotationTargetAnnotation.php b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/AnnotationTargetAnnotation.php
+new file mode 100644
+index 0000000000..7d85bc407a
+--- /dev/null
++++ b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/AnnotationTargetAnnotation.php
+@@ -0,0 +1,15 @@
++<?php
++// @codingStandardsIgnoreFile
++
++namespace Drupal\Tests\Component\Annotation\Doctrine\Fixtures;
++
++/**
++ * @Annotation
++ * @Target({ "ANNOTATION" })
++ */
++final class AnnotationTargetAnnotation
++{
++    public $data;
++    public $name;
++    public $target;
++}
+diff --git a/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/AnnotationTargetClass.php b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/AnnotationTargetClass.php
+new file mode 100644
+index 0000000000..e9ac2d9fc1
+--- /dev/null
++++ b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/AnnotationTargetClass.php
+@@ -0,0 +1,16 @@
++<?php
++// @codingStandardsIgnoreFile
++
++namespace Drupal\Tests\Component\Annotation\Doctrine\Fixtures;
++
++
++/**
++ * @Annotation
++ * @Target("CLASS")
++ */
++final class AnnotationTargetClass
++{
++    public $data;
++    public $name;
++    public $target;
++}
+diff --git a/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/AnnotationTargetPropertyMethod.php b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/AnnotationTargetPropertyMethod.php
+new file mode 100644
+index 0000000000..f6097467fb
+--- /dev/null
++++ b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/AnnotationTargetPropertyMethod.php
+@@ -0,0 +1,15 @@
++<?php
++// @codingStandardsIgnoreFile
++
++namespace Drupal\Tests\Component\Annotation\Doctrine\Fixtures;
++
++/**
++ * @Annotation
++ * @Target({ "METHOD", "PROPERTY" })
++ */
++final class AnnotationTargetPropertyMethod
++{
++    public $data;
++    public $name;
++    public $target;
++}
+diff --git a/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/AnnotationWithAttributes.php b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/AnnotationWithAttributes.php
+new file mode 100644
+index 0000000000..82d0036345
+--- /dev/null
++++ b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/AnnotationWithAttributes.php
+@@ -0,0 +1,130 @@
++<?php
++// @codingStandardsIgnoreFile
++
++namespace Drupal\Tests\Component\Annotation\Doctrine\Fixtures;
++
++/**
++ * @Annotation
++ * @Target("ALL")
++ * @Attributes({
++      @Attribute("mixed",                type = "mixed"),
++      @Attribute("boolean",              type = "boolean"),
++      @Attribute("bool",                 type = "bool"),
++      @Attribute("float",                type = "float"),
++      @Attribute("string",               type = "string"),
++      @Attribute("integer",              type = "integer"),
++      @Attribute("array",                type = "array"),
++      @Attribute("arrayOfIntegers",      type = "array<integer>"),
++      @Attribute("arrayOfStrings",       type = "string[]"),
++      @Attribute("annotation",           type = "Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationTargetAll"),
++      @Attribute("arrayOfAnnotations",   type = "array<Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationTargetAll>"),
++  })
++ */
++final class AnnotationWithAttributes
++{
++
++    public final function __construct(array $data)
++    {
++        foreach ($data as $key => $value) {
++            $this->$key = $value;
++        }
++    }
++
++    private $mixed;
++    private $boolean;
++    private $bool;
++    private $float;
++    private $string;
++    private $integer;
++    private $array;
++    private $annotation;
++    private $arrayOfIntegers;
++    private $arrayOfStrings;
++    private $arrayOfAnnotations;
++
++    /**
++     * @return mixed
++     */
++    public function getMixed()
++    {
++        return $this->mixed;
++    }
++
++    /**
++     * @return boolean
++     */
++    public function getBoolean()
++    {
++        return $this->boolean;
++    }
++
++    /**
++     * @return bool
++     */
++    public function getBool()
++    {
++        return $this->bool;
++    }
++
++    /**
++     * @return float
++     */
++    public function getFloat()
++    {
++        return $this->float;
++    }
++
++    /**
++     * @return string
++     */
++    public function getString()
++    {
++        return $this->string;
++    }
++
++    public function getInteger()
++    {
++        return $this->integer;
++    }
++
++    /**
++     * @return array
++     */
++    public function getArray()
++    {
++        return $this->array;
++    }
++
++    /**
++     * @return Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationTargetAll
++     */
++    public function getAnnotation()
++    {
++        return $this->annotation;
++    }
++
++    /**
++     * @return string[]
++     */
++    public function getArrayOfStrings()
++    {
++        return $this->arrayOfIntegers;
++    }
++
++    /**
++     * @return array<integer>
++     */
++    public function getArrayOfIntegers()
++    {
++        return $this->arrayOfIntegers;
++    }
++
++    /**
++     * @return array<Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationTargetAll>
++     */
++    public function getArrayOfAnnotations()
++    {
++        return $this->arrayOfAnnotations;
++    }
++
++}
+diff --git a/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/AnnotationWithConstants.php b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/AnnotationWithConstants.php
+new file mode 100644
+index 0000000000..4c23b44384
+--- /dev/null
++++ b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/AnnotationWithConstants.php
+@@ -0,0 +1,21 @@
++<?php
++// @codingStandardsIgnoreFile
++
++namespace Drupal\Tests\Component\Annotation\Doctrine\Fixtures;
++
++/**
++ * @Annotation
++ * @Target("ALL")
++ */
++final class AnnotationWithConstants
++{
++
++    const INTEGER = 1;
++    const FLOAT   = 1.2;
++    const STRING  = '1.2.3';
++
++    /**
++     * @var mixed
++     */
++    public $value;
++}
+diff --git a/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/AnnotationWithRequiredAttributes.php b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/AnnotationWithRequiredAttributes.php
+new file mode 100644
+index 0000000000..4c90bea797
+--- /dev/null
++++ b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/AnnotationWithRequiredAttributes.php
+@@ -0,0 +1,51 @@
++<?php
++// @codingStandardsIgnoreFile
++
++namespace Drupal\Tests\Component\Annotation\Doctrine\Fixtures;
++
++/**
++ * @Annotation
++ * @Target("ALL")
++ * @Attributes({
++      @Attribute("value",   required = true ,   type = "string"),
++      @Attribute("annot",   required = true ,   type = "Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationTargetAnnotation"),
++   })
++ */
++final class AnnotationWithRequiredAttributes
++{
++
++    public final function __construct(array $data)
++    {
++        foreach ($data as $key => $value) {
++            $this->$key = $value;
++        }
++    }
++
++    /**
++     * @var string
++     */
++    private $value;
++
++    /**
++     *
++     * @var Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationTargetAnnotation
++     */
++    private $annot;
++
++    /**
++     * @return string
++     */
++    public function getValue()
++    {
++        return $this->value;
++    }
++
++    /**
++     * @return Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationTargetAnnotation
++     */
++    public function getAnnot()
++    {
++        return $this->annot;
++    }
++
++}
+diff --git a/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/AnnotationWithRequiredAttributesWithoutContructor.php b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/AnnotationWithRequiredAttributesWithoutContructor.php
+new file mode 100644
+index 0000000000..81edf748db
+--- /dev/null
++++ b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/AnnotationWithRequiredAttributesWithoutContructor.php
+@@ -0,0 +1,25 @@
++<?php
++// @codingStandardsIgnoreFile
++
++namespace Drupal\Tests\Component\Annotation\Doctrine\Fixtures;
++
++/**
++ * @Annotation
++ * @Target("ALL")
++ */
++final class AnnotationWithRequiredAttributesWithoutContructor
++{
++
++    /**
++     * @Required
++     * @var string
++     */
++    public $value;
++
++    /**
++     * @Required
++     * @var Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationTargetAnnotation
++     */
++    public $annot;
++
++}
+diff --git a/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/AnnotationWithTargetSyntaxError.php b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/AnnotationWithTargetSyntaxError.php
+new file mode 100644
+index 0000000000..22f1e1229c
+--- /dev/null
++++ b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/AnnotationWithTargetSyntaxError.php
+@@ -0,0 +1,12 @@
++<?php
++// @codingStandardsIgnoreFile
++
++namespace Drupal\Tests\Component\Annotation\Doctrine\Fixtures;
++
++/**
++ * @Annotation
++ * @Target(@)
++ */
++final class AnnotationWithTargetSyntaxError
++{
++}
+diff --git a/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/AnnotationWithVarType.php b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/AnnotationWithVarType.php
+new file mode 100644
+index 0000000000..c2aca7534b
+--- /dev/null
++++ b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/AnnotationWithVarType.php
+@@ -0,0 +1,68 @@
++<?php
++// @codingStandardsIgnoreFile
++
++namespace Drupal\Tests\Component\Annotation\Doctrine\Fixtures;
++
++/**
++ * @Annotation
++ * @Target("ALL")
++ */
++final class AnnotationWithVarType
++{
++
++    /**
++     * @var mixed
++     */
++    public $mixed;
++
++    /**
++     * @var boolean
++     */
++    public $boolean;
++
++    /**
++     * @var bool
++     */
++    public $bool;
++
++    /**
++     * @var float
++     */
++    public $float;
++
++    /**
++     * @var string
++     */
++    public $string;
++
++    /**
++     * @var integer
++     */
++    public $integer;
++
++    /**
++     * @var array
++     */
++    public $array;
++
++    /**
++     * @var Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationTargetAll
++     */
++    public $annotation;
++
++    /**
++     * @var array<integer>
++     */
++    public $arrayOfIntegers;
++
++    /**
++     * @var string[]
++     */
++    public $arrayOfStrings;
++
++    /**
++     * @var array<Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationTargetAll>
++     */
++    public $arrayOfAnnotations;
++
++}
+diff --git a/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/ClassWithConstants.php b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/ClassWithConstants.php
+new file mode 100644
+index 0000000000..9068db55ba
+--- /dev/null
++++ b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/ClassWithConstants.php
+@@ -0,0 +1,12 @@
++<?php
++// @codingStandardsIgnoreFile
++
++namespace Drupal\Tests\Component\Annotation\Doctrine\Fixtures;
++
++class ClassWithConstants
++{
++    const SOME_VALUE  = 'ClassWithConstants.SOME_VALUE';
++    const SOME_KEY    = 'ClassWithConstants.SOME_KEY';
++    const OTHER_KEY_  = 'ClassWithConstants.OTHER_KEY_';
++    const OTHER_KEY_2 = 'ClassWithConstants.OTHER_KEY_2';
++}
+diff --git a/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/ClassWithInvalidAnnotationTargetAtClass.php b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/ClassWithInvalidAnnotationTargetAtClass.php
+new file mode 100644
+index 0000000000..31f22a4cec
+--- /dev/null
++++ b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/ClassWithInvalidAnnotationTargetAtClass.php
+@@ -0,0 +1,18 @@
++<?php
++// @codingStandardsIgnoreFile
++
++namespace Drupal\Tests\Component\Annotation\Doctrine\Fixtures;
++
++use Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationTargetPropertyMethod;
++
++/**
++ * @AnnotationTargetPropertyMethod("Some data")
++ */
++class ClassWithInvalidAnnotationTargetAtClass
++{
++
++    /**
++     * @AnnotationTargetPropertyMethod("Bar")
++     */
++    public $foo;
++}
+diff --git a/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/ClassWithInvalidAnnotationTargetAtMethod.php b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/ClassWithInvalidAnnotationTargetAtMethod.php
+new file mode 100644
+index 0000000000..9ee0a27f86
+--- /dev/null
++++ b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/ClassWithInvalidAnnotationTargetAtMethod.php
+@@ -0,0 +1,21 @@
++<?php
++// @codingStandardsIgnoreFile
++
++namespace Drupal\Tests\Component\Annotation\Doctrine\Fixtures;
++
++use Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationTargetClass;
++
++/**
++ * @AnnotationTargetClass("Some data")
++ */
++class ClassWithInvalidAnnotationTargetAtMethod
++{
++
++    /**
++     * @AnnotationTargetClass("functionName")
++     */
++    public function functionName($param)
++    {
++
++    }
++}
+diff --git a/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/ClassWithInvalidAnnotationTargetAtProperty.php b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/ClassWithInvalidAnnotationTargetAtProperty.php
+new file mode 100644
+index 0000000000..ed5be2678d
+--- /dev/null
++++ b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/ClassWithInvalidAnnotationTargetAtProperty.php
+@@ -0,0 +1,25 @@
++<?php
++// @codingStandardsIgnoreFile
++
++namespace Drupal\Tests\Component\Annotation\Doctrine\Fixtures;
++
++use Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationTargetClass;
++use Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationTargetAnnotation;
++
++/**
++ * @AnnotationTargetClass("Some data")
++ */
++class ClassWithInvalidAnnotationTargetAtProperty
++{
++
++    /**
++     * @AnnotationTargetClass("Bar")
++     */
++    public $foo;
++
++
++    /**
++     * @AnnotationTargetAnnotation("Foo")
++     */
++    public $bar;
++}
+diff --git a/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/ClassWithValidAnnotationTarget.php b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/ClassWithValidAnnotationTarget.php
+new file mode 100644
+index 0000000000..505aa27a13
+--- /dev/null
++++ b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/ClassWithValidAnnotationTarget.php
+@@ -0,0 +1,41 @@
++<?php
++// @codingStandardsIgnoreFile
++
++namespace Drupal\Tests\Component\Annotation\Doctrine\Fixtures;
++
++use Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationTargetClass;
++use Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationTargetAll;
++use Drupal\Tests\Component\Annotation\Doctrine\Fixtures\AnnotationTargetPropertyMethod;
++
++/**
++ * @AnnotationTargetClass("Some data")
++ */
++class ClassWithValidAnnotationTarget
++{
++
++    /**
++     * @AnnotationTargetPropertyMethod("Some data")
++     */
++    public $foo;
++
++
++    /**
++     * @AnnotationTargetAll("Some data",name="Some name")
++     */
++    public $name;
++
++    /**
++     * @AnnotationTargetPropertyMethod("Some data",name="Some name")
++     */
++    public function someFunction()
++    {
++
++    }
++
++
++    /**
++     * @AnnotationTargetAll(@AnnotationTargetAnnotation)
++     */
++    public $nested;
++
++}
+diff --git a/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/IntefaceWithConstants.php b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/IntefaceWithConstants.php
+new file mode 100644
+index 0000000000..eb54ac9d48
+--- /dev/null
++++ b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/IntefaceWithConstants.php
+@@ -0,0 +1,11 @@
++<?php
++// @codingStandardsIgnoreFile
++
++namespace Drupal\Tests\Component\Annotation\Doctrine\Fixtures;
++
++interface IntefaceWithConstants
++{
++
++    const SOME_VALUE = 'IntefaceWithConstants.SOME_VALUE';
++    const SOME_KEY   = 'IntefaceWithConstants.SOME_KEY';
++}
+diff --git a/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Ticket/DCOM58Entity.php b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Ticket/DCOM58Entity.php
+new file mode 100644
+index 0000000000..fb7365d8a5
+--- /dev/null
++++ b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Ticket/DCOM58Entity.php
+@@ -0,0 +1,10 @@
++<?php
++// @codingStandardsIgnoreFile
++
++// Some class named Entity in the global namespace
++/**
++ * @Annotation
++ */
++class Entity
++{
++}
+diff --git a/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Ticket/DCOM58Test.php b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Ticket/DCOM58Test.php
+new file mode 100644
+index 0000000000..bc3b70a510
+--- /dev/null
++++ b/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Ticket/DCOM58Test.php
+@@ -0,0 +1,119 @@
++<?php
++// @codingStandardsIgnoreFile
++
++namespace Drupal\Tests\Component\Annotation\Doctrine\Ticket;
++
++use Doctrine\Common\Annotations\AnnotationReader;
++use Doctrine\Common\Annotations\DocParser;
++use Doctrine\Common\Annotations\SimpleAnnotationReader;
++use PHPUnit\Framework\TestCase;
++
++//Some class named Entity in the global namespace
++include __DIR__ .'/DCOM58Entity.php';
++
++/**
++ * @group DCOM58
++ */
++class DCOM58Test extends TestCase
++{
++    public function testIssue()
++    {
++        $reader     = new AnnotationReader();
++        $result     = $reader->getClassAnnotations(new \ReflectionClass(__NAMESPACE__."\MappedClass"));
++
++        foreach ($result as $annot) {
++            $classAnnotations[get_class($annot)] = $annot;
++        }
++
++        $this->assertTrue(!isset($classAnnotations['']), 'Class "xxx" is not a valid entity or mapped super class.');
++    }
++
++    public function testIssueGlobalNamespace()
++    {
++        $docblock   = "@Entity";
++        $parser     = new DocParser();
++        $parser->setImports(array(
++            "__NAMESPACE__" =>"Drupal\Tests\Component\Annotation\Doctrine\Ticket\Doctrine\ORM\Mapping"
++        ));
++
++        $annots     = $parser->parse($docblock);
++
++        $this->assertEquals(1, count($annots));
++        $this->assertInstanceOf("Drupal\Tests\Component\Annotation\Doctrine\Ticket\Doctrine\ORM\Mapping\Entity", $annots[0]);
++    }
++
++    public function testIssueNamespaces()
++    {
++        $docblock   = "@Entity";
++        $parser     = new DocParser();
++        $parser->addNamespace("Drupal\Tests\Component\Annotation\Doctrine\Ticket\Doctrine\ORM");
++
++        $annots     = $parser->parse($docblock);
++
++        $this->assertEquals(1, count($annots));
++        $this->assertInstanceOf("Drupal\Tests\Component\Annotation\Doctrine\Ticket\Doctrine\ORM\Entity", $annots[0]);
++    }
++
++    public function testIssueMultipleNamespaces()
++    {
++        $docblock   = "@Entity";
++        $parser     = new DocParser();
++        $parser->addNamespace("Drupal\Tests\Component\Annotation\Doctrine\Ticket\Doctrine\ORM\Mapping");
++        $parser->addNamespace("Drupal\Tests\Component\Annotation\Doctrine\Ticket\Doctrine\ORM");
++
++        $annots     = $parser->parse($docblock);
++
++        $this->assertEquals(1, count($annots));
++        $this->assertInstanceOf("Drupal\Tests\Component\Annotation\Doctrine\Ticket\Doctrine\ORM\Mapping\Entity", $annots[0]);
++    }
++
++    public function testIssueWithNamespacesOrImports()
++    {
++        $docblock   = "@Entity";
++        $parser     = new DocParser();
++        $annots     = $parser->parse($docblock);
++
++        $this->assertEquals(1, count($annots));
++        $this->assertInstanceOf("Entity", $annots[0]);
++        $this->assertEquals(1, count($annots));
++    }
++
++
++    public function testIssueSimpleAnnotationReader()
++    {
++        $reader     = new SimpleAnnotationReader();
++        $reader->addNamespace('Drupal\Tests\Component\Annotation\Doctrine\Ticket\Doctrine\ORM\Mapping');
++        $annots     = $reader->getClassAnnotations(new \ReflectionClass(__NAMESPACE__."\MappedClass"));
++
++        $this->assertEquals(1, count($annots));
++        $this->assertInstanceOf("Drupal\Tests\Component\Annotation\Doctrine\Ticket\Doctrine\ORM\Mapping\Entity", $annots[0]);
++    }
++
++}
++
++/**
++ * @Entity
++ */
++class MappedClass
++{
++
++}
++
++
++namespace Drupal\Tests\Component\Annotation\Doctrine\Ticket\Doctrine\ORM\Mapping;
++/**
++* @Annotation
++*/
++class Entity
++{
++
++}
++
++namespace Drupal\Tests\Component\Annotation\Doctrine\Ticket\Doctrine\ORM;
++/**
++* @Annotation
++*/
++class Entity
++{
++
++}
+diff --git a/core/tests/Drupal/Tests/Component/Plugin/Discovery/AnnotatedClassDiscoveryTest.php b/core/tests/Drupal/Tests/Component/Plugin/Discovery/AnnotatedClassDiscoveryTest.php
+new file mode 100644
+index 0000000000..67e9c090e7
+--- /dev/null
++++ b/core/tests/Drupal/Tests/Component/Plugin/Discovery/AnnotatedClassDiscoveryTest.php
+@@ -0,0 +1,100 @@
++<?php
++
++namespace Drupal\Tests\Component\Plugin\Discovery;
++
++use Drupal\Component\Annotation\Plugin\Discovery\AnnotatedClassDiscovery;
++use Drupal\Component\FileCache\FileCacheFactory;
++use org\bovigo\vfs\vfsStream;
++use org\bovigo\vfs\vfsStreamDirectory;
++use org\bovigo\vfs\vfsStreamWrapper;
++use PHPUnit\Framework\TestCase;
++
++/**
++ * @coversDefaultClass \Drupal\Component\Annotation\Plugin\Discovery\AnnotatedClassDiscovery
++ *
++ * @group Annotation
++ * @group Plugin
++ */
++class AnnotatedClassDiscoveryTest extends TestCase {
++
++  /**
++   * All the Drupal documentation standards tags.
++   *
++   * @var string[]
++   */
++  public function provideBadAnnotations() {
++    return [
++      ['addtogroup'],
++      ['code'],
++      ['defgroup'],
++      ['deprecated'],
++      ['endcode'],
++      ['endlink'],
++      ['file'],
++      ['ingroup'],
++      ['group'],
++      ['link'],
++      ['mainpage'],
++      ['param'],
++      ['ref'],
++      ['return'],
++      ['section'],
++      ['see'],
++      ['subsection'],
++      ['throws'],
++      ['todo'],
++      ['var'],
++      ['{'],
++      ['}'],
++    ];
++  }
++
++  /**
++   * Make sure AnnotatedClassDiscovery never tries to autoload bad annotations.
++   *
++   * @dataProvider provideBadAnnotations
++   *
++   * @coversNothing
++   */
++  public function testAutoloadBadAnnotations($annotation) {
++    // Set up a class file in vfsStream.
++    vfsStreamWrapper::register();
++    $root = new vfsStreamDirectory('root');
++    vfsStreamWrapper::setRoot($root);
++
++    FileCacheFactory::setPrefix(__CLASS__);
++
++    // Make a directory for discovery.
++    $url = vfsStream::url('root');
++    mkdir($url . '/DrupalTest');
++
++    // Create a class docblock with our annotation.
++    $php_file = "<?php\nnamespace DrupalTest;\n/**\n";
++    $php_file .= " * @$annotation\n";
++    $php_file .= " */\nclass TestClass {}";
++    file_put_contents($url . '/DrupalTest/TestClass.php', $php_file);
++
++    // Create an AnnotatedClassDiscovery object referencing the virtual file.
++    $discovery = new AnnotatedClassDiscovery(
++      ['\\DrupalTest\\TestClass' => [vfsStream::url('root/DrupalTest')]], '\\DrupalTest\\Component\\Annotation\\'
++    );
++
++    // Register our class loader which will fail if the annotation reader tries
++    // to autoload disallowed annotations.
++    $class_loader = function ($class_name) use ($annotation) {
++      $name_array = explode('\\', $class_name);
++      $name = array_pop($name_array);
++      if ($name == $annotation) {
++        $this->fail('Attempted to autoload a non-plugin annotation: ' . $name);
++      }
++    };
++    spl_autoload_register($class_loader, TRUE, TRUE);
++    // Now try to get plugin definitions.
++    $definitions = $discovery->getDefinitions();
++    // Unregister to clean up.
++    spl_autoload_unregister($class_loader);
++    // Assert that no annotations were loaded.
++    $this->assertEmpty($definitions);
++  }
++
++}
