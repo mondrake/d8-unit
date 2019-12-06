@@ -1,9 +1,9 @@
 diff --git a/core/lib/Drupal/Core/Test/Comparator/MarkupInterfaceComparator.php b/core/lib/Drupal/Core/Test/Comparator/MarkupInterfaceComparator.php
 new file mode 100644
-index 0000000000..46313e7381
+index 0000000000..cf0ccea15a
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Test/Comparator/MarkupInterfaceComparator.php
-@@ -0,0 +1,65 @@
+@@ -0,0 +1,34 @@
 +<?php
 +
 +namespace Drupal\Core\Test\Comparator;
@@ -20,61 +20,30 @@ index 0000000000..46313e7381
 +   * {@inheritdoc}
 +   */
 +  public function accepts($expected, $actual) {
-+    // If we do not have an initialised container, we are likely in a unit test
-+    // context. In this case we cannot cast the objects to strings, so we let
-+    // PHPUnit fall back to the standard ObjectComparator.
-+    if (!$this->containerExists()) {
-+      return FALSE;
-+    }
-+    // When either expected or actual are MarkupInterface objects, we take over
-+    // and convert to strings before comparing.
-+    if (($expected instanceof MarkupInterface && $actual instanceof MarkupInterface) ||
++    // If at least one argument is a MarkupInterface object, we take over and
++    // convert to strings before comparing.
++    return ($expected instanceof MarkupInterface && $actual instanceof MarkupInterface) ||
 +      ($expected instanceof MarkupInterface && is_scalar($actual)) ||
-+      (is_scalar($expected) && $actual instanceof MarkupInterface)) {
-+      return TRUE;
-+    }
-+    return FALSE;
++      (is_scalar($expected) && $actual instanceof MarkupInterface);
 +  }
 +
 +  /**
 +   * {@inheritdoc}
 +   */
 +  public function assertEquals($expected, $actual, $delta = 0.0, $canonicalize = FALSE, $ignoreCase = FALSE) {
-+    $expected_safe = $this->safeCastString($expected);
-+    $actual_safe = $this->safeCastString($actual);
++    $expected_safe = $expected instanceof MarkupInterface ? (string) $expected : $expected;
++    $actual_safe = $actual instanceof MarkupInterface ? (string) $actual : $actual;
 +    $comparator = $this->factory->getComparatorFor($expected_safe, $actual_safe);
 +    $comparator->assertEquals($expected_safe, $actual_safe, $delta, $canonicalize, $ignoreCase);
-+  }
-+
-+  /**
-+   * Returns TRUE if the container has been initialized, FALSE otherwise.
-+   *
-+   * @return bool
-+   */
-+  protected function containerExists() {
-+    return \Drupal::hasContainer();
-+  }
-+
-+  /**
-+   * Casts MarkupInterface objects into strings.
-+   *
-+   * @param mixed $value
-+   *   The value to act on.
-+   *
-+   * @return mixed
-+   *   The input value, with MarkupInterface objects cast to string.
-+   */
-+  private function safeCastString($value) {
-+    return ($value instanceof MarkupInterface && $this->containerExists()) ? (string) $value : $value;
 +  }
 +
 +}
 diff --git a/core/tests/Drupal/KernelTests/Core/Test/Comparator/MarkupInterfaceComparatorTest.php b/core/tests/Drupal/KernelTests/Core/Test/Comparator/MarkupInterfaceComparatorTest.php
 new file mode 100644
-index 0000000000..d742917f65
+index 0000000000..b3c6ec4e91
 --- /dev/null
 +++ b/core/tests/Drupal/KernelTests/Core/Test/Comparator/MarkupInterfaceComparatorTest.php
-@@ -0,0 +1,182 @@
+@@ -0,0 +1,135 @@
 +<?php
 +
 +namespace Drupal\KernelTests\Core\Test\Comparator;
@@ -90,9 +59,7 @@ index 0000000000..d742917f65
 + * Tests \Drupal\Core\Test\Comparator\MarkupInterfaceComparator.
 + *
 + * We need to test the class with a kernel test since casting MarkupInterface
-+ * objects to strings can require an initialised container. We also test under
-+ * the assumption of missing container by mocking MarkupInterfaceComparator;
-+ * this way we cover the case of the comparator being used in a unit test.
++ * objects to strings can require an initialised container.
 + *
 + * @group Test
 + *
@@ -111,33 +78,22 @@ index 0000000000..d742917f65
 +  protected $factory;
 +
 +  /**
-+   * Prepares the comparator.
++   * {@inheritdoc}
 +   */
-+  protected function setUpComparator($mock = FALSE) {
-+    if ($mock) {
-+      $mock_builder = $this->getMockBuilder(MarkupInterfaceComparator::class);
-+      $this->comparator = $mock_builder->setMethods(['containerExists'])->getMock();
-+      $this->comparator->expects($this->any())
-+        ->method('containerExists')
-+        ->will($this->returnValue(FALSE));
-+    }
-+    else {
-+      $this->comparator = new MarkupInterfaceComparator();
-+    }
-+
++  protected function setUp() {
++    parent::setUp();
 +    $this->factory = new Factory();
++    $this->comparator = new MarkupInterfaceComparator();
 +    $this->comparator->setFactory($this->factory);
 +  }
 +
 +  /**
 +   * Provides test data for the comparator.
 +   *
-+   * @returns array
-+   *   Each array entry has test expected, test actual values, a bool indicating
-+   *   the expected return value of ::accepts, a value indicating the expected
-+   *   result of ::assertEquals with a container initialised, and a value
-+   *   indicating the expected result of ::assertEquals without a container
-+   *   initialised.
++   * @return array
++   *   Each array entry has test expected value, test actual value, a bool
++   *   indicating the expected return value of ::accepts, and a value
++   *   indicating the expected result of ::assertEquals.
 +   */
 +  public function dataSetProvider() {
 +    return [
@@ -146,12 +102,10 @@ index 0000000000..d742917f65
 +        new FormattableMarkup('goldfinger', []),
 +        TRUE,
 +        TRUE,
-+        TRUE,
 +      ],
 +      'FormattableMarkup vs string, equal' => [
 +        new FormattableMarkup('goldfinger', []),
 +        'goldfinger',
-+        TRUE,
 +        TRUE,
 +        TRUE,
 +      ],
@@ -160,34 +114,29 @@ index 0000000000..d742917f65
 +        new FormattableMarkup('goldfinger', []),
 +        TRUE,
 +        TRUE,
-+        TRUE,
 +      ],
 +      'TranslatableMarkup vs FormattableMarkup, equal' => [
 +        new TranslatableMarkup('goldfinger'),
 +        new FormattableMarkup('goldfinger', []),
 +        TRUE,
 +        TRUE,
-+        ComparisonFailure::class,
 +      ],
 +      'TranslatableMarkup vs int, equal' => [
 +        new TranslatableMarkup('1234'),
 +        1234,
 +        TRUE,
 +        TRUE,
-+        ComparisonFailure::class,
 +      ],
 +      'int vs TranslatableMarkup, equal' => [
 +        1234,
 +        new TranslatableMarkup('1234'),
 +        TRUE,
 +        TRUE,
-+        ComparisonFailure::class,
 +      ],
 +      'FormattableMarkup vs array' => [
 +        new FormattableMarkup('goldfinger', []),
 +        ['goldfinger'],
 +        FALSE,
-+        ComparisonFailure::class,
 +        ComparisonFailure::class,
 +      ],
 +      'stdClass vs TranslatableMarkup' => [
@@ -195,13 +144,11 @@ index 0000000000..d742917f65
 +        new TranslatableMarkup('goldfinger'),
 +        FALSE,
 +        ComparisonFailure::class,
-+        ComparisonFailure::class,
 +      ],
 +      'string vs string, equal' => [
 +        'goldfinger',
 +        'goldfinger',
 +        FALSE,
-+        TRUE,
 +        TRUE,
 +      ],
 +    ];
@@ -211,8 +158,7 @@ index 0000000000..d742917f65
 +   * @covers ::accepts
 +   * @dataProvider dataSetProvider
 +   */
-+  public function testAcceptsWithContainer($expected, $actual, $accepts_result, $equals_result_with_container, $equals_result_without_container) {
-+    $this->setUpComparator();
++  public function testAccepts($expected, $actual, $accepts_result, $equals_result) {
 +    if ($accepts_result) {
 +      $this->assertTrue($this->comparator->accepts($expected, $actual));
 +    }
@@ -222,41 +168,39 @@ index 0000000000..d742917f65
 +  }
 +
 +  /**
-+   * @covers ::accepts
-+   * @dataProvider dataSetProvider
-+   */
-+  public function testAcceptsWithoutContainer($expected, $actual, $accepts_result, $equals_result_with_container, $equals_result_without_container) {
-+    $this->setUpComparator(TRUE);
-+    $this->assertFalse($this->comparator->accepts($expected, $actual));
-+  }
-+
-+  /**
 +   * @covers ::assertEquals
 +   * @dataProvider dataSetProvider
 +   */
-+  public function testAssertEqualsWithContainer($expected, $actual, $accepts_result, $equals_result_with_container, $equals_result_without_container) {
-+    $this->setUpComparator();
-+
-+    if ($equals_result_with_container === ComparisonFailure::class) {
-+      $this->expectException(ComparisonFailure::class);
-+    }
-+    $this->assertNull($this->comparator->assertEquals($expected, $actual));
-+  }
-+
-+  /**
-+   * @covers ::assertEquals
-+   * @dataProvider dataSetProvider
-+   */
-+  public function testAssertEqualsWithoutContainer($expected, $actual, $accepts_result, $equals_result_with_container, $equals_result_without_container) {
-+    $this->setUpComparator(TRUE);
-+
-+    if ($equals_result_without_container === ComparisonFailure::class) {
++  public function testAssertEquals($expected, $actual, $accepts_result, $equals_result) {
++    if ($equals_result === ComparisonFailure::class) {
 +      $this->expectException(ComparisonFailure::class);
 +    }
 +    $this->assertNull($this->comparator->assertEquals($expected, $actual));
 +  }
 +
 +}
+diff --git a/core/tests/Drupal/KernelTests/KernelTestBase.php b/core/tests/Drupal/KernelTests/KernelTestBase.php
+index 957ed79582..4f59401650 100644
+--- a/core/tests/Drupal/KernelTests/KernelTestBase.php
++++ b/core/tests/Drupal/KernelTests/KernelTestBase.php
+@@ -16,6 +16,7 @@
+ use Drupal\Core\Extension\ExtensionDiscovery;
+ use Drupal\Core\Language\Language;
+ use Drupal\Core\Site\Settings;
++use Drupal\Core\Test\Comparator\MarkupInterfaceComparator;
+ use Drupal\Core\Test\TestDatabase;
+ use Drupal\Tests\AssertHelperTrait;
+ use Drupal\Tests\ConfigTestTrait;
+@@ -237,6 +238,9 @@ public static function setUpBeforeClass() {
+   protected function setUp() {
+     parent::setUp();
+ 
++    // Allow tests to compare MarkupInterface objects via assertEquals().
++    $this->registerComparator(new MarkupInterfaceComparator());
++
+     $this->root = static::getDrupalRoot();
+     $this->initFileCache();
+     $this->bootEnvironment();
 diff --git a/core/tests/Drupal/TestTools/PhpUnitCompatibility/PhpUnit6/TestCompatibilityTrait.php b/core/tests/Drupal/TestTools/PhpUnitCompatibility/PhpUnit6/TestCompatibilityTrait.php
 index 92b1b9ebd7..e6d99e402a 100644
 --- a/core/tests/Drupal/TestTools/PhpUnitCompatibility/PhpUnit6/TestCompatibilityTrait.php
@@ -303,34 +247,25 @@ index 3d10e151a9..5db4beb372 100644
 -  }
 -
  }
-diff --git a/core/tests/bootstrap.php b/core/tests/bootstrap.php
-index 467e6af6e6..11471c5edc 100644
---- a/core/tests/bootstrap.php
-+++ b/core/tests/bootstrap.php
-@@ -8,6 +8,7 @@
-  */
- 
- use Drupal\Component\Assertion\Handle;
+diff --git a/core/tests/Drupal/Tests/BrowserTestBase.php b/core/tests/Drupal/Tests/BrowserTestBase.php
+index 96657a93e7..1ffbb821be 100644
+--- a/core/tests/Drupal/Tests/BrowserTestBase.php
++++ b/core/tests/Drupal/Tests/BrowserTestBase.php
+@@ -9,6 +9,7 @@
+ use Behat\Mink\Session;
+ use Drupal\Component\Serialization\Json;
+ use Drupal\Core\Database\Database;
 +use Drupal\Core\Test\Comparator\MarkupInterfaceComparator;
- use PHPUnit\Framework\AssertionFailedError;
- use PHPUnit\Framework\Constraint\Count;
- use PHPUnit\Framework\Error\Error;
-@@ -19,6 +20,7 @@
- use PHPUnit\Framework\TestCase;
- use PHPUnit\Util\Test;
- use PHPUnit\Util\Xml;
-+use SebastianBergmann\Comparator\Factory;
+ use Drupal\Core\Test\FunctionalTestSetupTrait;
+ use Drupal\Core\Test\TestSetupTrait;
+ use Drupal\Core\Utility\Error;
+@@ -391,6 +392,9 @@ protected function registerSessions() {}
+   protected function setUp() {
+     parent::setUp();
  
- /**
-  * Finds all valid extension directories recursively within a given directory.
-@@ -163,6 +165,10 @@ function drupal_phpunit_populate_class_loader() {
- // Do class loader population.
- drupal_phpunit_populate_class_loader();
- 
-+// Register any additional Comparator with PHPUnit.
-+$comparator_factory = Factory::getInstance();
-+$comparator_factory->register(new MarkupInterfaceComparator());
++    // Allow tests to compare MarkupInterface objects via assertEquals().
++    $this->registerComparator(new MarkupInterfaceComparator());
 +
- // Set sane locale settings, to ensure consistent string, dates, times and
- // numbers handling.
- // @see \Drupal\Core\DrupalKernel::bootEnvironment()
+     $this->setupBaseUrl();
+ 
+     // Install Drupal test site.
