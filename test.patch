@@ -1,32 +1,35 @@
 diff --git a/core/lib/Drupal/Core/Test/EnvironmentCleaner.php b/core/lib/Drupal/Core/Test/EnvironmentCleaner.php
-index 31da3cfc..04b9cf5b 100644
+index 31da3cfc07..1585269627 100644
 --- a/core/lib/Drupal/Core/Test/EnvironmentCleaner.php
 +++ b/core/lib/Drupal/Core/Test/EnvironmentCleaner.php
-@@ -26,15 +26,9 @@ class EnvironmentCleaner implements EnvironmentCleanerInterface {
+@@ -26,15 +26,11 @@ class EnvironmentCleaner implements EnvironmentCleanerInterface {
    protected $testDatabase;
-
+ 
    /**
 -   * Connection to the database where test results are stored.
++   * The test run results storage.
     *
 -   * This could be the same as $testDatabase, or it could be different.
 -   * run-tests.sh allows you to specify a different results database with the
 -   * --sqlite parameter.
 -   *
 -   * @var \Drupal\Core\Database\Connection
++   * @var \Drupal\Core\Test\TestRunResultsStorageInterface
     */
 -  protected $resultsDatabase;
 +  protected $testRunResultsStorage;
-
+ 
    /**
     * The file system service.
-@@ -57,18 +51,16 @@ class EnvironmentCleaner implements EnvironmentCleanerInterface {
+@@ -57,18 +53,17 @@ class EnvironmentCleaner implements EnvironmentCleanerInterface {
     *   The path to the root of the Drupal installation.
     * @param \Drupal\Core\Database\Connection $test_database
     *   Connection to the database against which tests were run.
 -   * @param \Drupal\Core\Database\Connection $results_database
 -   *   Connection to the database where test results were stored. This could be
 -   *   the same as $test_database, or it could be different.
-+   * @todo
++   * @param \Drupal\Core\Test\TestRunResultsStorageInterface $test_run_results_storage
++   *   The test run results storage.
     * @param \Symfony\Component\Console\Output\OutputInterface $output
     *   A symfony console output object.
     * @param \Drupal\Core\File\FileSystemInterface $file_system
@@ -41,7 +44,7 @@ index 31da3cfc..04b9cf5b 100644
      $this->output = $output;
      $this->fileSystem = $file_system;
    }
-@@ -85,7 +77,7 @@ public function cleanEnvironment($clear_results = TRUE, $clear_temp_directories
+@@ -85,7 +80,7 @@ public function cleanEnvironment($clear_results = TRUE, $clear_temp_directories
        $this->doCleanTemporaryDirectories();
      }
      if ($clear_results) {
@@ -50,7 +53,7 @@ index 31da3cfc..04b9cf5b 100644
        $this->output->write('Test results removed: ' . $count);
      }
      else {
-@@ -168,27 +160,14 @@ protected function doCleanTemporaryDirectories() {
+@@ -168,27 +163,14 @@ protected function doCleanTemporaryDirectories() {
    /**
     * {@inheritdoc}
     */
@@ -80,15 +83,15 @@ index 31da3cfc..04b9cf5b 100644
 -
 -    return $count;
    }
-
+ 
  }
 diff --git a/core/lib/Drupal/Core/Test/EnvironmentCleanerInterface.php b/core/lib/Drupal/Core/Test/EnvironmentCleanerInterface.php
-index 4487278a..dc5d40cd 100644
+index 4487278ad2..dc5d40cdba 100644
 --- a/core/lib/Drupal/Core/Test/EnvironmentCleanerInterface.php
 +++ b/core/lib/Drupal/Core/Test/EnvironmentCleanerInterface.php
 @@ -44,7 +44,7 @@ public function cleanDatabase();
    public function cleanTemporaryDirectories();
-
+ 
    /**
 -   * Clears test result tables from the results database.
 +   * Clears test results from the results storage.
@@ -101,14 +104,14 @@ index 4487278a..dc5d40cd 100644
     */
 -  public function cleanResultsTable($test_id = NULL);
 +  public function cleanResults($test_id = NULL);
-
+ 
  }
 diff --git a/core/lib/Drupal/Core/Test/SimpletestTestRunResultsStorage.php b/core/lib/Drupal/Core/Test/SimpletestTestRunResultsStorage.php
 new file mode 100644
-index 00000000..9fcbe352
+index 0000000000..25c1a80d39
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Test/SimpletestTestRunResultsStorage.php
-@@ -0,0 +1,281 @@
+@@ -0,0 +1,286 @@
 +<?php
 +
 +namespace Drupal\Core\Test;
@@ -118,22 +121,24 @@ index 00000000..9fcbe352
 +use Drupal\Core\Database\ConnectionNotDefinedException;
 +
 +/**
++ * Implements a test run results storage compatible with legacy Simpletest.
 + *
++ * @internal
 + */
 +class SimpletestTestRunResultsStorage implements TestRunResultsStorageInterface {
 +
 +  /**
++   * The database connection to use for inserting assertions.
 +   *
++   * @var \Drupal\Core\Database\Connection
 +   */
 +  protected $connection;
 +
 +  /**
-+   * Returns the database connection to the site running Simpletest.
++   * Returns the database connection to use for inserting assertions.
 +   *
 +   * @return \Drupal\Core\Database\Connection
 +   *   The database connection to use for inserting assertions.
-+   *
-+   * @see \Drupal\simpletest\TestBase::prepareEnvironment()
 +   */
 +  public static function getConnection() {
 +    // Check whether there is a test runner connection.
@@ -160,6 +165,9 @@ index 00000000..9fcbe352
 +
 +  /**
 +   * SimpletestTestRunResultsStorage constructor.
++   *
++   * @param \Drupal\Core\Database\Connection $connection
++   *   The database connection to use for inserting assertions.
 +   */
 +  public function __construct(Connection $connection = NULL) {
 +    if (is_null($connection)) {
@@ -180,7 +188,7 @@ index 00000000..9fcbe352
 +  /**
 +   * {@inheritdoc}
 +   */
-+  public function setDatabasePrefix(TestRun $test_run, $database_prefix) {
++  public function setDatabasePrefix(TestRun $test_run, string $database_prefix) {
 +    $affected_rows = $this->connection->update('simpletest_test_id')
 +      ->fields(['last_prefix' => $database_prefix])
 +      ->condition('test_id', $test_run->id())
@@ -193,7 +201,7 @@ index 00000000..9fcbe352
 +  /**
 +   * {@inheritdoc}
 +   */
-+  public function insertLogEntry(TestRun $test_run, array $entry) {
++  public function insertLogEntry(TestRun $test_run, array $entry): bool {
 +    $entry['test_id'] = $test_run->id();
 +    $entry = array_merge([
 +      'function' => 'Unknown',
@@ -201,15 +209,15 @@ index 00000000..9fcbe352
 +      'file' => 'Unknown',
 +    ], $entry);
 +
-+    return $this->connection->insert('simpletest')
++    return (bool) $this->connection->insert('simpletest')
 +      ->fields($entry)
 +      ->execute();
 +  }
 +
 +  /**
-+   *
++   * {@inheritdoc}
 +   */
-+  public function removeResults(TestRun $test_run) {
++  public function removeResults(TestRun $test_run): int {
 +    $tx = $this->connection->startTransaction('delete_test_run');
 +    $this->connection->delete('simpletest')
 +      ->condition('test_id', $test_run->id())
@@ -218,7 +226,7 @@ index 00000000..9fcbe352
 +      ->condition('test_id', $test_run->id())
 +      ->execute();
 +    $tx = NULL;
-+    return $count;
++    return (int) $count;
 +  }
 +
 +  /**
@@ -257,21 +265,9 @@ index 00000000..9fcbe352
 +  }
 +
 +  /**
-+   *
-+   */
-+  public function cleanUp() {
-+    // Clear test results.
-+    $tx = $this->connection->startTransaction('delete_simpletest');
-+    $this->connection->delete('simpletest')->execute();
-+    $count = $this->connection->delete('simpletest_test_id')->execute();
-+    $tx = NULL;
-+    return $count;
-+  }
-+
-+  /**
 +   * {@inheritdoc}
 +   */
-+  public function buildTestingResultsEnvironment($keep_results) {
++  public function buildTestingResultsEnvironment(bool $keep_results) {
 +    $schema = $this->connection->schema();
 +    foreach (static::testingResultsSchema() as $name => $table_spec) {
 +      $table_exists = $schema->tableExists($name);
@@ -287,9 +283,21 @@ index 00000000..9fcbe352
 +  /**
 +   * {@inheritdoc}
 +   */
-+  public function validateTestingResultsEnvironment() {
++  public function validateTestingResultsEnvironment(): bool {
 +    $schema = $this->connection->schema();
 +    return $schema->tableExists('simpletest') && $schema->tableExists('simpletest_test_id');
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function cleanUp(): int {
++    // Clear test results.
++    $tx = $this->connection->startTransaction('delete_simpletest');
++    $this->connection->delete('simpletest')->execute();
++    $count = $this->connection->delete('simpletest_test_id')->execute();
++    $tx = NULL;
++    return (int) $count;
 +  }
 +
 +  /**
@@ -391,22 +399,22 @@ index 00000000..9fcbe352
 +
 +}
 diff --git a/core/lib/Drupal/Core/Test/TestDatabase.php b/core/lib/Drupal/Core/Test/TestDatabase.php
-index 115568f6..d1ca0119 100644
+index 115568f67b..d1ca0119fc 100644
 --- a/core/lib/Drupal/Core/Test/TestDatabase.php
 +++ b/core/lib/Drupal/Core/Test/TestDatabase.php
 @@ -3,8 +3,6 @@
  namespace Drupal\Core\Test;
-
+ 
  use Drupal\Component\FileSystem\FileSystem;
 -use Drupal\Core\Database\ConnectionNotDefinedException;
 -use Drupal\Core\Database\Database;
-
+ 
  /**
   * Provides helper methods for interacting with the fixture database.
 @@ -26,37 +24,6 @@ class TestDatabase {
     */
    protected $databasePrefix;
-
+ 
 -  /**
 -   * Returns the database connection to the site running Simpletest.
 -   *
@@ -443,7 +451,7 @@ index 115568f6..d1ca0119 100644
     *
 @@ -180,253 +147,13 @@ protected function getLockFile($lock_id) {
    }
-
+ 
    /**
 -   * Store an assertion from outside the testing context.
 -   *
@@ -698,45 +706,60 @@ index 115568f6..d1ca0119 100644
 +  public function getPhpErrorLogPath() {
 +    return $this->getTestSitePath() . '/error.log';
    }
-
+ 
  }
 diff --git a/core/lib/Drupal/Core/Test/TestRun.php b/core/lib/Drupal/Core/Test/TestRun.php
 new file mode 100644
-index 00000000..68bb032b
+index 0000000000..6ca6091b01
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Test/TestRun.php
-@@ -0,0 +1,183 @@
+@@ -0,0 +1,230 @@
 +<?php
 +
 +namespace Drupal\Core\Test;
 +
 +/**
++ * Implements an object that tracks execution of a test run.
 + *
++ * @internal
 + */
 +class TestRun {
 +
 +  /**
++   * The test run results storage.
 +   *
++   * @var \Drupal\Core\Test\TestRunResultsStorageInterface
 +   */
 +  protected $testRunResultsStorage;
 +
 +  /**
++   * A unique test run id.
 +   *
++   * @var int|string
 +   */
 +  protected $testId;
 +
 +  /**
++   * The test database prefix.
 +   *
++   * @var string
 +   */
 +  protected $databasePrefix;
 +
 +  /**
++   * The latest class under test.
 +   *
++   * @var string
 +   */
 +  protected $testClass;
 +
 +  /**
 +   * TestRun constructor.
++   *
++   * @param \Drupal\Core\Test\TestRunResultsStorageInterface $test_run_results_storage
++   *   The test run results storage.
++   * @param int|string $test_id
++   *   A unique test run id.
 +   */
 +  public function __construct(TestRunResultsStorageInterface $test_run_results_storage, $test_id) {
 +    $this->testRunResultsStorage = $test_run_results_storage;
@@ -744,39 +767,65 @@ index 00000000..68bb032b
 +  }
 +
 +  /**
++   * Returns a new test run object.
 +   *
++   * @param \Drupal\Core\Test\TestRunResultsStorageInterface $test_run_results_storage
++   *   The test run results storage.
++   *
++   * @return self
++   *   The new test run object.
 +   */
-+  public static function createNew(TestRunResultsStorageInterface $test_run_results_storage) {
++  public static function createNew(TestRunResultsStorageInterface $test_run_results_storage): TestRun {
 +    $test_id = $test_run_results_storage->createNew();
 +    return new static($test_run_results_storage, $test_id);
 +  }
 +
 +  /**
++   * Returns a test run object from storage.
 +   *
++   * @param \Drupal\Core\Test\TestRunResultsStorageInterface $test_run_results_storage
++   *   The test run results storage.
++   * @param int|string $test_id
++   *   The test run id.
++   *
++   * @return self
++   *   The test run object.
 +   */
-+  public static function get(TestRunResultsStorageInterface $test_run_results_storage, $test_id) {
++  public static function get(TestRunResultsStorageInterface $test_run_results_storage, $test_id): TestRun {
 +    return new static($test_run_results_storage, $test_id);
 +  }
 +
 +  /**
++   * Returns the id of the test run object.
 +   *
++   * @return int|string
++   *   The id of the test run object.
 +   */
 +  public function id() {
 +    return $this->testId;
 +  }
 +
 +  /**
++   * Sets the test database prefix.
 +   *
++   * @param string $database_prefix
++   *   The database prefix.
++   *
++   * @throws \RuntimeException
++   *   If the database prefix cannot be saved to storage.
 +   */
-+  public function setDatabasePrefix($database_prefix) {
++  public function setDatabasePrefix(string $database_prefix) {
 +    $this->databasePrefix = $database_prefix;
 +    $this->testRunResultsStorage->setDatabasePrefix($this, $database_prefix);
 +  }
 +
 +  /**
++   * Gets the test database prefix.
 +   *
++   * @return string
++   *   The database prefix.
 +   */
-+  public function getDatabasePrefix() {
++  public function getDatabasePrefix(): string {
 +    if (is_null($this->databasePrefix)) {
 +      $state = $this->testRunResultsStorage->getCurrentTestRunState($this);
 +      $this->databasePrefix = $state['db_prefix'];
@@ -786,9 +835,12 @@ index 00000000..68bb032b
 +  }
 +
 +  /**
++   * Gets the latest class under test.
 +   *
++   * @return string
++   *   The test class.
 +   */
-+  public function getTestClass() {
++  public function getTestClass(): string {
 +    if (is_null($this->testClass)) {
 +      $state = $this->testRunResultsStorage->getCurrentTestRunState($this);
 +      $this->databasePrefix = $state['db_prefix'];
@@ -798,27 +850,36 @@ index 00000000..68bb032b
 +  }
 +
 +  /**
++   * Adds a test log entry.
 +   *
++   * @param array $entry
++   *   The array of the log entry elements.
++   *
++   * @return bool
++   *   TRUE if the addition was successful, FALSE otherwise.
 +   */
-+  public function insertLogEntry(array $entry) {
++  public function insertLogEntry(array $entry): bool {
 +    $this->testClass = $entry['test_class'];
 +    return $this->testRunResultsStorage->insertLogEntry($this, $entry);
 +  }
 +
 +  /**
-+   * Get test results for the test run.
++   * Get test results for a test run, ordered by test class.
 +   *
 +   * @return array
-+   *   Array of results grouped by test_class.
++   *   Array of results ordered by test class and message id.
 +   */
 +  public function getLogEntriesByTestClass() {
 +    return $this->testRunResultsStorage->getLogEntriesByTestClass($this);
 +  }
 +
 +  /**
++   * Removes the test results from the storage.
 +   *
++   * @return int
++   *   The number of log entries that were removed from storage.
 +   */
-+  public function removeResults() {
++  public function removeResults(): int {
 +    return $this->testRunResultsStorage->removeResults($this);
 +  }
 +
@@ -835,10 +896,8 @@ index 00000000..68bb032b
 +   *
 +   * @return bool
 +   *   Whether any fatal errors were found.
-+   *
-+   * @internal
 +   */
-+  public function processPhpErrorLogFile($error_log_path, $test_class) {
++  public function processPhpErrorLogFile(string $error_log_path, string $test_class) {
 +    $found = FALSE;
 +    if (file_exists($error_log_path)) {
 +      foreach (file($error_log_path) as $line) {
@@ -870,17 +929,13 @@ index 00000000..68bb032b
 +  }
 +
 +  /**
-+   * Inserts the parsed PHPUnit results into {simpletest}.
++   * Inserts the parsed PHPUnit results into the storage.
 +   *
 +   * @param array[] $phpunit_results
 +   *   An array of test results, as returned from
-+   *   \Drupal\Core\Test\JUnitConverter::xmlToRows(). These results are in a
-+   *   form suitable for inserting into the {simpletest} table of the test
-+   *   results database.
-+   *
-+   * @internal
++   *   \Drupal\Core\Test\JUnitConverter::xmlToRows().
 +   */
-+  public function processPhpUnitResults($phpunit_results) {
++  public function processPhpUnitResults(array $phpunit_results) {
 +    if (!empty($phpunit_results)) {
 +      foreach ($phpunit_results as $result) {
 +        $this->insertLogEntry($result);
@@ -891,85 +946,131 @@ index 00000000..68bb032b
 +}
 diff --git a/core/lib/Drupal/Core/Test/TestRunResultsStorageInterface.php b/core/lib/Drupal/Core/Test/TestRunResultsStorageInterface.php
 new file mode 100644
-index 00000000..1233de07
+index 0000000000..812522f0c9
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Test/TestRunResultsStorageInterface.php
-@@ -0,0 +1,60 @@
+@@ -0,0 +1,106 @@
 +<?php
 +
 +namespace Drupal\Core\Test;
 +
 +/**
++ * Interface describing a test run results storage object.
 + *
++ * @internal
 + */
 +interface TestRunResultsStorageInterface {
 +
 +  /**
++   * Gets a new unique identifier for a test run.
 +   *
++   * @return int|string
++   *   A unique identifier.
 +   */
 +  public function createNew();
 +
 +  /**
++   * Sets the test database prefix of a test run in storage.
 +   *
++   * @param \Drupal\Core\Test\TestRun $test_run
++   *   The test run object.
++   * @param string $database_prefix
++   *   The database prefix.
++   *
++   * @throws \RuntimeException
++   *   If the operation failed.
 +   */
-+  public function setDatabasePrefix(TestRun $test_run, $database_prefix);
++  public function setDatabasePrefix(TestRun $test_run, string $database_prefix);
 +
 +  /**
++   * Adds a test log entry for a test run to the storage.
 +   *
++   * @param \Drupal\Core\Test\TestRun $test_run
++   *   The test run object.
++   * @param array $entry
++   *   The array of the log entry elements.
++   *
++   * @return bool
++   *   TRUE if the addition was successful, FALSE otherwise.
 +   */
-+  public function insertLogEntry(TestRun $test_run, array $entry);
++  public function insertLogEntry(TestRun $test_run, array $entry): bool;
 +
 +  /**
-+   * Get test results for the test run.
++   * Removes the results of a test run from the storage.
++   *
++   * @param \Drupal\Core\Test\TestRun $test_run
++   *   The test run object.
++   *
++   * @return int
++   *   The number of log entries that were removed from storage.
++   */
++  public function removeResults(TestRun $test_run): int;
++
++  /**
++   * Get test results for a test run, ordered by test class.
++   *
++   * @param \Drupal\Core\Test\TestRun $test_run
++   *   The test run object.
 +   *
 +   * @return array
-+   *   Array of results grouped by test_class.
++   *   Array of results ordered by test class and message id.
 +   */
 +  public function getLogEntriesByTestClass(TestRun $test_run);
 +
 +  /**
++   * Get state information about a test run, from storage.
 +   *
-+   */
-+  public function removeResults(TestRun $test_run);
-+
-+  /**
-+   * Get information about the last test that ran given a test ID.
++   * @param \Drupal\Core\Test\TestRun $test_run
++   *   The test run object.
 +   *
-+   * @todo
++   * @return array
++   *   Array of state information, for example 'last_prefix' and 'test_class'.
 +   */
 +  public function getCurrentTestRunState(TestRun $test_run);
 +
 +  /**
++   * Prepares the test run storage.
 +   *
++   * @param bool $keep_results
++   *   If TRUE, any pre-existing storage will be preserved; if FALSE,
++   *   pre-existing storage will be cleaned up.
 +   */
-+  public function cleanUp();
++  public function buildTestingResultsEnvironment(bool $keep_results);
 +
 +  /**
++   * Checks if the test run storage is valid.
 +   *
++   * @return bool
++   *   TRUE when the storage is valid and ready for use, FALSE otherwise.
++   *
++   * @see ::buildTestingResultsEnvironment()
 +   */
-+  public function buildTestingResultsEnvironment($keep_results);
++  public function validateTestingResultsEnvironment(): bool;
 +
 +  /**
++   * Resets the test run storage.
 +   *
++   * @return int
++   *   The number of log entries that were removed from storage.
 +   */
-+  public function validateTestingResultsEnvironment();
++  public function cleanUp(): int;
 +
 +}
 diff --git a/core/lib/Drupal/Core/Test/TestSetupTrait.php b/core/lib/Drupal/Core/Test/TestSetupTrait.php
-index 1cac0bea..c7d211e1 100644
+index 1cac0bea58..c7d211e126 100644
 --- a/core/lib/Drupal/Core/Test/TestSetupTrait.php
 +++ b/core/lib/Drupal/Core/Test/TestSetupTrait.php
-@@ -110,7 +110,7 @@
+@@ -110,7 +110,7 @@ trait TestSetupTrait {
     *   The database connection to use for inserting assertions.
     */
    public static function getDatabaseConnection() {
 -    return TestDatabase::getConnection();
 +    return SimpletestTestRunResultsStorage::getConnection();
    }
-
+ 
    /**
 diff --git a/core/modules/simpletest/simpletest.install b/core/modules/simpletest/simpletest.install
-index 37387680..b6c56a67 100644
+index 373876807b..b6c56a67fa 100644
 --- a/core/modules/simpletest/simpletest.install
 +++ b/core/modules/simpletest/simpletest.install
 @@ -8,7 +8,7 @@
@@ -979,7 +1080,7 @@ index 37387680..b6c56a67 100644
 -use Drupal\Core\Test\TestDatabase;
 +use Drupal\Core\Test\SimpletestTestRunResultsStorage;
  use PHPUnit\Framework\TestCase;
-
+ 
  /**
 @@ -86,7 +86,7 @@ function simpletest_requirements($phase) {
   * Implements hook_schema().
@@ -988,10 +1089,10 @@ index 37387680..b6c56a67 100644
 -  return TestDatabase::testingSchema();
 +  return SimpletestTestRunResultsStorage::testingResultsSchema();
  }
-
+ 
  /**
 diff --git a/core/modules/simpletest/simpletest.module b/core/modules/simpletest/simpletest.module
-index a5385755..23ecbcd3 100644
+index a538575503..4a981e8ed5 100644
 --- a/core/modules/simpletest/simpletest.module
 +++ b/core/modules/simpletest/simpletest.module
 @@ -8,7 +8,6 @@
@@ -1002,28 +1103,29 @@ index a5385755..23ecbcd3 100644
  use Drupal\Core\File\Exception\FileException;
  use Drupal\Core\File\FileSystemInterface;
  use Drupal\Core\Render\Element;
-@@ -16,7 +15,9 @@
+@@ -16,7 +15,10 @@
  use Drupal\Core\StreamWrapper\PublicStream;
  use Drupal\Core\Test\JUnitConverter;
  use Drupal\Core\Test\PhpUnitTestRunner;
 +use Drupal\Core\Test\SimpletestTestRunResultsStorage;
  use Drupal\Core\Test\TestDatabase;
 +use Drupal\Core\Test\TestRun;
++use Drupal\Core\Test\TestRunResultsStorageInterface;
  use Drupal\Core\Url;
  use Drupal\simpletest\Form\SimpletestResultsForm;
  use Drupal\simpletest\TestDiscovery;
-@@ -144,9 +145,7 @@ function simpletest_run_tests($test_list) {
+@@ -144,9 +146,7 @@ function simpletest_run_tests($test_list) {
      unset($test_list['phpunit']);
    }
-
+ 
 -  $test_id = \Drupal::database()->insert('simpletest_test_id')
 -    ->useDefaults(['test_id'])
 -    ->execute();
 +  $test_run = TestRun::createNew(new SimpletestTestRunResultsStorage(\Drupal::database()));
-
+ 
    // Clear out the previous verbose files.
    try {
-@@ -163,7 +162,7 @@ function simpletest_run_tests($test_list) {
+@@ -163,7 +163,7 @@ function simpletest_run_tests($test_list) {
    $batch = [
      'title' => t('Running tests'),
      'operations' => [
@@ -1032,16 +1134,16 @@ index a5385755..23ecbcd3 100644
      ],
      'finished' => '_simpletest_batch_finished',
      'progress_message' => '',
-@@ -174,7 +173,7 @@ function simpletest_run_tests($test_list) {
-
+@@ -174,7 +174,7 @@ function simpletest_run_tests($test_list) {
+ 
    \Drupal::moduleHandler()->invokeAllDeprecated('Convert your test to a PHPUnit-based one and implement test listeners. See https://www.drupal.org/node/2934242', 'test_group_started');
-
+ 
 -  return $test_id;
 +  return $test_run->id();
  }
-
+ 
  /**
-@@ -211,13 +210,16 @@ function simpletest_run_phpunit_tests($test_id, array $unescaped_test_classnames
+@@ -211,13 +211,16 @@ function simpletest_run_phpunit_tests($test_id, array $unescaped_test_classnames
   *   An array of test results returned from simpletest_phpunit_xml_to_rows().
   *
   * @deprecated in drupal:8.8.0 and is removed from drupal:9.0.0. Use
@@ -1059,9 +1161,9 @@ index a5385755..23ecbcd3 100644
 +  }
 +  TestRun::get(new SimpletestTestRunResultsStorage(), $phpunit_results[0]['test_id'])->processPhpUnitResults($phpunit_results);
  }
-
+ 
  /**
-@@ -346,7 +348,8 @@ function _simpletest_batch_operation($test_list_init, $test_id, &$context) {
+@@ -346,7 +349,8 @@ function _simpletest_batch_operation($test_list_init, $test_id, &$context) {
    if (is_subclass_of($test_class, TestCase::class)) {
      $runner = PhpUnitTestRunner::create(\Drupal::getContainer());
      $phpunit_results = $runner->runTests($test_id, [$test_class]);
@@ -1071,9 +1173,9 @@ index a5385755..23ecbcd3 100644
      $test_results[$test_class] = simpletest_summarize_phpunit_result($phpunit_results)[$test_class];
    }
    else {
-@@ -406,10 +409,11 @@ function _simpletest_batch_finished($success, $results, $operations, $elapsed) {
+@@ -406,10 +410,11 @@ function _simpletest_batch_finished($success, $results, $operations, $elapsed) {
      $test_id = $operations[0][1][1];
-
+ 
      // Retrieve the last database prefix used for testing and the last test
 -    // class that was run from. Use the information to read the lgo file
 +    // class that was run from. Use the information to read the log file
@@ -1083,10 +1185,10 @@ index a5385755..23ecbcd3 100644
 +    $test_run = TestRun::get(new SimpletestTestRunResultsStorage(), $test_id);
 +    $test_database = new TestDatabase($test_run->getDatabasePrefix());
 +    $test_run->processPhpErrorLogFile($test_database->getPhpErrorLogPath(), $test_run->getTestClass());
-
+ 
      \Drupal::messenger()->addError(t('The test run did not successfully finish.'));
      \Drupal::messenger()->addWarning(t('Use the <em>Clean environment</em> button to clean-up temporary files and tables.'));
-@@ -433,7 +437,8 @@ function _simpletest_batch_finished($success, $results, $operations, $elapsed) {
+@@ -433,7 +438,8 @@ function _simpletest_batch_finished($success, $results, $operations, $elapsed) {
   */
  function simpletest_last_test_get($test_id) {
    @trigger_error(__FUNCTION__ . ' is deprecated in drupal:8.8.0 and is removed from drupal:9.0.0. Use \Drupal\Core\Test\TestDatabase::lastTestGet() instead. See https://www.drupal.org/node/3075252', E_USER_DEPRECATED);
@@ -1094,9 +1196,9 @@ index a5385755..23ecbcd3 100644
 +  $test_run = TestRun::get(new SimpletestTestRunResultsStorage(), $test_id);
 +  return [$test_run->getDatabasePrefix(), $test_run->getTestClass()];
  }
-
+ 
  /**
-@@ -459,8 +464,9 @@ function simpletest_last_test_get($test_id) {
+@@ -459,8 +465,9 @@ function simpletest_last_test_get($test_id) {
   */
  function simpletest_log_read($test_id, $database_prefix, $test_class) {
    @trigger_error(__FUNCTION__ . ' is deprecated in drupal:8.8.0 and is removed from drupal:9.0.0. Use \Drupal\Core\Test\TestDatabase::logRead() instead. See https://www.drupal.org/node/3075252', E_USER_DEPRECATED);
@@ -1106,9 +1208,9 @@ index a5385755..23ecbcd3 100644
 +  $test_database = new TestDatabase($database_prefix);
 +  return $test_run->processPhpErrorLogFile($test_database->getPhpErrorLogPath(), $test_class);
  }
-
+ 
  /**
-@@ -497,7 +503,29 @@ function simpletest_log_read($test_id, $database_prefix, $test_class) {
+@@ -497,7 +504,29 @@ function simpletest_log_read($test_id, $database_prefix, $test_class) {
   */
  function simpletest_insert_assert($test_id, $test_class, $status, $message = '', $group = 'Other', array $caller = []) {
    @trigger_error(__FUNCTION__ . ' is deprecated in drupal:8.8.0 and is removed from drupal:9.0.0. Use \Drupal\Core\Test\TestDatabase::insertAssert() instead. See https://www.drupal.org/node/3075252', E_USER_DEPRECATED);
@@ -1137,9 +1239,9 @@ index a5385755..23ecbcd3 100644
 +
 +  TestRun::get(new SimpletestTestRunResultsStorage(), $test_id)->insertLogEntry($assertion);
  }
-
+ 
  /**
-@@ -669,7 +697,7 @@ function simpletest_clean_results_table($test_id = NULL) {
+@@ -669,7 +698,7 @@ function simpletest_clean_results_table($test_id = NULL) {
    if (\Drupal::config('simpletest.settings')->get('clear_results')) {
      /* @var $cleaner \Drupal\simpletest\EnvironmentCleanerService */
      $cleaner = \Drupal::service('environment_cleaner');
@@ -1148,23 +1250,24 @@ index a5385755..23ecbcd3 100644
    }
    return $count;
  }
-@@ -742,6 +770,8 @@ function simpletest_phpunit_testcase_to_row($test_id, \SimpleXMLElement $test_ca
+@@ -742,6 +771,9 @@ function simpletest_phpunit_testcase_to_row($test_id, \SimpleXMLElement $test_ca
  /**
   * Display test results from run-tests.sh in a browser.
   *
-+ * @todo
++ * @param \Drupal\Core\Test\TestRunResultsStorageInterface $test_run_results_storage
++ *   The test run results storage.
 + *
   * @internal
   *   This function is only used by run-tests.sh
   *
-@@ -751,18 +781,15 @@ function simpletest_phpunit_testcase_to_row($test_id, \SimpleXMLElement $test_ca
+@@ -751,18 +783,15 @@ function simpletest_phpunit_testcase_to_row($test_id, \SimpleXMLElement $test_ca
   *
   * @see https://www.drupal.org/node/3083549
   */
 -function _simpletest_run_tests_script_open_browser() {
-+function _simpletest_run_tests_script_open_browser(SimpletestTestRunResultsStorage $test_run_results_storage) {
++function _simpletest_run_tests_script_open_browser(TestRunResultsStorageInterface $test_run_results_storage) {
    global $test_ids;
-
+ 
    try {
 -    $connection = Database::getConnection('default', 'test-runner');
 -    $results = $connection->select('simpletest')
@@ -1183,17 +1286,17 @@ index a5385755..23ecbcd3 100644
    catch (Exception $e) {
      echo (string) $e;
 diff --git a/core/modules/simpletest/src/EnvironmentCleanerFactory.php b/core/modules/simpletest/src/EnvironmentCleanerFactory.php
-index dc48b50a..aa1f9d0b 100644
+index dc48b50a21..aa1f9d0bb8 100644
 --- a/core/modules/simpletest/src/EnvironmentCleanerFactory.php
 +++ b/core/modules/simpletest/src/EnvironmentCleanerFactory.php
 @@ -3,7 +3,7 @@
  namespace Drupal\simpletest;
-
+ 
  use Drupal\Core\DependencyInjection\Container;
 -use Drupal\Core\Test\TestDatabase;
 +use Drupal\Core\Test\SimpletestTestRunResultsStorage;
  use Drupal\Core\Database\Database;
-
+ 
  /**
 @@ -41,7 +41,7 @@ public function createCleaner() {
      $cleaner = new EnvironmentCleanerService(
@@ -1205,7 +1308,7 @@ index dc48b50a..aa1f9d0b 100644
        $this->container->get('string_translation'),
        $this->container->get('config.factory'),
 diff --git a/core/modules/simpletest/src/EnvironmentCleanerService.php b/core/modules/simpletest/src/EnvironmentCleanerService.php
-index b4de5789..cd45ca74 100644
+index b4de5789ea..4806ac7feb 100644
 --- a/core/modules/simpletest/src/EnvironmentCleanerService.php
 +++ b/core/modules/simpletest/src/EnvironmentCleanerService.php
 @@ -9,6 +9,7 @@
@@ -1213,17 +1316,18 @@ index b4de5789..cd45ca74 100644
  use Drupal\Core\File\FileSystem;
  use Drupal\Core\Test\EnvironmentCleaner;
 +use Drupal\Core\Test\TestRunResultsStorageInterface;
-
+ 
  /**
   * Uses containerized services to perform post-test cleanup.
-@@ -50,17 +51,15 @@ class EnvironmentCleanerService extends EnvironmentCleaner {
+@@ -50,17 +51,16 @@ class EnvironmentCleanerService extends EnvironmentCleaner {
     *   The path to the root of the Drupal installation.
     * @param \Drupal\Core\Database\Connection $test_database
     *   Connection to the database against which tests were run.
 -   * @param \Drupal\Core\Database\Connection $results_database
 -   *   Connection to the database where test results were stored. This could be
 -   *   the same as $test_database, or it could be different.
-+   * @todo
++   * @param \Drupal\Core\Test\TestRunResultsStorageInterface $test_run_results_storage
++   *   The test run results storage.
     * @param \Drupal\Core\StringTranslation\TranslationInterface|null $translation
     *   (optional) The translation service. If none is supplied, this class will
     *   attempt to discover one using \Drupal.
@@ -1237,7 +1341,7 @@ index b4de5789..cd45ca74 100644
      $this->messenger = $messenger;
      $this->translation = $translation;
      $this->configFactory = $config;
-@@ -82,7 +81,7 @@ public function cleanEnvironment($clear_results = TRUE, $clear_temp_directories
+@@ -82,7 +82,7 @@ public function cleanEnvironment($clear_results = TRUE, $clear_temp_directories
        $this->cleanTemporaryDirectories();
      }
      if ($clear_results) {
@@ -1247,7 +1351,7 @@ index b4de5789..cd45ca74 100644
      $this->cacheDefault->delete('simpletest');
      $this->cacheDefault->delete('simpletest_phpunit');
 diff --git a/core/modules/simpletest/src/Form/SimpletestResultsForm.php b/core/modules/simpletest/src/Form/SimpletestResultsForm.php
-index adc1d4a5..616caee6 100644
+index adc1d4a5bb..616caee683 100644
 --- a/core/modules/simpletest/src/Form/SimpletestResultsForm.php
 +++ b/core/modules/simpletest/src/Form/SimpletestResultsForm.php
 @@ -6,6 +6,8 @@
@@ -1261,12 +1365,12 @@ index adc1d4a5..616caee6 100644
  use Drupal\simpletest\TestDiscovery;
 @@ -172,7 +174,7 @@ public function buildForm(array $form, FormStateInterface $form_state, $test_id
      ];
-
+ 
      if (is_numeric($test_id)) {
 -      $this->cleaner->cleanResultsTable($test_id);
 +      $this->cleaner->cleanResults($test_id);
      }
-
+ 
      return $form;
 @@ -228,13 +230,7 @@ public function submitForm(array &$form, FormStateInterface $form_state) {
     *   Array of results grouped by test_class.
@@ -1281,10 +1385,10 @@ index adc1d4a5..616caee6 100644
 -      ->fetchAll();
 +    return TestRun::get((new SimpletestTestRunResultsStorage($this->database)), $test_id)->getLogEntriesByTestClass();
    }
-
+ 
    /**
 diff --git a/core/modules/simpletest/src/TestBase.php b/core/modules/simpletest/src/TestBase.php
-index 969e2270..3c456bf8 100644
+index 969e227041..3c456bf87c 100644
 --- a/core/modules/simpletest/src/TestBase.php
 +++ b/core/modules/simpletest/src/TestBase.php
 @@ -11,8 +11,10 @@
@@ -1308,11 +1412,11 @@ index 969e2270..3c456bf8 100644
 -      ->execute();
 +    return TestRun::get(new SimpletestTestRunResultsStorage(self::getDatabaseConnection()), $this->testId)->insertLogEntry($assertion);
    }
-
+ 
    /**
 @@ -416,10 +415,7 @@ public static function insertAssert($test_id, $test_class, $status, $message = '
      ];
-
+ 
      // We can't use storeAssertion() because this method is static.
 -    return self::getDatabaseConnection()
 -      ->insert('simpletest')
@@ -1320,7 +1424,7 @@ index 969e2270..3c456bf8 100644
 -      ->execute();
 +    return TestRun::get(new SimpletestTestRunResultsStorage(self::getDatabaseConnection()), $test_id)->insertLogEntry($assertion);
    }
-
+ 
    /**
 @@ -1041,13 +1037,7 @@ private function prepareDatabasePrefix() {
      // As soon as the database prefix is set, the test might start to execute.
@@ -1335,39 +1439,39 @@ index 969e2270..3c456bf8 100644
 -    }
 +    TestRun::get(new SimpletestTestRunResultsStorage(self::getDatabaseConnection()), $this->testId)->setDatabasePrefix($this->databasePrefix);
    }
-
+ 
    /**
 @@ -1251,7 +1241,9 @@ private function restoreEnvironment() {
-
+ 
      // In case a fatal error occurred that was not in the test process read the
      // log to pick up any fatal errors.
 -    (new TestDatabase($this->databasePrefix))->logRead($this->testId, get_class($this));
 +    $test_run = TestRun::get(new SimpletestTestRunResultsStorage(self::getDatabaseConnection()), $this->testId);
 +    $test_database = new TestDatabase($this->databasePrefix);
 +    $test_run->processPhpErrorLogFile($test_database->getPhpErrorLogPath(), get_class($this));
-
+ 
      // Restore original dependency injection container.
      $this->container = $this->originalContainer;
 diff --git a/core/modules/simpletest/tests/src/Kernel/DeprecatedCleanupTest.php b/core/modules/simpletest/tests/src/Kernel/DeprecatedCleanupTest.php
-index ec29a767..0f68cdad 100644
+index ec29a76768..0f68cdadb4 100644
 --- a/core/modules/simpletest/tests/src/Kernel/DeprecatedCleanupTest.php
 +++ b/core/modules/simpletest/tests/src/Kernel/DeprecatedCleanupTest.php
 @@ -54,7 +54,7 @@ public function cleanEnvironment($clear_results = TRUE, $clear_temp_directories
-
+ 
    }
-
+ 
 -  public function cleanResultsTable($test_id = NULL) {
 +  public function cleanResults($test_id = NULL) {
-
+ 
    }
-
+ 
 diff --git a/core/modules/simpletest/tests/src/Kernel/SimpletestDeprecationTest.php b/core/modules/simpletest/tests/src/Kernel/SimpletestDeprecationTest.php
-index 4ef09a90..a28f9250 100644
+index 4ef09a9033..a28f925056 100644
 --- a/core/modules/simpletest/tests/src/Kernel/SimpletestDeprecationTest.php
 +++ b/core/modules/simpletest/tests/src/Kernel/SimpletestDeprecationTest.php
 @@ -93,7 +93,7 @@ public function testDeprecatedSimpletestGenerateFile() {
    }
-
+ 
    /**
 -   * @expectedDeprecation simpletest_process_phpunit_results() is deprecated in drupal:8.8.0 and is removed from drupal:9.0.0. Use \Drupal\Core\Test\TestDatabase::processPhpUnitResults() instead. See https://www.drupal.org/node/3075252
 +   * @expectedDeprecation simpletest_process_phpunit_results() is deprecated in drupal:8.8.0 and is removed from drupal:9.0.0. Use \Drupal\Core\Test\TestRun::processPhpUnitResults() instead. See https://www.drupal.org/node/3075252
@@ -1375,7 +1479,7 @@ index 4ef09a90..a28f9250 100644
    public function testProcessPhpUnitResults() {
      // The only safe way to test this deprecation is to call it with an empty
 diff --git a/core/scripts/run-tests.sh b/core/scripts/run-tests.sh
-index 10475af2..62ef7f02 100755
+index 10475af24b..62ef7f0202 100755
 --- a/core/scripts/run-tests.sh
 +++ b/core/scripts/run-tests.sh
 @@ -14,8 +14,10 @@
@@ -1390,7 +1494,7 @@ index 10475af2..62ef7f02 100755
  use Drupal\Core\Test\TestDiscovery;
  use PHPUnit\Framework\TestCase;
 @@ -56,7 +58,9 @@
-
+ 
  if ($args['execute-test']) {
    simpletest_script_setup_database();
 -  simpletest_script_run_one_test($args['test-id'], $args['execute-test']);
@@ -1401,9 +1505,9 @@ index 10475af2..62ef7f02 100755
    exit(SIMPLETEST_SCRIPT_EXIT_SUCCESS);
  }
 @@ -126,12 +130,16 @@
-
+ 
  simpletest_script_setup_database(TRUE);
-
+ 
 +// Setup the test run results storage environment. Currently, this coincides
 +// with the simpletest database schema.
 +$test_run_results_storage = script_setup_test_run_results_storage(TRUE);
@@ -1420,15 +1524,15 @@ index 10475af2..62ef7f02 100755
    );
 @@ -169,7 +177,7 @@
  }
-
+ 
  // Execute tests.
 -$status = simpletest_script_execute_batch($tests_to_run);
 +$status = simpletest_script_execute_batch($test_run_results_storage, $tests_to_run);
-
+ 
  // Stop the timer.
  simpletest_script_reporter_timer_stop();
 @@ -182,14 +190,14 @@
-
+ 
  // Display results before database is cleared.
  if ($args['browser']) {
 -  simpletest_script_open_browser();
@@ -1438,12 +1542,12 @@ index 10475af2..62ef7f02 100755
 -  simpletest_script_reporter_display_results();
 +  simpletest_script_reporter_display_results($test_run_results_storage);
  }
-
+ 
  if ($args['xml']) {
 -  simpletest_script_reporter_write_xml_results();
 +  simpletest_script_reporter_write_xml_results($test_run_results_storage);
  }
-
+ 
  // Clean up all test results.
 @@ -198,11 +206,11 @@
      $cleaner = new EnvironmentCleaner(
@@ -1472,14 +1576,14 @@ index 10475af2..62ef7f02 100755
 +  global $args;
 +
 +  $databases['default'] = Database::getConnectionInfo('default');
-
+ 
 -  // If no --sqlite parameter has been passed, then Simpletest module is assumed
 +    // If no --sqlite parameter has been passed, then Simpletest module is assumed
    // to be installed, so the test runner database connection is the default
    // database connection.
    if (empty($args['sqlite'])) {
 @@ -677,33 +694,24 @@ function simpletest_script_setup_database($new = FALSE) {
-
+ 
    // Create the Simpletest schema.
    try {
 -    $connection = Database::getConnection('default', 'test-runner');
@@ -1527,18 +1631,18 @@ index 10475af2..62ef7f02 100755
 +
 +  return $test_run_results_storage;
  }
-
+ 
  /**
   * Execute a batch of tests.
   */
 -function simpletest_script_execute_batch($test_classes) {
 +function simpletest_script_execute_batch(SimpletestTestRunResultsStorage $test_run_results_storage, $test_classes) {
    global $args, $test_ids;
-
+ 
    $total_status = SIMPLETEST_SCRIPT_EXIT_SUCCESS;
 @@ -731,20 +741,17 @@ function simpletest_script_execute_batch($test_classes) {
        }
-
+ 
        try {
 -        $test_id = Database::getConnection('default', 'test-runner')
 -          ->insert('simpletest_test_id')
@@ -1552,13 +1656,13 @@ index 10475af2..62ef7f02 100755
        }
 -      $test_ids[] = $test_id;
 +      $test_ids[] = $test_run->id();
-
+ 
        $test_class = array_shift($test_classes);
        // Fork a child process.
 -      $command = simpletest_script_command($test_id, $test_class);
 +      $command = simpletest_script_command($test_run, $test_class);
        $process = proc_open($command, [], $pipes, NULL, NULL, ['bypass_shell' => TRUE]);
-
+ 
        if (!is_resource($process)) {
 @@ -755,7 +762,7 @@ function simpletest_script_execute_batch($test_classes) {
        // Register our new child.
@@ -1602,7 +1706,7 @@ index 10475af2..62ef7f02 100755
 -          simpletest_script_cleanup($child['test_id'], $child['class'], $status['exitcode']);
 +          simpletest_script_cleanup($child['test_run'], $child['class'], $status['exitcode']);
          }
-
+ 
          // Remove this child.
 @@ -813,15 +824,15 @@ function simpletest_script_execute_batch($test_classes) {
  /**
@@ -1614,13 +1718,13 @@ index 10475af2..62ef7f02 100755
    if ($reflection->hasProperty('runLimit')) {
      set_time_limit($reflection->getStaticPropertyValue('runLimit'));
    }
-
+ 
    $runner = PhpUnitTestRunner::create(\Drupal::getContainer());
 -  $results = $runner->runTests($test_id, [$class], $status);
 -  TestDatabase::processPhpUnitResults($results);
 +  $results = $runner->runTests($test_run->id(), [$class], $status);
 +  $test_run->processPhpUnitResults($results);
-
+ 
    $summaries = $runner->summarizeResults($results);
    foreach ($summaries as $class => $summary) {
 @@ -833,7 +844,7 @@ function simpletest_script_run_phpunit($test_id, $class) {
@@ -1630,7 +1734,7 @@ index 10475af2..62ef7f02 100755
 -function simpletest_script_run_one_test($test_id, $test_class) {
 +function simpletest_script_run_one_test(TestRun $test_run, $test_class) {
    global $args;
-
+ 
    try {
 @@ -849,12 +860,12 @@ function simpletest_script_run_one_test($test_id, $test_class) {
        // Use empty array to run all the test methods.
@@ -1654,7 +1758,7 @@ index 10475af2..62ef7f02 100755
 -function simpletest_script_command($test_id, $test_class) {
 +function simpletest_script_command(TestRun $test_run, $test_class) {
    global $args, $php;
-
+ 
    $command = escapeshellarg($php) . ' ' . escapeshellarg('./core/scripts/' . $args['script']);
 @@ -911,7 +922,7 @@ function simpletest_script_command($test_id, $test_class) {
      $command .= ' --dburl ' . escapeshellarg($args['dburl']);
@@ -1684,21 +1788,21 @@ index 10475af2..62ef7f02 100755
    catch (Exception $e) {
      echo (string) $e;
 @@ -960,7 +970,7 @@ function simpletest_script_cleanup($test_id, $test_class, $exitcode) {
-
+ 
    // If no database prefix was found, then the test was not set up correctly.
    if (empty($db_prefix)) {
 -    echo "\nFATAL $test_class: Found no database prefix for test ID $test_id. (Check whether setUp() is invoked correctly.)";
 +    echo "\nFATAL $test_class: Found no database prefix for test ID " . $test_run->id() . ". (Check whether setUp() is invoked correctly.)";
      return;
    }
-
+ 
 @@ -968,11 +978,12 @@ function simpletest_script_cleanup($test_id, $test_class, $exitcode) {
    $output = !empty($exitcode);
    $messages = [];
-
+ 
 -  $messages[] = "- Found database prefix '$db_prefix' for test ID $test_id.";
 +  $messages[] = "- Found database prefix '$db_prefix' for test ID " . $test_run->id() . ".";
-
+ 
    // Read the log file in case any fatal errors caused the test to crash.
    try {
 -    (new TestDatabase($db_prefix))->logRead($test_id, $last_test['test_class']);
@@ -1714,7 +1818,7 @@ index 10475af2..62ef7f02 100755
 -function simpletest_script_reporter_write_xml_results() {
 +function simpletest_script_reporter_write_xml_results(SimpletestTestRunResultsStorage $test_run_results_storage) {
    global $args, $test_ids, $results_map;
-
+ 
    try {
 -    $results = simpletest_script_load_messages_by_test_id($test_ids);
 +    $results = simpletest_script_load_messages_by_test_id($test_run_results_storage, $test_ids);
@@ -1728,11 +1832,11 @@ index 10475af2..62ef7f02 100755
 -function simpletest_script_reporter_display_results() {
 +function simpletest_script_reporter_display_results(SimpletestTestRunResultsStorage $test_run_results_storage) {
    global $args, $test_ids, $results_map;
-
+ 
    if ($args['verbose']) {
 @@ -1344,7 +1355,7 @@ function simpletest_script_reporter_display_results() {
      echo "---------------------\n";
-
+ 
      try {
 -      $results = simpletest_script_load_messages_by_test_id($test_ids);
 +      $results = simpletest_script_load_messages_by_test_id($test_run_results_storage, $test_ids);
@@ -1747,9 +1851,9 @@ index 10475af2..62ef7f02 100755
 +function simpletest_script_load_messages_by_test_id(SimpletestTestRunResultsStorage $test_run_results_storage, $test_ids) {
    global $args;
    $results = [];
-
+ 
 @@ -1509,10 +1520,11 @@ function simpletest_script_load_messages_by_test_id($test_ids) {
-
+ 
    foreach ($test_id_chunks as $test_id_chunk) {
      try {
 -      $result_chunk = Database::getConnection('default', 'test-runner')
@@ -1789,11 +1893,11 @@ index 10475af2..62ef7f02 100755
    simpletest_script_print_error('In order to use the --browser option the Simpletest module must be available. See https://www.drupal.org/node/3083549.');
  }
 diff --git a/core/tests/Drupal/KernelTests/Core/Test/EnvironmentCleanerTest.php b/core/tests/Drupal/KernelTests/Core/Test/EnvironmentCleanerTest.php
-index 0ca66926..308dc9a8 100644
+index 0ca6692600..308dc9a8be 100644
 --- a/core/tests/Drupal/KernelTests/Core/Test/EnvironmentCleanerTest.php
 +++ b/core/tests/Drupal/KernelTests/Core/Test/EnvironmentCleanerTest.php
 @@ -4,6 +4,7 @@
-
+ 
  use Drupal\Core\Database\Connection;
  use Drupal\Core\Test\EnvironmentCleaner;
 +use Drupal\Core\Test\TestRunResultsStorageInterface;
@@ -1802,10 +1906,10 @@ index 0ca66926..308dc9a8 100644
  use Symfony\Component\Console\Output\NullOutput;
 @@ -30,11 +31,12 @@ public function testDoCleanTemporaryDirectories() {
      ]);
-
+ 
      $connection = $this->prophesize(Connection::class);
 +    $test_run_results_storage = $this->prophesize(TestRunResultsStorageInterface::class);
-
+ 
      $cleaner = new EnvironmentCleaner(
        vfsStream::url('cleanup_test'),
        $connection->reveal(),
@@ -1816,7 +1920,7 @@ index 0ca66926..308dc9a8 100644
      );
 diff --git a/core/tests/Drupal/KernelTests/Core/Test/SimpletestTestRunResultsStorageTest.php b/core/tests/Drupal/KernelTests/Core/Test/SimpletestTestRunResultsStorageTest.php
 new file mode 100644
-index 00000000..18ca7e1c
+index 0000000000..18ca7e1c7e
 --- /dev/null
 +++ b/core/tests/Drupal/KernelTests/Core/Test/SimpletestTestRunResultsStorageTest.php
 @@ -0,0 +1,188 @@
@@ -2010,7 +2114,7 @@ index 00000000..18ca7e1c
 +}
 diff --git a/core/tests/Drupal/KernelTests/Core/Test/TestRunTest.php b/core/tests/Drupal/KernelTests/Core/Test/TestRunTest.php
 new file mode 100644
-index 00000000..cc2121ac
+index 0000000000..cc2121aca8
 --- /dev/null
 +++ b/core/tests/Drupal/KernelTests/Core/Test/TestRunTest.php
 @@ -0,0 +1,290 @@
@@ -2305,7 +2409,7 @@ index 00000000..cc2121ac
 +
 +}
 diff --git a/core/tests/Drupal/Tests/Core/Test/TestDatabaseTest.php b/core/tests/Drupal/Tests/Core/Test/TestDatabaseTest.php
-index 9fc1e6f5..c92a51a9 100644
+index 9fc1e6f554..c92a51a9b6 100644
 --- a/core/tests/Drupal/Tests/Core/Test/TestDatabaseTest.php
 +++ b/core/tests/Drupal/Tests/Core/Test/TestDatabaseTest.php
 @@ -27,6 +27,7 @@ public function testConstructorException() {
@@ -2322,7 +2426,7 @@ index 9fc1e6f5..c92a51a9 100644
      $this->assertEquals($expected_site_path, $test_db->getTestSitePath());
 +    $this->assertEquals($expected_site_path . '/error.log', $test_db->getPhpErrorLogPath());
    }
-
+ 
    /**
 @@ -50,6 +52,9 @@ public function providerTestConstructor() {
     * Verify that a test lock is generated if there is no provided prefix.
@@ -2335,16 +2439,16 @@ index 9fc1e6f5..c92a51a9 100644
    public function testConstructorNullPrefix() {
      // We use a stub class here because we can't mock getTestLock() so that it's
 @@ -58,6 +63,7 @@ public function testConstructorNullPrefix() {
-
+ 
      $this->assertEquals('test23', $test_db->getDatabasePrefix());
      $this->assertEquals('sites/simpletest/23', $test_db->getTestSitePath());
 +    $this->assertEquals('sites/simpletest/23/error.log', $test_db->getPhpErrorLogPath());
    }
-
+ 
  }
 diff --git a/core/tests/fixtures/test-error.log b/core/tests/fixtures/test-error.log
 new file mode 100644
-index 00000000..73bda611
+index 0000000000..73bda61186
 --- /dev/null
 +++ b/core/tests/fixtures/test-error.log
 @@ -0,0 +1,9 @@
