@@ -1,59 +1,334 @@
-diff --git a/core/tests/Drupal/KernelTests/Core/Entity/EntityQueryTest.php b/core/tests/Drupal/KernelTests/Core/Entity/EntityQueryTest.php
-index 05b7b87b..ded7caf9 100644
---- a/core/tests/Drupal/KernelTests/Core/Entity/EntityQueryTest.php
-+++ b/core/tests/Drupal/KernelTests/Core/Entity/EntityQueryTest.php
-@@ -2,6 +2,7 @@
-
- namespace Drupal\KernelTests\Core\Entity;
-
-+use Drupal\Core\Database\Database;
- use Drupal\entity_test\Entity\EntityTest;
- use Drupal\entity_test\Entity\EntityTestMulRev;
- use Drupal\field\Entity\FieldConfig;
-@@ -1217,7 +1218,19 @@ public function testToString() {
-
-     $figures = $this->figures;
-
--    $expected = <<<EOF
-+    $connection = Database::getConnection();
-+    $expected = $connection->select("entity_test_mulrev", "base_table");
-+    $expected->addField("base_table", "revision_id", "revision_id");
-+    $expected->addField("base_table", "id", "id");
-+    $expected->join("entity_test_mulrev__$figures", "entity_test_mulrev__$figures", "entity_test_mulrev__$figures.entity_id = base_table.id");
-+    $expected->join("entity_test_mulrev__$figures", "entity_test_mulrev__{$figures}_2", "entity_test_mulrev__{$figures}_2.entity_id = base_table.id");
-+    $expected->addJoin("LEFT", "entity_test_mulrev__$figures", "entity_test_mulrev__{$figures}_3", "entity_test_mulrev__{$figures}_3.entity_id = base_table.id");
-+    $expected->condition("entity_test_mulrev__$figures.{$figures}_color", ["blue"], "IN");
-+    $expected->condition("entity_test_mulrev__{$figures}_2.{$figures}_color", ["red"], "IN");
-+    $expected->isNull("entity_test_mulrev__{$figures}_3.{$figures}_color");
-+    $expected->orderBy("base_table.id");
-+
-+/*    $expected = <<<EOF
- SELECT base_table.revision_id AS revision_id, base_table.id AS id
- FROM
- {entity_test_mulrev} base_table
-@@ -1226,13 +1239,22 @@ public function testToString() {
- LEFT JOIN {entity_test_mulrev__{$figures}} entity_test_mulrev__{$figures}_3 ON entity_test_mulrev__{$figures}_3.entity_id = base_table.id
- WHERE (entity_test_mulrev__{$figures}.{$figures}_color IN ('blue')) AND (entity_test_mulrev__{$figures}_2.{$figures}_color IN ('red')) AND (entity_test_mulrev__{$figures}_3.{$figures}_color IS NULL)
- ORDER BY base_table.id ASC
--EOF;
-+EOF;*/
-
-     // Apply table prefixes to the expected sql.
--    $expected = \Drupal::database()->prefixTables($expected);
-+    $expected_string = \Drupal::database()->prefixTables((string) $expected);
-+    // Resolve placeholders to their values.
-+    $quoted = [];
-+    foreach ($expected->getArguments() as $key => $value) {
-+      $quoted[$key] = $connection->quote($value);
-+    }
-+    $expected_string = strtr($expected_string, $quoted);
-+
-     // PostgreSQL adds " NULLS FIRST" to the end of the query so
-     // assertContains() is used for maximum compatibility.
--    $this->assertContains($expected, (string) $query);
-+
-+    $this->assertSame($expected_string, (string) $query);
-+    //$this->assertEquals($expected, $query);
+diff --git a/core/includes/theme.inc b/core/includes/theme.inc
+index 713983c679..46b86353fd 100644
+--- a/core/includes/theme.inc
++++ b/core/includes/theme.inc
+@@ -20,8 +20,8 @@
+ use Drupal\Core\Render\BubbleableMetadata;
+ use Drupal\Core\Render\RenderableInterface;
+ use Drupal\Core\Template\Attribute;
++use Drupal\Core\Template\AttributeHelper;
+ use Drupal\Core\Theme\ThemeSettings;
+-use Drupal\Component\Utility\NestedArray;
+ use Drupal\Core\Render\Element;
+ use Drupal\Core\Render\Markup;
+ use Drupal\Core\Utility\TableSort;
+@@ -821,7 +821,7 @@ function template_preprocess_image(&$variables) {
+     if (isset($variables[$key])) {
+       // If the property has already been defined in the attributes,
+       // do not override, including NULL.
+-      if (array_key_exists($key, $variables['attributes'])) {
++      if (AttributeHelper::attributeExists($key, $variables['attributes'])) {
+         continue;
+       }
+       $variables['attributes'][$key] = $variables[$key];
+@@ -1243,7 +1243,7 @@ function template_preprocess(&$variables, $hook, $info) {
+   if (isset($info['render element'])) {
+     $key = $info['render element'];
+     if (isset($variables[$key]['#attributes'])) {
+-      $variables['attributes'] = NestedArray::mergeDeep($variables['attributes'], $variables[$key]['#attributes']);
++      $variables['attributes'] = AttributeHelper::mergeCollections($variables['attributes'], $variables[$key]['#attributes']);
+     }
    }
-
+ }
+@@ -1578,7 +1578,7 @@ function template_preprocess_field(&$variables, $hook) {
+ 
+   // Merge attributes when a single-value field has a hidden label.
+   if ($element['#label_display'] == 'hidden' && !$variables['multiple'] && !empty($element['#items'][0]->_attributes)) {
+-    $variables['attributes'] = NestedArray::mergeDeep($variables['attributes'], (array) $element['#items'][0]->_attributes);
++    $variables['attributes'] = AttributeHelper::mergeCollections($variables['attributes'], (array) $element['#items'][0]->_attributes);
+   }
+ 
+   // We want other preprocess functions and the theme implementation to have
+diff --git a/core/lib/Drupal/Core/Template/Attribute.php b/core/lib/Drupal/Core/Template/Attribute.php
+index 99546ef1be..fe9aace1f0 100644
+--- a/core/lib/Drupal/Core/Template/Attribute.php
++++ b/core/lib/Drupal/Core/Template/Attribute.php
+@@ -4,6 +4,7 @@
+ 
+ use Drupal\Component\Render\PlainTextOutput;
+ use Drupal\Component\Render\MarkupInterface;
++use Drupal\Component\Utility\NestedArray;
+ 
+ /**
+  * Collects, sanitizes, and renders HTML attributes.
+@@ -208,6 +209,19 @@ public function setAttribute($attribute, $value) {
+     return $this;
+   }
+ 
++  /**
++   * Checks if the storage has an attribute with the given name.
++   *
++   * @param string $name
++   *   The name of the attribute to check for.
++   *
++   * @return bool
++   *   Returns TRUE if the attribute exists, or FALSE otherwise.
++   */
++  public function hasAttribute($name) {
++    return array_key_exists($name, $this->storage);
++  }
++
+   /**
+    * Removes an attribute from an Attribute object.
+    *
+@@ -356,4 +370,20 @@ public function jsonSerialize() {
+     return (string) $this;
+   }
+ 
++  /**
++   * Merges an Attribute object into the current storage.
++   *
++   * @param \Drupal\Core\Template\Attribute $collection
++   *   The Attribute object to merge.
++   *
++   * @return $this
++   */
++  public function merge(Attribute $collection) {
++    $merged_attributes = NestedArray::mergeDeep($this->toArray(), $collection->toArray());
++    foreach ($merged_attributes as $name => $value) {
++      $this->storage[$name] = $this->createAttributeValue($name, $value);
++    }
++    return $this;
++  }
++
+ }
+diff --git a/core/lib/Drupal/Core/Template/AttributeHelper.php b/core/lib/Drupal/Core/Template/AttributeHelper.php
+new file mode 100644
+index 0000000000..4beb5208cd
+--- /dev/null
++++ b/core/lib/Drupal/Core/Template/AttributeHelper.php
+@@ -0,0 +1,76 @@
++<?php
++
++namespace Drupal\Core\Template;
++
++use Drupal\Component\Utility\NestedArray;
++
++/**
++ * Helper class to deal with mixed array and Attribute operations.
++ *
++ * This class contains static methods only and is not meant to be instantiated.
++ */
++class AttributeHelper {
++
++  /**
++   * This class should not be instantiated.
++   */
++  private function __construct() {
++  }
++
++  /**
++   * Checks if the given attribute collection has an attribute.
++   *
++   * @param string $name
++   *   The name of the attribute to check for.
++   * @param \Drupal\Core\Template\Attribute|array $collection
++   *   An Attribute object or an array of attributes.
++   *
++   * @return bool
++   *   TRUE if the attibute exists, FALSE otherwise.
++   *
++   * @throws \InvalidArgumentException
++   *   When the input $collection is neither an Attribute object nor an array.
++   */
++  public static function attributeExists($name, $collection) {
++    if ($collection instanceof Attribute) {
++      return $collection->hasAttribute($name);
++    }
++    elseif (is_array($collection)) {
++      return array_key_exists($name, $collection);
++    }
++    throw new \InvalidArgumentException('Invalid collection argument');
++  }
++
++  /**
++   * Merges two attribute collections.
++   *
++   * @param \Drupal\Core\Template\Attribute|array $a
++   *   First Attribute object or array to merge. The returned value type will
++   *   be the same as the type of this argument.
++   * @param \Drupal\Core\Template\Attribute|array $b
++   *   Second Attribute object or array to merge.
++   *
++   * @return \Drupal\Core\Template\Attribute|array
++   *   The merged attributes, as an Attribute object or an array.
++   *
++   * @throws \InvalidArgumentException
++   *   If at least one collection argument is neither an Attribute object nor an
++   *   array.
++   */
++  public static function mergeCollections($a, $b) {
++    if (!($a instanceof Attribute || is_array($a)) || !($b instanceof Attribute || is_array($b))) {
++      throw new \InvalidArgumentException('Invalid collection argument');
++    }
++    // If both collections are arrays, just merge them.
++    if (is_array($a) && is_array($b)) {
++      return NestedArray::mergeDeep($a, $b);
++    }
++    // If at least one collections is an Attribute object, merge through
++    // Attribute::merge.
++    $merge_a = $a instanceof Attribute ? $a : new Attribute($a);
++    $merge_b = $b instanceof Attribute ? $b : new Attribute($b);
++    $merge_a->merge($merge_b);
++    return $a instanceof Attribute ? $merge_a : $merge_a->toArray();
++  }
++
++}
+diff --git a/core/tests/Drupal/Tests/Core/Template/AttributeHelperTest.php b/core/tests/Drupal/Tests/Core/Template/AttributeHelperTest.php
+new file mode 100644
+index 0000000000..55842a5544
+--- /dev/null
++++ b/core/tests/Drupal/Tests/Core/Template/AttributeHelperTest.php
+@@ -0,0 +1,81 @@
++<?php
++
++namespace Drupal\Tests\Core\Template;
++
++use Drupal\Core\Template\Attribute;
++use Drupal\Core\Template\AttributeHelper;
++
++/**
++ * @coversDefaultClass \Drupal\Core\Template\AttributeHelper
++ * @group Template
++ */
++class AttributeHelperTest extends UnitTestCase {
++
++  /**
++   * Provides tests data for testAttributeExists
++   *
++   * @return array
++   *   An array of test data each containing an array of attributes, the name
++   *   of the attribute to check existence of, and the expected result.
++   */
++  public function providerTestAttributeExists() {
++    return [
++      [['class' => ['example-class']], 'class', TRUE],
++      [[], 'class', FALSE],
++      [['class' => ['example-class']], 'id', FALSE],
++      [['class' => ['example-class'], 'id' => 'foo'], 'id', TRUE],
++      [['id' => 'foo'], 'class', FALSE],
++    ];
++  }
++
++  /**
++   * @covers ::attributeExists
++   * @dataProvider providerTestAttributeExists
++   */
++  public function testAttributeExists(array $test_data, $test_attribute, $expected) {
++    $this->assertSame($expected, AttributeHelper::attributeExists($test_attribute, $test_data));
++    $attributes = new Attribute($test_data);
++    $this->assertSame($expected, AttributeHelper::attributeExists($test_attribute, $attributes));
++  }
++
++  /**
++   * Provides tests data for testMergeCollections
++   *
++   * @return array
++   *   An array of test data each containing an initial attribute collection, an
++   *   Attribute object or array to be merged, and the expected result.
++   */
++  public function providerTestMergeCollections() {
++    return [
++      [[], ['class' => ['class1']], ['class' => ['class1']]],
++      [[], new Attribute(['class' => ['class1']]), ['class' => ['class1']]],
++      [['class' => ['example-class']], ['class' => ['class1']], ['class' => ['example-class', 'class1']]],
++      [['class' => ['example-class']], new Attribute(['class' => ['class1']]), ['class' => ['example-class', 'class1']]],
++      [['class' => ['example-class']], ['id' => 'foo', 'href' => 'bar'], ['class' => ['example-class'], 'id' => 'foo', 'href' => 'bar']],
++      [['class' => ['example-class']], new Attribute(['id' => 'foo', 'href' => 'bar']), ['class' => ['example-class'], 'id' => 'foo', 'href' => 'bar']],
++    ];
++  }
++
++  /**
++   * @covers ::mergeCollections
++   * @dataProvider providerTestMerge
++   */
++  public function testMergeCollections($original, $merge, $expected) {
++    $this->assertEquals($expected, AttributeHelper::mergeCollections($original, $merge));
++    $this->assertEquals(new Attribute($expected), AttributeHelper::mergeCollections(new Attribute($original), $merge));
++  }
++
++  /**
++   * @covers ::mergeCollections
++   */
++  public function testMergeCollectionsArgumentException() {
++    $attributes = new Attribute(['class' => ['example-class']]);
++    $this->expectException(\InvalidArgumentException::class);
++    $this->expectExceptionMessage('Invalid attributes argument');
++    AttributeHelper::mergeCollections($attributes, 'not an array')
++    $this->expectException(\InvalidArgumentException::class);
++    $this->expectExceptionMessage('Invalid attributes argument');
++    AttributeHelper::mergeCollections('not an array', $attributes);
++  }
++
++}
+diff --git a/core/tests/Drupal/Tests/Core/Template/AttributeTest.php b/core/tests/Drupal/Tests/Core/Template/AttributeTest.php
+index 911b6e150d..fc5885627c 100644
+--- a/core/tests/Drupal/Tests/Core/Template/AttributeTest.php
++++ b/core/tests/Drupal/Tests/Core/Template/AttributeTest.php
+@@ -452,4 +452,66 @@ public function testStorage() {
+     $this->assertEquals(['class' => new AttributeArray('class', ['example-class'])], $attribute->storage());
+   }
+ 
++  /**
++   * Provides tests data for testHasAttribute
++   *
++   * @return array
++   *   An array of test data each containing an array of attributes, the name
++   *   of the attribute to check existence of, and the expected result.
++   */
++  public function providerTestHasAttribute() {
++    return [
++      [['class' => ['example-class']], 'class', TRUE],
++      [[], 'class', FALSE],
++      [['class' => ['example-class']], 'id', FALSE],
++      [['class' => ['example-class'], 'id' => 'foo'], 'id', TRUE],
++      [['id' => 'foo'], 'class', FALSE],
++    ];
++  }
++
++  /**
++   * @covers ::hasAttribute
++   * @dataProvider providerTestHasAttribute
++   */
++  public function testHasAttribute(array $test_data, $test_attribute, $expected) {
++    $attributes = new Attribute($test_data);
++    $this->assertSame($expected, $attributes->hasAttribute($test_attribute));
++  }
++
++  /**
++   * Provides tests data for testMerge
++   *
++   * @return array
++   *   An array of test data each containing an initial Attribute object, an
++   *   Attribute object or array to be merged, and the expected result.
++   */
++  public function providerTestMerge() {
++    return [
++      [new Attribute([]), ['class' => ['class1']], new Attribute(['class' => ['class1']])],
++      [new Attribute([]), new Attribute(['class' => ['class1']]), new Attribute(['class' => ['class1']])],
++      [new Attribute(['class' => ['example-class']]), ['class' => ['class1']], new Attribute(['class' => ['example-class', 'class1']])],
++      [new Attribute(['class' => ['example-class']]), new Attribute(['class' => ['class1']]), new Attribute(['class' => ['example-class', 'class1']])],
++      [new Attribute(['class' => ['example-class']]), ['id' => 'foo', 'href' => 'bar'], new Attribute(['class' => ['example-class'], 'id' => 'foo', 'href' => 'bar'])],
++      [new Attribute(['class' => ['example-class']]), new Attribute(['id' => 'foo', 'href' => 'bar']), new Attribute(['class' => ['example-class'], 'id' => 'foo', 'href' => 'bar'])],
++    ];
++  }
++
++  /**
++   * @covers ::merge
++   * @dataProvider providerTestMerge
++   */
++  public function testMerge($original, $merge, $expected) {
++    $this->assertEquals($expected, $original->merge($merge));
++  }
++
++  /**
++   * @covers ::merge
++   */
++  public function testMergeArgumentException() {
++    $this->expectException(\InvalidArgumentException::class);
++    $this->expectExceptionMessage('Invalid attributes argument');
++    $attributes = new Attribute(['class' => ['example-class']]);
++    $attributes->merge('not an array');
++  }
++
  }
