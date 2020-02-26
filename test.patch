@@ -1,46 +1,183 @@
-diff --git a/core/tests/Drupal/Tests/Listeners/DrupalListener.php b/core/tests/Drupal/Tests/Listeners/DrupalListener.php
-index 663c2e52..380d6ee1 100644
---- a/core/tests/Drupal/Tests/Listeners/DrupalListener.php
-+++ b/core/tests/Drupal/Tests/Listeners/DrupalListener.php
-@@ -18,11 +18,41 @@ class DrupalListener implements TestListener {
-   use DrupalComponentTestListenerTrait;
-   use DrupalStandardsListenerTrait;
+diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
+index 691a6ae84c..6469bcaabd 100644
+--- a/core/lib/Drupal/Core/Database/Connection.php
++++ b/core/lib/Drupal/Core/Database/Connection.php
+@@ -1362,6 +1362,19 @@ protected function generateTemporaryTableName() {
+    */
+   abstract public function driver();
  
 +  /**
-+   * A list of methods to be checked for void return typehint.
++   * Returns the value of a connection attribute.
 +   *
-+   * @var string[]
++   * @param mixed $attribute
++   *   The attribute.
++   *
++   * @return mixed
++   *   The value of the attribute.
 +   */
-+  protected $methodsWithVoidReturn = [
-+    'setUpBeforeClass',
-+    'setUp',
-+    'assertPreConditions',
-+    'assertPostConditions',
-+    'tearDown',
-+    'tearDownAfterClass',
-+    'onNotSuccessfulTest',
-+  ];
++  public function getAttribute($attribute) {
++    return $this->connection->getAttribute($attribute);
++  }
 +
    /**
+    * Returns the version of the database server.
+    */
+diff --git a/core/lib/Drupal/Core/Database/Driver/mysql/Connection.php b/core/lib/Drupal/Core/Database/Driver/mysql/Connection.php
+index 42b5feb033..a534f1903e 100644
+--- a/core/lib/Drupal/Core/Database/Driver/mysql/Connection.php
++++ b/core/lib/Drupal/Core/Database/Driver/mysql/Connection.php
+@@ -46,6 +46,16 @@ class Connection extends DatabaseConnection {
+    */
+   const SQLSTATE_SYNTAX_ERROR = 42000;
+ 
++  /**
++   * A regex to detect if the current db is MariaDB.
++   *
++   * MariaDB may prefix its version string with '5.5.5-', which should be
++   * ignored.
++   *
++   * @see https://github.com/MariaDB/server/blob/f6633bf058802ad7da8196d01fd19d75c53f7274/include/mysql_com.h#L42.
++   */
++  const MARIADB_DETECTION_REGEX = '/^((?:5\.5\.5-)|)(\d+\.\d+\.\d+.*)-mariadb/i';
++
+   /**
+    * Flag to indicate if the cleanup function in __destruct() should run.
+    *
+@@ -546,6 +556,15 @@ public function driver() {
+     return 'mysql';
+   }
+ 
++  /**
++   * {@inheritdoc}
++   */
++  public function version() {
++    $server_version = $this->getAttribute(\PDO::ATTR_SERVER_VERSION);
++    preg_match(static::MARIADB_DETECTION_REGEX, $server_version, $matches);
++    return $matches[1] ?? $server_version;
++  }
++
+   public function databaseType() {
+     return 'mysql';
+   }
+diff --git a/core/lib/Drupal/Core/Database/Driver/mysql/Install/Tasks.php b/core/lib/Drupal/Core/Database/Driver/mysql/Install/Tasks.php
+index ff441d3cae..cbb0c4a937 100644
+--- a/core/lib/Drupal/Core/Database/Driver/mysql/Install/Tasks.php
++++ b/core/lib/Drupal/Core/Database/Driver/mysql/Install/Tasks.php
+@@ -2,6 +2,7 @@
+ 
+ namespace Drupal\Core\Database\Driver\mysql\Install;
+ 
++use Drupal\Core\Database\ConnectionNotDefinedException;
+ use Drupal\Core\Database\Install\Tasks as InstallTasks;
+ use Drupal\Core\Database\Database;
+ use Drupal\Core\Database\Driver\mysql\Connection;
+@@ -12,6 +13,16 @@
+  */
+ class Tasks extends InstallTasks {
+ 
++  /**
++   * Minimum required MySQL version.
++   */
++  const MYSQL_MINIMUM_VERSION = '5.7.0';
++
++  /**
++   * Minimum required MariaDB version.
++   */
++  const MARIADB_MINIMUM_VERSION = '10.2.0';
++
+   /**
+    * Minimum required MySQLnd version.
+    */
+@@ -43,18 +54,30 @@ public function __construct() {
     * {@inheritdoc}
     */
-   public function startTest(Test $test): void {
-     $this->deprecationStartTest($test);
-+
-+    // Check for missing void return typehints in concrete test classes'
-+    // methods. If the method is inherited from a base test class, do
-+    // nothing.
-+    $class = new \ReflectionClass($test);
-+    foreach ($this->methodsWithVoidReturn as $method) {
-+      if ($class->hasMethod($method)) {
-+        $reflected_method = $class->getMethod($method);
-+        if ($reflected_method && $reflected_method->getDeclaringClass()->getName() === get_class($test)) {
-+          if (!$reflected_method->getReturnType() || $reflected_method->getReturnType()->getName() !== 'void') {
-+            @trigger_error("Declaring ::$method without a void return typehint in " . get_class($test) . " is deprecated in drupal:9.0.0. It will be required before drupal:10.0.0. See https://www.drupal.org/node/xxx", E_USER_DEPRECATED);
-+          }
-+        }
+   public function name() {
+-    return t('MySQL, MariaDB, Percona Server, or equivalent');
++    try {
++      $connection = Database::getConnection();
++      $server_version = $connection->getAttribute(\PDO::ATTR_SERVER_VERSION);
++      preg_match(Connection::MARIADB_DETECTION_REGEX, $server_version, $matches);
++      if ($matches) {
++        return t('MariaDB');
 +      }
++      else {
++        return t('MySQL, Percona Server, or equivalent');
++      }
++    }
++    catch (ConnectionNotDefinedException $e) {
++      return t('MySQL, MariaDB, Percona Server, or equivalent');
 +    }
    }
  
    /**
+    * {@inheritdoc}
+    */
+   public function minimumVersion() {
+-    // This can not be increased above '5.5.5' without dropping support for all
+-    // MariaDB versions. MariaDB prefixes its version string with '5.5.5-'. For
+-    // more information, see
+-    // https://github.com/MariaDB/server/blob/f6633bf058802ad7da8196d01fd19d75c53f7274/include/mysql_com.h#L42.
+-    return '5.5.3';
++    $connection = Database::getConnection();
++    $server_version = $connection->getAttribute(\PDO::ATTR_SERVER_VERSION);
++    preg_match(Connection::MARIADB_DETECTION_REGEX, $server_version, $matches);
++    return $matches ? static::MARIADB_MINIMUM_VERSION : static::MYSQL_MINIMUM_VERSION;
+   }
+ 
+   /**
+diff --git a/core/tests/Drupal/Tests/Core/Database/Driver/mysql/ConnectionTest.php b/core/tests/Drupal/Tests/Core/Database/Driver/mysql/ConnectionTest.php
+new file mode 100644
+index 0000000000..4b4ae9498c
+--- /dev/null
++++ b/core/tests/Drupal/Tests/Core/Database/Driver/mysql/ConnectionTest.php
+@@ -0,0 +1,50 @@
++<?php
++
++namespace Drupal\Tests\Core\Database\Driver\mysql;
++
++use Drupal\Core\Database\Driver\mysql\Connection;
++use Drupal\Tests\UnitTestCase;
++
++/**
++ * Tests MySql database connections.
++ *
++ * @coversDefaultClass \Drupal\Core\Database\Driver\mysql\Connection
++ * @group Database
++ */
++class Connection extends UnitTestCase {
++
++  /**
++   * @covers ::version
++   * @dataProvider providerTestVersion
++   */
++  public function testVersion($version_string, $expected_version) {
++    $connection = $this->getMockBuilder(Connection::class)
++      ->disableOriginalConstructor()
++      ->setMethods(['getAttribute'])
++      ->getMock();
++    $connection->expects($this->once())
++      ->method('getAttribute')
++      ->will($this->returnValue($version_string));
++
++    $this->assertSame($expected_version, $version_string);
++  }
++
++  /**
++   * Provides test data for testVersion.
++   *
++   * @return array
++   */
++  public function providerTestVersion() {
++    return [
++      ['10.2.0-MariaDB', '10.2.0'],
++      ['10.2.1-MARIADB', '10.2.1'],
++      ['10.2.2-alphaX-MARIADB', '10.2.2-alphaX'],
++      ['5.5.5-10.2.20-MariaDB-1:10.2.20+maria~bionic', '10.2.20'],
++      ['5.7.28', '5.7.28'],
++      ['5.7.28-31', '5.7.28-31'],
++      ['5.5.5-10.3.22-MariaDB-0+deb10u1', '10.3.22'],
++      ['5.5.5-10.3.22-buzz+-MariaDB-0+deb10u1', '10.3.22-buzz+'],
++    ];
++  }
++
++}
