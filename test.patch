@@ -60,7 +60,7 @@ index 42b5feb033..511859c668 100644
      return 'mysql';
    }
 diff --git a/core/lib/Drupal/Core/Database/Driver/mysql/Install/Tasks.php b/core/lib/Drupal/Core/Database/Driver/mysql/Install/Tasks.php
-index ff441d3cae..cbb0c4a937 100644
+index ff441d3cae..3e07bf7816 100644
 --- a/core/lib/Drupal/Core/Database/Driver/mysql/Install/Tasks.php
 +++ b/core/lib/Drupal/Core/Database/Driver/mysql/Install/Tasks.php
 @@ -2,6 +2,7 @@
@@ -88,14 +88,27 @@ index ff441d3cae..cbb0c4a937 100644
    /**
     * Minimum required MySQLnd version.
     */
-@@ -43,18 +54,30 @@ public function __construct() {
+@@ -39,22 +50,42 @@ public function __construct() {
+     ];
+   }
+ 
++  /**
++   * Returns the database connection.
++   *
++   * @return \Drupal\Core\Database\Driver\mysql\Connection
++   *   The database connection.
++   */
++  protected function getConnection() {
++    return Database::getConnection();
++  }
++
+   /**
     * {@inheritdoc}
     */
    public function name() {
 -    return t('MySQL, MariaDB, Percona Server, or equivalent');
 +    try {
-+      $connection = Database::getConnection();
-+      $server_version = $connection->getAttribute(\PDO::ATTR_SERVER_VERSION);
++      $server_version = $this->getConnection()->getAttribute(\PDO::ATTR_SERVER_VERSION);
 +      preg_match(Connection::MARIADB_DETECTION_REGEX, $server_version, $matches);
 +      if ($matches) {
 +        return t('MariaDB');
@@ -118,8 +131,7 @@ index ff441d3cae..cbb0c4a937 100644
 -    // more information, see
 -    // https://github.com/MariaDB/server/blob/f6633bf058802ad7da8196d01fd19d75c53f7274/include/mysql_com.h#L42.
 -    return '5.5.3';
-+    $connection = Database::getConnection();
-+    $server_version = $connection->getAttribute(\PDO::ATTR_SERVER_VERSION);
++    $server_version = $this->getConnection()->getAttribute(\PDO::ATTR_SERVER_VERSION);
 +    preg_match(Connection::MARIADB_DETECTION_REGEX, $server_version, $matches);
 +    return $matches ? static::MARIADB_MINIMUM_VERSION : static::MYSQL_MINIMUM_VERSION;
    }
@@ -127,15 +139,17 @@ index ff441d3cae..cbb0c4a937 100644
    /**
 diff --git a/core/tests/Drupal/Tests/Core/Database/Driver/mysql/ConnectionTest.php b/core/tests/Drupal/Tests/Core/Database/Driver/mysql/ConnectionTest.php
 new file mode 100644
-index 0000000000..523d7c20b8
+index 0000000000..c5e89ddb33
 --- /dev/null
 +++ b/core/tests/Drupal/Tests/Core/Database/Driver/mysql/ConnectionTest.php
-@@ -0,0 +1,50 @@
+@@ -0,0 +1,136 @@
 +<?php
 +
 +namespace Drupal\Tests\Core\Database\Driver\mysql;
 +
++use Drupal\Core\Database\ConnectionNotDefinedException;
 +use Drupal\Core\Database\Driver\mysql\Connection;
++use Drupal\Core\Database\Driver\mysql\Install\Tasks;
 +use Drupal\Tests\UnitTestCase;
 +
 +/**
@@ -148,18 +162,30 @@ index 0000000000..523d7c20b8
 +
 +  /**
 +   * @covers ::version
++   * @covers \Drupal\Core\Database\Driver\mysql\Install\Tasks::minimumVersion
++   * @covers \Drupal\Core\Database\Driver\mysql\Install\Tasks::name
 +   * @dataProvider providerTestVersion
 +   */
-+  public function testVersion($version_string, $expected_version) {
++  public function testVersion(string $version_string, string $expected_version, string $expected_name, string $expected_minimum_version) {
 +    $connection = $this->getMockBuilder(Connection::class)
 +      ->disableOriginalConstructor()
 +      ->setMethods(['getAttribute'])
 +      ->getMock();
-+    $connection->expects($this->once())
++    $connection->expects($this->exactly(3))
 +      ->method('getAttribute')
 +      ->will($this->returnValue($version_string));
 +
 +    $this->assertSame($expected_version, $connection->version());
++
++    $tasks = $this->getMockBuilder(Tasks::class)
++      ->setMethods(['getConnection'])
++      ->getMock();
++    $tasks->expects($this->exactly(2))
++      ->method('getConnection')
++      ->will($this->returnValue($connection));
++
++    $this->assertEquals($expected_name, $tasks->name());
++    $this->assertEquals($expected_minimum_version, $tasks->minimumVersion());
 +  }
 +
 +  /**
@@ -169,15 +195,87 @@ index 0000000000..523d7c20b8
 +   */
 +  public function providerTestVersion() {
 +    return [
-+      ['10.2.0-MariaDB', '10.2.0'],
-+      ['10.2.1-MARIADB', '10.2.1'],
-+      ['10.2.2-alphaX-MARIADB', '10.2.2-alphaX'],
-+      ['5.5.5-10.2.20-MariaDB-1:10.2.20+maria~bionic', '10.2.20'],
-+      ['5.7.28', '5.7.28'],
-+      ['5.7.28-31', '5.7.28-31'],
-+      ['5.5.5-10.3.22-MariaDB-0+deb10u1', '10.3.22'],
-+      ['5.5.5-10.3.22-buzz+-MariaDB-0+deb10u1', '10.3.22-buzz+'],
++      [
++        '10.2.0-MariaDB',
++        '10.2.0-MariaDB',
++        'MariaDB'
++        Tasks::MARIADB_MINIMUM_VERSION,
++      ],
++      [
++        '10.2.1-MARIADB',
++        '10.2.1-MARIADB',
++        'MariaDB'
++        Tasks::MARIADB_MINIMUM_VERSION,
++      ],
++      [
++        '10.2.2-alphaX-MARIADB',
++        '10.2.2-alphaX-MARIADB',
++        'MariaDB'
++        Tasks::MARIADB_MINIMUM_VERSION,
++      ],
++      [
++        '5.5.5-10.2.20-MariaDB-1:10.2.20+maria~bionic',
++        '10.2.20-MariaDB-1:10.2.20+maria~bionic',
++        'MariaDB'
++        Tasks::MARIADB_MINIMUM_VERSION,
++      ],
++      [
++        '5.5.5-10.2.20-notMariaDB',
++        '5.5.5-10.2.20-notMariaDB',
++        'MySQL, Percona Server, or equivalent'
++        Tasks::MYSQL_MINIMUM_VERSION,
++      ],
++      [
++        '5.5.5',
++        '5.5.5',
++        'MySQL, Percona Server, or equivalent'
++        Tasks::MYSQL_MINIMUM_VERSION,
++      ],
++      [
++        '5.5.5-',
++        '5.5.5-',
++        'MySQL, Percona Server, or equivalent'
++        Tasks::MYSQL_MINIMUM_VERSION,
++      ],
++      [
++        '5.7.28',
++        '5.7.28',
++        'MySQL, Percona Server, or equivalent'
++        Tasks::MYSQL_MINIMUM_VERSION,
++      ],
++      [
++        '5.7.28-31',
++        '5.7.28-31',
++        'MySQL, Percona Server, or equivalent'
++        Tasks::MYSQL_MINIMUM_VERSION,
++      ],
++      [
++        '5.5.5-10.3.22-MariaDB-0+deb10u1',
++        '10.3.22-MariaDB-0+deb10u1',
++        'MariaDB'
++        Tasks::MARIADB_MINIMUM_VERSION,
++      ],
++      [
++        '5.5.5-10.3.22-buzz+-MariaDB-0+deb10u1',
++        '10.3.22-buzz+-MariaDB-0+deb10u1',
++        'MariaDB'
++        Tasks::MARIADB_MINIMUM_VERSION,
++      ],
 +    ];
++  }
++
++  /**
++   * @covers \Drupal\Core\Database\Driver\mysql\Install\Tasks::name
++   */
++  public function testTasksNameWithNoConnection() {
++    $tasks = $this->getMockBuilder(Tasks::class)
++      ->setMethods(['getConnection'])
++      ->getMock();
++    $tasks->expects($this->once())
++      ->method('getConnection')
++      ->willThrowException(new ConnectionNotDefinedException());
++
++    $this->assertEquals('MySQL, MariaDB, Percona Server, or equivalent', $tasks->name());
 +  }
 +
 +}
