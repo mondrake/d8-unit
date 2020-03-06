@@ -1,49 +1,57 @@
-diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
-index 691a6ae84c..6469bcaabd 100644
---- a/core/lib/Drupal/Core/Database/Connection.php
-+++ b/core/lib/Drupal/Core/Database/Connection.php
-@@ -1362,6 +1362,19 @@ protected function generateTemporaryTableName() {
-    */
-   abstract public function driver();
+diff --git a/core/INSTALL.txt b/core/INSTALL.txt
+index 8c399305..1b2707da 100644
+--- a/core/INSTALL.txt
++++ b/core/INSTALL.txt
+@@ -51,10 +51,10 @@ Drupal requires:
+ - PHP 7.3.0 (or greater) (http://php.net/). For better security support it is
+   recommended to update to at least 7.3.13.
+ - One of the following databases:
+-  - MySQL 5.5.3 (or greater) (http://www.mysql.com/).
+-  - MariaDB 5.5.20 (or greater) (https://mariadb.org/). MariaDB is a fully
++  - MySQL 5.7.8 (or greater) (http://www.mysql.com/).
++  - MariaDB 10.2.7 (or greater) (https://mariadb.org/). MariaDB is a fully
+     compatible drop-in replacement for MySQL.
+-  - Percona Server 5.5.8 (or greater) (http://www.percona.com/). Percona
++  - Percona Server 5.7.8 (or greater) (http://www.percona.com/). Percona
+     Server is a backwards-compatible replacement for MySQL.
+   - PostgreSQL 9.1.2 (or greater) (http://www.postgresql.org/).
+   - SQLite 3.7.11 (or greater) (http://www.sqlite.org/).
+diff --git a/core/includes/install.inc b/core/includes/install.inc
+index 457dc50b..61d55f4c 100644
+--- a/core/includes/install.inc
++++ b/core/includes/install.inc
+@@ -161,7 +161,6 @@ function drupal_detect_database_types() {
+  */
+ function drupal_get_database_types() {
+   $databases = [];
+-  $drivers = [];
  
-+  /**
-+   * Returns the value of a connection attribute.
-+   *
-+   * @param mixed $attribute
-+   *   The attribute.
-+   *
-+   * @return mixed
-+   *   The value of the attribute.
-+   */
-+  public function getAttribute($attribute) {
-+    return $this->connection->getAttribute($attribute);
-+  }
-+
-   /**
-    * Returns the version of the database server.
-    */
+   // The internal database driver name is any valid PHP identifier.
+   $mask = ExtensionDiscovery::PHP_FUNCTION_PATTERN;
+@@ -173,13 +172,11 @@ function drupal_get_database_types() {
+   }
+   foreach ($files as $file) {
+     if (file_exists($file->uri . '/Install/Tasks.php')) {
+-      $drivers[$file->filename] = $file->uri;
+-    }
+-  }
+-  foreach ($drivers as $driver => $file) {
+-    $installer = db_installer_object($driver);
+-    if ($installer->installable()) {
+-      $databases[$driver] = $installer;
++      $driver = $file->filename;
++      $installer = db_installer_object($driver);
++      if ($installer->installable()) {
++        $databases[$driver] = $installer;
++      }
+     }
+   }
+ 
 diff --git a/core/lib/Drupal/Core/Database/Driver/mysql/Connection.php b/core/lib/Drupal/Core/Database/Driver/mysql/Connection.php
-index 42b5feb033..f0290987ea 100644
+index 42b5feb0..d08fafeb 100644
 --- a/core/lib/Drupal/Core/Database/Driver/mysql/Connection.php
 +++ b/core/lib/Drupal/Core/Database/Driver/mysql/Connection.php
-@@ -46,6 +46,16 @@ class Connection extends DatabaseConnection {
-    */
-   const SQLSTATE_SYNTAX_ERROR = 42000;
- 
-+  /**
-+   * A regex to detect if the current db is MariaDB.
-+   *
-+   * MariaDB may prefix its version string with '5.5.5-', which should be
-+   * ignored.
-+   *
-+   * @see https://github.com/MariaDB/server/blob/f6633bf058802ad7da8196d01fd19d75c53f7274/include/mysql_com.h#L42.
-+   */
-+  const MARIADB_DETECTION_REGEX = '/^(?:(?:5\.5\.5-)|)(\d+\.\d+\.\d+.*-mariadb.*)/i';
-+
-   /**
-    * Flag to indicate if the cleanup function in __destruct() should run.
-    *
-@@ -546,6 +556,15 @@ public function driver() {
+@@ -546,6 +546,53 @@ public function driver() {
      return 'mysql';
    }
  
@@ -51,19 +59,57 @@ index 42b5feb033..f0290987ea 100644
 +   * {@inheritdoc}
 +   */
 +  public function version() {
-+    $server_version = $this->getAttribute(\PDO::ATTR_SERVER_VERSION);
-+    preg_match(static::MARIADB_DETECTION_REGEX, $server_version, $matches);
-+    return $matches[1] ?? $server_version;
++    if ($this->isMariaDb()) {
++      return $this->getMariaDbVersionMatch();
++    }
++
++    return $this->getServerVersion();
++  }
++
++  /**
++   * Determines whether the MySQL distribution is MariaDB or not.
++   *
++   * @return bool
++   *   Returns TRUE if the distribution is MariaDB, or FALSE if not.
++   */
++  public function isMariaDb(): bool {
++    return (bool) $this->getMariaDbVersionMatch();
++  }
++
++  /**
++   * Gets the MariaDB portion of the server version.
++   *
++   * @return string
++   *   The MariaDB portion of the server version if present, or NULL if not.
++   */
++  protected function getMariaDbVersionMatch(): ?string {
++    // MariaDB may prefix its version string with '5.5.5-', which should be
++    // ignored.
++    // @see https://github.com/MariaDB/server/blob/f6633bf058802ad7da8196d01fd19d75c53f7274/include/mysql_com.h#L42.
++    $regex = '/^(?:(?:5\.5\.5-)|)(\d+\.\d+\.\d+.*-mariadb.*)/i';
++
++    preg_match($regex, $this->getServerVersion(), $matches);
++    return (empty($matches[1])) ? NULL : $matches[1];
++  }
++
++  /**
++   * Gets the server version.
++   *
++   * @return string
++   *   The PDO server version.
++   */
++  protected function getServerVersion(): string {
++    return $this->connection->getAttribute(\PDO::ATTR_SERVER_VERSION);
 +  }
 +
    public function databaseType() {
      return 'mysql';
    }
 diff --git a/core/lib/Drupal/Core/Database/Driver/mysql/Install/Tasks.php b/core/lib/Drupal/Core/Database/Driver/mysql/Install/Tasks.php
-index ff441d3cae..040534f20a 100644
+index ff441d3c..fcb9853d 100644
 --- a/core/lib/Drupal/Core/Database/Driver/mysql/Install/Tasks.php
 +++ b/core/lib/Drupal/Core/Database/Driver/mysql/Install/Tasks.php
-@@ -2,16 +2,28 @@
+@@ -2,6 +2,7 @@
  
  namespace Drupal\Core\Database\Driver\mysql\Install;
  
@@ -71,64 +117,39 @@ index ff441d3cae..040534f20a 100644
  use Drupal\Core\Database\Install\Tasks as InstallTasks;
  use Drupal\Core\Database\Database;
  use Drupal\Core\Database\Driver\mysql\Connection;
- use Drupal\Core\Database\DatabaseNotFoundException;
-+use Drupal\Core\StringTranslation\TranslatableMarkup;
- 
- /**
-  * Specifies installation tasks for MySQL and equivalent databases.
+@@ -12,6 +13,22 @@
   */
  class Tasks extends InstallTasks {
  
 +  /**
 +   * Minimum required MySQL version.
++   *
++   * 5.7.8 is the minimum version that supports the JSON datatype.
++   * @see https://dev.mysql.com/doc/refman/5.7/en/json.html
 +   */
-+  const MYSQL_MINIMUM_VERSION = '5.7.0';
++  const MYSQL_MINIMUM_VERSION = '5.7.8';
 +
 +  /**
 +   * Minimum required MariaDB version.
++   *
++   * 10.2.7 is the minimum version that supports the JSON datatype (alias).
++   * @see https://mariadb.com/kb/en/json-data-type/
 +   */
-+  const MARIADB_MINIMUM_VERSION = '10.2.0';
++  const MARIADB_MINIMUM_VERSION = '10.2.7';
 +
    /**
     * Minimum required MySQLnd version.
     */
-@@ -39,22 +51,51 @@ public function __construct() {
-     ];
-   }
- 
-+  /**
-+   * Returns the database connection.
-+   *
-+   * @return \Drupal\Core\Database\Driver\mysql\Connection
-+   *   The database connection.
-+   */
-+  protected function getConnection() {
-+    return Database::getConnection();
-+  }
-+
-+  /**
-+   * Translates a string to the current language or to a given language.
-+   *
-+   * @see \Drupal\Core\StringTranslation\TranslatableMarkup::__construct()
-+   */
-+  protected function t($string, array $args = [], array $options = []) {
-+    return new TranslatableMarkup($string, $args, $options);
-+  }
-+
-   /**
+@@ -43,18 +60,25 @@ public function __construct() {
     * {@inheritdoc}
     */
    public function name() {
 -    return t('MySQL, MariaDB, Percona Server, or equivalent');
 +    try {
-+      $server_version = $this->getConnection()->getAttribute(\PDO::ATTR_SERVER_VERSION);
-+      preg_match(Connection::MARIADB_DETECTION_REGEX, $server_version, $matches);
-+      if ($matches) {
++      if ($this->getConnection()->isMariaDb()) {
 +        return $this->t('MariaDB');
 +      }
-+      else {
-+        return $this->t('MySQL, Percona Server, or equivalent');
-+      }
++      return $this->t('MySQL, Percona Server, or equivalent');
 +    }
 +    catch (ConnectionNotDefinedException $e) {
 +      return $this->t('MySQL, MariaDB, Percona Server, or equivalent');
@@ -144,29 +165,66 @@ index ff441d3cae..040534f20a 100644
 -    // more information, see
 -    // https://github.com/MariaDB/server/blob/f6633bf058802ad7da8196d01fd19d75c53f7274/include/mysql_com.h#L42.
 -    return '5.5.3';
-+    $server_version = $this->getConnection()->getAttribute(\PDO::ATTR_SERVER_VERSION);
-+    preg_match(Connection::MARIADB_DETECTION_REGEX, $server_version, $matches);
-+    return $matches ? static::MARIADB_MINIMUM_VERSION : static::MYSQL_MINIMUM_VERSION;
++    if ($this->getConnection()->isMariaDb()) {
++      return static::MARIADB_MINIMUM_VERSION;
++    }
++    return static::MYSQL_MINIMUM_VERSION;
    }
  
    /**
+diff --git a/core/lib/Drupal/Core/Database/Install/Tasks.php b/core/lib/Drupal/Core/Database/Install/Tasks.php
+index 6ba3ba73..522ff790 100644
+--- a/core/lib/Drupal/Core/Database/Install/Tasks.php
++++ b/core/lib/Drupal/Core/Database/Install/Tasks.php
+@@ -2,7 +2,9 @@
+ 
+ namespace Drupal\Core\Database\Install;
+ 
++use Drupal\Core\Database\Connection;
+ use Drupal\Core\Database\Database;
++use Drupal\Core\StringTranslation\TranslatableMarkup;
+ 
+ /**
+  * Database installer structure.
+@@ -300,4 +302,23 @@ public function validateDatabaseSettings($database) {
+     return $errors;
+   }
+ 
++  /**
++   * Translates a string to the current language or to a given language.
++   *
++   * @see \Drupal\Core\StringTranslation\TranslatableMarkup::__construct()
++   */
++  protected function t($string, array $args = [], array $options = []) {
++    return new TranslatableMarkup($string, $args, $options);
++  }
++
++  /**
++   * Returns the database connection.
++   *
++   * @return \Drupal\Core\Database\Connection
++   *   The database connection.
++   */
++  protected function getConnection() {
++    return Database::getConnection();
++  }
++
+ }
 diff --git a/core/tests/Drupal/Tests/Core/Database/Driver/mysql/ConnectionTest.php b/core/tests/Drupal/Tests/Core/Database/Driver/mysql/ConnectionTest.php
 new file mode 100644
-index 0000000000..c9ae003931
+index 00000000..be9081db
 --- /dev/null
 +++ b/core/tests/Drupal/Tests/Core/Database/Driver/mysql/ConnectionTest.php
-@@ -0,0 +1,142 @@
+@@ -0,0 +1,134 @@
 +<?php
 +
 +namespace Drupal\Tests\Core\Database\Driver\mysql;
 +
-+use Drupal\Core\Database\ConnectionNotDefinedException;
 +use Drupal\Core\Database\Driver\mysql\Connection;
-+use Drupal\Core\Database\Driver\mysql\Install\Tasks;
 +use Drupal\Tests\UnitTestCase;
 +
 +/**
-+ * Tests MySql database connections.
++ * Tests MySQL database connections.
 + *
 + * @coversDefaultClass \Drupal\Core\Database\Driver\mysql\Connection
 + * @group Database
@@ -174,127 +232,242 @@ index 0000000000..c9ae003931
 +class ConnectionTest extends UnitTestCase {
 +
 +  /**
-+   * @covers ::version
-+   * @covers \Drupal\Core\Database\Driver\mysql\Install\Tasks::minimumVersion
-+   * @covers \Drupal\Core\Database\Driver\mysql\Install\Tasks::name
-+   * @dataProvider providerTestVersion
++   * A PDO object prophecy.
++   *
++   * @var \PDO|\Prophecy\Prophecy\ObjectProphecy
 +   */
-+  public function testVersion(string $version_string, string $expected_version, string $expected_name, string $expected_minimum_version) {
-+    $connection = $this->getMockBuilder(Connection::class)
-+      ->disableOriginalConstructor()
-+      ->setMethods(['getAttribute'])
-+      ->getMock();
-+    $connection->expects($this->exactly(3))
-+      ->method('getAttribute')
-+      ->will($this->returnValue($version_string));
++  private $pdoConnection;
 +
-+    $this->assertSame($expected_version, $connection->version());
-+
-+    $tasks = $this->getMockBuilder(Tasks::class)
-+      ->setMethods(['getConnection', 't'])
-+      ->getMock();
-+    $tasks->expects($this->exactly(2))
-+      ->method('getConnection')
-+      ->will($this->returnValue($connection));
-+    $tasks->expects($this->once())
-+      ->method('t')
-+      ->will($this->returnArgument(0));
-+
-+    $this->assertEquals($expected_name, $tasks->name());
-+    $this->assertEquals($expected_minimum_version, $tasks->minimumVersion());
++  /**
++   * {@inheritdoc}
++   */
++  public function setUp() {
++    $this->pdoConnection = $this->prophesize(\PDO::class);
 +  }
 +
 +  /**
-+   * Provides test data for testVersion.
++   * Creates a Connection object for testing.
++   *
++   * @return \Drupal\Core\Database\Driver\mysql\Connection
++   */
++  private function createConnection(): Connection {
++    /** @var \PDO $pdo_connection */
++    $pdo_connection = $this->pdoConnection->reveal();
++
++    return new class($pdo_connection) extends Connection {
++
++      public function __construct(\PDO $connection) {
++        $this->connection = $connection;
++      }
++
++    };
++  }
++
++  /**
++   * @covers ::version
++   * @covers ::isMariaDb
++   * @dataProvider providerVersionAndIsMariaDb
++   */
++  public function testVersionAndIsMariaDb(bool $expected_is_mariadb, string $server_version, string $expected_version): void {
++    $this->pdoConnection
++      ->getAttribute(\PDO::ATTR_SERVER_VERSION)
++      ->shouldBeCalled()
++      ->willReturn($server_version);
++    $connection = $this->createConnection();
++
++    $is_mariadb = $connection->isMariaDb();
++    $version = $connection->version();
++
++    $this->assertSame($expected_is_mariadb, $is_mariadb);
++    $this->assertSame($expected_version, $version);
++  }
++
++  /**
++   * Provides test data.
 +   *
 +   * @return array
 +   */
-+  public function providerTestVersion() {
++  public function providerVersionAndIsMariaDb(): array {
 +    return [
++      // MariaDB.
 +      [
++        TRUE,
 +        '10.2.0-MariaDB',
 +        '10.2.0-MariaDB',
-+        'MariaDB',
-+        Tasks::MARIADB_MINIMUM_VERSION,
 +      ],
 +      [
++        TRUE,
 +        '10.2.1-MARIADB',
 +        '10.2.1-MARIADB',
-+        'MariaDB',
-+        Tasks::MARIADB_MINIMUM_VERSION,
 +      ],
 +      [
++        TRUE,
 +        '10.2.2-alphaX-MARIADB',
 +        '10.2.2-alphaX-MARIADB',
-+        'MariaDB',
-+        Tasks::MARIADB_MINIMUM_VERSION,
 +      ],
 +      [
++        TRUE,
 +        '5.5.5-10.2.20-MariaDB-1:10.2.20+maria~bionic',
 +        '10.2.20-MariaDB-1:10.2.20+maria~bionic',
-+        'MariaDB',
-+        Tasks::MARIADB_MINIMUM_VERSION,
 +      ],
 +      [
-+        '5.5.5-10.2.20-notMariaDB',
-+        '5.5.5-10.2.20-notMariaDB',
-+        'MySQL, Percona Server, or equivalent',
-+        Tasks::MYSQL_MINIMUM_VERSION,
-+      ],
-+      [
-+        '5.5.5',
-+        '5.5.5',
-+        'MySQL, Percona Server, or equivalent',
-+        Tasks::MYSQL_MINIMUM_VERSION,
-+      ],
-+      [
-+        '5.5.5-',
-+        '5.5.5-',
-+        'MySQL, Percona Server, or equivalent',
-+        Tasks::MYSQL_MINIMUM_VERSION,
-+      ],
-+      [
-+        '5.7.28',
-+        '5.7.28',
-+        'MySQL, Percona Server, or equivalent',
-+        Tasks::MYSQL_MINIMUM_VERSION,
-+      ],
-+      [
-+        '5.7.28-31',
-+        '5.7.28-31',
-+        'MySQL, Percona Server, or equivalent',
-+        Tasks::MYSQL_MINIMUM_VERSION,
-+      ],
-+      [
++        TRUE,
 +        '5.5.5-10.3.22-MariaDB-0+deb10u1',
 +        '10.3.22-MariaDB-0+deb10u1',
++      ],
++      [
++        TRUE,
++        '5.5.5-10.3.22-buzz+-MariaDB-0+deb10u1',
++        '10.3.22-buzz+-MariaDB-0+deb10u1',
++      ],
++      // MySQL.
++      [
++        FALSE,
++        '5.5.5-10.2.20-notMariaDB',
++        '5.5.5-10.2.20-notMariaDB',
++      ],
++      [
++        FALSE,
++        '5.5.5',
++        '5.5.5',
++      ],
++      [
++        FALSE,
++        '5.5.5-',
++        '5.5.5-',
++      ],
++      [
++        FALSE,
++        '5.7.28',
++        '5.7.28',
++      ],
++      [
++        FALSE,
++        '5.7.28-31',
++        '5.7.28-31',
++      ],
++    ];
++  }
++
++}
+diff --git a/core/tests/Drupal/Tests/Core/Database/Driver/mysql/install/TasksTest.php b/core/tests/Drupal/Tests/Core/Database/Driver/mysql/install/TasksTest.php
+new file mode 100644
+index 00000000..4dbf3a5e
+--- /dev/null
++++ b/core/tests/Drupal/Tests/Core/Database/Driver/mysql/install/TasksTest.php
+@@ -0,0 +1,115 @@
++<?php
++
++namespace Drupal\Tests\Core\Database\Driver\mysql\install;
++
++use Drupal\Core\Database\ConnectionNotDefinedException;
++use Drupal\Core\Database\Driver\mysql\Connection;
++use Drupal\Core\Database\Driver\mysql\Install\Tasks;
++use Drupal\Tests\UnitTestCase;
++
++/**
++ * Tests the MySQL install tasks.
++ *
++ * @coversDefaultClass \Drupal\Core\Database\Driver\mysql\Install\Tasks
++ * @group Database
++ */
++class TasksTest extends UnitTestCase {
++
++  /**
++   * A connection object prophecy.
++   *
++   * @var \Drupal\Core\Database\Driver\mysql\Connection|\Prophecy\Prophecy\ObjectProphecy
++   */
++  private $connection;
++
++  /**
++   * {@inheritdoc}
++   */
++  public function setUp() {
++    $this->connection = $this->prophesize(Connection::class);
++  }
++
++  /**
++   * Creates a Connection object for testing.
++   *
++   * @return \Drupal\Core\Database\Driver\mysql\Connection
++   */
++  private function createTasks(): Tasks {
++    /** @var \Drupal\Core\Database\Driver\mysql\Connection $connection */
++    $connection = $this->connection->reveal();
++
++    return new class($connection) extends Tasks {
++
++      private $connection;
++
++      public function __construct(Connection $connection) {
++        $this->connection = $connection;
++      }
++
++      protected function getConnection() {
++        return $this->connection;
++      }
++
++      protected function t($string, array $args = [], array $options = []) {
++        return $string;
++      }
++
++    };
++  }
++
++  /**
++   * @covers ::minimumVersion
++   * @covers ::name
++   * @dataProvider providerNameAndMinimumVersion
++   */
++  public function testNameAndMinimumVersion(bool $is_mariadb, string $expected_name, string $expected_minimum_version): void {
++    $this->connection
++      ->isMariaDb()
++      ->shouldBeCalledTimes(2)
++      ->willReturn($is_mariadb);
++    $tasks = $this->createTasks();
++
++    $minimum_version = $tasks->minimumVersion();
++    $name = $tasks->name();
++
++    $this->assertSame($expected_minimum_version, $minimum_version);
++    $this->assertSame($expected_name, $name);
++
++  }
++
++  /**
++   * Provides test data.
++   *
++   * @return array
++   */
++  public function providerNameAndMinimumVersion(): array {
++    return [
++      [
++        TRUE,
 +        'MariaDB',
 +        Tasks::MARIADB_MINIMUM_VERSION,
 +      ],
 +      [
-+        '5.5.5-10.3.22-buzz+-MariaDB-0+deb10u1',
-+        '10.3.22-buzz+-MariaDB-0+deb10u1',
-+        'MariaDB',
-+        Tasks::MARIADB_MINIMUM_VERSION,
++        FALSE,
++        'MySQL, Percona Server, or equivalent',
++        Tasks::MYSQL_MINIMUM_VERSION,
 +      ],
 +    ];
 +  }
 +
 +  /**
-+   * @covers \Drupal\Core\Database\Driver\mysql\Install\Tasks::name
++   * @covers ::name
 +   */
-+  public function testTasksNameWithNoConnection() {
-+    $tasks = $this->getMockBuilder(Tasks::class)
-+      ->setMethods(['getConnection', 't'])
-+      ->getMock();
-+    $tasks->expects($this->once())
-+      ->method('getConnection')
-+      ->willThrowException(new ConnectionNotDefinedException());
-+    $tasks->expects($this->once())
-+      ->method('t')
-+      ->will($this->returnArgument(0));
++  public function testNameWithNoConnection() {
++    $this->connection
++      ->isMariaDb()
++      ->shouldBeCalledOnce()
++      ->willThrow(ConnectionNotDefinedException::class);
++    $tasks = $this->createTasks();
 +
-+    $this->assertEquals('MySQL, MariaDB, Percona Server, or equivalent', $tasks->name());
++    $name = $tasks->name();
++
++    $this->assertSame('MySQL, MariaDB, Percona Server, or equivalent', $name);
 +  }
 +
 +}
