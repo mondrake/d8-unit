@@ -1,37 +1,195 @@
-diff --git a/core/modules/migrate/tests/src/Kernel/MigrateTestBase.php b/core/modules/migrate/tests/src/Kernel/MigrateTestBase.php
-index 896c7de718..9868cbbad7 100644
---- a/core/modules/migrate/tests/src/Kernel/MigrateTestBase.php
-+++ b/core/modules/migrate/tests/src/Kernel/MigrateTestBase.php
-@@ -97,7 +97,7 @@ private function createMigrationConnection() {
- 
-       // Add the original simpletest prefix so SQLite can attach its database.
-       // @see \Drupal\Core\Database\Driver\sqlite\Connection::init()
--      $connection_info[$target]['prefix'][$value['prefix']['default']] = $value['prefix']['default'];
-+//      $connection_info[$target]['prefix'][$value['prefix']['default']] = $value['prefix']['default'];
+diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
+index bbc33a11..1ace2e18 100644
+--- a/core/lib/Drupal/Core/Database/Connection.php
++++ b/core/lib/Drupal/Core/Database/Connection.php
+@@ -198,7 +198,9 @@ public function __construct(\PDO $connection, array $connection_options) {
      }
-     Database::addConnectionInfo('migrate', 'default', $connection_info['default']);
+ 
+     // Initialize and prepare the connection prefix.
+-    $this->setPrefix(isset($connection_options['prefix']) ? $connection_options['prefix'] : '');
++    $xxx = isset($connection_options['prefix']) ? $connection_options['prefix'] : '';
++    if (is_array($xxx)) $xxx = $xxx['default'] ?? '';
++    $this->addPrefix('default', $xxx);
+ 
+     // Set a Statement class, unless the driver opted out.
+     if (!empty($this->statementClass)) {
+@@ -209,6 +211,16 @@ public function __construct(\PDO $connection, array $connection_options) {
+     $this->connectionOptions = $connection_options;
    }
+ 
++  /**
++   * @todo
++   */
++  public function attachSchema(string $schema): void {
++    // By default, do nothing. SQLite driver needs to implement this to secure
++    // additional schemas, which are managed as separate files, are "attached"
++    // to the connection.
++    return;
++  }
++
+   /**
+    * Opens a PDO connection.
+    *
+@@ -314,14 +326,61 @@ public function getConnectionOptions() {
+     return $this->connectionOptions;
+   }
+ 
++  /**
++   * Adds a prefix to the list of prefixes used by this database connection.
++   *
++   * @param string $prefix
++   *   A single prefix.
++   * @param string $value
++   *   The value to be used for the prefix.
++   */
++  protected function addPrefix(string $pkey, string $prefix): void {
++    $this->prefixes[$pkey] = $prefix;
++    $identifier_quote = $this->identifierQuote();
++    // Set up variables for use in prefixTables(). Replace table-specific
++    // prefixes first.
++    $this->prefixSearch = [];
++    $this->prefixReplace = [];
++    foreach ($this->prefixes as $key => $val) {
++      if ($key != 'default') {
++        $this->prefixSearch[] = '{' . $key . '}';
++        // $val can point to another database like 'database.users'. In this
++        // instance we need to quote the identifiers correctly.
++        $val = str_replace('.', $identifier_quote . '.' . $identifier_quote, $val);
++        $this->prefixReplace[] = $identifier_quote . $val . $key . $identifier_quote;
++      }
++    }
++    // Then replace remaining tables with the default prefix.
++    $this->prefixSearch[] = '{';
++    // $this->prefixes['default'] can point to another database like
++    // 'other_db.'. In this instance we need to quote the identifiers correctly.
++    // For example, "other_db"."PREFIX_table_name".
++    $this->prefixReplace[] = $identifier_quote . str_replace('.', $identifier_quote . '.' . $identifier_quote, $this->prefixes['default']);
++    $this->prefixSearch[] = '}';
++    $this->prefixReplace[] = $identifier_quote;
++
++    // Set up a map of prefixed => un-prefixed tables.
++    foreach ($this->prefixes as $table_name => $prefix) {
++      if ($table_name !== 'default') {
++        $this->unprefixedTablesMap[$prefix . $table_name] = $table_name;
++      }
++    }
++  }
++
+   /**
+    * Set the list of prefixes used by this database connection.
+    *
+    * @param array|string $prefix
+    *   Either a single prefix, or an array of prefixes, in any of the multiple
+    *   forms documented in default.settings.php.
++   *
++   * @deprecated in drupal:9.1.0 and is removed in drupal:10.0.0. Use
++   *   ::addPrefix instead.
++   *
++   * @see https://www.drupal.org/node/TODO
+    */
+   protected function setPrefix($prefix) {
++    @trigger_error(__METHOD__ . ' is deprecated in drupal:9.1.0 and is removed in drupal:10.0.0. Use ::addPrefix instead. See https://www.drupal.org/node/TODO', E_USER_DEPRECATED);
+     if (is_array($prefix)) {
+       $this->prefixes = $prefix + ['default' => ''];
+     }
+@@ -1072,7 +1131,7 @@ public function escapeDatabase($database) {
+    * Force all table names to be strictly alphanumeric-plus-underscore.
+    * Database drivers should never wrap the table name in database-specific
+    * escape characters. This is done in Connection::prefixTables(). The
+-   * database-specific escape characters are added in Connection::setPrefix().
++   * database-specific escape characters are added in Connection::addPrefix().
+    *
+    * @param string $table
+    *   An unsanitized table name.
+@@ -1081,7 +1140,7 @@ public function escapeDatabase($database) {
+    *   The sanitized table name.
+    *
+    * @see \Drupal\Core\Database\Connection::prefixTables()
+-   * @see \Drupal\Core\Database\Connection::setPrefix()
++   * @see \Drupal\Core\Database\Connection::addPrefix()
+    */
+   public function escapeTable($table) {
+     if (!isset($this->escapedTables[$table])) {
+diff --git a/core/lib/Drupal/Core/Database/Driver/sqlite/Connection.php b/core/lib/Drupal/Core/Database/Driver/sqlite/Connection.php
+index 162a615d..5de8c512 100644
+--- a/core/lib/Drupal/Core/Database/Driver/sqlite/Connection.php
++++ b/core/lib/Drupal/Core/Database/Driver/sqlite/Connection.php
+@@ -71,31 +71,32 @@ public function __construct(\PDO $connection, array $connection_options) {
+     parent::__construct($connection, $connection_options);
+ 
+     // Attach one database for each registered prefix.
+-    $prefixes = $this->prefixes;
+-    foreach ($prefixes as &$prefix) {
++    foreach ($this->prefixes as $prefix) {
+       // Empty prefix means query the main database -- no need to attach anything.
+       if (!empty($prefix)) {
+-        // Only attach the database once.
+-        if (!isset($this->attachedDatabases[$prefix])) {
+-          $this->attachedDatabases[$prefix] = $prefix;
+-          if ($connection_options['database'] === ':memory:') {
+-            // In memory database use ':memory:' as database name. According to
+-            // http://www.sqlite.org/inmemorydb.html it will open a unique
+-            // database so attaching it twice is not a problem.
+-            $this->query('ATTACH DATABASE :database AS :prefix', [':database' => $connection_options['database'], ':prefix' => $prefix]);
+-          }
+-          else {
+-            $this->query('ATTACH DATABASE :database AS :prefix', [':database' => $connection_options['database'] . '-' . $prefix, ':prefix' => $prefix]);
+-          }
+-        }
++        $this->attachSchema($prefix);
++      }
++    }
++  }
+ 
+-        // Add a ., so queries become prefix.table, which is proper syntax for
+-        // querying an attached database.
+-        $prefix .= '.';
++  /**
++   * {@inheritdoc}
++   */
++  public function attachSchema(string $schema): void {
++    // Only attach a database once.
++    if (!isset($this->attachedDatabases[$schema])) {
++      $this->attachedDatabases[$schema] = $schema;
++      if ($this->connectionOptions['database'] === ':memory:') {
++        // In memory database use ':memory:' as database name. According to
++        // http://www.sqlite.org/inmemorydb.html it will open a unique
++        // database so attaching it twice is not a problem.
++        $this->query('ATTACH DATABASE :database AS :schema', [':database' => $this->connectionOptions['database'], ':schema' => $schema]);
++      }
++      else {
++        $this->query('ATTACH DATABASE :database AS :schema', [':database' => $this->connectionOptions['database'] . '-' . $schema, ':schema' => $schema]);
+       }
++      $this->addPrefix($schema, $schema . '.');
+     }
+-    // Regenerate the prefixes replacement table.
+-    $this->setPrefix($prefixes);
+   }
+ 
+   /**
+@@ -359,9 +360,7 @@ public function queryTemporary($query, array $args = [], array $options = []) {
+     // Generate a new temporary table name and protect it from prefixing.
+     // SQLite requires that temporary tables to be non-qualified.
+     $tablename = $this->generateTemporaryTableName();
+-    $prefixes = $this->prefixes;
+-    $prefixes[$tablename] = '';
+-    $this->setPrefix($prefixes);
++    $this->addPrefix($tablename, '');
+ 
+     $this->query('CREATE TEMPORARY TABLE ' . $tablename . ' AS ' . $query, $args, $options);
+     return $tablename;
 diff --git a/core/modules/migrate/tests/src/Kernel/Plugin/MigrationPluginListTest.php b/core/modules/migrate/tests/src/Kernel/Plugin/MigrationPluginListTest.php
-index 9dc4f88eae..c855dfb2b2 100644
+index 9dc4f88e..c5549065 100644
 --- a/core/modules/migrate/tests/src/Kernel/Plugin/MigrationPluginListTest.php
 +++ b/core/modules/migrate/tests/src/Kernel/Plugin/MigrationPluginListTest.php
-@@ -129,6 +129,7 @@ public function testGetDefinitions() {
- 
-     // Set up a migrate database connection so that plugin discovery works.
-     // Clone the current connection and replace the current prefix.
-+//dump(['before', Database::getAllConnectionInfo()]);
-     $connection_info = Database::getConnectionInfo('migrate');
-     if ($connection_info) {
-       Database::renameConnection('migrate', 'simpletest_original_migrate');
-@@ -142,9 +143,10 @@ public function testGetDefinitions() {
- 
-       // Add the original simpletest prefix so SQLite can attach its database.
-       // @see \Drupal\Core\Database\Driver\sqlite\Connection::init()
+@@ -139,10 +139,6 @@ public function testGetDefinitions() {
+       // Simpletest uses 7 character prefixes at most so this can't cause
+       // collisions.
+       $connection_info[$target]['prefix']['default'] = $prefix . '0';
+-
+-      // Add the original simpletest prefix so SQLite can attach its database.
+-      // @see \Drupal\Core\Database\Driver\sqlite\Connection::init()
 -      $connection_info[$target]['prefix'][$value['prefix']['default']] = $value['prefix']['default'];
-+//      $connection_info[$target]['prefix'][$value['prefix']['default']] = $value['prefix']['default'];
      }
      Database::addConnectionInfo('migrate', 'default', $connection_info['default']);
-+//dump(['after', Database::getAllConnectionInfo()]);
  
-     $migration_plugins = $this->container->get('plugin.manager.migration')->getDefinitions();
-     // All the plugins provided by core depend on migrate_drupal.
