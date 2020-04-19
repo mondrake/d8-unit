@@ -1,195 +1,648 @@
-diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
-index bbc33a11..1ace2e18 100644
---- a/core/lib/Drupal/Core/Database/Connection.php
-+++ b/core/lib/Drupal/Core/Database/Connection.php
-@@ -198,7 +198,9 @@ public function __construct(\PDO $connection, array $connection_options) {
+diff --git a/composer.json b/composer.json
+index 2dc16113..aa3a6816 100644
+--- a/composer.json
++++ b/composer.json
+@@ -21,7 +21,7 @@
+         "composer/composer": "^1.9.1",
+         "drupal/coder": "^8.3.7",
+         "mikey179/vfsstream": "^1.6.8",
+-        "phpunit/phpunit": "^8.4.1",
++        "phpunit/phpunit": "^8.4.1 || ^9",
+         "phpspec/prophecy": "^1.7",
+         "symfony/css-selector": "^4.4",
+         "symfony/phpunit-bridge": "^4.4",
+diff --git a/core/lib/Drupal/Core/Composer/Composer.php b/core/lib/Drupal/Core/Composer/Composer.php
+index bd87d539..aa191646 100644
+--- a/core/lib/Drupal/Core/Composer/Composer.php
++++ b/core/lib/Drupal/Core/Composer/Composer.php
+@@ -316,7 +316,7 @@ public static function upgradePHPUnit(Event $event) {
+       return;
      }
  
-     // Initialize and prepare the connection prefix.
--    $this->setPrefix(isset($connection_options['prefix']) ? $connection_options['prefix'] : '');
-+    $xxx = isset($connection_options['prefix']) ? $connection_options['prefix'] : '';
-+    if (is_array($xxx)) $xxx = $xxx['default'] ?? '';
-+    $this->addPrefix('default', $xxx);
- 
-     // Set a Statement class, unless the driver opted out.
-     if (!empty($this->statementClass)) {
-@@ -209,6 +211,16 @@ public function __construct(\PDO $connection, array $connection_options) {
-     $this->connectionOptions = $connection_options;
-   }
- 
-+  /**
-+   * @todo
-+   */
-+  public function attachSchema(string $schema): void {
-+    // By default, do nothing. SQLite driver needs to implement this to secure
-+    // additional schemas, which are managed as separate files, are "attached"
-+    // to the connection.
-+    return;
-+  }
-+
-   /**
-    * Opens a PDO connection.
-    *
-@@ -314,14 +326,61 @@ public function getConnectionOptions() {
-     return $this->connectionOptions;
-   }
- 
-+  /**
-+   * Adds a prefix to the list of prefixes used by this database connection.
-+   *
-+   * @param string $prefix
-+   *   A single prefix.
-+   * @param string $value
-+   *   The value to be used for the prefix.
-+   */
-+  protected function addPrefix(string $pkey, string $prefix): void {
-+    $this->prefixes[$pkey] = $prefix;
-+    $identifier_quote = $this->identifierQuote();
-+    // Set up variables for use in prefixTables(). Replace table-specific
-+    // prefixes first.
-+    $this->prefixSearch = [];
-+    $this->prefixReplace = [];
-+    foreach ($this->prefixes as $key => $val) {
-+      if ($key != 'default') {
-+        $this->prefixSearch[] = '{' . $key . '}';
-+        // $val can point to another database like 'database.users'. In this
-+        // instance we need to quote the identifiers correctly.
-+        $val = str_replace('.', $identifier_quote . '.' . $identifier_quote, $val);
-+        $this->prefixReplace[] = $identifier_quote . $val . $key . $identifier_quote;
-+      }
-+    }
-+    // Then replace remaining tables with the default prefix.
-+    $this->prefixSearch[] = '{';
-+    // $this->prefixes['default'] can point to another database like
-+    // 'other_db.'. In this instance we need to quote the identifiers correctly.
-+    // For example, "other_db"."PREFIX_table_name".
-+    $this->prefixReplace[] = $identifier_quote . str_replace('.', $identifier_quote . '.' . $identifier_quote, $this->prefixes['default']);
-+    $this->prefixSearch[] = '}';
-+    $this->prefixReplace[] = $identifier_quote;
-+
-+    // Set up a map of prefixed => un-prefixed tables.
-+    foreach ($this->prefixes as $table_name => $prefix) {
-+      if ($table_name !== 'default') {
-+        $this->unprefixedTablesMap[$prefix . $table_name] = $table_name;
-+      }
-+    }
-+  }
-+
-   /**
-    * Set the list of prefixes used by this database connection.
-    *
-    * @param array|string $prefix
-    *   Either a single prefix, or an array of prefixes, in any of the multiple
-    *   forms documented in default.settings.php.
-+   *
-+   * @deprecated in drupal:9.1.0 and is removed in drupal:10.0.0. Use
-+   *   ::addPrefix instead.
-+   *
-+   * @see https://www.drupal.org/node/TODO
+-    // If the PHP version is 7.3 or above and PHPUnit is less than version 7
++    // If the PHP version is 7.4 or above and PHPUnit is less than version 9
+     // call the drupal-phpunit-upgrade script to upgrade PHPUnit.
+     if (!static::upgradePHPUnitCheck($phpunit_package->getVersion())) {
+       $event->getComposer()
+@@ -338,7 +338,7 @@ public static function upgradePHPUnit(Event $event) {
+    *   TRUE if the PHPUnit needs to be upgraded, FALSE if not.
     */
-   protected function setPrefix($prefix) {
-+    @trigger_error(__METHOD__ . ' is deprecated in drupal:9.1.0 and is removed in drupal:10.0.0. Use ::addPrefix instead. See https://www.drupal.org/node/TODO', E_USER_DEPRECATED);
-     if (is_array($prefix)) {
-       $this->prefixes = $prefix + ['default' => ''];
-     }
-@@ -1072,7 +1131,7 @@ public function escapeDatabase($database) {
-    * Force all table names to be strictly alphanumeric-plus-underscore.
-    * Database drivers should never wrap the table name in database-specific
-    * escape characters. This is done in Connection::prefixTables(). The
--   * database-specific escape characters are added in Connection::setPrefix().
-+   * database-specific escape characters are added in Connection::addPrefix().
-    *
-    * @param string $table
-    *   An unsanitized table name.
-@@ -1081,7 +1140,7 @@ public function escapeDatabase($database) {
-    *   The sanitized table name.
-    *
-    * @see \Drupal\Core\Database\Connection::prefixTables()
--   * @see \Drupal\Core\Database\Connection::setPrefix()
-+   * @see \Drupal\Core\Database\Connection::addPrefix()
-    */
-   public function escapeTable($table) {
-     if (!isset($this->escapedTables[$table])) {
-diff --git a/core/lib/Drupal/Core/Database/Driver/sqlite/Connection.php b/core/lib/Drupal/Core/Database/Driver/sqlite/Connection.php
-index 162a615d..5de8c512 100644
---- a/core/lib/Drupal/Core/Database/Driver/sqlite/Connection.php
-+++ b/core/lib/Drupal/Core/Database/Driver/sqlite/Connection.php
-@@ -71,31 +71,32 @@ public function __construct(\PDO $connection, array $connection_options) {
-     parent::__construct($connection, $connection_options);
- 
-     // Attach one database for each registered prefix.
--    $prefixes = $this->prefixes;
--    foreach ($prefixes as &$prefix) {
-+    foreach ($this->prefixes as $prefix) {
-       // Empty prefix means query the main database -- no need to attach anything.
-       if (!empty($prefix)) {
--        // Only attach the database once.
--        if (!isset($this->attachedDatabases[$prefix])) {
--          $this->attachedDatabases[$prefix] = $prefix;
--          if ($connection_options['database'] === ':memory:') {
--            // In memory database use ':memory:' as database name. According to
--            // http://www.sqlite.org/inmemorydb.html it will open a unique
--            // database so attaching it twice is not a problem.
--            $this->query('ATTACH DATABASE :database AS :prefix', [':database' => $connection_options['database'], ':prefix' => $prefix]);
--          }
--          else {
--            $this->query('ATTACH DATABASE :database AS :prefix', [':database' => $connection_options['database'] . '-' . $prefix, ':prefix' => $prefix]);
--          }
--        }
-+        $this->attachSchema($prefix);
-+      }
-+    }
-+  }
- 
--        // Add a ., so queries become prefix.table, which is proper syntax for
--        // querying an attached database.
--        $prefix .= '.';
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function attachSchema(string $schema): void {
-+    // Only attach a database once.
-+    if (!isset($this->attachedDatabases[$schema])) {
-+      $this->attachedDatabases[$schema] = $schema;
-+      if ($this->connectionOptions['database'] === ':memory:') {
-+        // In memory database use ':memory:' as database name. According to
-+        // http://www.sqlite.org/inmemorydb.html it will open a unique
-+        // database so attaching it twice is not a problem.
-+        $this->query('ATTACH DATABASE :database AS :schema', [':database' => $this->connectionOptions['database'], ':schema' => $schema]);
-+      }
-+      else {
-+        $this->query('ATTACH DATABASE :database AS :schema', [':database' => $this->connectionOptions['database'] . '-' . $schema, ':schema' => $schema]);
-       }
-+      $this->addPrefix($schema, $schema . '.');
-     }
--    // Regenerate the prefixes replacement table.
--    $this->setPrefix($prefixes);
+   public static function upgradePHPUnitCheck($phpunit_version) {
+-    return !(version_compare(PHP_MAJOR_VERSION . '.' . PHP_MINOR_VERSION, '7.3') >= 0 && version_compare($phpunit_version, '7.0') < 0);
++    return !(version_compare(PHP_MAJOR_VERSION . '.' . PHP_MINOR_VERSION, '7.4') >= 0 && version_compare($phpunit_version, '9.0') < 0);
    }
  
-   /**
-@@ -359,9 +360,7 @@ public function queryTemporary($query, array $args = [], array $options = []) {
-     // Generate a new temporary table name and protect it from prefixing.
-     // SQLite requires that temporary tables to be non-qualified.
-     $tablename = $this->generateTemporaryTableName();
--    $prefixes = $this->prefixes;
--    $prefixes[$tablename] = '';
--    $this->setPrefix($prefixes);
-+    $this->addPrefix($tablename, '');
+ }
+diff --git a/core/modules/hal/tests/src/Kernel/EntityTranslationNormalizeTest.php b/core/modules/hal/tests/src/Kernel/EntityTranslationNormalizeTest.php
+index bd31f529..356246e0 100644
+--- a/core/modules/hal/tests/src/Kernel/EntityTranslationNormalizeTest.php
++++ b/core/modules/hal/tests/src/Kernel/EntityTranslationNormalizeTest.php
+@@ -70,6 +70,7 @@ public function testNodeTranslation() {
  
-     $this->query('CREATE TEMPORARY TABLE ' . $tablename . ' AS ' . $query, $args, $options);
-     return $tablename;
-diff --git a/core/modules/migrate/tests/src/Kernel/Plugin/MigrationPluginListTest.php b/core/modules/migrate/tests/src/Kernel/Plugin/MigrationPluginListTest.php
-index 9dc4f88e..c5549065 100644
---- a/core/modules/migrate/tests/src/Kernel/Plugin/MigrationPluginListTest.php
-+++ b/core/modules/migrate/tests/src/Kernel/Plugin/MigrationPluginListTest.php
-@@ -139,10 +139,6 @@ public function testGetDefinitions() {
-       // Simpletest uses 7 character prefixes at most so this can't cause
-       // collisions.
-       $connection_info[$target]['prefix']['default'] = $prefix . '0';
+     $normalized = $this->serializer->normalize($node, $this->format);
+ 
++dump([$normalized['title']]);
+     $this->assertContains(['lang' => 'en', 'value' => $node->getTitle()], $normalized['title'], 'Original language title has been normalized.');
+     $this->assertContains(['lang' => 'de', 'value' => $translation->getTitle()], $normalized['title'], 'Translation language title has been normalized.');
+ 
+diff --git a/core/modules/migrate/tests/src/Unit/MigrateStubTest.php b/core/modules/migrate/tests/src/Unit/MigrateStubTest.php
+index fcf171b1..dbdc5e8e 100644
+--- a/core/modules/migrate/tests/src/Unit/MigrateStubTest.php
++++ b/core/modules/migrate/tests/src/Unit/MigrateStubTest.php
+@@ -3,6 +3,7 @@
+ namespace Drupal\Tests\migrate\Unit;
+ 
+ use Drupal\Component\Plugin\Exception\PluginNotFoundException;
++use Drupal\Tests\Traits\PhpUnitWarningsCompatibilityTrait;
+ use Drupal\migrate\MigrateStub;
+ use Drupal\migrate\Plugin\MigrateDestinationInterface;
+ use Drupal\migrate\Plugin\MigrateIdMapInterface;
+@@ -22,6 +23,8 @@
+  */
+ class MigrateStubTest extends TestCase {
+ 
++  use PhpUnitWarningsCompatibilityTrait;
++
+   /**
+    * The plugin manager prophecy.
+    *
+diff --git a/core/modules/views/tests/src/Kernel/Plugin/ViewsSqlExceptionTest.php b/core/modules/views/tests/src/Kernel/Plugin/ViewsSqlExceptionTest.php
+index 39574d65..f08ac5be 100644
+--- a/core/modules/views/tests/src/Kernel/Plugin/ViewsSqlExceptionTest.php
++++ b/core/modules/views/tests/src/Kernel/Plugin/ViewsSqlExceptionTest.php
+@@ -47,7 +47,7 @@ public function testSqlException() {
+     ]);
+ 
+     $this->expectException(DatabaseExceptionWrapper::class);
+-    $this->expectExceptionMessageRegExp('/^Exception in Test filters\[test_filter\]:/');
++    $this->expectExceptionMessageMatches('/^Exception in Test filters\[test_filter\]:/');
+ 
+     $this->executeView($view);
+   }
+diff --git a/core/scripts/run-tests.sh b/core/scripts/run-tests.sh
+index 955eb5bf..91b47782 100755
+--- a/core/scripts/run-tests.sh
++++ b/core/scripts/run-tests.sh
+@@ -149,7 +149,7 @@
+ }
+ 
+ if (!Composer::upgradePHPUnitCheck(Version::id())) {
+-  simpletest_script_print_error("PHPUnit testing framework version 7 or greater is required when running on PHP 7.3 or greater. Run the command 'composer run-script drupal-phpunit-upgrade' in order to fix this.");
++  simpletest_script_print_error("PHPUnit testing framework version 9 or greater is required when running on PHP 7.4 or greater. Run the command 'composer run-script drupal-phpunit-upgrade' in order to fix this.");
+   exit(SIMPLETEST_SCRIPT_EXIT_FAILURE);
+ }
+ 
+diff --git a/core/tests/Drupal/BuildTests/Framework/BuildTestBase.php b/core/tests/Drupal/BuildTests/Framework/BuildTestBase.php
+index cddc6d58..be8ae2e4 100644
+--- a/core/tests/Drupal/BuildTests/Framework/BuildTestBase.php
++++ b/core/tests/Drupal/BuildTests/Framework/BuildTestBase.php
+@@ -7,7 +7,7 @@
+ use Behat\Mink\Mink;
+ use Behat\Mink\Session;
+ use Drupal\Component\FileSystem\FileSystem as DrupalFilesystem;
+-use Drupal\Tests\Traits\PHPUnit8Warnings;
++use Drupal\Tests\Traits\PhpUnitWarningsCompatibilityTrait;
+ use PHPUnit\Framework\TestCase;
+ use Symfony\Component\BrowserKit\Client as SymfonyClient;
+ use Symfony\Component\Filesystem\Filesystem as SymfonyFilesystem;
+@@ -53,7 +53,7 @@
+ abstract class BuildTestBase extends TestCase {
+ 
+   use ExternalCommandRequirementsTrait;
+-  use PHPUnit8Warnings;
++  use PhpUnitWarningsCompatibilityTrait;
+ 
+   /**
+    * The working directory where this test will manipulate files.
+diff --git a/core/tests/Drupal/KernelTests/Core/Messenger/MessengerTest.php b/core/tests/Drupal/KernelTests/Core/Messenger/MessengerTest.php
+index ac305022..9d0d11f6 100644
+--- a/core/tests/Drupal/KernelTests/Core/Messenger/MessengerTest.php
++++ b/core/tests/Drupal/KernelTests/Core/Messenger/MessengerTest.php
+@@ -49,6 +49,7 @@ public function testRemoveSingleMessage() {
+ 
+     // Check we only have the second one.
+     $this->assertCount(1, $this->messenger->messagesByType(MessengerInterface::TYPE_STATUS));
++dump([$this->messenger->deleteByType(MessengerInterface::TYPE_STATUS)]);
+     $this->assertContains('Second message with <em>markup!</em> (not removed).', $this->messenger->deleteByType(MessengerInterface::TYPE_STATUS));
+ 
+   }
+diff --git a/core/tests/Drupal/KernelTests/KernelTestBase.php b/core/tests/Drupal/KernelTests/KernelTestBase.php
+index d5f6ca69..14351d35 100644
+--- a/core/tests/Drupal/KernelTests/KernelTestBase.php
++++ b/core/tests/Drupal/KernelTests/KernelTestBase.php
+@@ -21,7 +21,7 @@
+ use Drupal\Tests\ConfigTestTrait;
+ use Drupal\Tests\RandomGeneratorTrait;
+ use Drupal\Tests\TestRequirementsTrait;
+-use Drupal\Tests\Traits\PHPUnit8Warnings;
++use Drupal\Tests\Traits\PhpUnitWarningsCompatibilityTrait;
+ use Drupal\TestTools\Comparator\MarkupInterfaceComparator;
+ use PHPUnit\Framework\Exception;
+ use PHPUnit\Framework\TestCase;
+@@ -81,7 +81,7 @@
+   use RandomGeneratorTrait;
+   use ConfigTestTrait;
+   use TestRequirementsTrait;
+-  use PHPUnit8Warnings;
++  use PhpUnitWarningsCompatibilityTrait;
+ 
+   /**
+    * {@inheritdoc}
+diff --git a/core/tests/Drupal/Tests/BrowserTestBase.php b/core/tests/Drupal/Tests/BrowserTestBase.php
+index de215ad0..d3578e05 100644
+--- a/core/tests/Drupal/Tests/BrowserTestBase.php
++++ b/core/tests/Drupal/Tests/BrowserTestBase.php
+@@ -16,7 +16,7 @@
+ use Drupal\Tests\block\Traits\BlockCreationTrait;
+ use Drupal\Tests\node\Traits\ContentTypeCreationTrait;
+ use Drupal\Tests\node\Traits\NodeCreationTrait;
+-use Drupal\Tests\Traits\PHPUnit8Warnings;
++use Drupal\Tests\Traits\PhpUnitWarningsCompatibilityTrait;
+ use Drupal\Tests\user\Traits\UserCreationTrait;
+ use Drupal\TestTools\Comparator\MarkupInterfaceComparator;
+ use GuzzleHttp\Cookie\CookieJar;
+@@ -64,7 +64,7 @@
+     createUser as drupalCreateUser;
+   }
+   use XdebugRequestTrait;
+-  use PHPUnit8Warnings;
++  use PhpUnitWarningsCompatibilityTrait;
+ 
+   /**
+    * The database prefix of this test run.
+diff --git a/core/tests/Drupal/Tests/Component/Annotation/Plugin/Discovery/AnnotationBridgeDecoratorTest.php b/core/tests/Drupal/Tests/Component/Annotation/Plugin/Discovery/AnnotationBridgeDecoratorTest.php
+index 12732e11..5cbfa08e 100644
+--- a/core/tests/Drupal/Tests/Component/Annotation/Plugin/Discovery/AnnotationBridgeDecoratorTest.php
++++ b/core/tests/Drupal/Tests/Component/Annotation/Plugin/Discovery/AnnotationBridgeDecoratorTest.php
+@@ -6,6 +6,7 @@
+ use Drupal\Component\Annotation\Plugin\Discovery\AnnotationBridgeDecorator;
+ use Drupal\Component\Plugin\Definition\PluginDefinition;
+ use Drupal\Component\Plugin\Discovery\DiscoveryInterface;
++use Drupal\Tests\Traits\PhpUnitWarningsCompatibilityTrait;
+ use PHPUnit\Framework\TestCase;
+ 
+ /**
+@@ -14,6 +15,8 @@
+  */
+ class AnnotationBridgeDecoratorTest extends TestCase {
+ 
++  use PhpUnitWarningsCompatibilityTrait;
++
+   /**
+    * @covers ::getDefinitions
+    */
+diff --git a/core/tests/Drupal/Tests/Component/DependencyInjection/ContainerTest.php b/core/tests/Drupal/Tests/Component/DependencyInjection/ContainerTest.php
+index 6f9e3f27..b40a6dc9 100644
+--- a/core/tests/Drupal/Tests/Component/DependencyInjection/ContainerTest.php
++++ b/core/tests/Drupal/Tests/Component/DependencyInjection/ContainerTest.php
+@@ -8,6 +8,7 @@
+ namespace Drupal\Tests\Component\DependencyInjection;
+ 
+ use Drupal\Component\Utility\Crypt;
++use Drupal\Tests\Traits\PhpUnitWarningsCompatibilityTrait;
+ use PHPUnit\Framework\TestCase;
+ use Symfony\Component\DependencyInjection\ContainerInterface;
+ use Symfony\Component\DependencyInjection\Exception\InvalidArgumentException;
+@@ -24,6 +25,8 @@
+  */
+ class ContainerTest extends TestCase {
+ 
++  use PhpUnitWarningsCompatibilityTrait;
++
+   /**
+    * The tested container.
+    *
+diff --git a/core/tests/Drupal/Tests/Component/DependencyInjection/Dumper/OptimizedPhpArrayDumperTest.php b/core/tests/Drupal/Tests/Component/DependencyInjection/Dumper/OptimizedPhpArrayDumperTest.php
+index 12c847d3..1a12ac25 100644
+--- a/core/tests/Drupal/Tests/Component/DependencyInjection/Dumper/OptimizedPhpArrayDumperTest.php
++++ b/core/tests/Drupal/Tests/Component/DependencyInjection/Dumper/OptimizedPhpArrayDumperTest.php
+@@ -8,6 +8,7 @@
+ namespace Drupal\Tests\Component\DependencyInjection\Dumper {
+ 
+   use Drupal\Component\Utility\Crypt;
++  use Drupal\Tests\Traits\PhpUnitWarningsCompatibilityTrait;
+   use PHPUnit\Framework\TestCase;
+   use Symfony\Component\DependencyInjection\Definition;
+   use Symfony\Component\DependencyInjection\Reference;
+@@ -24,6 +25,8 @@
+    */
+   class OptimizedPhpArrayDumperTest extends TestCase {
+ 
++    use PhpUnitWarningsCompatibilityTrait;
++
+     /**
+      * The container builder instance.
+      *
+diff --git a/core/tests/Drupal/Tests/Component/Diff/Engine/DiffOpTest.php b/core/tests/Drupal/Tests/Component/Diff/Engine/DiffOpTest.php
+index be205481..76f0064e 100644
+--- a/core/tests/Drupal/Tests/Component/Diff/Engine/DiffOpTest.php
++++ b/core/tests/Drupal/Tests/Component/Diff/Engine/DiffOpTest.php
+@@ -4,7 +4,6 @@
+ 
+ use Drupal\Component\Diff\Engine\DiffOp;
+ use PHPUnit\Framework\TestCase;
+-use PHPUnit\Framework\Error\Error;
+ 
+ /**
+  * Test DiffOp base class.
+@@ -25,7 +24,7 @@ class DiffOpTest extends TestCase {
+    * @covers ::reverse
+    */
+   public function testReverse() {
+-    $this->expectException(Error::class);
++    $this->expectError();
+     $op = new DiffOp();
+     $result = $op->reverse();
+   }
+diff --git a/core/tests/Drupal/Tests/Component/Gettext/PoStreamWriterTest.php b/core/tests/Drupal/Tests/Component/Gettext/PoStreamWriterTest.php
+index 75f50d5b..d2482a20 100644
+--- a/core/tests/Drupal/Tests/Component/Gettext/PoStreamWriterTest.php
++++ b/core/tests/Drupal/Tests/Component/Gettext/PoStreamWriterTest.php
+@@ -4,6 +4,7 @@
+ 
+ use Drupal\Component\Gettext\PoItem;
+ use Drupal\Component\Gettext\PoStreamWriter;
++use Drupal\Tests\Traits\PhpUnitWarningsCompatibilityTrait;
+ use org\bovigo\vfs\vfsStream;
+ use org\bovigo\vfs\vfsStreamFile;
+ use PHPUnit\Framework\TestCase;
+@@ -14,6 +15,8 @@
+  */
+ class PoStreamWriterTest extends TestCase {
+ 
++  use PhpUnitWarningsCompatibilityTrait;
++
+   /**
+    * The PO writer object under test.
+    *
+diff --git a/core/tests/Drupal/Tests/Component/PhpStorage/FileStorageTest.php b/core/tests/Drupal/Tests/Component/PhpStorage/FileStorageTest.php
+index 17272f3e..a4eac854 100644
+--- a/core/tests/Drupal/Tests/Component/PhpStorage/FileStorageTest.php
++++ b/core/tests/Drupal/Tests/Component/PhpStorage/FileStorageTest.php
+@@ -5,7 +5,6 @@
+ use Drupal\Component\PhpStorage\FileStorage;
+ use Drupal\Component\Utility\Random;
+ use org\bovigo\vfs\vfsStreamDirectory;
+-use PHPUnit\Framework\Error\Warning;
+ 
+ /**
+  * @coversDefaultClass \Drupal\Component\PhpStorage\FileStorage
+@@ -99,8 +98,8 @@ public function testCreateDirectoryFailWarning() {
+       'bin' => 'test',
+     ]);
+     $code = "<?php\n echo 'here';";
+-    $this->expectException(Warning::class);
+-    $this->expectExceptionMessage('mkdir(): Permission Denied');
++    $this->expectWarning();
++    $this->expectWarningMessage('mkdir(): Permission Denied');
+     $storage->save('subdirectory/foo.php', $code);
+   }
+ 
+diff --git a/core/tests/Drupal/Tests/Component/Plugin/PluginManagerBaseTest.php b/core/tests/Drupal/Tests/Component/Plugin/PluginManagerBaseTest.php
+index 954ff701..64586b29 100644
+--- a/core/tests/Drupal/Tests/Component/Plugin/PluginManagerBaseTest.php
++++ b/core/tests/Drupal/Tests/Component/Plugin/PluginManagerBaseTest.php
+@@ -5,6 +5,7 @@
+ use Drupal\Component\Plugin\Exception\PluginNotFoundException;
+ use Drupal\Component\Plugin\Mapper\MapperInterface;
+ use Drupal\Component\Plugin\PluginManagerBase;
++use Drupal\Tests\Traits\PhpUnitWarningsCompatibilityTrait;
+ use PHPUnit\Framework\TestCase;
+ 
+ /**
+@@ -13,6 +14,8 @@
+  */
+ class PluginManagerBaseTest extends TestCase {
+ 
++  use PhpUnitWarningsCompatibilityTrait;
++
+   /**
+    * A callback method for mocking FactoryInterface objects.
+    */
+diff --git a/core/tests/Drupal/Tests/Component/Serialization/YamlTest.php b/core/tests/Drupal/Tests/Component/Serialization/YamlTest.php
+index 860c3d6e..e8743587 100644
+--- a/core/tests/Drupal/Tests/Component/Serialization/YamlTest.php
++++ b/core/tests/Drupal/Tests/Component/Serialization/YamlTest.php
+@@ -103,7 +103,7 @@ public function testObjectSupportDisabledPecl() {
+    */
+   public function testObjectSupportDisabledSymfony() {
+     $this->expectException(InvalidDataTypeException::class);
+-    $this->expectExceptionMessageRegExp('/^Object support when parsing a YAML file has been disabled/');
++    $this->expectExceptionMessageMatches('/^Object support when parsing a YAML file has been disabled/');
+     $object = new \stdClass();
+     $object->foo = 'bar';
+     // In core all Yaml encoding is done via Symfony and it does not support
+diff --git a/core/tests/Drupal/Tests/Composer/Plugin/Scaffold/AssertUtilsTrait.php b/core/tests/Drupal/Tests/Composer/Plugin/Scaffold/AssertUtilsTrait.php
+index 96dab849..6119fe2a 100644
+--- a/core/tests/Drupal/Tests/Composer/Plugin/Scaffold/AssertUtilsTrait.php
++++ b/core/tests/Drupal/Tests/Composer/Plugin/Scaffold/AssertUtilsTrait.php
+@@ -2,13 +2,13 @@
+ 
+ namespace Drupal\Tests\Composer\Plugin\Scaffold;
+ 
+-use Drupal\Tests\Traits\PHPUnit8Warnings;
++use Drupal\Tests\Traits\PhpUnitWarningsCompatibilityTrait;
+ 
+ /**
+  * Convenience class for creating fixtures.
+  */
+ trait AssertUtilsTrait {
+-  use PHPUnit8Warnings;
++  use PhpUnitWarningsCompatibilityTrait;
+ 
+   /**
+    * Asserts that a given file exists and is/is not a symlink.
+diff --git a/core/tests/Drupal/Tests/Composer/Plugin/Scaffold/Integration/AppendOpTest.php b/core/tests/Drupal/Tests/Composer/Plugin/Scaffold/Integration/AppendOpTest.php
+index e6f7bd67..f5b3d21d 100644
+--- a/core/tests/Drupal/Tests/Composer/Plugin/Scaffold/Integration/AppendOpTest.php
++++ b/core/tests/Drupal/Tests/Composer/Plugin/Scaffold/Integration/AppendOpTest.php
+@@ -5,7 +5,7 @@
+ use Drupal\Composer\Plugin\Scaffold\Operations\AppendOp;
+ use Drupal\Composer\Plugin\Scaffold\ScaffoldOptions;
+ use Drupal\Tests\Composer\Plugin\Scaffold\Fixtures;
+-use Drupal\Tests\Traits\PHPUnit8Warnings;
++use Drupal\Tests\Traits\PhpUnitWarningsCompatibilityTrait;
+ use PHPUnit\Framework\TestCase;
+ 
+ /**
+@@ -14,7 +14,7 @@
+  * @group Scaffold
+  */
+ class AppendOpTest extends TestCase {
+-  use PHPUnit8Warnings;
++  use PhpUnitWarningsCompatibilityTrait;
+ 
+   /**
+    * @covers ::process
+diff --git a/core/tests/Drupal/Tests/Composer/Plugin/Scaffold/Integration/ReplaceOpTest.php b/core/tests/Drupal/Tests/Composer/Plugin/Scaffold/Integration/ReplaceOpTest.php
+index cb5d6c7c..1df61ff7 100644
+--- a/core/tests/Drupal/Tests/Composer/Plugin/Scaffold/Integration/ReplaceOpTest.php
++++ b/core/tests/Drupal/Tests/Composer/Plugin/Scaffold/Integration/ReplaceOpTest.php
+@@ -5,7 +5,7 @@
+ use Drupal\Composer\Plugin\Scaffold\Operations\ReplaceOp;
+ use Drupal\Composer\Plugin\Scaffold\ScaffoldOptions;
+ use Drupal\Tests\Composer\Plugin\Scaffold\Fixtures;
+-use Drupal\Tests\Traits\PHPUnit8Warnings;
++use Drupal\Tests\Traits\PhpUnitWarningsCompatibilityTrait;
+ use PHPUnit\Framework\TestCase;
+ 
+ /**
+@@ -14,7 +14,7 @@
+  * @group Scaffold
+  */
+ class ReplaceOpTest extends TestCase {
+-  use PHPUnit8Warnings;
++  use PhpUnitWarningsCompatibilityTrait;
+ 
+   /**
+    * @covers ::process
+diff --git a/core/tests/Drupal/Tests/Composer/Plugin/Scaffold/Integration/SkipOpTest.php b/core/tests/Drupal/Tests/Composer/Plugin/Scaffold/Integration/SkipOpTest.php
+index ba8313bb..859f931d 100644
+--- a/core/tests/Drupal/Tests/Composer/Plugin/Scaffold/Integration/SkipOpTest.php
++++ b/core/tests/Drupal/Tests/Composer/Plugin/Scaffold/Integration/SkipOpTest.php
+@@ -5,7 +5,7 @@
+ use Drupal\Composer\Plugin\Scaffold\Operations\SkipOp;
+ use Drupal\Composer\Plugin\Scaffold\ScaffoldOptions;
+ use Drupal\Tests\Composer\Plugin\Scaffold\Fixtures;
+-use Drupal\Tests\Traits\PHPUnit8Warnings;
++use Drupal\Tests\Traits\PhpUnitWarningsCompatibilityTrait;
+ use PHPUnit\Framework\TestCase;
+ 
+ /**
+@@ -14,7 +14,7 @@
+  * @group Scaffold
+  */
+ class SkipOpTest extends TestCase {
+-  use PHPUnit8Warnings;
++  use PhpUnitWarningsCompatibilityTrait;
+ 
+   /**
+    * @covers ::process
+diff --git a/core/tests/Drupal/Tests/Composer/Plugin/VendorHardening/ConfigTest.php b/core/tests/Drupal/Tests/Composer/Plugin/VendorHardening/ConfigTest.php
+index 9755278b..0962a438 100644
+--- a/core/tests/Drupal/Tests/Composer/Plugin/VendorHardening/ConfigTest.php
++++ b/core/tests/Drupal/Tests/Composer/Plugin/VendorHardening/ConfigTest.php
+@@ -113,7 +113,7 @@ public function testMixedCaseConfigCleanupPackages() {
+     $plugin_config = $ref_plugin_config->invoke($config);
+ 
+     foreach (array_keys($plugin_config) as $package_name) {
+-      $this->assertNotRegExp('/[A-Z]/', $package_name);
++      $this->assertDoesNotMatchRegularExpression('/[A-Z]/', $package_name);
+     }
+   }
+ 
+diff --git a/core/tests/Drupal/Tests/Composer/Plugin/VendorHardening/VendorHardeningPluginTest.php b/core/tests/Drupal/Tests/Composer/Plugin/VendorHardening/VendorHardeningPluginTest.php
+index 089b9067..4378c1bd 100644
+--- a/core/tests/Drupal/Tests/Composer/Plugin/VendorHardening/VendorHardeningPluginTest.php
++++ b/core/tests/Drupal/Tests/Composer/Plugin/VendorHardening/VendorHardeningPluginTest.php
+@@ -8,6 +8,7 @@
+ use Composer\Package\RootPackageInterface;
+ use Drupal\Composer\VendorHardening\Config;
+ use Drupal\Composer\Plugin\VendorHardening\VendorHardeningPlugin;
++use Drupal\Tests\Traits\PhpUnitWarningsCompatibilityTrait;
+ use org\bovigo\vfs\vfsStream;
+ use PHPUnit\Framework\TestCase;
+ 
+@@ -17,6 +18,8 @@
+  */
+ class VendorHardeningPluginTest extends TestCase {
+ 
++  use PhpUnitWarningsCompatibilityTrait;
++
+   public function setUp(): void {
+     parent::setUp();
+     vfsStream::setup('vendor', NULL, [
+diff --git a/core/tests/Drupal/Tests/Core/Asset/CssCollectionGrouperUnitTest.php b/core/tests/Drupal/Tests/Core/Asset/CssCollectionGrouperUnitTest.php
+index 0396cc01..114597a3 100644
+--- a/core/tests/Drupal/Tests/Core/Asset/CssCollectionGrouperUnitTest.php
++++ b/core/tests/Drupal/Tests/Core/Asset/CssCollectionGrouperUnitTest.php
+@@ -113,6 +113,7 @@ public function testGrouper() {
+     $this->assertSame('all', $group['media']);
+     $this->assertTrue($group['preprocess']);
+     $this->assertSame(3, count($group['items']));
++dump([$css_assets['system.base.css'], $group['items']]);
+     $this->assertContains($css_assets['system.base.css'], $group['items']);
+     $this->assertContains($css_assets['js.module.css'], $group['items']);
+ 
+diff --git a/core/tests/Drupal/Tests/Core/Config/Entity/ConfigEntityBaseUnitTest.php b/core/tests/Drupal/Tests/Core/Config/Entity/ConfigEntityBaseUnitTest.php
+index 3f36ec29..6d36191e 100644
+--- a/core/tests/Drupal/Tests/Core/Config/Entity/ConfigEntityBaseUnitTest.php
++++ b/core/tests/Drupal/Tests/Core/Config/Entity/ConfigEntityBaseUnitTest.php
+@@ -636,7 +636,7 @@ public function testToArraySchemaException() {
+       ->method('getPropertiesToExport')
+       ->willReturn(NULL);
+     $this->expectException(SchemaIncompleteException::class);
+-    $this->expectExceptionMessageRegExp("/Entity type 'Mock_ConfigEntityTypeInterface_[^']*' is missing 'config_export' definition in its annotation/");
++    $this->expectExceptionMessageMatches("/Entity type 'Mock_ConfigEntityTypeInterface_[^']*' is missing 'config_export' definition in its annotation/");
+     $this->entity->toArray();
+   }
+ 
+diff --git a/core/tests/Drupal/Tests/Listeners/DeprecationListenerTrait.php b/core/tests/Drupal/Tests/Listeners/DeprecationListenerTrait.php
+index 8135e779..2a2fc45d 100644
+--- a/core/tests/Drupal/Tests/Listeners/DeprecationListenerTrait.php
++++ b/core/tests/Drupal/Tests/Listeners/DeprecationListenerTrait.php
+@@ -172,6 +172,8 @@ public static function getSkippedDeprecations() {
+       "The \"Drupal\Tests\Listeners\DrupalListener\" class implements \"PHPUnit\Framework\TestListener\" that is deprecated Use the `TestHook` interfaces instead.",
+       "The \"Drupal\Tests\Listeners\DrupalListener\" class uses \"PHPUnit\Framework\TestListenerDefaultImplementation\" that is deprecated The `TestListener` interface is deprecated.",
+       "The \"PHPUnit\Framework\TestSuite\" class is considered internal This class is not covered by the backward compatibility promise for PHPUnit. It may change without further notice. You should not use it from \"Drupal\Tests\TestSuites\TestSuiteBase\".",
++      // PHPUnit 9.
++      "The \"PHPUnit\TextUI\DefaultResultPrinter\" class is considered internal This class is not covered by the backward compatibility promise for PHPUnit. It may change without further notice. You should not use it from \"Drupal\Tests\Listeners\HtmlOutputPrinter\".",
+     ];
+   }
+ 
+diff --git a/core/tests/Drupal/Tests/Listeners/HtmlOutputPrinter.php b/core/tests/Drupal/Tests/Listeners/HtmlOutputPrinter.php
+index a3f7916e..a85c3204 100644
+--- a/core/tests/Drupal/Tests/Listeners/HtmlOutputPrinter.php
++++ b/core/tests/Drupal/Tests/Listeners/HtmlOutputPrinter.php
+@@ -2,15 +2,27 @@
+ 
+ namespace Drupal\Tests\Listeners;
+ 
++use Drupal\TestTools\PhpUnitCompatibility\RunnerVersion;
+ use PHPUnit\Framework\TestResult;
+-use PHPUnit\TextUI\ResultPrinter;
++
++// In order to manage different implementations across PHPUnit versions, we
++// dynamically load the base ResultPrinter class dependent on the PHPUnit runner
++// version.
++if (!class_exists(ResultPrinterBase::class, FALSE)) {
++  if (RunnerVersion::getMajor() < 9) {
++    class_alias('PHPUnit\TextUI\ResultPrinter', ResultPrinterBase::class);
++  }
++  else {
++    class_alias('PHPUnit\TextUI\DefaultResultPrinter', ResultPrinterBase::class);
++  }
++}
+ 
+ /**
+  * Defines a class for providing html output results for functional tests.
+  *
+  * @internal
+  */
+-class HtmlOutputPrinter extends ResultPrinter {
++class HtmlOutputPrinter extends ResultPrinterBase {
+ 
+   use HtmlOutputPrinterTrait;
+ 
+diff --git a/core/tests/Drupal/Tests/Traits/PHPUnit8Warnings.php b/core/tests/Drupal/Tests/Traits/PHPUnit8Warnings.php
+deleted file mode 100644
+index c5d3610e..00000000
+--- a/core/tests/Drupal/Tests/Traits/PHPUnit8Warnings.php
++++ /dev/null
+@@ -1,43 +0,0 @@
+-<?php
 -
--      // Add the original simpletest prefix so SQLite can attach its database.
--      // @see \Drupal\Core\Database\Driver\sqlite\Connection::init()
--      $connection_info[$target]['prefix'][$value['prefix']['default']] = $value['prefix']['default'];
-     }
-     Database::addConnectionInfo('migrate', 'default', $connection_info['default']);
+-namespace Drupal\Tests\Traits;
+-
+-/**
+- * Used to ignore warnings being added by PHPUnit 8.
+- *
+- * This trait exists to allow Drupal 8 tests using PHPUnit 7 and Drupal 9 tests
+- * using PHPUnit 8 to happily co-exist. Once Drupal 8 and Drupal 9 are not so
+- * closely aligned these will be fixed in core and the warnings will be emitted
+- * from the test runner.
+- *
+- * @todo https://www.drupal.org/project/drupal/issues/3110543 Remove the ignored
+- *   warnings to support PHPUnit 9.
+- *
+- * @internal
+- */
+-trait PHPUnit8Warnings {
+-
+-  /**
+-   * The list of warnings to ignore.
+-   *
+-   * @var string[]
+-   */
+-  private static $ignoredWarnings = [
+-    // Temporarily empty.
+-  ];
+-
+-  /**
+-   * Ignores specific PHPUnit 8 warnings.
+-   *
+-   * @see \PHPUnit\Framework\TestCase::addWarning()
+-   *
+-   * @internal
+-   */
+-  public function addWarning(string $warning): void {
+-    if (in_array($warning, self::$ignoredWarnings, TRUE)) {
+-      return;
+-    }
+-    parent::addWarning($warning);
+-  }
+-
+-}
+diff --git a/core/tests/Drupal/Tests/Traits/PhpUnitWarningsCompatibilityTrait.php b/core/tests/Drupal/Tests/Traits/PhpUnitWarningsCompatibilityTrait.php
+new file mode 100644
+index 00000000..4dd1cd86
+--- /dev/null
++++ b/core/tests/Drupal/Tests/Traits/PhpUnitWarningsCompatibilityTrait.php
+@@ -0,0 +1,45 @@
++<?php
++
++namespace Drupal\Tests\Traits;
++
++/**
++ * Used to ignore warnings being added by PHPUnit.
++ *
++ * This trait exists to allow Drupal tests using different PHPUnit versions to
++ * happily co-exist.
++ *
++ * @internal
++ */
++trait PhpUnitWarningsCompatibilityTrait {
++
++  /**
++   * The list of warnings to ignore.
++   *
++   * @var string[]
++   */
++  private static $ignoredWarnings = [
++    // PHPUnit 9.
++    'assertFileNotExists() is deprecated and will be removed in PHPUnit 10. Refactor your code to use assertFileDoesNotExist() instead.',
++    'PHPUnit\Framework\TestCase::prophesize() is deprecated and will be removed in PHPUnit 10. Please use the trait provided by phpspec/prophecy-phpunit.',
++    'assertRegExp() is deprecated and will be removed in PHPUnit 10. Refactor your code to use assertMatchesRegularExpression() instead.',
++    'assertNotRegExp() is deprecated and will be removed in PHPUnit 10. Refactor your code to use assertDoesNotMatchRegularExpression() instead.',
++    'assertDirectoryNotExists() is deprecated and will be removed in PHPUnit 10. Refactor your code to use assertDirectoryDoesNotExist() instead.',
++    'Support for using expectException() with PHPUnit\Framework\Error\Warning is deprecated and will be removed in PHPUnit 10. Use expectWarning() instead.',
++    'Support for using expectException() with PHPUnit\Framework\Error\Error is deprecated and will be removed in PHPUnit 10. Use expectError() instead.',
++  ];
++
++  /**
++   * Overrides ::addWarning to selectively ignore specific PHPUnit warnings.
++   *
++   * @see \PHPUnit\Framework\TestCase::addWarning()
++   *
++   * @internal
++   */
++  public function addWarning(string $warning): void {
++    if (in_array($warning, self::$ignoredWarnings, TRUE)) {
++      return;
++    }
++    parent::addWarning($warning);
++  }
++
++}
+diff --git a/core/tests/Drupal/Tests/UnitTestCase.php b/core/tests/Drupal/Tests/UnitTestCase.php
+index 10167a02..41d10b58 100644
+--- a/core/tests/Drupal/Tests/UnitTestCase.php
++++ b/core/tests/Drupal/Tests/UnitTestCase.php
+@@ -9,7 +9,7 @@
+ use Drupal\Core\DependencyInjection\ContainerBuilder;
+ use Drupal\Core\StringTranslation\TranslatableMarkup;
+ use Drupal\Core\StringTranslation\PluralTranslatableMarkup;
+-use Drupal\Tests\Traits\PHPUnit8Warnings;
++use Drupal\Tests\Traits\PhpUnitWarningsCompatibilityTrait;
+ use PHPUnit\Framework\TestCase;
  
+ /**
+@@ -19,7 +19,7 @@
+  */
+ abstract class UnitTestCase extends TestCase {
+ 
+-  use PHPUnit8Warnings;
++  use PhpUnitWarningsCompatibilityTrait;
+ 
+   /**
+    * The random generator.
