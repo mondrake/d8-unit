@@ -1,148 +1,455 @@
-diff --git a/core/tests/Drupal/FunctionalTests/BrowserTestBaseTest.php b/core/tests/Drupal/FunctionalTests/BrowserTestBaseTest.php
-index 5bf2f49e..2862c678 100644
---- a/core/tests/Drupal/FunctionalTests/BrowserTestBaseTest.php
-+++ b/core/tests/Drupal/FunctionalTests/BrowserTestBaseTest.php
-@@ -56,6 +56,7 @@ public function testGoTo() {
-     $this->assertStringNotContainsString('</html>', $text);
- 
-     // Response includes cache tags that we can assert.
-+    $this->assertSession()->responseHeaderExists('X-Drupal-Cache-Tags');
-     $this->assertSession()->responseHeaderEquals('X-Drupal-Cache-Tags', 'http_response rendered');
- 
-     // Test that we can read the JS settings.
-@@ -74,6 +75,7 @@ public function testGoTo() {
-     $this->drupalGet('system-test/header', [], [
-       'Test-Header' => 'header value',
-     ]);
-+    $this->assertSession()->responseHeaderExists('Test-Header');
-     $returned_header = $this->getSession()->getResponseHeader('Test-Header');
-     $this->assertSame('header value', $returned_header);
+diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
+index c6ce48e5..0acfd2fd 100644
+--- a/core/lib/Drupal/Core/Database/Connection.php
++++ b/core/lib/Drupal/Core/Database/Connection.php
+@@ -315,6 +315,11 @@ public function destroy() {
+    *   database type. In rare cases, such as creating an SQL function, []
+    *   characters might be needed and can be allowed by changing this option to
+    *   TRUE.
++   * - pdo: By default, queries will execute with the PDO options set on the
++   *   connection. In particular cases, it could be necessary to override the
++   *   PDO driver options on the statement level. In such case, pass the
++   *   required setting as an array here, and they will be passed to the
++   *   prepared statement. See https://www.php.net/manual/en/pdo.prepare.php.
+    *
+    * @return array
+    *   An array of default query options.
+@@ -326,6 +331,7 @@ protected function defaultOptions() {
+       'throw_exception' => TRUE,
+       'allow_delimiter_in_query' => FALSE,
+       'allow_square_brackets' => FALSE,
++      'pdo' => [],
+     ];
    }
-@@ -226,6 +228,16 @@ public function testLinkNotExistsExact() {
-     $this->assertSession()->linkNotExistsExact('foo|bar');
+ 
+@@ -476,6 +482,38 @@ public function getFullQualifiedTableName($table) {
+     return $options['database'] . '.' . $prefix . $table;
    }
  
 +  /**
-+   * Tests responseHeaderDoesNotExist() functionality.
++   * Returns a prepared statement given a SQL string.
 +   *
-+   * @see \Drupal\Tests\WebAssert::responseHeaderDoesNotExist()
++   * This method caches prepared statements, reusing them when possible. It also
++   * prefixes tables names enclosed in curly braces and, optionally, quotes
++   * identifiers enclosed in square brackets.
++   *
++   * @param string $query
++   *   The query string as SQL, with curly braces surrounding the table names.
++   * @param array $args
++   *   The array of arguments for the prepared statement. By default Drupal
++   *   uses named placeholders; drivers may need to pre-process the arguments
++   *   or the placeholders before preparing the statement (for instance, to
++   *   convert the named placeholders to positional placeholders represented
++   *   by ? in the SQL query string if a driver is unable to manage named
++   *   placeholders).
++   * @param array $options
++   *   An associative array of options to control how the query is run. See
++   *   the documentation for self::defaultOptions() for details. The content of
++   *   the 'pdo' key will be passed to the prepared statement.
++   *
++   * @return \Drupal\Core\Database\StatementInterface
++   *   A PDO prepared statement ready for its execute() method.
 +   */
-+  public function testResponseHeaderDoesNotExist() {
-+    $this->drupalGet('test-pipe-char');
-+    $this->assertSession()->responseHeaderDoesNotExist('Foo-Bar');
++  public function prepareStatement(string $query, array $args, array $options): StatementInterface {
++    $query = $this->prefixTables($query);
++    if (!($options['allow_square_brackets'] ?? FALSE)) {
++      $query = $this->quoteIdentifiers($query);
++    }
++    return $this->connection->prepare($query, $options['pdo'] ?? []);
 +  }
 +
    /**
-    * Tests linkNotExistsExact() functionality fail.
+    * Prepares a query string and returns the prepared statement.
     *
-diff --git a/core/tests/Drupal/FunctionalTests/WebAssertTest.php b/core/tests/Drupal/FunctionalTests/WebAssertTest.php
-new file mode 100644
-index 00000000..69df3fd1
---- /dev/null
-+++ b/core/tests/Drupal/FunctionalTests/WebAssertTest.php
-@@ -0,0 +1,52 @@
-+<?php
-+
-+namespace Drupal\FunctionalTests;
-+
-+use Drupal\Tests\BrowserTestBase;
-+use PHPUnit\Framework\AssertionFailedError;
-+
-+/**
-+ * Tests WebAssert functionality.
-+ *
-+ * @group browsertestbase
-+ * @coversDefaultClass \Drupal\Tests\WebAssert
-+ */
-+class WebAssertTest extends BrowserTestBase {
-+
+@@ -494,6 +532,7 @@ public function getFullQualifiedTableName($table) {
+    *   A PDO prepared statement ready for its execute() method.
+    */
+   public function prepareQuery($query, $quote_identifiers = TRUE) {
++    @trigger_error('Connection::prepareQuery() is deprecated in drupal:9.1.0 and is removed in drupal:10.0.0. Use ::prepareStatement() instead. See https://www.drupal.org/node/TODO', E_USER_DEPRECATED);
+     $query = $this->prefixTables($query);
+     if ($quote_identifiers) {
+       $query = $this->quoteIdentifiers($query);
+@@ -675,9 +714,7 @@ protected function filterComment($comment = '') {
+    *   object to this method. It is used primarily for database drivers for
+    *   databases that require special LOB field handling.
+    * @param array $args
+-   *   An array of arguments for the prepared statement. If the prepared
+-   *   statement uses ? placeholders, this array must be an indexed array.
+-   *   If it contains named placeholders, it must be an associative array.
++   *   The associative array of arguments for the prepared statement.
+    * @param array $options
+    *   An associative array of options to control how the query is run. The
+    *   given options will be merged with self::defaultOptions(). See the
+@@ -730,7 +767,7 @@ public function query($query, array $args = [], $options = []) {
+         if (strpos($query, ';') !== FALSE && empty($options['allow_delimiter_in_query'])) {
+           throw new \InvalidArgumentException('; is not supported in SQL strings. Use only one statement at a time.');
+         }
+-        $stmt = $this->prepareQuery($query, !$options['allow_square_brackets']);
++        $stmt = $this->prepareStatement($query, $args, $options);
+         $stmt->execute($args, $options);
+       }
+ 
+@@ -1652,6 +1689,7 @@ public function commit() {
+    * @see \PDO::prepare()
+    */
+   public function prepare($statement, array $driver_options = []) {
++    @trigger_error('Connection::prepare() is deprecated in drupal:9.1.0 and is removed in drupal:10.0.0. See https://www.drupal.org/node/TODO', E_USER_DEPRECATED);
+     return $this->connection->prepare($statement, $driver_options);
+   }
+ 
+diff --git a/core/lib/Drupal/Core/Database/Driver/pgsql/Connection.php b/core/lib/Drupal/Core/Database/Driver/pgsql/Connection.php
+index c2aef48a..4e19f00e 100644
+--- a/core/lib/Drupal/Core/Database/Driver/pgsql/Connection.php
++++ b/core/lib/Drupal/Core/Database/Driver/pgsql/Connection.php
+@@ -6,6 +6,7 @@
+ use Drupal\Core\Database\Connection as DatabaseConnection;
+ use Drupal\Core\Database\DatabaseAccessDeniedException;
+ use Drupal\Core\Database\DatabaseNotFoundException;
++use Drupal\Core\Database\StatementInterface;
+ 
+ /**
+  * @addtogroup database
+@@ -184,7 +185,23 @@ public function query($query, array $args = [], $options = []) {
+     return $return;
+   }
+ 
 +  /**
-+   * Modules to enable.
-+   *
-+   * @var array
++   * {@inheritdoc}
 +   */
-+  protected static $modules = [
-+    'test_page_test',
-+  ];
++  public function prepareStatement(string $query, array $args, array $options): StatementInterface {
++    // mapConditionOperator converts some operations (LIKE, REGEXP, etc.) to
++    // PostgreSQL equivalents (ILIKE, ~*, etc.). However PostgreSQL doesn't
++    // automatically cast the fields to the right type for these operators,
++    // so we need to alter the query and add the type-cast.
++    $query = preg_replace('/ ([^ ]+) +(I*LIKE|NOT +I*LIKE|~\*|!~\*) /i', ' ${1}::text ${2} ', $query);
++    return parent::prepareStatement($query, $args, $options);
++  }
 +
 +  /**
 +   * {@inheritdoc}
 +   */
-+  protected $defaultTheme = 'classy';
-+
-+  /**
-+   * @covers ::responseHeaderExists
-+   */
-+  public function testResponseHeaderExists() {
-+    $this->drupalLogin($this->drupalCreateUser());
-+    $this->drupalGet('test-page');
-+    $this->expectException(AssertionFailedError::class);
-+    $this->expectExceptionMessage("Failed asserting that the response has a 'does-not-exist' header.");
-+    $this->assertSession()->responseHeaderExists('does-not-exist');
-+  }
-+
-+  /**
-+   * @covers ::responseHeaderDoesNotExist
-+   */
-+  public function testResponseHeaderDoesNotExist() {
-+    $this->drupalLogin($this->drupalCreateUser());
-+    $this->drupalGet('test-page');
-+    $this->expectException(AssertionFailedError::class);
-+    $this->expectExceptionMessage("Failed asserting that the response does not have a 'X-Drupal-Cache-Tags' header.");
-+    $this->assertSession()->responseHeaderDoesNotExist('X-Drupal-Cache-Tags');
-+  }
-+
-+}
-diff --git a/core/tests/Drupal/Tests/WebAssert.php b/core/tests/Drupal/Tests/WebAssert.php
-index 7b296263..a3bf6b07 100644
---- a/core/tests/Drupal/Tests/WebAssert.php
-+++ b/core/tests/Drupal/Tests/WebAssert.php
-@@ -10,6 +10,9 @@
- use Behat\Mink\Session;
- use Drupal\Component\Utility\Html;
- use Drupal\Core\Url;
-+use PHPUnit\Framework\Assert;
-+use PHPUnit\Framework\Constraint\ArrayHasKey;
-+use PHPUnit\Framework\Constraint\LogicalNot;
+   public function prepareQuery($query, $quote_identifiers = TRUE) {
++    @trigger_error('Connection::prepareQuery() is deprecated in drupal:9.1.0 and is removed in drupal:10.0.0. Use ::prepareStatement() instead. See https://www.drupal.org/node/TODO', E_USER_DEPRECATED);
+     // mapConditionOperator converts some operations (LIKE, REGEXP, etc.) to
+     // PostgreSQL equivalents (ILIKE, ~*, etc.). However PostgreSQL doesn't
+     // automatically cast the fields to the right type for these operators,
+diff --git a/core/lib/Drupal/Core/Database/Driver/pgsql/Insert.php b/core/lib/Drupal/Core/Database/Driver/pgsql/Insert.php
+index ce25e647..422a2770 100644
+--- a/core/lib/Drupal/Core/Database/Driver/pgsql/Insert.php
++++ b/core/lib/Drupal/Core/Database/Driver/pgsql/Insert.php
+@@ -20,7 +20,9 @@ public function execute() {
+       return NULL;
+     }
+ 
+-    $stmt = $this->connection->prepareQuery((string) $this);
++    // For this driver we do not need to pass arguments to the
++    // prepareStatement method.
++    $stmt = $this->connection->prepareStatement((string) $this, [], $this->queryOptions);
+ 
+     // Fetch the list of blobs and sequences used on that table.
+     $table_information = $this->connection->schema()->queryTableInformation($this->table);
+diff --git a/core/lib/Drupal/Core/Database/Driver/pgsql/NativeUpsert.php b/core/lib/Drupal/Core/Database/Driver/pgsql/NativeUpsert.php
+index 03f9db0d..db08319d 100644
+--- a/core/lib/Drupal/Core/Database/Driver/pgsql/NativeUpsert.php
++++ b/core/lib/Drupal/Core/Database/Driver/pgsql/NativeUpsert.php
+@@ -19,7 +19,9 @@ public function execute() {
+       return NULL;
+     }
+ 
+-    $stmt = $this->connection->prepareQuery((string) $this);
++    // For this driver we do not need to pass arguments to the
++    // prepareStatement method.
++    $stmt = $this->connection->prepareStatement((string) $this, [], $this->queryOptions);
+ 
+     // Fetch the list of blobs and sequences used on that table.
+     $table_information = $this->connection->schema()->queryTableInformation($this->table);
+diff --git a/core/lib/Drupal/Core/Database/Driver/pgsql/Update.php b/core/lib/Drupal/Core/Database/Driver/pgsql/Update.php
+index e937f6c8..4aeff0cc 100644
+--- a/core/lib/Drupal/Core/Database/Driver/pgsql/Update.php
++++ b/core/lib/Drupal/Core/Database/Driver/pgsql/Update.php
+@@ -17,8 +17,9 @@ public function execute() {
+     $blob_count = 0;
+ 
+     // Because we filter $fields the same way here and in __toString(), the
+-    // placeholders will all match up properly.
+-    $stmt = $this->connection->prepareQuery((string) $this);
++    // placeholders will all match up properly. For this driver we do not need
++    // to pass arguments to the prepareStatement method.
++    $stmt = $this->connection->prepareStatement((string) $this, [], $this->queryOptions);
+ 
+     // Fetch the list of blobs and sequences used on that table.
+     $table_information = $this->connection->schema()->queryTableInformation($this->table);
+diff --git a/core/lib/Drupal/Core/Database/Driver/sqlite/Connection.php b/core/lib/Drupal/Core/Database/Driver/sqlite/Connection.php
+index f00ffb75..b80ebc4a 100644
+--- a/core/lib/Drupal/Core/Database/Driver/sqlite/Connection.php
++++ b/core/lib/Drupal/Core/Database/Driver/sqlite/Connection.php
+@@ -5,6 +5,7 @@
+ use Drupal\Core\Database\Database;
+ use Drupal\Core\Database\DatabaseNotFoundException;
+ use Drupal\Core\Database\Connection as DatabaseConnection;
++use Drupal\Core\Database\StatementInterface;
  
  /**
-  * Defines a class with methods for asserting presence of elements during tests.
-@@ -55,6 +58,38 @@ protected function cleanUrl($url) {
-     return parent::cleanUrl($url);
+  * SQLite implementation of \Drupal\Core\Database\Connection.
+@@ -336,6 +337,7 @@ public static function sqlFunctionLikeBinary($pattern, $subject) {
+    * {@inheritdoc}
+    */
+   public function prepare($statement, array $driver_options = []) {
++    @trigger_error('Connection::prepare() is deprecated in drupal:9.1.0 and is removed in drupal:10.0.0. See https://www.drupal.org/node/TODO', E_USER_DEPRECATED);
+     return new Statement($this->connection, $this, $statement, $driver_options);
+   }
+ 
+@@ -400,10 +402,22 @@ public function mapConditionOperator($operator) {
+     return isset(static::$sqliteConditionOperatorMap[$operator]) ? static::$sqliteConditionOperatorMap[$operator] : NULL;
    }
  
 +  /**
-+   * Asserts that the current response header has a specific entry.
-+   *
-+   * @param string $name
-+   *   The name of the header entry to check existence of.
++   * {@inheritdoc}
 +   */
-+  public function responseHeaderExists(string $name, string $message = ''): void {
-+    if ($message === '') {
-+      $message = "Failed asserting that the response has a '$name' header.";
++  public function prepareStatement(string $query, array $args, array $options): StatementInterface {
++    $query = $this->prefixTables($query);
++    if (!($options['allow_square_brackets'] ?? FALSE)) {
++      $query = $this->quoteIdentifiers($query);
 +    }
-+    $headers = $this->session->getResponseHeaders();
-+    $constraint = new ArrayHasKey($name);
-+    Assert::assertThat($headers, $constraint, $message);
-+  }
-+
-+  /**
-+   * Asserts that the current response header does not have a specific entry.
-+   *
-+   * @param string $name
-+   *   The name of the header entry to check existence of.
-+   */
-+  public function responseHeaderDoesNotExist(string $name, string $message = ''): void {
-+    if ($message === '') {
-+      $message = "Failed asserting that the response does not have a '$name' header.";
-+    }
-+    $headers = $this->session->getResponseHeaders();
-+    $constraint = new LogicalNot(
-+      new ArrayHasKey($name)
-+    );
-+    Assert::assertThat($headers, $constraint, $message);
++    return new Statement($this->connection, $this, $query, $options['pdo'] ?? []);
 +  }
 +
    /**
-    * Checks that specific button exists on the current page.
-    *
+    * {@inheritdoc}
+    */
+   public function prepareQuery($query, $quote_identifiers = TRUE) {
++    @trigger_error('Connection::prepareQuery() is deprecated in drupal:9.1.0 and is removed in drupal:10.0.0. Use ::prepareStatement() instead. See https://www.drupal.org/node/TODO', E_USER_DEPRECATED);
+     $query = $this->prefixTables($query);
+     if ($quote_identifiers) {
+       $query = $this->quoteIdentifiers($query);
+diff --git a/core/lib/Drupal/Core/Database/StatementPrefetch.php b/core/lib/Drupal/Core/Database/StatementPrefetch.php
+index 4294b72d..c7f06823 100644
+--- a/core/lib/Drupal/Core/Database/StatementPrefetch.php
++++ b/core/lib/Drupal/Core/Database/StatementPrefetch.php
+@@ -220,7 +220,7 @@ protected function throwPDOException() {
+    *   A PDOStatement object.
+    */
+   protected function getStatement($query, &$args = []) {
+-    return $this->dbh->prepare($query);
++    return $this->dbh->prepare($query, $this->driverOptions);
+   }
+ 
+   /**
+diff --git a/core/tests/Drupal/FunctionalTests/Database/NonDefaultStatementTest.php b/core/tests/Drupal/FunctionalTests/Database/NonDefaultStatementTest.php
+new file mode 100644
+index 00000000..746d3f54
+--- /dev/null
++++ b/core/tests/Drupal/FunctionalTests/Database/NonDefaultStatementTest.php
+@@ -0,0 +1,87 @@
++<?php
++
++namespace Drupal\FunctionalTests\Database;
++
++use Drupal\Core\Database\Database;
++use Drupal\FunctionalTests\Installer\InstallerTestBase;
++
++/**
++ * Tests a non-default database Statement object.
++ *
++ * @group Database
++ */
++class NonDefaultStatementTest extends InstallerTestBase {
++
++  /**
++   * {@inheritdoc}
++   */
++  protected $defaultTheme = 'stark';
++
++  /**
++   * The name of the test database driver in use.
++   * @var string
++   */
++  protected $testDriverName;
++
++  /**
++   * {@inheritdoc}
++   */
++  protected function setUpSettings() {
++    $driver = Database::getConnection()->driver();
++    if ($driver !== 'mysql') {
++      $this->markTestSkipped("This test does not support the {$driver} database driver.");
++    }
++    $this->testDriverName = 'Drivertest' . ucfirst($driver);
++
++    $settings = $this->parameters['forms']['install_settings_form'];
++    $settings['driver'] = $this->testDriverName;
++    $settings[$this->testDriverName] = $settings[$driver];
++    unset($settings[$driver]);
++    $edit = $this->translatePostValues($settings);
++    $this->drupalPostForm(NULL, $edit, $this->translations['Save and continue']);
++  }
++
++  /**
++   * Tests a Statement that replaces named placeholders with positional ones.
++   */
++  public function testPositionalPlaceholderStatement() {
++    $this->assertUrl('user/1');
++    $this->assertResponse(200);
++
++    // Assert that in the settings.php the database connection array has the
++    // correct values set.
++    $contents = file_get_contents($this->container->getParameter('app.root') . '/' . $this->siteDirectory . '/settings.php');
++    $this->assertStringContainsString("'namespace' => 'Drupal\\\\driver_test\\\\Driver\\\\Database\\\\{$this->testDriverName}',", $contents);
++    $this->assertStringContainsString("'driver' => '{$this->testDriverName}',", $contents);
++    $this->assertStringContainsString("'autoload' => 'core/modules/system/tests/modules/driver_test/src/Driver/Database/{$this->testDriverName}/',", $contents);
++
++    $num_records_before = $this->connection->select('test')->countQuery()->execute()->fetchField();
++
++    $sql = "INSERT INTO {test} ([name], [age]) VALUES (:name, :age)";
++    $args = [
++      ':name' => 'Larry',
++      ':age' => '30',
++    ];
++    $options = [
++      'return' => Database::RETURN_STATEMENT,
++      'allow_square_brackets' => FALSE,
++    ];
++
++    $stmt = $this->connection->prepareStatement($sql, $args, $options);
++    $this->assertInstanceOf(StatementInterface::class, $stmt);
++    $this->assertTrue($stmt->execute($args, $options));
++
++    // We should be able to specify values in any order if named.
++    $args = [
++      ':age' => '31',
++      ':name' => 'Curly',
++    ];
++    $this->assertTrue($stmt->execute($args, $options));
++
++    $num_records_after = $this->connection->select('test')->countQuery()->execute()->fetchField();
++    $this->assertEquals($num_records_before + 2, $num_records_after);
++    $this->assertSame('30', $this->connection->query('SELECT age FROM {test} WHERE name = :name', [':name' => 'Larry'])->fetchField());
++    $this->assertSame('31', $this->connection->query('SELECT age FROM {test} WHERE name = :name', [':name' => 'Curly'])->fetchField());
++  }
++
++}
+diff --git a/core/tests/Drupal/KernelTests/Core/Database/DatabaseExceptionWrapperTest.php b/core/tests/Drupal/KernelTests/Core/Database/DatabaseExceptionWrapperTest.php
+index 54cc6cd3..5000de55 100644
+--- a/core/tests/Drupal/KernelTests/Core/Database/DatabaseExceptionWrapperTest.php
++++ b/core/tests/Drupal/KernelTests/Core/Database/DatabaseExceptionWrapperTest.php
+@@ -14,9 +14,12 @@
+ class DatabaseExceptionWrapperTest extends KernelTestBase {
+ 
+   /**
+-   * Tests the expected database exception thrown for prepared statements.
++   * Tests deprecation of Connection::prepare.
++   *
++   * @group legacy
++   * @expectedDeprecation Connection::prepare() is deprecated in drupal:9.1.0 and is removed in drupal:10.0.0. See https://www.drupal.org/node/TODO
+    */
+-  public function testPreparedStatement() {
++  public function testPrepare() {
+     $connection = Database::getConnection();
+     try {
+       // SQLite validates the syntax upon preparing a statement already.
+@@ -40,6 +43,51 @@ public function testPreparedStatement() {
+     }
+   }
+ 
++  /**
++   * Tests deprecation of Connection::prepareQuery.
++   *
++   * @group legacy
++   * @expectedDeprecation Connection::prepareQuery() is deprecated in drupal:9.1.0 and is removed in drupal:10.0.0. Use ::prepareStatement() instead. See https://www.drupal.org/node/TODO
++   */
++  public function testPrepareQuery() {
++    $connection = Database::getConnection();
++    try {
++      // SQLite validates the syntax upon preparing a statement already.
++      // @throws \PDOException
++      $query = $connection->prepareQuery('bananas');
++
++      // MySQL only validates the syntax upon trying to execute a query.
++      // @throws \Drupal\Core\Database\DatabaseExceptionWrapper
++      $connection->query($query);
++
++      $this->fail("A \\PDOException or a DatabaseExceptionWrapper should be caught, none was thrown.");
++    }
++    catch (\Exception $e) {
++      $this->assertTrue($e instanceof \PDOException || $e instanceof DatabaseExceptionWrapper, "A \\PDOException or a DatabaseExceptionWrapper should be thrown, " . get_class($e) . " was thrown instead:\n" . (string) $e);
++    }
++  }
++
++  /**
++   * Tests Connection::prepareStatement exceptions.
++   */
++  public function testPrepareStatement() {
++    $connection = Database::getConnection();
++    try {
++      // SQLite validates the syntax upon preparing a statement already.
++      // @throws \PDOException
++      $query = $connection->prepareStatement('bananas', [], []);
++
++      // MySQL only validates the syntax upon trying to execute a query.
++      // @throws \Drupal\Core\Database\DatabaseExceptionWrapper
++      $connection->query($query);
++
++      $this->fail("A \\PDOException or a DatabaseExceptionWrapper should be caught, none was thrown.");
++    }
++    catch (\Exception $e) {
++      $this->assertTrue($e instanceof \PDOException || $e instanceof DatabaseExceptionWrapper, "A \\PDOException or a DatabaseExceptionWrapper should be thrown, " . get_class($e) . " was thrown instead:\n" . (string) $e);
++    }
++  }
++
+   /**
+    * Tests the expected database exception thrown for inexistent tables.
+    */
+diff --git a/core/tests/Drupal/KernelTests/Core/Database/StatementTest.php b/core/tests/Drupal/KernelTests/Core/Database/StatementTest.php
+new file mode 100644
+index 00000000..e1faec3d
+--- /dev/null
++++ b/core/tests/Drupal/KernelTests/Core/Database/StatementTest.php
+@@ -0,0 +1,48 @@
++<?php
++
++namespace Drupal\KernelTests\Core\Database;
++
++use Drupal\Core\Database\Database;
++use Drupal\Core\Database\StatementInterface;
++
++/**
++ * Tests the Statement classes.
++ *
++ * @group Database
++ */
++class StatementTest extends DatabaseTestBase {
++
++  /**
++   * Tests that a prepared statement object can be reused for multiple inserts.
++   */
++  public function testRepeatedInsertStatementReuse() {
++    $num_records_before = $this->connection->select('test')->countQuery()->execute()->fetchField();
++
++    $sql = "INSERT INTO {test} ([name], [age]) VALUES (:name, :age)";
++    $args = [
++      ':name' => 'Larry',
++      ':age' => '30',
++    ];
++    $options = [
++      'return' => Database::RETURN_STATEMENT,
++      'allow_square_brackets' => FALSE,
++    ];
++
++    $stmt = $this->connection->prepareStatement($sql, $args, $options);
++    $this->assertInstanceOf(StatementInterface::class, $stmt);
++    $this->assertTrue($stmt->execute($args, $options));
++
++    // We should be able to specify values in any order if named.
++    $args = [
++      ':age' => '31',
++      ':name' => 'Curly',
++    ];
++    $this->assertTrue($stmt->execute($args, $options));
++
++    $num_records_after = $this->connection->select('test')->countQuery()->execute()->fetchField();
++    $this->assertEquals($num_records_before + 2, $num_records_after);
++    $this->assertSame('30', $this->connection->query('SELECT age FROM {test} WHERE name = :name', [':name' => 'Larry'])->fetchField());
++    $this->assertSame('31', $this->connection->query('SELECT age FROM {test} WHERE name = :name', [':name' => 'Curly'])->fetchField());
++  }
++
++}
