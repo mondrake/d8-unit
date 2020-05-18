@@ -237,7 +237,7 @@ index 4294b72d..c7f06823 100644
    /**
 diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlPrefetch/Connection.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlPrefetch/Connection.php
 new file mode 100644
-index 00000000..28bf615e
+index 00000000..0289fa86
 --- /dev/null
 +++ b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlPrefetch/Connection.php
 @@ -0,0 +1,40 @@
@@ -258,20 +258,20 @@ index 00000000..28bf615e
 +  public function __construct(\PDO $connection, array $connection_options) {
 +    // We do not pass a PDOStatement class here, we will simulate it in
 +    // static::prepareStatement().
-+//    $this->statementClass = NULL;
++    $this->statementClass = NULL;
 +    parent::__construct($connection, $connection_options);
 +  }
 +
 +  /**
 +   * {@inheritdoc}
 +   */
-+/*  public function prepareStatement(string $query, array $args, array $options): StatementInterface {
++  public function prepareStatement(string $query, array $args, array $options): StatementInterface {
 +    $query = $this->prefixTables($query);
 +    if (!($options['allow_square_brackets'] ?? FALSE)) {
 +      $query = $this->quoteIdentifiers($query);
 +    }
 +    return new Statement($this->connection, $this, $query, $args, $options);
-+  }*/
++  }
 +
 +  /**
 +   * {@inheritdoc}
@@ -340,31 +340,331 @@ index 00000000..6833fc0e
 +class Schema extends CoreSchema {}
 diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlPrefetch/Statement.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlPrefetch/Statement.php
 new file mode 100644
-index 00000000..7ef846b2
+index 00000000..8dab34b0
 --- /dev/null
 +++ b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlPrefetch/Statement.php
-@@ -0,0 +1,24 @@
+@@ -0,0 +1,324 @@
 +<?php
 +
 +namespace Drupal\driver_test\Driver\Database\DrivertestMysqlPrefetch;
 +
-+use Drupal\Core\Database\StatementPrefetch;
++use Drupal\Core\Database\Connection;
++use Drupal\Core\Database\DatabaseExceptionWrapper;
 +use Drupal\Core\Database\StatementInterface;
++use Drupal\Core\Database\RowCountException;
 +
 +/**
 + * Test implementation of Statement.
 + */
-+class Statement extends StatementPrefetch implements StatementInterface {
++class Statement implements \IteratorAggregate, StatementInterface {
++
++  /**
++   * Reference to the PDO database connection object for this statement.
++   *
++   * The name $dbh is inherited from \PDOStatement.
++   *
++   * @var \PDO
++   */
++  public $dbh;
++
++  /**
++   * Reference to the connection object for this statement.
++   *
++   * @var \Drupal\Core\Database\Connection
++   */
++  protected $connection;
++
++  /**
++   * Is rowCount() execution allowed.
++   *
++   * @var bool
++   */
++  public $allowRowCount = FALSE;
++
++  /**
++   * The PDO statement.
++   *
++   * @var \PDOStatement
++   */
++  protected $PDOStatement;
++
++  /**
++   * The default fetch mode.
++   *
++   * See http://php.net/manual/pdo.constants.php for the definition of the
++   * constants used.
++   *
++   * @var int
++   */
++  protected $defaultFetchMode;
++
++  /**
++   * The query string, in its form with placeholders.
++   *
++   * @var string
++   */
++  protected $queryString;
++
++  /**
++   * The class to be used for returning row results.
++   *
++   * Used when fetch mode is \PDO::FETCH_CLASS.
++   *
++   * @var string
++   */
++  protected $fetchClass;
 +
 +  public function __construct(\PDO $pdo_connection, Connection $connection, $query, array $args = [], array $options = []) {
-+    parent::__construct($pdo_connection, $connection, $query, $options['pdo'] ?? []);
++    $this->queryString = $query;
++    $this->dbh = $pdo_connection;
++    $this->connection = $connection;
++    $this->setFetchMode(\PDO::FETCH_OBJ);
++
++    try {
++      $this->PDOStatement = $this->dbh->prepare($this->queryString);
++    }
++    catch (\Exception $e) {
++      throw new DatabaseExceptionWrapper($e->getMessage(), $e->getCode(), $e);
++    }
++  }
++
++  /**
++   * Constructs a Statement object.
++   *
++   * @param \Drupal\drudbal\Driver\Database\dbal\Connection $dbh
++   *   The database connection object for this statement.
++   * @param string $statement
++   *   A string containing an SQL query. Passed by reference.
++   * @param array $params
++   *   (optional) An array of values to substitute into the query at placeholder
++   *   markers. Passed by reference.
++   * @param array $driver_options
++   *   (optional) An array of driver options for this query.
++   */
++/*  public function __construct(DruDbalConnection $dbh, &$statement, array &$params, array $driver_options = []) {
++    $this->queryString = $statement;
++    $this->dbh = $dbh;
++    $this->setFetchMode(\PDO::FETCH_OBJ);
++
++    // Replace named placeholders with positional ones if needed.
++    if (!$this->dbh->getDbalExtension()->delegateNamedPlaceholdersSupport()) {
++      list($statement, $params) = SQLParserUtils::expandListParameters($statement, $params, []);
++    }
++
++    try {
++      $this->dbh->getDbalExtension()->alterStatement($statement, $params);
++      $this->PDOStatement = $dbh->getDbalConnection()->prepare($statement);
++    }
++    catch (DBALException $e) {
++      throw new DatabaseExceptionWrapper($e->getMessage(), $e->getCode(), $e);
++    }
++  }*/
++
++  /**
++   * {@inheritdoc}
++   */
++  public function execute($args = [], $options = []) {
++    if (isset($options['fetch'])) {
++      if (is_string($options['fetch'])) {
++        $this->setFetchMode(\PDO::FETCH_CLASS, $options['fetch']);
++      }
++      else {
++        $this->setFetchMode($options['fetch']);
++      }
++    }
++
++    $logger = $this->connection->getLogger();
++    if (!empty($logger)) {
++      $query_start = microtime(TRUE);
++    }
++
++    $this->PDOStatement->execute($args);
++
++    if (!empty($logger)) {
++      $query_end = microtime(TRUE);
++      $logger->log($this, $args, $query_end - $query_start);
++    }
++
++    return TRUE;
 +  }
 +
 +  /**
 +   * {@inheritdoc}
 +   */
-+  protected function getStatement($query, &$args = []) {
-+    return $this->pdoConnection->prepare($query);
++  public function fetch($mode = NULL, $cursor_orientation = NULL, $cursor_offset = NULL) {
++    if (is_string($mode)) {
++      $this->setFetchMode(\PDO::FETCH_CLASS, $mode);
++      $mode = \PDO::FETCH_CLASS;
++    }
++    else {
++      $mode = $mode ?: $this->defaultFetchMode;
++    }
++
++    $row = $this->PDOStatement->fetch(FetchMode::ASSOCIATIVE);
++    if (!$row) {
++      return FALSE;
++    }
++    switch ($mode) {
++      case \PDO::FETCH_ASSOC:
++        return $row;
++
++      case \PDO::FETCH_NUM:
++        return array_values($row);
++
++      case \PDO::FETCH_BOTH:
++        return $row + array_values($row);
++
++      case \PDO::FETCH_OBJ:
++        return (object) $row;
++
++      case \PDO::FETCH_CLASS:
++        $class_obj = new $this->fetchClass();
++        foreach ($row as $column => $value) {
++          $class_obj->$column = $value;
++        }
++        return $class_obj;
++
++      case \PDO::FETCH_CLASS | \PDO::FETCH_CLASSTYPE:
++        $class = array_shift($row);
++        $class_obj = new $class();
++        foreach ($row as $column => $value) {
++          $class_obj->$column = $value;
++        }
++        return $class_obj;
++
++      default:
++        throw new DatabaseExceptionWrapper("Unknown fetch type '{$mode}'");
++
++    }
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function fetchAll($mode = NULL, $column_index = NULL, $constructor_arguments = NULL) {
++    if (is_string($mode)) {
++      $this->setFetchMode(\PDO::FETCH_CLASS, $mode);
++      $mode = \PDO::FETCH_CLASS;
++    }
++    else {
++      $mode = $mode ?: $this->defaultFetchMode;
++    }
++
++    $rows = [];
++    if (\PDO::FETCH_COLUMN == $mode) {
++      if ($column_index === NULL) {
++        $column_index = 0;
++      }
++      while (($record = $this->fetch(\PDO::FETCH_ASSOC)) !== FALSE) {
++        $cols = array_keys($record);
++        $rows[] = $record[$cols[$column_index]];
++      }
++    }
++    else {
++      while (($row = $this->fetch($mode)) !== FALSE) {
++        $rows[] = $row;
++      }
++    }
++
++    return $rows;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function getIterator() {
++    return new \ArrayIterator($this->fetchAll());
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function getQueryString() {
++    return $this->queryString;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function fetchCol($index = 0) {
++    return $this->fetchAll(\PDO::FETCH_COLUMN, $index);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function fetchAllAssoc($key, $fetch = NULL) {
++    $return = [];
++    if (isset($fetch)) {
++      if (is_string($fetch)) {
++        $this->setFetchMode(\PDO::FETCH_CLASS, $fetch);
++      }
++      else {
++        $this->setFetchMode($fetch ?: $this->defaultFetchMode);
++      }
++    }
++
++    while ($record = $this->fetch()) {
++      $record_key = is_object($record) ? $record->$key : $record[$key];
++      $return[$record_key] = $record;
++    }
++
++    return $return;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function fetchAllKeyed($key_index = 0, $value_index = 1) {
++    $return = [];
++    $this->setFetchMode(\PDO::FETCH_ASSOC);
++    while ($record = $this->fetch(\PDO::FETCH_ASSOC)) {
++      $cols = array_keys($record);
++      $return[$record[$cols[$key_index]]] = $record[$cols[$value_index]];
++    }
++    return $return;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function fetchField($index = 0) {
++    if (($ret = $this->fetch(\PDO::FETCH_NUM)) === FALSE) {
++      return FALSE;
++    }
++    return $ret[$index] === NULL ? NULL : (string) $ret[$index];
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function fetchAssoc() {
++    return $this->fetch(\PDO::FETCH_ASSOC);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function fetchObject($class_name = NULL, $constructor_args = []) {
++    return $this->fetch($class_name ?? \PDO::FETCH_OBJ);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function rowCount() {
++    return $this->PDOStatement->rowCount();
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function setFetchMode($mode, $a1 = NULL, $a2 = []) {
++    $this->defaultFetchMode = $mode;
++    if ($mode === \PDO::FETCH_CLASS) {
++      $this->fetchClass = $a1;
++    }
++    return TRUE;
 +  }
 +
 +}
