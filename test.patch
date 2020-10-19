@@ -1,499 +1,322 @@
-diff --git a/core/core.services.yml b/core/core.services.yml
-index 5d01d87667..8c938dfefb 100644
---- a/core/core.services.yml
-+++ b/core/core.services.yml
-@@ -1733,3 +1733,5 @@ services:
-   pager.parameters:
-     class: Drupal\Core\Pager\PagerParameters
-     arguments: ['@request_stack']
-+  php.environment.memory:
-+    class: Drupal\Component\Utility\EnvironmentMemory
-diff --git a/core/lib/Drupal/Component/Utility/Environment.php b/core/lib/Drupal/Component/Utility/Environment.php
-index 6028183c6f..820902fb14 100644
---- a/core/lib/Drupal/Component/Utility/Environment.php
-+++ b/core/lib/Drupal/Component/Utility/Environment.php
-@@ -23,18 +23,18 @@ class Environment {
-    * @return bool
-    *   TRUE if there is sufficient memory to allow the operation, or FALSE
-    *   otherwise.
-+   *
-+   * @deprecated in drupal:9.1.0 and is removed from drupal:10.0.0. Use
-+   *   \Drupal\Component\Utility\EnvironmentMemory or the
-+   *   'php.environment.memory' service instead, and its methods.
-+   *
-+   * @see https://www.drupal.org/node/3166797
+diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
+index 39a03b98ed..da2a23e5da 100644
+--- a/core/lib/Drupal/Core/Database/Connection.php
++++ b/core/lib/Drupal/Core/Database/Connection.php
+@@ -554,7 +554,7 @@ public function prepareStatement(string $query, array $options): StatementInterf
+     // @todo in Drupal 10, only return the StatementWrapper.
+     // @see https://www.drupal.org/node/3177490
+     return $this->statementWrapperClass ?
+-      new $this->statementWrapperClass($this, $this->connection, $query, $options['pdo'] ?? []) :
++      new $this->statementWrapperClass($this, $this->connection, $query, $options['pdo'] ?? [], $options['return']) :
+       $this->connection->prepare($query, $options['pdo'] ?? []);
+   }
+ 
+@@ -831,7 +831,6 @@ public function query($query, array $args = [], $options = []) {
+           return $stmt;
+ 
+         case Database::RETURN_AFFECTED:
+-          $stmt->allowRowCount = TRUE;
+           return $stmt->rowCount();
+ 
+         case Database::RETURN_INSERT_ID:
+diff --git a/core/lib/Drupal/Core/Database/Log.php b/core/lib/Drupal/Core/Database/Log.php
+index 08a0506e24..3d50320838 100644
+--- a/core/lib/Drupal/Core/Database/Log.php
++++ b/core/lib/Drupal/Core/Database/Log.php
+@@ -115,7 +115,7 @@ public function log(StatementInterface $statement, $args, $time) {
+       $this->queryLog[$key][] = [
+         'query' => $statement->getQueryString(),
+         'args' => $args,
+-        'target' => $statement->dbh->getTarget(),
++        'target' => $statement->getConnectionTarget(),
+         'caller' => $this->findCaller(),
+         'time' => $time,
+       ];
+diff --git a/core/lib/Drupal/Core/Database/StatementEmpty.php b/core/lib/Drupal/Core/Database/StatementEmpty.php
+index a87bca920a..6fd1d425a0 100644
+--- a/core/lib/Drupal/Core/Database/StatementEmpty.php
++++ b/core/lib/Drupal/Core/Database/StatementEmpty.php
+@@ -20,7 +20,48 @@ class StatementEmpty implements \Iterator, StatementInterface {
+    *
+    * @var bool
     */
-   public static function checkMemoryLimit($required, $memory_limit = NULL) {
--    if (!isset($memory_limit)) {
--      $memory_limit = ini_get('memory_limit');
--    }
--
--    // There is sufficient memory if:
--    // - No memory limit is set.
--    // - The memory limit is set to unlimited (-1).
--    // - The memory limit is greater than or equal to the memory required for
--    //   the operation.
--    return ((!$memory_limit) || ($memory_limit == -1) || (Bytes::toNumber($memory_limit) >= Bytes::toNumber($required)));
-+    @trigger_error(__METHOD__ . ' is deprecated in drupal:9.1.0 and is removed from drupal:10.0.0. Use \Drupal\Component\Utility\EnvironmentMemory or the \'php.environment.memory\' service instead, and its methods. See https://www.drupal.org/node/3166797', E_USER_DEPRECATED);
-+    $environment_library = new EnvironmentMemory();
-+    $environment_library->setLimit($memory_limit);
-+    return $environment_library->checkTotal($required);
+-  public $allowRowCount = FALSE;
++  protected $rowCountEnabled = FALSE;
++
++  /**
++   * Implements the magic __get() method.
++   *
++   * @deprecated in drupal:9.1.0 and is removed from drupal:10.0.0. Access the
++   *   client-level statement object via ::getClientStatement().
++   *
++   * @see https://www.drupal.org/node/3177488
++   */
++  public function __get($name) {
++    if ($name === 'allowRowCount') {
++      @trigger_error("StatementEmpty::\${$name} should not be accessed in drupal:9.2.0 and will error in drupal:10.0.0. TODO. See https://www.drupal.org/node/TODO", E_USER_DEPRECATED);
++      return $this->rowCountEnabled;
++    }
++  }
++
++  /**
++   * Implements the magic __set() method.
++   *
++   * @deprecated in drupal:9.2.0 and is removed from drupal:10.0.0. Access the
++   *   client-level statement object via ::getClientStatement().
++   *
++   * @see https://www.drupal.org/node/3177488
++   */
++  public function __set($name, $value) {
++    if ($name === 'allowRowCount') {
++      @trigger_error("StatementEmpty::\${$name} should not be written in drupal:9.2.0 and will error in drupal:10.0.0. TODO. See https://www.drupal.org/node/TODO", E_USER_DEPRECATED);
++      $this->rowCountEnabled = $value;
++    }
++  }
++
++  /**
++   * Returns the target connection this statement is associated with.
++   *
++   * @return string|null
++   *   The target connection string of this statement, or NULL if no target is
++   *   set.
++   */
++  public function getConnectionTarget(): ?string {
++    return NULL;
++  }
+ 
+   /**
+    * {@inheritdoc}
+@@ -40,7 +81,7 @@ public function getQueryString() {
+    * {@inheritdoc}
+    */
+   public function rowCount() {
+-    if ($this->allowRowCount) {
++    if ($this->rowCountEnabled) {
+       return 0;
+     }
+     throw new RowCountException();
+diff --git a/core/lib/Drupal/Core/Database/StatementPrefetch.php b/core/lib/Drupal/Core/Database/StatementPrefetch.php
+index 3f6efdf364..1ff2d8fa15 100644
+--- a/core/lib/Drupal/Core/Database/StatementPrefetch.php
++++ b/core/lib/Drupal/Core/Database/StatementPrefetch.php
+@@ -25,11 +25,11 @@ class StatementPrefetch implements \Iterator, StatementInterface {
+   protected $driverOptions;
+ 
+   /**
+-   * Reference to the Drupal database connection object for this statement.
++   * The Drupal database connection object.
+    *
+    * @var \Drupal\Core\Database\Connection
+    */
+-  public $dbh;
++  protected $connection;
+ 
+   /**
+    * Reference to the PDO connection object for this statement.
+@@ -124,13 +124,61 @@ class StatementPrefetch implements \Iterator, StatementInterface {
+    *
+    * @var bool
+    */
+-  public $allowRowCount = FALSE;
++  protected $rowCountEnabled = FALSE;
+ 
+-  public function __construct(\PDO $pdo_connection, Connection $connection, $query, array $driver_options = []) {
++  public function __construct(\PDO $pdo_connection, Connection $connection, $query, array $driver_options = [], int $return_type = Database::RETURN_STATEMENT) {
+     $this->pdoConnection = $pdo_connection;
+-    $this->dbh = $connection;
++    $this->connection = $connection;
+     $this->queryString = $query;
+     $this->driverOptions = $driver_options;
++    if ($return_type === Database::RETURN_AFFECTED) {
++      $this->rowCountEnabled = TRUE;
++    }
++  }
++
++  /**
++   * Implements the magic __get() method.
++   *
++   * @deprecated in drupal:9.1.0 and is removed from drupal:10.0.0. Access the
++   *   client-level statement object via ::getClientStatement().
++   *
++   * @see https://www.drupal.org/node/3177488
++   */
++  public function __get($name) {
++    if ($name === 'dbh') {
++      @trigger_error("StatementPrefetch::\${$name} should not be accessed in drupal:9.2.0 and will error in drupal:10.0.0. TODO. See https://www.drupal.org/node/TODO", E_USER_DEPRECATED);
++      return $this->connection;
++    }
++    if ($name === 'allowRowCount') {
++      @trigger_error("StatementPrefetch::\${$name} should not be accessed in drupal:9.2.0 and will error in drupal:10.0.0. TODO. See https://www.drupal.org/node/TODO", E_USER_DEPRECATED);
++      return $this->rowCountEnabled;
++    }
++  }
++
++  /**
++   * Implements the magic __set() method.
++   *
++   * @deprecated in drupal:9.2.0 and is removed from drupal:10.0.0. Access the
++   *   client-level statement object via ::getClientStatement().
++   *
++   * @see https://www.drupal.org/node/3177488
++   */
++  public function __set($name, $value) {
++    if ($name === 'allowRowCount') {
++      @trigger_error("StatementPrefetch::\${$name} should not be written in drupal:9.2.0 and will error in drupal:10.0.0. TODO. See https://www.drupal.org/node/TODO", E_USER_DEPRECATED);
++      $this->rowCountEnabled = $value;
++    }
++  }
++
++  /**
++   * Returns the target connection this statement is associated with.
++   *
++   * @return string|null
++   *   The target connection string of this statement, or NULL if no target is
++   *   set.
++   */
++  public function getConnectionTarget(): ?string {
++    return $this->connection->getTarget();
    }
  
    /**
-diff --git a/core/lib/Drupal/Component/Utility/EnvironmentMemory.php b/core/lib/Drupal/Component/Utility/EnvironmentMemory.php
-new file mode 100644
-index 0000000000..1296727fea
---- /dev/null
-+++ b/core/lib/Drupal/Component/Utility/EnvironmentMemory.php
-@@ -0,0 +1,135 @@
-+<?php
-+
-+namespace Drupal\Component\Utility;
-+
-+/**
-+ * A PHP memory checking helper class.
-+ */
-+class EnvironmentMemory {
-+
-+  /**
-+   * Constant representing unlimited memory.
-+   */
-+  const UNLIMITED = -1;
-+
-+  /**
-+   * Total memory, in bytes, available to PHP.
-+   *
-+   * Will be set to static::UNLIMITED when no memory limit is set or it is set
-+   * to unlimited.
-+   *
-+   * @var int
-+   */
-+  protected $total;
-+
-+  /**
-+   * Constructs a new EnvironmentMemory object.
-+   */
-+  public function __construct() {
-+    // ini_get() may return -1 or null for memory_limit to indicate there is no
-+    // limit set. We check that explicitly, and in that case map the result to
-+    // the internal constant static::UNLIMITED.
-+    $memory_limit = ini_get('memory_limit');
-+    $this->total = (!$memory_limit || (int) $memory_limit === -1) ? static::UNLIMITED : (int) Bytes::toNumber($memory_limit);
-+  }
-+
-+  /**
-+   * Sets the total memory, in bytes, available to PHP.
-+   *
-+   * This method is provided to ensure BC for the deprecated
-+   * Drupal\Tests\Component\Utility\Environment::checkMemoryLimit() method, and
-+   * should not be used.
-+   *
-+   * @param int|string|null $size
-+   *   (optional) The total memory available to PHP, expressed as a number of
-+   *   bytes with optional SI or IEC binary unit prefix (e.g. 2, 3K, 5MB, 10G,
-+   *   6GiB, 8bytes, 9mbytes). If no value is passed, the current PHP
-+   *   memory_limit will be used. Defaults to NULL.
-+   *
-+   * @see https://en.wikipedia.org/wiki/Binary_prefix
-+   *
-+   * @deprecated in drupal:9.1.0 and is removed from drupal:10.0.0. There is no
-+   *   replacement.
-+   *
-+   * @see https://www.drupal.org/node/3166797
-+   */
-+  public function setLimit($memory_limit = NULL): void {
-+    @trigger_error(__METHOD__ . ' is deprecated in drupal:9.1.0 and is removed from drupal:10.0.0. There is no replacement. See https://www.drupal.org/node/3166797', E_USER_DEPRECATED);
-+    if ($memory_limit === NULL) {
-+      $memory_limit = ini_get('memory_limit');
-+    }
-+    $this->total = ($memory_limit === NULL || (int) $memory_limit === -1) ? static::UNLIMITED : (int) Bytes::toNumber($memory_limit);
-+  }
-+
-+  /**
-+   * Gets the total memory, in bytes, available to PHP.
-+   *
-+   * @return int
-+   *   The total memory, in bytes, available to PHP. Returns static::UNLIMITED
-+   *   when no memory limit is set or it is set to unlimited.
-+   */
-+  public function getTotal(): int {
-+    return $this->total;
-+  }
-+
-+  /**
-+   * Gets the amount of memory, in bytes, currently used by PHP.
-+   *
-+   * @return int
-+   *   The memory, in bytes, currently used by PHP.
-+   */
-+  public function getUsed(): int {
-+    return memory_get_usage(TRUE);
-+  }
-+
-+  /**
-+   * Gets the amount of memory, in bytes, currently free to be used by PHP.
-+   *
-+   * @return int
-+   *   The amount of memory, in bytes, free for use by PHP. Returns
-+   *   static::UNLIMITED when no memory limit is set or it is set to unlimited.
-+   */
-+  public function getFree(): int {
-+    return $this->getTotal() === static::UNLIMITED ? static::UNLIMITED : $this->getTotal() - $this->getUsed();
-+  }
-+
-+  /**
-+   * Compares a memory requirement against the total PHP memory.
-+   *
-+   * There is sufficient memory if:
-+   * - No memory limit is set, or set to unlimited (static::UNLIMITED).
-+   * - The memory limit is greater than or equal to the memory required for
-+   *   the operation.
-+   *
-+   * @param int|float|string $required
-+   *   The memory requirement, expressed as a number of bytes with optional SI
-+   *   or IEC binary unit prefix (e.g. 2, 3K, 5MB, 10G, 6GiB, 8bytes, 9mbytes).
-+   *
-+   * @return bool
-+   *   TRUE if there is sufficient memory to allow the requirements, or FALSE
-+   *   otherwise.
-+   *
-+   * @see https://en.wikipedia.org/wiki/Binary_prefix
-+   */
-+  public function checkTotal($required): bool {
-+    return $this->getTotal() === static::UNLIMITED || $this->getTotal() >= Bytes::toNumber($required);
-+  }
-+
-+  /**
-+   * Compares a memory requirement against the currently available PHP memory.
-+   *
-+   * @param int|float|string $required
-+   *   The memory requirement, expressed as a number of bytes with optional SI
-+   *   or IEC binary unit prefix (e.g. 2, 3K, 5MB, 10G, 6GiB, 8bytes, 9mbytes).
-+   *
-+   * @return bool
-+   *   TRUE if there is sufficient remaining memory to allow the requirements,
-+   *   or FALSE otherwise.
-+   *
-+   * @see https://en.wikipedia.org/wiki/Binary_prefix
-+   */
-+  public function checkAvailable($required): bool {
-+    return $this->getTotal() === static::UNLIMITED || $this->getFree() >= Bytes::toNumber($required);
-+  }
-+
-+}
-diff --git a/core/modules/color/color.module b/core/modules/color/color.module
-index 712d65e784..cc5ae56174 100644
---- a/core/modules/color/color.module
-+++ b/core/modules/color/color.module
-@@ -6,9 +6,7 @@
-  */
- 
- use Drupal\Core\Url;
--use Drupal\Component\Utility\Bytes;
- use Drupal\Component\Utility\Color;
--use Drupal\Component\Utility\Environment;
- use Drupal\Core\Asset\CssOptimizer;
- use Drupal\Core\Block\BlockPluginInterface;
- use Drupal\Core\File\Exception\FileException;
-@@ -393,14 +391,13 @@ function color_scheme_form_submit($form, FormStateInterface $form_state) {
-     // size (both at 32bpp).
-     $required = $width * $height * 8;
-     // We intend to prevent color scheme changes if there isn't enough memory
--    // available.  memory_get_usage(TRUE) returns a more accurate number than
--    // memory_get_usage(), therefore we won't inadvertently reject a color
--    // scheme change based on a faulty memory calculation.
--    $usage = memory_get_usage(TRUE);
--    $memory_limit = ini_get('memory_limit');
--    $size = Bytes::toNumber($memory_limit);
--    if (!Environment::checkMemoryLimit($usage + $required, $memory_limit)) {
--      \Drupal::messenger()->addError(t('There is not enough memory available to PHP to change this theme\'s color scheme. You need at least %size more. Check the <a href="http://php.net/manual/ini.core.php#ini.sect.resource-limits">PHP documentation</a> for more information.', ['%size' => format_size($usage + $required - $size)]));
-+    // available.  EnvironmentMemory::getUsed() uses memory_get_usage(TRUE)
-+    // to return a more accurate number than memory_get_usage(), therefore we
-+    // won't inadvertently reject a color scheme change based on a faulty
-+    // memory calculation.
-+    $environment_memory = \Drupal::service('php.environment.memory');
-+    if (!$environment_memory->checkAvailable($required)) {
-+      \Drupal::messenger()->addError(t('There is not enough memory available to PHP to change this theme\'s color scheme. You need at least %size more. Check the <a href="http://php.net/manual/ini.core.php#ini.sect.resource-limits">PHP documentation</a> for more information.', ['%size' => format_size($environment_memory->getUsed() + $required - $environment_memory->getTotal())]));
-       return;
+@@ -149,7 +197,7 @@ public function execute($args = [], $options = []) {
+       }
      }
-   }
-diff --git a/core/modules/system/system.install b/core/modules/system/system.install
-index 57ac719d13..f7174f27a4 100644
---- a/core/modules/system/system.install
-+++ b/core/modules/system/system.install
-@@ -8,7 +8,7 @@
- use Drupal\Component\FileSystem\FileSystem as FileSystemComponent;
- use Drupal\Component\Utility\Bytes;
- use Drupal\Component\Utility\Crypt;
--use Drupal\Component\Utility\Environment;
-+use Drupal\Component\Utility\EnvironmentMemory;
- use Drupal\Component\Utility\OpCodeCache;
- use Drupal\Component\Utility\Unicode;
- use Drupal\Core\Database\Database;
-@@ -457,13 +457,13 @@ function system_requirements($phase) {
+ 
+-    $logger = $this->dbh->getLogger();
++    $logger = $this->connection->getLogger();
+     if (!empty($logger)) {
+       $query_start = microtime(TRUE);
+     }
+@@ -199,7 +247,7 @@ public function execute($args = [], $options = []) {
+    * Throw a PDO Exception based on the last PDO error.
+    */
+   protected function throwPDOException() {
+-    $error_info = $this->dbh->errorInfo();
++    $error_info = $this->connection->errorInfo();
+     // We rebuild a message formatted in the same way as PDO.
+     $exception = new \PDOException("SQLSTATE[" . $error_info[0] . "]: General error " . $error_info[1] . ": " . $error_info[2]);
+     $exception->errorInfo = $error_info;
+@@ -221,7 +269,7 @@ protected function throwPDOException() {
+    *   A PDOStatement object.
+    */
+   protected function getStatement($query, &$args = []) {
+-    return $this->dbh->prepare($query, $this->driverOptions);
++    return $this->connection->prepare($query, $this->driverOptions);
    }
  
-   // Test PHP memory_limit
--  $memory_limit = ini_get('memory_limit');
-+  $environment_memory = \Drupal::service('php.environment.memory');
-   $requirements['php_memory_limit'] = [
-     'title' => t('PHP memory limit'),
--    'value' => $memory_limit == -1 ? t('-1 (Unlimited)') : $memory_limit,
-+    'value' => $environment_memory->getTotal() === EnvironmentMemory::UNLIMITED ? t('-1 (Unlimited)') : format_size($environment_memory->getTotal()),
-   ];
- 
--  if (!Environment::checkMemoryLimit(\Drupal::MINIMUM_PHP_MEMORY_LIMIT, $memory_limit)) {
-+  if (!$environment_memory->checkTotal(\Drupal::MINIMUM_PHP_MEMORY_LIMIT)) {
-     $description = [];
-     if ($phase == 'install') {
-       $description['phase'] = t('Consider increasing your PHP memory limit to %memory_minimum_limit to help prevent errors in the installation process.', ['%memory_minimum_limit' => \Drupal::MINIMUM_PHP_MEMORY_LIMIT]);
-@@ -472,7 +472,7 @@ function system_requirements($phase) {
-       $description['phase'] = t('Consider increasing your PHP memory limit to %memory_minimum_limit to help prevent errors in the update process.', ['%memory_minimum_limit' => \Drupal::MINIMUM_PHP_MEMORY_LIMIT]);
+   /**
+@@ -364,7 +412,7 @@ public function valid() {
+    */
+   public function rowCount() {
+     // SELECT query should not use the method.
+-    if ($this->allowRowCount) {
++    if ($this->rowCountEnabled) {
+       return $this->rowCount;
      }
-     elseif ($phase == 'runtime') {
--      $description['phase'] = t('Depending on your configuration, Drupal can run with a %memory_limit PHP memory limit. However, a %memory_minimum_limit PHP memory limit or above is recommended, especially if your site uses additional custom or contributed modules.', ['%memory_limit' => $memory_limit, '%memory_minimum_limit' => \Drupal::MINIMUM_PHP_MEMORY_LIMIT]);
-+      $description['phase'] = t('Depending on your configuration, Drupal can run with a %memory_limit PHP memory limit. However, a %memory_minimum_limit PHP memory limit or above is recommended, especially if your site uses additional custom or contributed modules.', ['%memory_limit' => format_size($environment_memory->getTotal()), '%memory_minimum_limit' => \Drupal::MINIMUM_PHP_MEMORY_LIMIT]);
+     else {
+diff --git a/core/lib/Drupal/Core/Database/StatementWrapper.php b/core/lib/Drupal/Core/Database/StatementWrapper.php
+index eff40102f4..38b42762bc 100644
+--- a/core/lib/Drupal/Core/Database/StatementWrapper.php
++++ b/core/lib/Drupal/Core/Database/StatementWrapper.php
+@@ -14,7 +14,7 @@ class StatementWrapper implements \IteratorAggregate, StatementInterface {
+    *
+    * @var \Drupal\Core\Database\Connection
+    */
+-  public $dbh;
++  protected $connection;
+ 
+   /**
+    * The client database Statement object.
+@@ -30,7 +30,7 @@ class StatementWrapper implements \IteratorAggregate, StatementInterface {
+    *
+    * @var bool
+    */
+-  public $allowRowCount = FALSE;
++  protected $rowCountEnabled = FALSE;
+ 
+   /**
+    * Constructs a StatementWrapper object.
+@@ -43,10 +43,15 @@ class StatementWrapper implements \IteratorAggregate, StatementInterface {
+    *   The SQL query string.
+    * @param array $options
+    *   Array of query options.
++   * @param int $return_type
++   *   The return type.
+    */
+-  public function __construct(Connection $connection, $client_connection, string $query, array $options) {
+-    $this->dbh = $connection;
++  public function __construct(Connection $connection, $client_connection, string $query, array $options, int $return_type) {
++    $this->connection = $connection;
+     $this->clientStatement = $client_connection->prepare($query, $options);
++    if ($return_type === Database::RETURN_AFFECTED) {
++      $this->rowCountEnabled = TRUE;
++    }
+     $this->setFetchMode(\PDO::FETCH_OBJ);
+   }
+ 
+@@ -63,6 +68,29 @@ public function __get($name) {
+       @trigger_error("StatementWrapper::\${$name} should not be accessed in drupal:9.1.0 and will error in drupal:10.0.0. Access the client-level statement object via ::getClientStatement(). See https://www.drupal.org/node/3177488", E_USER_DEPRECATED);
+       return $this->getClientStatement()->queryString;
      }
- 
-     if (!empty($description['phase'])) {
-diff --git a/core/tests/Drupal/KernelTests/Core/Database/LargeQueryTest.php b/core/tests/Drupal/KernelTests/Core/Database/LargeQueryTest.php
-index 869f85ebc7..db3ad48901 100644
---- a/core/tests/Drupal/KernelTests/Core/Database/LargeQueryTest.php
-+++ b/core/tests/Drupal/KernelTests/Core/Database/LargeQueryTest.php
-@@ -2,7 +2,6 @@
- 
- namespace Drupal\KernelTests\Core\Database;
- 
--use Drupal\Component\Utility\Environment;
- use Drupal\Core\Database\Database;
- use Drupal\Core\Database\DatabaseException;
- 
-@@ -27,7 +26,7 @@ public function testMaxAllowedPacketQueryTruncating() {
-     // check if PHP is configured with sufficient allowed memory to be able
-     // to generate a query larger than max_allowed_packet.
-     $max_allowed_packet = $this->connection->query('SELECT @@global.max_allowed_packet')->fetchField();
--    if (!Environment::checkMemoryLimit($max_allowed_packet + (16 * 1024 * 1024))) {
-+    if (\Drupal::service('php.environment.memory')->checkTotal($max_allowed_packet + (16 * 1024 * 1024))) {
-       $this->markTestSkipped('The configured max_allowed_packet exceeds the php memory limit. Therefore the test is skipped.');
-     }
- 
-diff --git a/core/tests/Drupal/Tests/Component/Utility/EnvironmentMemoryTest.php b/core/tests/Drupal/Tests/Component/Utility/EnvironmentMemoryTest.php
-new file mode 100644
-index 0000000000..990e01ef03
---- /dev/null
-+++ b/core/tests/Drupal/Tests/Component/Utility/EnvironmentMemoryTest.php
-@@ -0,0 +1,179 @@
-+<?php
-+
-+namespace Drupal\Tests\Component\Utility;
-+
-+use Drupal\Component\Utility\Bytes;
-+use Drupal\Component\Utility\EnvironmentMemory;
-+use PHPUnit\Framework\TestCase;
-+
-+/**
-+ * Test PHP memory helper class.
-+ *
-+ * @group Utility
-+ *
-+ * @coversDefaultClass \Drupal\Component\Utility\EnvironmentMemory
-+ */
-+class EnvironmentMemoryTest extends TestCase {
-+
-+  /**
-+   * Test getting total memory via ini_get().
-+   *
-+   * @covers ::getTotal
-+   */
-+  public function testGetTotalFromIni(): void {
-+    $memory_limit = ini_get('memory_limit');
-+    $memory_limit = (!$memory_limit || $memory_limit == -1) ? EnvironmentMemory::UNLIMITED : (int) Bytes::toNumber($memory_limit);
-+    $this->assertSame($memory_limit, (new EnvironmentMemory())->getTotal());
-+  }
-+
-+  /**
-+   * Test getting total limit.
-+   *
-+   * @covers ::getTotal
-+   */
-+  public function testGetTotal(): void {
-+    $memory = $this->getMockBuilder(EnvironmentMemory::class)
-+      ->disableOriginalConstructor()
-+      ->setMethods(['getTotal'])
-+      ->getMock();
-+    $memory->expects($this->any())
-+      ->method('getTotal')
-+      ->will($this->returnValue((int) Bytes::toNumber('100MB')));
-+    $this->assertSame(104857600, $memory->getTotal());
-+  }
-+
-+  /**
-+   * Test available total memory based on simulated total memory.
-+   *
-+   * @covers ::checkTotal
-+   *
-+   * @dataProvider providerTestCheckTotal
-+   *
-+   * @param int|float|string $required
-+   *   The required memory argument for
-+   *   \Drupal\Component\Utility\EnvironmentMemory::checkTotal().
-+   * @param int|float|string $custom_memory_limit
-+   *   The custom memory limit.
-+   * @param bool $expected
-+   *   The expected return value from
-+   *   \Drupal\Component\Utility\EnvironmentMemory::checkTotal().
-+   */
-+  public function testCheckTotal($required, $custom_memory_limit, bool $expected): void {
-+    $memory = $this->getMockBuilder(EnvironmentMemory::class)
-+      ->disableOriginalConstructor()
-+      ->setMethods(['getTotal'])
-+      ->getMock();
-+    $memory->expects($this->any())
-+      ->method('getTotal')
-+      ->will($this->returnValue(($custom_memory_limit === NULL || $custom_memory_limit === EnvironmentMemory::UNLIMITED) ? EnvironmentMemory::UNLIMITED : (int) Bytes::toNumber($custom_memory_limit)));
-+    $this->assertSame($expected, $memory->checkTotal($required));
-+  }
-+
-+  /**
-+   * Provides data for ::testCheckTotal().
-+   *
-+   * @return array
-+   *   An array of arrays, each containing the arguments for
-+   *   required and memory_limit, and the expected return value.
-+   */
-+  public function providerTestCheckTotal(): array {
-+    return [
-+      'Unspecified memory limit' => [
-+        '30MB', NULL, TRUE,
-+      ],
-+      'Unlimited memory' => [
-+        '80TB', EnvironmentMemory::UNLIMITED, TRUE,
-+      ],
-+      'Exceed a memory limit' => [
-+        '30MB', '16MB', FALSE,
-+      ],
-+      'Available = required' => [
-+        '30MB', '30MB', TRUE,
-+      ],
-+    ];
-+  }
-+
-+  /**
-+   * Test available memory based on current process memory usage.
-+   *
-+   * @covers ::checkAvailable
-+   * @covers ::getUsed
-+   */
-+  public function testCheckAvailableCurrent(): void {
-+    $memory_limit = ini_get('memory_limit');
-+    $memory_limit = (!$memory_limit || $memory_limit == -1) ? EnvironmentMemory::UNLIMITED : (int) Bytes::toNumber($memory_limit);
-+    if ($memory_limit === EnvironmentMemory::UNLIMITED) {
-+      $this->markTestSkipped('No limit set for PHP memory, skipping.');
++    if ($name === 'dbh') {
++      @trigger_error("StatementWrapper::\${$name} should not be accessed in drupal:9.2.0 and will error in drupal:10.0.0. TODO. See https://www.drupal.org/node/TODO", E_USER_DEPRECATED);
++      return $this->connection;
 +    }
-+    $memory = new EnvironmentMemory();
-+    $free_memory = $memory_limit - memory_get_usage(TRUE);
-+    $this->assertTrue($memory->checkAvailable($free_memory - Bytes::toNumber('4k')));
-+    $this->assertFalse($memory->checkAvailable($free_memory + Bytes::toNumber('4k')));
++    if ($name === 'allowRowCount') {
++      @trigger_error("StatementWrapper::\${$name} should not be accessed in drupal:9.2.0 and will error in drupal:10.0.0. TODO. See https://www.drupal.org/node/TODO", E_USER_DEPRECATED);
++      return $this->rowCountEnabled;
++    }
 +  }
 +
 +  /**
-+   * Test available memory based on simulated memory usage.
++   * Implements the magic __set() method.
 +   *
-+   * @covers ::checkAvailable
++   * @deprecated in drupal:9.2.0 and is removed from drupal:10.0.0. Access the
++   *   client-level statement object via ::getClientStatement().
 +   *
-+   * @dataProvider providerTestCheckAvailable
-+   *
-+   * @param int|float|string $custom_memory_limit
-+   *   A custom memory limit.
-+   * @param int|float|string $used_memory
-+   *   A mocked value for used memory.
-+   * @param int|float|string $required
-+   *   The required memory argument for
-+   *   \Drupal\Component\Utility\EnvironmentMemory::checkAvailable().
-+   * @param bool $expected
-+   *   The expected return value from
-+   *   \Drupal\Component\Utility\EnvironmentMemory::checkAvailable().
++   * @see https://www.drupal.org/node/3177488
 +   */
-+  public function testCheckAvailable($custom_memory_limit, $used_memory, $required, bool $expected) {
-+    $memory = $this->getMockBuilder(EnvironmentMemory::class)
-+      ->disableOriginalConstructor()
-+      ->setMethods(['getTotal', 'getUsed'])
-+      ->getMock();
-+    $memory->expects($this->any())
-+      ->method('getTotal')
-+      ->will($this->returnValue((int) Bytes::toNumber($custom_memory_limit)));
-+    $memory->expects($this->any())
-+      ->method('getUsed')
-+      ->will($this->returnValue((int) Bytes::toNumber($used_memory)));
-+
-+    $this->assertSame($memory->getTotal() - $memory->getUsed(), $memory->getFree());
-+    if ($expected) {
-+      $this->assertLessThanOrEqual($memory->getFree(), (int) Bytes::toNumber($required));
++  public function __set($name, $value) {
++    if ($name === 'allowRowCount') {
++      @trigger_error("StatementWrapper::\${$name} should not be written in drupal:9.2.0 and will error in drupal:10.0.0. TODO. See https://www.drupal.org/node/TODO", E_USER_DEPRECATED);
++      $this->rowCountEnabled = $value;
 +    }
-+    else {
-+      $this->assertGreaterThan($memory->getFree(), (int) Bytes::toNumber($required));
-+    }
-+    $this->assertSame($expected, $memory->checkAvailable($required));
-+  }
-+
+   }
+ 
+   /**
+@@ -93,6 +121,17 @@ public function getClientStatement() {
+     return $this->clientStatement;
+   }
+ 
 +  /**
-+   * Provides data for ::testCheckAvailable().
++   * Returns the target connection this statement is associated with.
 +   *
-+   * @return array[]
-+   *   An array of arrays, each containing the arguments for
-+   *   memory_limit, used_memory, required memory and the expected
-+   *   return value.
++   * @return string|null
++   *   The target connection string of this statement, or NULL if no target is
++   *   set.
 +   */
-+  public function providerTestCheckAvailable(): array {
-+    return [
-+      '30MB should be available with limit of 60MB and usage of 10MB' => [
-+        '60MB', '10MB', '30MB', TRUE,
-+      ],
-+      'Limit = required + used' => [
-+        '40MB', '30MB', '10MB', TRUE,
-+      ],
-+      'Exceed memory limit' => [
-+        '20MB', '10MB', '30MB', FALSE,
-+      ],
-+      'Exceed memory limit by 1 byte' => [
-+        '20MB', '20MB', '1', FALSE,
-+      ],
-+    ];
++  public function getConnectionTarget(): ?string {
++    return $this->connection->getTarget();
 +  }
-+
-+}
-diff --git a/core/tests/Drupal/Tests/Component/Utility/EnvironmentTest.php b/core/tests/Drupal/Tests/Component/Utility/EnvironmentTest.php
-index 5d484b2903..8036945ec0 100644
---- a/core/tests/Drupal/Tests/Component/Utility/EnvironmentTest.php
-+++ b/core/tests/Drupal/Tests/Component/Utility/EnvironmentTest.php
-@@ -4,6 +4,7 @@
- 
- use Drupal\Component\Utility\Environment;
- use PHPUnit\Framework\TestCase;
-+use Symfony\Bridge\PhpUnit\ExpectDeprecationTrait;
- 
- /**
-  * Test PHP Environment helper methods.
-@@ -14,9 +15,12 @@
-  */
- class EnvironmentTest extends TestCase {
- 
-+  use ExpectDeprecationTrait;
 +
    /**
-    * Tests \Drupal\Component\Utility\Environment::checkMemoryLimit().
-    *
-+   * @group legacy
-    * @dataProvider providerTestCheckMemoryLimit
-    * @covers ::checkMemoryLimit
-    *
-@@ -31,6 +35,8 @@ class EnvironmentTest extends TestCase {
-    *   \Drupal\Component\Utility\Environment::checkMemoryLimit().
+    * {@inheritdoc}
     */
-   public function testCheckMemoryLimit($required, $custom_memory_limit, $expected) {
-+    $this->expectDeprecation('Drupal\Component\Utility\Environment::checkMemoryLimit is deprecated in drupal:9.1.0 and is removed from drupal:10.0.0. Use \Drupal\Component\Utility\EnvironmentMemory or the \'php.environment.memory\' service instead, and its methods. See https://www.drupal.org/node/3166797');
-+    $this->expectDeprecation('Drupal\Component\Utility\EnvironmentMemory::setLimit is deprecated in drupal:9.1.0 and is removed from drupal:10.0.0. There is no replacement. See https://www.drupal.org/node/3166797');
-     $actual = Environment::checkMemoryLimit($required, $custom_memory_limit);
-     $this->assertEquals($expected, $actual);
-   }
+@@ -108,7 +147,7 @@ public function execute($args = [], $options = []) {
+       }
+     }
+ 
+-    $logger = $this->dbh->getLogger();
++    $logger = $this->connection->getLogger();
+     if (!empty($logger)) {
+       $query_start = microtime(TRUE);
+     }
+@@ -202,7 +241,7 @@ public function fetchObject(string $class_name = NULL) {
+    */
+   public function rowCount() {
+     // SELECT query should not use the method.
+-    if ($this->allowRowCount) {
++    if ($this->rowCountEnabled) {
+       return $this->clientStatement->rowCount();
+     }
+     else {
