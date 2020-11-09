@@ -1,129 +1,37 @@
-diff --git a/core/lib/Drupal/Core/ImageToolkit/ImageToolkitBase.php b/core/lib/Drupal/Core/ImageToolkit/ImageToolkitBase.php
-index ce0e283c8e..2281386528 100644
---- a/core/lib/Drupal/Core/ImageToolkit/ImageToolkitBase.php
-+++ b/core/lib/Drupal/Core/ImageToolkit/ImageToolkitBase.php
-@@ -127,8 +127,14 @@ public function apply($operation, array $arguments = []) {
-       $this->logger->error("The selected image handling toolkit '@toolkit' can not process operation '@operation'.", ['@toolkit' => $this->getPluginId(), '@operation' => $operation]);
-       return FALSE;
-     }
--    catch (\InvalidArgumentException $e) {
--      $this->logger->warning($e->getMessage(), []);
-+    catch (\Throwable $t) {
-+      $this->logger->warning("The image toolkit '@toolkit' failed processing '@operation' for image '@image'. Reported error: @class - @message", [
-+        '@toolkit' => $this->getPluginId(),
-+        '@operation' => $operation,
-+        '@image' => $this->getSource(),
-+        '@class' => get_class($t),
-+        '@message' =>  $t->getMessage(),
-+      ]);
-       return FALSE;
-     }
-   }
-diff --git a/core/modules/system/src/Plugin/ImageToolkit/GDToolkit.php b/core/modules/system/src/Plugin/ImageToolkit/GDToolkit.php
-index 1975274326..3d81b5c3d7 100644
---- a/core/modules/system/src/Plugin/ImageToolkit/GDToolkit.php
-+++ b/core/modules/system/src/Plugin/ImageToolkit/GDToolkit.php
-@@ -197,31 +197,55 @@ protected function load() {
-       return FALSE;
-     }
- 
-+    // Invalidate the image object and return if there's no function to load the
-+    // image file.
-     $function = 'imagecreatefrom' . image_type_to_extension($this->getType(), FALSE);
--    if (function_exists($function) && $resource = $function($this->getSource())) {
--      $this->setResource($resource);
--      if (imageistruecolor($resource)) {
--        return TRUE;
--      }
--      else {
--        // Convert indexed images to truecolor, copying the image to a new
--        // truecolor resource, so that filters work correctly and don't result
--        // in unnecessary dither.
--        $data = [
--          'width' => imagesx($resource),
--          'height' => imagesy($resource),
--          'extension' => image_type_to_extension($this->getType(), FALSE),
--          'transparent_color' => $this->getTransparentColor(),
--          'is_temp' => TRUE,
--        ];
--        if ($this->apply('create_new', $data)) {
--          imagecopy($this->getResource(), $resource, 0, 0, 0, 0, imagesx($resource), imagesy($resource));
--          imagedestroy($resource);
--        }
-+    if (!function_exists($function)) {
-+      $this->logger->error("The image toolkit '@toolkit' can not process image '@image'.", [
-+        '@toolkit' => $this->getPluginId(),
-+        '@image' => $this->getSource(),
-+      ]);
-+      $this->preLoadInfo = NULL;
-+      return FALSE;
-+    }
-+
-+    // Invalidate the image object and return if the load fails.
-+    try {
-+      $resource = $function($this->getSource());
-+    }
-+    catch (\Throwable $t) {
-+      $this->logger->error("The image toolkit '@toolkit' failed loading image '@image'. Reported error: @class - @message", [
-+        '@toolkit' => $this->getPluginId(),
-+        '@operation' => $operation,
-+        '@image' => $this->getSource(),
-+        '@class' => get_class($t),
-+        '@message' =>  $t->getMessage(),
-+      ]);
-+      $this->preLoadInfo = NULL;
-+      return FALSE;
-+    }
-+
-+    $this->setResource($resource);
-+    if (imageistruecolor($resource)) {
-+      return TRUE;
-+    }
-+    else {
-+      // Convert indexed images to truecolor, copying the image to a new
-+      // truecolor resource, so that filters work correctly and don't result
-+      // in unnecessary dither.
-+      $data = [
-+        'width' => imagesx($resource),
-+        'height' => imagesy($resource),
-+        'extension' => image_type_to_extension($this->getType(), FALSE),
-+        'transparent_color' => $this->getTransparentColor(),
-+        'is_temp' => TRUE,
-+      ];
-+      if ($this->apply('create_new', $data)) {
-+        imagecopy($this->getResource(), $resource, 0, 0, 0, 0, imagesx($resource), imagesy($resource));
-+        imagedestroy($resource);
-       }
--      return (bool) $this->getResource();
-     }
--    return FALSE;
-+    return (bool) $this->getResource();
-   }
- 
-   /**
 diff --git a/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php b/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php
-index b5dddf3959..ce723842e6 100644
+index b5dddf395..24a7a5751 100644
 --- a/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php
 +++ b/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php
-@@ -459,6 +459,22 @@ public function testResourceDestruction() {
+@@ -459,6 +459,33 @@ public function testResourceDestruction() {
      $this->assertIsResource($new_res);
    }
  
 +  /**
-+   * Tests images that will exceed memory available.
++   * Tests creation of image that will exceed memory limit.
 +   */
-+   public function testInsufficientMemory() {
-+     $image = $this->imageFactory->get('core/tests/fixtures/files/image-test.png');
++  public function testInsufficientMemory() {
++    $image = $this->imageFactory->get('core/tests/fixtures/files/image-test.png');
 +
-+     // Test creation of an image that will exceed the memory available.
-+     $old_res = $image->getToolkit()->getResource();
-+     $this->assertFalse($image->createNew(200000, 200000));
-+     $new_res = $image->getToolkit()->getResource();
++    // Test creation of an image that will exceed the memory available.
++    $old_res = $image->getToolkit()->getResource();
++    $this->assertFalse($image->createNew(200000, 200000));
++    $new_res = $image->getToolkit()->getResource();
 +
-+     // Check that a new resource has not been created, and the old one is still
-+     // valid.
-+     $this->assertEquals($old_res, $new_res);
-+   }
++    // Check that a new resource has not been created, and the old one is still
++    // valid.
++    $this->assertEquals($old_res, $new_res);
++  }
++
++  /**
++   * Tests creation of image that will exceed memory available.
++   */
++  public function testInsufficientMemory() {
++    $image = $this->imageFactory->get('core/tests/fixtures/files/image-test.png');
++
++    $memory_in_use = memory_get_usage(TRUE);
++    ini_set('memory_limit', $memory_in_use + 2048);
++    $this->assertFalse($image->resize(20000, 20000));
++  }
 +
    /**
     * Tests for GIF images with transparency.
