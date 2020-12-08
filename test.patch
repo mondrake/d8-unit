@@ -1,735 +1,480 @@
-diff --git a/core/drupalci.yml b/core/drupalci.yml
-index 8d6ce5a376..629c09e523 100644
---- a/core/drupalci.yml
-+++ b/core/drupalci.yml
-@@ -34,17 +34,17 @@ build:
-         testgroups: '--all'
-         suppress-deprecations: false
-         halt-on-fail: false
--      run_tests.functional:
--        types: 'PHPUnit-Functional'
--        testgroups: '--all'
--        suppress-deprecations: false
--        halt-on-fail: false
--      run_tests.javascript:
--        concurrency: 15
--        types: 'PHPUnit-FunctionalJavascript'
--        testgroups: '--all'
--        suppress-deprecations: false
--        halt-on-fail: false
--      # Run nightwatch testing.
--      # @see https://www.drupal.org/project/drupal/issues/2869825
--      nightwatchjs:
-+#      run_tests.functional:
-+#        types: 'PHPUnit-Functional'
-+#        testgroups: '--all'
-+#        suppress-deprecations: false
-+#        halt-on-fail: false
-+#      run_tests.javascript:
-+#        concurrency: 15
-+#        types: 'PHPUnit-FunctionalJavascript'
-+#        testgroups: '--all'
-+#        suppress-deprecations: false
-+#        halt-on-fail: false
-+#      # Run nightwatch testing.
-+#      # @see https://www.drupal.org/project/drupal/issues/2869825
-+#      nightwatchjs:
 diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
-index 486d788b2c..97a3c39a63 100644
+index 486d788b2c050c797c58ad98d2c34c10e1a689cb..a00bebf21e15c3ea3b91882ac8f8e58cd8236713 100644
 --- a/core/lib/Drupal/Core/Database/Connection.php
 +++ b/core/lib/Drupal/Core/Database/Connection.php
-@@ -542,11 +542,14 @@ public function getFullQualifiedTableName($table) {
-    *   An associative array of options to control how the query is run. See
-    *   the documentation for self::defaultOptions() for details. The content of
-    *   the 'pdo' key will be passed to the prepared statement.
-+   * @param bool $allow_row_count
-+   *   (optional) A flag indicating if row count is allowed on the statement
-+   *   object. Defaults to FALSE.
+@@ -545,17 +545,24 @@ public function getFullQualifiedTableName($table) {
     *
     * @return \Drupal\Core\Database\StatementInterface
     *   A PDO prepared statement ready for its execute() method.
++   *
++   * @throws \Drupal\Core\Database\DatabaseExceptionWrapper
     */
--  public function prepareStatement(string $query, array $options): StatementInterface {
-+  public function prepareStatement(string $query, array $options, bool $allow_row_count = FALSE): StatementInterface {
+   public function prepareStatement(string $query, array $options): StatementInterface {
      $query = $this->prefixTables($query);
      if (!($options['allow_square_brackets'] ?? FALSE)) {
        $query = $this->quoteIdentifiers($query);
-@@ -554,7 +557,7 @@ public function prepareStatement(string $query, array $options): StatementInterf
-     // @todo in Drupal 10, only return the StatementWrapper.
-     // @see https://www.drupal.org/node/3177490
-     return $this->statementWrapperClass ?
+     }
+-    // @todo in Drupal 10, only return the StatementWrapper.
+-    // @see https://www.drupal.org/node/3177490
+-    return $this->statementWrapperClass ?
 -      new $this->statementWrapperClass($this, $this->connection, $query, $options['pdo'] ?? []) :
-+      new $this->statementWrapperClass($this, $this->connection, $query, $options['pdo'] ?? [], $allow_row_count) :
-       $this->connection->prepare($query, $options['pdo'] ?? []);
+-      $this->connection->prepare($query, $options['pdo'] ?? []);
++    try {
++      // @todo in Drupal 10, only return the StatementWrapper.
++      // @see https://www.drupal.org/node/3177490
++      return $this->statementWrapperClass ?
++        new $this->statementWrapperClass($this, $this->connection, $query, $options['pdo'] ?? []) :
++        $this->connection->prepare($query, $options['pdo'] ?? []);
++    }
++    catch (\Exception $e) {
++      $this->exceptionHandler($e)->handleStatementException($query, $options);
++    }
    }
  
-diff --git a/core/lib/Drupal/Core/Database/Driver/pgsql/Connection.php b/core/lib/Drupal/Core/Database/Driver/pgsql/Connection.php
-index b996735aab..6703bcf4b2 100644
---- a/core/lib/Drupal/Core/Database/Driver/pgsql/Connection.php
-+++ b/core/lib/Drupal/Core/Database/Driver/pgsql/Connection.php
-@@ -201,13 +201,13 @@ public function query($query, array $args = [], $options = []) {
    /**
-    * {@inheritdoc}
-    */
--  public function prepareStatement(string $query, array $options): StatementInterface {
-+  public function prepareStatement(string $query, array $options, bool $allow_row_count = FALSE): StatementInterface {
-     // mapConditionOperator converts some operations (LIKE, REGEXP, etc.) to
-     // PostgreSQL equivalents (ILIKE, ~*, etc.). However PostgreSQL doesn't
-     // automatically cast the fields to the right type for these operators,
-     // so we need to alter the query and add the type-cast.
-     $query = preg_replace('/ ([^ ]+) +(I*LIKE|NOT +I*LIKE|~\*|!~\*) /i', ' ${1}::text ${2} ', $query);
--    return parent::prepareStatement($query, $options);
-+    return parent::prepareStatement($query, $options, $allow_row_count);
-   }
+@@ -792,39 +799,46 @@ public function query($query, array $args = [], $options = []) {
+     $options += $this->defaultOptions();
+     assert(!isset($options['target']), 'Passing "target" option to query() has no effect. See https://www.drupal.org/node/2993033');
  
-   public function queryRange($query, $from, $count, array $args = [], array $options = []) {
-diff --git a/core/lib/Drupal/Core/Database/Driver/pgsql/Update.php b/core/lib/Drupal/Core/Database/Driver/pgsql/Update.php
-index 8a3d918c90..55bf0f2b45 100644
---- a/core/lib/Drupal/Core/Database/Driver/pgsql/Update.php
-+++ b/core/lib/Drupal/Core/Database/Driver/pgsql/Update.php
-@@ -18,7 +18,7 @@ public function execute() {
- 
-     // Because we filter $fields the same way here and in __toString(), the
-     // placeholders will all match up properly.
--    $stmt = $this->connection->prepareStatement((string) $this, $this->queryOptions);
-+    $stmt = $this->connection->prepareStatement((string) $this, $this->queryOptions, TRUE);
- 
-     // Fetch the list of blobs and sequences used on that table.
-     $table_information = $this->connection->schema()->queryTableInformation($this->table);
-@@ -71,13 +71,11 @@ public function execute() {
- 
-     $options = $this->queryOptions;
-     $options['already_prepared'] = TRUE;
--    $options['return'] = Database::RETURN_AFFECTED;
- 
-     $this->connection->addSavepoint();
++    // We allow either a pre-bound statement object (deprecated) or a literal
++    // string. In either case, we want to end up with an executed statement
++    // object, which we pass to StatementInterface::execute.
++    if (is_string($query)) {
++      $this->expandArguments($query, $args);
++      // To protect against SQL injection, Drupal only supports executing one
++      // statement at a time.  Thus, the presence of a SQL delimiter (the
++      // semicolon) is not allowed unless the option is set.  Allowing
++      // semicolons should only be needed for special cases like defining a
++      // function or stored procedure in SQL. Trim any trailing delimiter to
++      // minimize false positives unless delimiter is allowed.
++      $trim_chars = " \xA0\t\n\r\0\x0B";
++      if (empty($options['allow_delimiter_in_query'])) {
++        $trim_chars .= ';';
++      }
++      $query = rtrim($query, $trim_chars);
++      if (strpos($query, ';') !== FALSE && empty($options['allow_delimiter_in_query'])) {
++        throw new \InvalidArgumentException('; is not supported in SQL strings. Use only one statement at a time.');
++      }
++      $stmt = $this->prepareStatement($query, $options);
++    }
++    elseif ($query instanceof StatementInterface) {
++      @trigger_error('Passing a StatementInterface object as a $query argument to ' . __METHOD__ . ' is deprecated in drupal:9.2.0 and is removed in drupal:10.0.0. Call the execute method from the StatementInterface object directly instead. See https://www.drupal.org/node/3154439', E_USER_DEPRECATED);
++      $stmt = $query;
++    }
++    elseif ($query instanceof \PDOStatement) {
++      @trigger_error('Passing a \\PDOStatement object as a $query argument to ' . __METHOD__ . ' is deprecated in drupal:9.2.0 and is removed in drupal:10.0.0. Call the execute method from the StatementInterface object directly instead. See https://www.drupal.org/node/3154439', E_USER_DEPRECATED);
++      $stmt = $query;
++    }
++
      try {
-       $stmt->execute(NULL, $options);
-       $this->connection->releaseSavepoint();
--      $stmt->allowRowCount = TRUE;
-       return $stmt->rowCount();
-     }
-     catch (\Exception $e) {
-diff --git a/core/lib/Drupal/Core/Database/Driver/sqlite/Connection.php b/core/lib/Drupal/Core/Database/Driver/sqlite/Connection.php
-index 0905ca9e2a..ee169e1ae0 100644
---- a/core/lib/Drupal/Core/Database/Driver/sqlite/Connection.php
-+++ b/core/lib/Drupal/Core/Database/Driver/sqlite/Connection.php
-@@ -423,12 +423,12 @@ public function mapConditionOperator($operator) {
-   /**
-    * {@inheritdoc}
-    */
--  public function prepareStatement(string $query, array $options): StatementInterface {
-+  public function prepareStatement(string $query, array $options, bool $allow_row_count = FALSE): StatementInterface {
-     $query = $this->prefixTables($query);
-     if (!($options['allow_square_brackets'] ?? FALSE)) {
-       $query = $this->quoteIdentifiers($query);
-     }
--    return new Statement($this->connection, $this, $query, $options['pdo'] ?? []);
-+    return new Statement($this->connection, $this, $query, $options['pdo'] ?? [], $allow_row_count);
-   }
- 
-   public function nextId($existing_id = 0) {
-@@ -441,9 +441,9 @@ public function nextId($existing_id = 0) {
-     // wait until this transaction commits. Also, the return value needs to be
-     // set to RETURN_AFFECTED as if it were a real update() query otherwise it
-     // is not possible to get the row count properly.
--    $affected = $this->query('UPDATE {sequences} SET value = GREATEST(value, :existing_id) + 1', [
--      ':existing_id' => $existing_id,
--    ], ['return' => Database::RETURN_AFFECTED]);
-+    $stmt = $this->prepareStatement('UPDATE {sequences} SET value = GREATEST(value, :existing_id) + 1', [], TRUE);
-+    $stmt->execute([':existing_id' => $existing_id]);
-+    $affected = $stmt->rowCount();
-     if (!$affected) {
-       $this->query('INSERT INTO {sequences} (value) VALUES (:existing_id + 1)', [
-         ':existing_id' => $existing_id,
-diff --git a/core/lib/Drupal/Core/Database/Log.php b/core/lib/Drupal/Core/Database/Log.php
-index 08a0506e24..3d50320838 100644
---- a/core/lib/Drupal/Core/Database/Log.php
-+++ b/core/lib/Drupal/Core/Database/Log.php
-@@ -115,7 +115,7 @@ public function log(StatementInterface $statement, $args, $time) {
-       $this->queryLog[$key][] = [
-         'query' => $statement->getQueryString(),
-         'args' => $args,
--        'target' => $statement->dbh->getTarget(),
-+        'target' => $statement->getConnectionTarget(),
-         'caller' => $this->findCaller(),
-         'time' => $time,
-       ];
-diff --git a/core/lib/Drupal/Core/Database/Query/Delete.php b/core/lib/Drupal/Core/Database/Query/Delete.php
-index 658b8342cc..920c036b88 100644
---- a/core/lib/Drupal/Core/Database/Query/Delete.php
-+++ b/core/lib/Drupal/Core/Database/Query/Delete.php
-@@ -3,6 +3,8 @@
- namespace Drupal\Core\Database\Query;
- 
- use Drupal\Core\Database\Database;
-+use Drupal\Core\Database\DatabaseExceptionWrapper;
-+use Drupal\Core\Database\IntegrityConstraintViolationException;
- use Drupal\Core\Database\Connection;
- 
- /**
-@@ -32,7 +34,6 @@ class Delete extends Query implements ConditionInterface {
-    *   Array of database options.
-    */
-   public function __construct(Connection $connection, $table, array $options = []) {
--    $options['return'] = Database::RETURN_AFFECTED;
-     parent::__construct($connection, $options);
-     $this->table = $table;
- 
-@@ -52,7 +53,23 @@ public function execute() {
-       $values = $this->condition->arguments();
-     }
- 
--    return $this->connection->query((string) $this, $values, $this->queryOptions);
-+    try {
-+      $stmt = $this->connection->prepareStatement((string) $this, $this->queryOptions, TRUE);
-+      $stmt->execute($values, $this->queryOptions);
-+    }
-+    catch (\PDOException $e) {
-+      if ($this->queryOptions['throw_exception'] ?? TRUE) {
-+        $message = $e->getMessage() . ": " . (string) $this . "; ";
-+        // Match all SQLSTATE 23xxx errors.
-+        if (substr($e->getCode(), -6, -3) == '23') {
-+          throw new IntegrityConstraintViolationException($message, $e->getCode(), $e);
-+        }
-+        throw new DatabaseExceptionWrapper($message, 0, $e);
+-      // We allow either a pre-bound statement object (deprecated) or a literal
+-      // string. In either case, we want to end up with an executed statement
+-      // object, which we pass to PDOStatement::execute.
+-      if ($query instanceof StatementInterface) {
+-        @trigger_error('Passing a StatementInterface object as a $query argument to ' . __METHOD__ . ' is deprecated in drupal:9.2.0 and is removed in drupal:10.0.0. Call the execute method from the StatementInterface object directly instead. See https://www.drupal.org/node/3154439', E_USER_DEPRECATED);
+-        $stmt = $query;
++      if (is_string($query)) {
++        $stmt->execute($args, $options);
 +      }
-+      return NULL;
-+    }
++      elseif ($query instanceof StatementInterface) {
+         $stmt->execute(NULL, $options);
+       }
+       elseif ($query instanceof \PDOStatement) {
+-        @trigger_error('Passing a \\PDOStatement object as a $query argument to ' . __METHOD__ . ' is deprecated in drupal:9.2.0 and is removed in drupal:10.0.0. Call the execute method from the StatementInterface object directly instead. See https://www.drupal.org/node/3154439', E_USER_DEPRECATED);
+-        $stmt = $query;
+         $stmt->execute();
+       }
+-      else {
+-        $this->expandArguments($query, $args);
+-        // To protect against SQL injection, Drupal only supports executing one
+-        // statement at a time.  Thus, the presence of a SQL delimiter (the
+-        // semicolon) is not allowed unless the option is set.  Allowing
+-        // semicolons should only be needed for special cases like defining a
+-        // function or stored procedure in SQL. Trim any trailing delimiter to
+-        // minimize false positives unless delimiter is allowed.
+-        $trim_chars = " \xA0\t\n\r\0\x0B";
+-        if (empty($options['allow_delimiter_in_query'])) {
+-          $trim_chars .= ';';
+-        }
+-        $query = rtrim($query, $trim_chars);
+-        if (strpos($query, ';') !== FALSE && empty($options['allow_delimiter_in_query'])) {
+-          throw new \InvalidArgumentException('; is not supported in SQL strings. Use only one statement at a time.');
+-        }
+-        $stmt = $this->prepareStatement($query, $options);
+-        $stmt->execute($args, $options);
+-      }
+ 
+       // Depending on the type of query we may need to return a different value.
+       // See DatabaseConnection::defaultOptions() for a description of each
+@@ -846,13 +860,19 @@ public function query($query, array $args = [], $options = []) {
+ 
+         default:
+           throw new \PDOException('Invalid return directive: ' . $options['return']);
 +
-+    return $stmt->rowCount();
-   }
- 
-   /**
-diff --git a/core/lib/Drupal/Core/Database/Query/Merge.php b/core/lib/Drupal/Core/Database/Query/Merge.php
-index 92d9c572ca..f9509bcad0 100644
---- a/core/lib/Drupal/Core/Database/Query/Merge.php
-+++ b/core/lib/Drupal/Core/Database/Query/Merge.php
-@@ -134,7 +134,6 @@ class Merge extends Query implements ConditionInterface {
-    *   Array of database options.
-    */
-   public function __construct(Connection $connection, $table, array $options = []) {
--    $options['return'] = Database::RETURN_AFFECTED;
-     parent::__construct($connection, $options);
-     $this->table = $table;
-     $this->conditionTable = $table;
-diff --git a/core/lib/Drupal/Core/Database/Query/Truncate.php b/core/lib/Drupal/Core/Database/Query/Truncate.php
-index 1d8fd36e0f..e4baad36bf 100644
---- a/core/lib/Drupal/Core/Database/Query/Truncate.php
-+++ b/core/lib/Drupal/Core/Database/Query/Truncate.php
-@@ -3,6 +3,8 @@
- namespace Drupal\Core\Database\Query;
- 
- use Drupal\Core\Database\Database;
-+use Drupal\Core\Database\DatabaseExceptionWrapper;
-+use Drupal\Core\Database\IntegrityConstraintViolationException;
- use Drupal\Core\Database\Connection;
- 
- /**
-@@ -28,7 +30,6 @@ class Truncate extends Query {
-    *   Array of database options.
-    */
-   public function __construct(Connection $connection, $table, array $options = []) {
--    $options['return'] = Database::RETURN_AFFECTED;
-     parent::__construct($connection, $options);
-     $this->table = $table;
-   }
-@@ -54,7 +55,18 @@ public function compiled() {
-    *   Return value is dependent on the database type.
-    */
-   public function execute() {
--    return $this->connection->query((string) $this, [], $this->queryOptions);
-+    try {
-+      $stmt = $this->connection->prepareStatement((string) $this, $this->queryOptions, TRUE);
-+      $stmt->execute([], $this->queryOptions);
-+    }
-+    catch (\PDOException $e) {
-+      if ($this->queryOptions['throw_exception'] ?? TRUE) {
-+        $message = $e->getMessage() . ": " . (string) $this . "; ";
-+        throw new DatabaseExceptionWrapper($message, 0, $e);
-+      }
-+      return NULL;
-+    }
-+    return $stmt->rowCount();
-   }
- 
-   /**
-diff --git a/core/lib/Drupal/Core/Database/Query/Update.php b/core/lib/Drupal/Core/Database/Query/Update.php
-index 2b08e20d00..c6ff2dda32 100644
---- a/core/lib/Drupal/Core/Database/Query/Update.php
-+++ b/core/lib/Drupal/Core/Database/Query/Update.php
-@@ -3,6 +3,8 @@
- namespace Drupal\Core\Database\Query;
- 
- use Drupal\Core\Database\Database;
-+use Drupal\Core\Database\DatabaseExceptionWrapper;
-+use Drupal\Core\Database\IntegrityConstraintViolationException;
- use Drupal\Core\Database\Connection;
- 
- /**
-@@ -61,7 +63,6 @@ class Update extends Query implements ConditionInterface {
-    *   Array of database options.
-    */
-   public function __construct(Connection $connection, $table, array $options = []) {
--    $options['return'] = Database::RETURN_AFFECTED;
-     parent::__construct($connection, $options);
-     $this->table = $table;
- 
-@@ -145,7 +146,23 @@ public function execute() {
-       $update_values = array_merge($update_values, $this->condition->arguments());
-     }
- 
--    return $this->connection->query((string) $this, $update_values, $this->queryOptions);
-+    try {
-+      $stmt = $this->connection->prepareStatement((string) $this, $this->queryOptions, TRUE);
-+      $stmt->execute($update_values, $this->queryOptions);
-+    }
-+    catch (\PDOException $e) {
-+      if ($this->queryOptions['throw_exception'] ?? TRUE) {
-+        $message = $e->getMessage() . ": " . (string) $this . "; ";
-+        // Match all SQLSTATE 23xxx errors.
-+        if (substr($e->getCode(), -6, -3) == '23') {
-+          throw new IntegrityConstraintViolationException($message, $e->getCode(), $e);
-+        }
-+        throw new DatabaseExceptionWrapper($message, 0, $e);
-+      }
-+      return NULL;
-+    }
-+
-+    return $stmt->rowCount();
-   }
- 
-   /**
-diff --git a/core/lib/Drupal/Core/Database/Query/Upsert.php b/core/lib/Drupal/Core/Database/Query/Upsert.php
-index a406d7ab97..ba2cd8ef40 100644
---- a/core/lib/Drupal/Core/Database/Query/Upsert.php
-+++ b/core/lib/Drupal/Core/Database/Query/Upsert.php
-@@ -3,6 +3,8 @@
- namespace Drupal\Core\Database\Query;
- 
- use Drupal\Core\Database\Connection;
-+use Drupal\Core\Database\DatabaseExceptionWrapper;
-+use Drupal\Core\Database\IntegrityConstraintViolationException;
- use Drupal\Core\Database\Database;
- 
- /**
-@@ -35,7 +37,6 @@
-    *   (optional) An array of database options.
-    */
-   public function __construct(Connection $connection, $table, array $options = []) {
--    $options['return'] = Database::RETURN_AFFECTED;
-     parent::__construct($connection, $options);
-     $this->table = $table;
-   }
-@@ -103,12 +104,26 @@ public function execute() {
        }
      }
- 
--    $last_insert_id = $this->connection->query((string) $this, $values, $this->queryOptions);
-+    try {
-+      $stmt = $this->connection->prepareStatement((string) $this, $this->queryOptions, TRUE);
-+      $stmt->execute($values, $this->queryOptions);
-+    }
-+    catch (\PDOException $e) {
-+      if ($this->queryOptions['throw_exception'] ?? TRUE) {
-+        $message = $e->getMessage() . ": " . (string) $this . "; ";
-+        // Match all SQLSTATE 23xxx errors.
-+        if (substr($e->getCode(), -6, -3) == '23') {
-+          throw new IntegrityConstraintViolationException($message, $e->getCode(), $e);
-+        }
-+        throw new DatabaseExceptionWrapper($message, 0, $e);
+-    catch (\PDOException $e) {
++    catch (\Exception $e) {
+       // Most database drivers will return NULL here, but some of them
+       // (e.g. the SQLite driver) may need to re-run the query, so the return
+       // value will be the same as for static::query().
+-      return $this->handleQueryException($e, $query, $args, $options);
++      if (is_string($query)) {
++        return $this->exceptionHandler($e)->handleExecutionException($stmt, $args, $options);
 +      }
-+      return NULL;
-+    }
- 
-     // Re-initialize the values array so that we can re-use this query.
-     $this->insertValues = [];
- 
--    return $last_insert_id;
-+    return $stmt->rowCount();
-   }
- 
- }
-diff --git a/core/lib/Drupal/Core/Database/Statement.php b/core/lib/Drupal/Core/Database/Statement.php
-index 3de4537fb2..745047b01c 100644
---- a/core/lib/Drupal/Core/Database/Statement.php
-+++ b/core/lib/Drupal/Core/Database/Statement.php
-@@ -44,6 +44,13 @@ protected function __construct(Connection $dbh) {
-     $this->setFetchMode(\PDO::FETCH_OBJ);
-   }
- 
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function getConnectionTarget(): string {
-+    return $this->connection->getTarget();
-+  }
-+
-   /**
-    * {@inheritdoc}
-    */
-diff --git a/core/lib/Drupal/Core/Database/StatementEmpty.php b/core/lib/Drupal/Core/Database/StatementEmpty.php
-index a87bca920a..801f28ef9a 100644
---- a/core/lib/Drupal/Core/Database/StatementEmpty.php
-+++ b/core/lib/Drupal/Core/Database/StatementEmpty.php
-@@ -20,7 +20,38 @@ class StatementEmpty implements \Iterator, StatementInterface {
-    *
-    * @var bool
-    */
--  public $allowRowCount = FALSE;
-+  protected $rowCountEnabled = FALSE;
-+
-+  /**
-+   * Implements the magic __get() method.
-+   *
-+   * @todo Remove the method in Drupal 10.
-+   */
-+  public function __get($name) {
-+    if ($name === 'allowRowCount') {
-+      @trigger_error("StatementEmpty::\$allowRowCount should not be accessed in drupal:9.2.0 and will error in drupal:10.0.0. Use \$this->rowCountEnabled instead. See https://www.drupal.org/node/TODO", E_USER_DEPRECATED);
-+      return $this->rowCountEnabled;
-+    }
-+  }
-+
-+  /**
-+   * Implements the magic __set() method.
-+   *
-+   * @todo Remove the method in Drupal 10.
-+   */
-+  public function __set($name, $value) {
-+    if ($name === 'allowRowCount') {
-+      @trigger_error("StatementEmpty::\$allowRowCount should not be written in drupal:9.2.0 and will error in drupal:10.0.0. Enable row counting by passing the appropriate argument to the constructor instead. See https://www.drupal.org/node/TODO", E_USER_DEPRECATED);
-+      $this->rowCountEnabled = $value;
-+    }
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function getConnectionTarget(): string {
-+    return 'default';
-+  }
- 
-   /**
-    * {@inheritdoc}
-@@ -40,7 +71,7 @@ public function getQueryString() {
-    * {@inheritdoc}
-    */
-   public function rowCount() {
--    if ($this->allowRowCount) {
-+    if ($this->rowCountEnabled) {
-       return 0;
++      else {
++        return $this->handleQueryException($e, $query, $args, $options);
++      }
      }
-     throw new RowCountException();
-diff --git a/core/lib/Drupal/Core/Database/StatementInterface.php b/core/lib/Drupal/Core/Database/StatementInterface.php
-index 917eb8b9bf..729bd94787 100644
---- a/core/lib/Drupal/Core/Database/StatementInterface.php
-+++ b/core/lib/Drupal/Core/Database/StatementInterface.php
-@@ -20,25 +20,6 @@
-  */
- interface StatementInterface extends \Traversable {
+   }
+ 
+@@ -875,8 +895,15 @@ public function query($query, array $args = [], $options = []) {
+    *
+    * @throws \Drupal\Core\Database\DatabaseExceptionWrapper
+    * @throws \Drupal\Core\Database\IntegrityConstraintViolationException
++   *
++   * @deprecated in drupal:9.2.0 and is removed from drupal:10.0.0. Get a
++   *   handler through $this->exceptionHandler() instead, and use one of its
++   *   methods.
++   *
++   * @see https://www.drupal.org/node/3187222
+    */
+   protected function handleQueryException(\PDOException $e, $query, array $args = [], $options = []) {
++    @trigger_error('Connection::handleQueryException() is deprecated in drupal:9.2.0 and is removed in drupal:10.0.0. Get a handler through $this->exceptionHandler() instead, and use one of its methods. See https://www.drupal.org/node/3187222', E_USER_DEPRECATED);
+     if ($options['throw_exception']) {
+       // Wrap the exception in another exception, because PHP does not allow
+       // overriding Exception::getMessage(). Its message is the extra database
+@@ -998,6 +1025,10 @@ public function getDriverClass($class) {
+             $this->driverClasses[$class] = Delete::class;
+             break;
+ 
++          case 'ExceptionHandler':
++            $this->driverClasses[$class] = ExceptionHandler::class;
++            break;
++
+           case 'Insert':
+             $this->driverClasses[$class] = Insert::class;
+             break;
+@@ -1038,6 +1069,20 @@ public function getDriverClass($class) {
+     return $this->driverClasses[$class];
+   }
+ 
++  /**
++   * Returns the database exceptions handler.
++   *
++   * @param \Exception $exception
++   *   The exception.
++   *
++   * @return \Drupal\Core\Database\ExceptionHandler
++   *   The database exceptions handler.
++   */
++  public function exceptionHandler(\Exception $exception) {
++    $class = $this->getDriverClass('ExceptionHandler');
++    return new $class($exception);
++  }
++
+   /**
+    * Prepares and returns a SELECT query object.
+    *
+diff --git a/core/lib/Drupal/Core/Database/Driver/mysql/Connection.php b/core/lib/Drupal/Core/Database/Driver/mysql/Connection.php
+index fe281cb3d9f5405d72af984ff76a938760c95dee..2a9c5cb37943cc05248cf87f1e7f3df7a38bdd57 100644
+--- a/core/lib/Drupal/Core/Database/Driver/mysql/Connection.php
++++ b/core/lib/Drupal/Core/Database/Driver/mysql/Connection.php
+@@ -10,7 +10,6 @@
+ use Drupal\Core\Database\DatabaseNotFoundException;
+ use Drupal\Core\Database\DatabaseException;
+ use Drupal\Core\Database\Connection as DatabaseConnection;
+-use Drupal\Component\Utility\Unicode;
+ use Drupal\Core\Database\TransactionNoActiveException;
+ 
+ /**
+@@ -89,29 +88,11 @@ class Connection extends DatabaseConnection {
+    */
+   protected $identifierQuotes = ['"', '"'];
  
 -  /**
--   * Constructs a new PDOStatement object.
--   *
--   * The PDO manual does not document this constructor, but when overriding the
--   * PDOStatement class with a custom without this constructor, PDO will throw
--   * the internal exception/warning:
--   *
--   * "PDO::query(): SQLSTATE[HY000]: General error: user-supplied statement does
--   *  not accept constructor arguments"
--   *
--   * PDO enforces that the access type of this constructor must be protected,
--   * and lastly, it also enforces that a custom PDOStatement interface (like
--   * this) omits the constructor (declaring it results in fatal errors
--   * complaining about "the access type must not be public" if it is public, and
--   * "the access type must be omitted" if it is protected; i.e., conflicting
--   * statements). The access type has to be protected.
+-   * {@inheritdoc}
 -   */
--  // protected function __construct(Connection $dbh);
+-  public function query($query, array $args = [], $options = []) {
+-    try {
+-      return parent::query($query, $args, $options);
+-    }
+-    catch (DatabaseException $e) {
+-      if ($e->getPrevious()->errorInfo[1] == 1153) {
+-        // If a max_allowed_packet error occurs the message length is truncated.
+-        // This should prevent the error from recurring if the exception is
+-        // logged to the database using dblog or the like.
+-        $message = Unicode::truncateBytes($e->getMessage(), self::MIN_MAX_ALLOWED_PACKET);
+-        $e = new DatabaseExceptionWrapper($message, $e->getCode(), $e->getPrevious());
+-      }
+-      throw $e;
+-    }
+-  }
 -
-   /**
-    * Executes a prepared statement.
-    *
-@@ -61,6 +42,14 @@ public function execute($args = [], $options = []);
-    */
-   public function getQueryString();
- 
-+  /**
-+   * Returns the target connection this statement is associated with.
-+   *
-+   * @return string
-+   *   The target connection string of this statement.
-+   */
-+  public function getConnectionTarget(): string;
-+
-   /**
-    * Returns the number of rows affected by the last SQL statement.
-    *
-diff --git a/core/lib/Drupal/Core/Database/StatementPrefetch.php b/core/lib/Drupal/Core/Database/StatementPrefetch.php
-index 3f6efdf364..fdc0d7f4ac 100644
---- a/core/lib/Drupal/Core/Database/StatementPrefetch.php
-+++ b/core/lib/Drupal/Core/Database/StatementPrefetch.php
-@@ -25,11 +25,11 @@ class StatementPrefetch implements \Iterator, StatementInterface {
-   protected $driverOptions;
- 
-   /**
--   * Reference to the Drupal database connection object for this statement.
-+   * The Drupal database connection object.
-    *
-    * @var \Drupal\Core\Database\Connection
-    */
--  public $dbh;
-+  protected $connection;
- 
-   /**
-    * Reference to the PDO connection object for this statement.
-@@ -124,13 +124,63 @@ class StatementPrefetch implements \Iterator, StatementInterface {
-    *
-    * @var bool
-    */
--  public $allowRowCount = FALSE;
-+  protected $rowCountEnabled = FALSE;
- 
--  public function __construct(\PDO $pdo_connection, Connection $connection, $query, array $driver_options = []) {
-+  /**
-+   * Constructs a StatementPrefetch object.
-+   *
-+   * @param \PDO $pdo_connection
-+   *   An object of the PDO class representing a database connection.
-+   * @param \Drupal\Core\Database\Connection $connection
-+   *   The database connection.
-+   * @param string $query
-+   *   The query string.
-+   * @param array $driver_options
-+   *   Driver-specific options.
-+   * @param bool $row_count_enabled
-+   *   (optional) Enables counting the rows affected. Defaults to TRUE.
-+   */
-+  public function __construct(\PDO $pdo_connection, Connection $connection, $query, array $driver_options = [], bool $row_count_enabled = TRUE) {
-     $this->pdoConnection = $pdo_connection;
--    $this->dbh = $connection;
-+    $this->connection = $connection;
-     $this->queryString = $query;
-     $this->driverOptions = $driver_options;
-+    $this->rowCountEnabled = $row_count_enabled;
-+  }
-+
-+  /**
-+   * Implements the magic __get() method.
-+   *
-+   * @todo Remove the method in Drupal 10.
-+   */
-+  public function __get($name) {
-+    if ($name === 'dbh') {
-+      @trigger_error("StatementPrefetch::\$dbh should not be accessed in drupal:9.2.0 and will error in drupal:10.0.0. Use \$this->connection instead. See https://www.drupal.org/node/TODO", E_USER_DEPRECATED);
-+      return $this->connection;
-+    }
-+    if ($name === 'allowRowCount') {
-+      @trigger_error("StatementPrefetch::\$allowRowCount should not be accessed in drupal:9.2.0 and will error in drupal:10.0.0. Use \$this->rowCountEnabled instead. See https://www.drupal.org/node/TODO", E_USER_DEPRECATED);
-+      return $this->rowCountEnabled;
-+    }
-+  }
-+
-+  /**
-+   * Implements the magic __set() method.
-+   *
-+   * @todo Remove the method in Drupal 10.
-+   */
-+  public function __set($name, $value) {
-+    if ($name === 'allowRowCount') {
-+      @trigger_error("StatementPrefetch::\$allowRowCount should not be written in drupal:9.2.0 and will error in drupal:10.0.0. Enable row counting by passing the appropriate argument to the constructor instead. See https://www.drupal.org/node/TODO", E_USER_DEPRECATED);
-+      $this->rowCountEnabled = $value;
-+    }
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function getConnectionTarget(): string {
-+    return $this->connection->getTarget();
-   }
- 
-   /**
-@@ -149,7 +199,7 @@ public function execute($args = [], $options = []) {
-       }
-     }
- 
--    $logger = $this->dbh->getLogger();
-+    $logger = $this->connection->getLogger();
-     if (!empty($logger)) {
-       $query_start = microtime(TRUE);
-     }
-@@ -165,7 +215,7 @@ public function execute($args = [], $options = []) {
-       $this->throwPDOException();
-     }
- 
--    if ($options['return'] == Database::RETURN_AFFECTED) {
-+    if ($this->rowCountEnabled) {
-       $this->rowCount = $statement->rowCount();
-     }
-     // Fetch all the data from the reply, in order to release any lock
-@@ -199,7 +249,7 @@ public function execute($args = [], $options = []) {
-    * Throw a PDO Exception based on the last PDO error.
-    */
-   protected function throwPDOException() {
--    $error_info = $this->dbh->errorInfo();
-+    $error_info = $this->connection->errorInfo();
-     // We rebuild a message formatted in the same way as PDO.
-     $exception = new \PDOException("SQLSTATE[" . $error_info[0] . "]: General error " . $error_info[1] . ": " . $error_info[2]);
-     $exception->errorInfo = $error_info;
-@@ -221,7 +271,7 @@ protected function throwPDOException() {
-    *   A PDOStatement object.
-    */
-   protected function getStatement($query, &$args = []) {
--    return $this->dbh->prepare($query, $this->driverOptions);
-+    return $this->connection->prepare($query, $this->driverOptions);
-   }
- 
-   /**
-@@ -364,7 +414,7 @@ public function valid() {
-    */
-   public function rowCount() {
-     // SELECT query should not use the method.
--    if ($this->allowRowCount) {
-+    if ($this->rowCountEnabled) {
-       return $this->rowCount;
-     }
-     else {
-diff --git a/core/lib/Drupal/Core/Database/StatementWrapper.php b/core/lib/Drupal/Core/Database/StatementWrapper.php
-index eff40102f4..ce79337ce3 100644
---- a/core/lib/Drupal/Core/Database/StatementWrapper.php
-+++ b/core/lib/Drupal/Core/Database/StatementWrapper.php
-@@ -14,7 +14,7 @@ class StatementWrapper implements \IteratorAggregate, StatementInterface {
-    *
-    * @var \Drupal\Core\Database\Connection
-    */
--  public $dbh;
-+  protected $connection;
- 
-   /**
-    * The client database Statement object.
-@@ -30,7 +30,7 @@ class StatementWrapper implements \IteratorAggregate, StatementInterface {
-    *
-    * @var bool
-    */
--  public $allowRowCount = FALSE;
-+  protected $rowCountEnabled = FALSE;
- 
-   /**
-    * Constructs a StatementWrapper object.
-@@ -43,26 +43,46 @@ class StatementWrapper implements \IteratorAggregate, StatementInterface {
-    *   The SQL query string.
-    * @param array $options
-    *   Array of query options.
-+   * @param bool $row_count_enabled
-+   *   (optional) Enables counting the rows affected. Defaults to TRUE.
-    */
--  public function __construct(Connection $connection, $client_connection, string $query, array $options) {
--    $this->dbh = $connection;
-+  public function __construct(Connection $connection, $client_connection, string $query, array $options, bool $row_count_enabled = TRUE) {
-+    $this->connection = $connection;
-     $this->clientStatement = $client_connection->prepare($query, $options);
-+    $this->rowCountEnabled = $row_count_enabled;
-     $this->setFetchMode(\PDO::FETCH_OBJ);
-   }
- 
-   /**
-    * Implements the magic __get() method.
-    *
--   * @deprecated in drupal:9.1.0 and is removed from drupal:10.0.0. Access the
--   *   client-level statement object via ::getClientStatement().
--   *
--   * @see https://www.drupal.org/node/3177488
-+   * @todo Remove the method in Drupal 10.
-    */
-   public function __get($name) {
-     if ($name === 'queryString') {
--      @trigger_error("StatementWrapper::\${$name} should not be accessed in drupal:9.1.0 and will error in drupal:10.0.0. Access the client-level statement object via ::getClientStatement(). See https://www.drupal.org/node/3177488", E_USER_DEPRECATED);
-+      @trigger_error("StatementWrapper::\$queryString should not be accessed in drupal:9.1.0 and will error in drupal:10.0.0. Access the client-level statement object via ::getClientStatement(). See https://www.drupal.org/node/3177488", E_USER_DEPRECATED);
-       return $this->getClientStatement()->queryString;
-     }
-+    if ($name === 'dbh') {
-+      @trigger_error("StatementWrapper::\$dbh should not be accessed in drupal:9.2.0 and will error in drupal:10.0.0. Use \$this->connection instead. See https://www.drupal.org/node/TODO", E_USER_DEPRECATED);
-+      return $this->connection;
-+    }
-+    if ($name === 'allowRowCount') {
-+      @trigger_error("StatementWrapper::\$allowRowCount should not be accessed in drupal:9.2.0 and will error in drupal:10.0.0. Use \$this->rowCountEnabled instead. See https://www.drupal.org/node/TODO", E_USER_DEPRECATED);
-+      return $this->rowCountEnabled;
-+    }
-+  }
-+
-+  /**
-+   * Implements the magic __set() method.
-+   *
-+   * @todo Remove the method in Drupal 10.
-+   */
-+  public function __set($name, $value) {
-+    if ($name === 'allowRowCount') {
-+      @trigger_error("StatementWrapper::\$allowRowCount should not be written in drupal:9.2.0 and will error in drupal:10.0.0. Enable row counting by passing the appropriate argument to the constructor instead. See https://www.drupal.org/node/TODO", E_USER_DEPRECATED);
-+      $this->rowCountEnabled = $value;
-+    }
-   }
- 
-   /**
-@@ -93,6 +113,13 @@ public function getClientStatement() {
-     return $this->clientStatement;
-   }
- 
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function getConnectionTarget(): string {
-+    return $this->connection->getTarget();
-+  }
-+
    /**
     * {@inheritdoc}
     */
-@@ -108,7 +135,7 @@ public function execute($args = [], $options = []) {
-       }
-     }
- 
--    $logger = $this->dbh->getLogger();
-+    $logger = $this->connection->getLogger();
-     if (!empty($logger)) {
-       $query_start = microtime(TRUE);
-     }
-@@ -202,7 +229,7 @@ public function fetchObject(string $class_name = NULL) {
+   protected function handleQueryException(\PDOException $e, $query, array $args = [], $options = []) {
++    @trigger_error('Connection::handleQueryException() is deprecated in drupal:9.2.0 and is removed in drupal:10.0.0. Get a handler through $this->exceptionHandler() instead, and use one of its methods. See https://www.drupal.org/node/3187222', E_USER_DEPRECATED);
+     // In case of attempted INSERT of a record with an undefined column and no
+     // default value indicated in schema, MySql returns a 1364 error code.
+     // Throw an IntegrityConstraintViolationException here like the other
+diff --git a/core/lib/Drupal/Core/Database/Driver/mysql/ExceptionHandler.php b/core/lib/Drupal/Core/Database/Driver/mysql/ExceptionHandler.php
+new file mode 100644
+index 0000000000000000000000000000000000000000..7558b103002fc4c10bd6dcab4a0368ba62d7e2d3
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/Driver/mysql/ExceptionHandler.php
+@@ -0,0 +1,56 @@
++<?php
++
++namespace Drupal\Core\Database\Driver\mysql;
++
++use Drupal\Component\Utility\Unicode;
++use Drupal\Core\Database\DatabaseExceptionWrapper;
++use Drupal\Core\Database\ExceptionHandler as BaseExceptionHandler;
++use Drupal\Core\Database\IntegrityConstraintViolationException;
++use Drupal\Core\Database\StatementInterface;
++
++/**
++ * MySql database exception handler class.
++ */
++class ExceptionHandler extends BaseExceptionHandler {
++
++  /**
++   * {@inheritdoc}
++   */
++  public function handleExecutionException(StatementInterface $statement, array $arguments = [], array $options = []): void {
++    if (!($options['throw_exception'] ?? FALSE)) {
++      return;
++    }
++
++    if ($this->exception instanceof \PDOException) {
++      // Wrap the exception in another exception, because PHP does not allow
++      // overriding Exception::getMessage(). Its message is the extra database
++      // debug information.
++      $code = is_int($this->exception->getCode()) ? $this->exception->getCode() : 0;
++
++      // If a max_allowed_packet error occurs the message length is truncated.
++      // This should prevent the error from recurring if the exception is logged
++      // to the database using dblog or the like.
++      if (($this->exception->errorInfo[1] ?? NULL) === 1153) {
++        $message = Unicode::truncateBytes($this->exception->getMessage(), Connection::MIN_MAX_ALLOWED_PACKET);
++        throw new DatabaseExceptionWrapper($message, $code, $this->exception);
++      }
++
++      $message = $this->exception->getMessage() . ": " . $statement->getQueryString() . "; " . print_r($arguments, TRUE);
++
++      // SQLSTATE 23xxx errors indicate an integrity constraint violation. Also,
++      // in case of attempted INSERT of a record with an undefined column and no
++      // default value indicated in schema, MySql returns a 1364 error code.
++      if (
++        substr($this->exception->getCode(), -6, -3) == '23' ||
++        ($this->exception->errorInfo[1] ?? NULL) === 1364
++      ) {
++        throw new IntegrityConstraintViolationException($message, $code, $this->exception);
++      }
++
++      throw new DatabaseExceptionWrapper($message, 0, $this->exception);
++    }
++
++    throw $this->exception;
++  }
++
++}
+diff --git a/core/lib/Drupal/Core/Database/Driver/sqlite/Connection.php b/core/lib/Drupal/Core/Database/Driver/sqlite/Connection.php
+index 0905ca9e2ae5ae63aa0c6d9cffa6cff19aadf19a..fcc718d8464155e9e965518961e867e90e9df3ba 100644
+--- a/core/lib/Drupal/Core/Database/Driver/sqlite/Connection.php
++++ b/core/lib/Drupal/Core/Database/Driver/sqlite/Connection.php
+@@ -363,6 +363,7 @@ public function prepare($statement, array $driver_options = []) {
+    * {@inheritdoc}
     */
-   public function rowCount() {
-     // SELECT query should not use the method.
--    if ($this->allowRowCount) {
-+    if ($this->rowCountEnabled) {
-       return $this->clientStatement->rowCount();
+   protected function handleQueryException(\PDOException $e, $query, array $args = [], $options = []) {
++    @trigger_error('Connection::handleQueryException() is deprecated in drupal:9.2.0 and is removed in drupal:10.0.0. Get a handler through $this->exceptionHandler() instead, and use one of its methods. See https://www.drupal.org/node/3187222', E_USER_DEPRECATED);
+     // The database schema might be changed by another process in between the
+     // time that the statement was prepared and the time the statement was run
+     // (e.g. usually happens when running tests). In this case, we need to
+diff --git a/core/lib/Drupal/Core/Database/Driver/sqlite/Statement.php b/core/lib/Drupal/Core/Database/Driver/sqlite/Statement.php
+index d9b422b58435ba139b5171c530600923dc83fd0e..1e895629ea14901b5cefeb44d44c059f86796f9b 100644
+--- a/core/lib/Drupal/Core/Database/Driver/sqlite/Statement.php
++++ b/core/lib/Drupal/Core/Database/Driver/sqlite/Statement.php
+@@ -90,6 +90,12 @@ public function execute($args = [], $options = []) {
+       $return = parent::execute($args, $options);
      }
-     else {
-diff --git a/core/tests/Drupal/KernelTests/Core/Database/StatementWrapperLegacyTest.php b/core/tests/Drupal/KernelTests/Core/Database/StatementWrapperLegacyTest.php
-index 56609ee8a6..156ad2de1b 100644
---- a/core/tests/Drupal/KernelTests/Core/Database/StatementWrapperLegacyTest.php
-+++ b/core/tests/Drupal/KernelTests/Core/Database/StatementWrapperLegacyTest.php
-@@ -35,6 +35,24 @@ public function testQueryString() {
-     $this->assertStringContainsString('SELECT * FROM ', $this->statement->getQueryString());
+     catch (\PDOException $e) {
++      // The database schema might be changed by another process in between the
++      // time that the statement was prepared and the time the statement was run
++      // (e.g. usually happens when running tests). In this case, we need to
++      // re-run the query.
++      // @see http://www.sqlite.org/faq.html#q15
++      // @see http://www.sqlite.org/rescode.html#schema
+       if (!empty($e->errorInfo[1]) && $e->errorInfo[1] === 17) {
+         // The schema has changed. SQLite specifies that we must resend the query.
+         $return = parent::execute($args, $options);
+diff --git a/core/lib/Drupal/Core/Database/ExceptionHandler.php b/core/lib/Drupal/Core/Database/ExceptionHandler.php
+new file mode 100644
+index 0000000000000000000000000000000000000000..50ad96805f61061e29cd5d4eff542e4e00f6da38
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/ExceptionHandler.php
+@@ -0,0 +1,92 @@
++<?php
++
++namespace Drupal\Core\Database;
++
++/**
++ * Base Database exception handler class.
++ *
++ * This class handles exceptions thrown by the database layer. Database driver
++ * implementation can provide an alternative implementation to support special
++ * handling required by that database.
++ */
++class ExceptionHandler {
++
++  /**
++   * The exception to be handled.
++   *
++   * @var \Exception
++   */
++  protected $exception;
++
++  /**
++   * Constructs a ExceptionHandler object.
++   *
++   * @param \Exception $exception
++   *   The exception to be handled.
++   */
++  public function __construct(\Exception $exception) {
++    $this->exception = $exception;
++  }
++
++  /**
++   * Handles exceptions thrown during the preparation of statement objects.
++   *
++   * @param string $sql
++   *   The SQL statement that was requested to be prepared.
++   * @param array $options
++   *   An associative array of options to control how the database operation is
++   *   run.
++   *
++   * @throws \Drupal\Core\Database\DatabaseExceptionWrapper
++   */
++  public function handleStatementException(string $sql, array $options = []): void {
++    if (!($options['throw_exception'] ?? FALSE)) {
++      return;
++    }
++
++    if ($this->exception instanceof \PDOException) {
++      // Wrap the exception in another exception, because PHP does not allow
++      // overriding Exception::getMessage(). Its message is the extra database
++      // debug information.
++      $message = $this->exception->getMessage() . ": " . $sql . "; ";
++      throw new DatabaseExceptionWrapper($message, 0, $this->exception);
++    }
++
++    throw $this->exception;
++  }
++
++  /**
++   * Handles exceptions thrown during execution of statement objects.
++   *
++   * @param \Drupal\Core\Database\StatementInterface $statement
++   *   The statement object requested to be executed.
++   * @param array $arguments
++   *   An array of arguments for the prepared statement.
++   * @param array $options
++   *   An associative array of options to control how the database operation is
++   *   run.
++   *
++   * @throws \Drupal\Core\Database\DatabaseExceptionWrapper
++   * @throws \Drupal\Core\Database\IntegrityConstraintViolationException
++   */
++  public function handleExecutionException(StatementInterface $statement, array $arguments = [], array $options = []): void {
++    if (!($options['throw_exception'] ?? FALSE)) {
++      return;
++    }
++
++    if ($this->exception instanceof \PDOException) {
++      // Wrap the exception in another exception, because PHP does not allow
++      // overriding Exception::getMessage(). Its message is the extra database
++      // debug information.
++      $message = $this->exception->getMessage() . ": " . $statement->getQueryString() . "; " . print_r($arguments, TRUE);
++      // Match all SQLSTATE 23xxx errors.
++      if (substr($this->exception->getCode(), -6, -3) == '23') {
++        throw new IntegrityConstraintViolationException($message, $this->exception->getCode(), $this->exception);
++      }
++      throw new DatabaseExceptionWrapper($message, 0, $this->exception);
++    }
++
++    throw $this->exception;
++  }
++
++}
+diff --git a/core/tests/Drupal/KernelTests/Core/Database/DatabaseExceptionWrapperTest.php b/core/tests/Drupal/KernelTests/Core/Database/DatabaseExceptionWrapperTest.php
+index 0f4c06a32821a69b46841dde7cb868fede96024c..f9ae22cab74014eb9e2067ceb22b6a973ef9daac 100644
+--- a/core/tests/Drupal/KernelTests/Core/Database/DatabaseExceptionWrapperTest.php
++++ b/core/tests/Drupal/KernelTests/Core/Database/DatabaseExceptionWrapperTest.php
+@@ -49,6 +49,19 @@ public function testPrepareQuery() {
+     $stmt->execute();
    }
  
 +  /**
-+   * Tests accessing deprecated properties.
++   * Tests deprecation of Connection::handleQueryException.
++   *
++   * @group legacy
 +   */
-+  public function testGetDeprecatedProperties() {
-+    $this->expectDeprecation('%s$dbh should not be accessed in drupal:9.2.0 and will error in drupal:10.0.0.%s');
-+    $this->assertNotNull($this->statement->dbh);
-+    $this->expectDeprecation('%s$allowRowCount should not be accessed in drupal:9.2.0 and will error in drupal:10.0.0.%s');
-+    $this->assertFalse($this->statement->allowRowCount);
-+  }
-+
-+  /**
-+   * Tests writing deprecated properties.
-+   */
-+  public function testSetDeprecatedProperties() {
-+    $this->expectDeprecation('%s$allowRowCount should not be written in drupal:9.2.0 and will error in drupal:10.0.0.%s');
-+    $this->statement->allowRowCount = TRUE;
++  public function testHandleQueryExceptionDeprecation(): void {
++    $this->expectDeprecation('Passing a StatementInterface object as a $query argument to Drupal\Core\Database\Connection::query is deprecated in drupal:9.2.0 and is removed in drupal:10.0.0. Call the execute method from the StatementInterface object directly instead. See https://www.drupal.org/node/3154439');
++    $this->expectDeprecation('Connection::handleQueryException() is deprecated in drupal:9.2.0 and is removed in drupal:10.0.0. Get a handler through $this->exceptionHandler() instead, and use one of its methods. See https://www.drupal.org/node/3187222');
++    $this->expectException(DatabaseExceptionWrapper::class);
++    $stmt = Database::getConnection()->prepareStatement('SELECT * FROM {does_not_exist}', []);
++    Database::getConnection()->query($stmt);
 +  }
 +
    /**
-    * Tests calling a non existing \PDOStatement method.
+    * Tests Connection::prepareStatement exceptions.
     */
+diff --git a/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php b/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
+index 64efa325154a3be42cf74f9f586a34c979a56553..44360a7e4b2444394b396a10f8b05ab7f5693e7e 100644
+--- a/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
++++ b/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
+@@ -149,6 +149,11 @@ public function providerGetDriverClass() {
+         'Drupal\corefake\Driver\Database\corefake',
+         'Delete',
+       ],
++      [
++        'Drupal\Core\Database\Query\ExceptionHandler',
++        'Drupal\corefake\Driver\Database\corefake',
++        'ExceptionHandler',
++      ],
+       [
+         'Drupal\Core\Database\Query\Insert',
+         'Drupal\corefake\Driver\Database\corefake',
+@@ -201,6 +206,11 @@ public function providerGetDriverClass() {
+         'Drupal\corefake\Driver\Database\corefakeWithAllCustomClasses',
+         'Delete',
+       ],
++      [
++        'Drupal\corefake\Driver\Database\corefakeWithAllCustomClasses\ExceptionHandler',
++        'Drupal\corefake\Driver\Database\corefakeWithAllCustomClasses',
++        'ExceptionHandler',
++      ],
+       [
+         'Drupal\corefake\Driver\Database\corefakeWithAllCustomClasses\Insert',
+         'Drupal\corefake\Driver\Database\corefakeWithAllCustomClasses',
+diff --git a/core/tests/fixtures/database_drivers/module/corefake/src/Driver/Database/corefakeWithAllCustomClasses/ExceptionHandler.php b/core/tests/fixtures/database_drivers/module/corefake/src/Driver/Database/corefakeWithAllCustomClasses/ExceptionHandler.php
+new file mode 100644
+index 0000000000000000000000000000000000000000..9dc9122124878239b8d4a8fd1c558029c4d1d710
+--- /dev/null
++++ b/core/tests/fixtures/database_drivers/module/corefake/src/Driver/Database/corefakeWithAllCustomClasses/ExceptionHandler.php
+@@ -0,0 +1,12 @@
++<?php
++
++namespace Drupal\corefake\Driver\Database\corefakeWithAllCustomClasses;
++
++use Drupal\Core\Database\ExceptionHandler as BaseExceptionHandler;
++
++/**
++ * CorefakeWithAllCustomClasses implementation of \Drupal\Core\Database\Delete.
++ */
++class ExceptionHandler extends BaseExceptionHandler {
++
++}
