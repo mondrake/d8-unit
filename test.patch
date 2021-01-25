@@ -1,524 +1,413 @@
-diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
-index 486d788b2c..a00bebf21e 100644
---- a/core/lib/Drupal/Core/Database/Connection.php
-+++ b/core/lib/Drupal/Core/Database/Connection.php
-@@ -545,17 +545,24 @@ public function getFullQualifiedTableName($table) {
-    *
-    * @return \Drupal\Core\Database\StatementInterface
-    *   A PDO prepared statement ready for its execute() method.
-+   *
-+   * @throws \Drupal\Core\Database\DatabaseExceptionWrapper
-    */
-   public function prepareStatement(string $query, array $options): StatementInterface {
-     $query = $this->prefixTables($query);
-     if (!($options['allow_square_brackets'] ?? FALSE)) {
-       $query = $this->quoteIdentifiers($query);
-     }
--    // @todo in Drupal 10, only return the StatementWrapper.
--    // @see https://www.drupal.org/node/3177490
--    return $this->statementWrapperClass ?
--      new $this->statementWrapperClass($this, $this->connection, $query, $options['pdo'] ?? []) :
--      $this->connection->prepare($query, $options['pdo'] ?? []);
-+    try {
-+      // @todo in Drupal 10, only return the StatementWrapper.
-+      // @see https://www.drupal.org/node/3177490
-+      return $this->statementWrapperClass ?
-+        new $this->statementWrapperClass($this, $this->connection, $query, $options['pdo'] ?? []) :
-+        $this->connection->prepare($query, $options['pdo'] ?? []);
-+    }
-+    catch (\Exception $e) {
-+      $this->exceptionHandler($e)->handleStatementException($query, $options);
-+    }
-   }
+diff --git a/core/lib/Drupal/Core/Database/Query/PagerSelectExtender.php b/core/lib/Drupal/Core/Database/Query/PagerSelectExtender.php
+index f32b1c733cf82fcc0fc3beae43dceac41e74022f..0b13ad6a82bf56daf3f2fd93bb96c035da543479 100644
+--- a/core/lib/Drupal/Core/Database/Query/PagerSelectExtender.php
++++ b/core/lib/Drupal/Core/Database/Query/PagerSelectExtender.php
+@@ -3,6 +3,7 @@
+ namespace Drupal\Core\Database\Query;
  
-   /**
-@@ -792,39 +799,46 @@ public function query($query, array $args = [], $options = []) {
-     $options += $this->defaultOptions();
-     assert(!isset($options['target']), 'Passing "target" option to query() has no effect. See https://www.drupal.org/node/2993033');
- 
-+    // We allow either a pre-bound statement object (deprecated) or a literal
-+    // string. In either case, we want to end up with an executed statement
-+    // object, which we pass to StatementInterface::execute.
-+    if (is_string($query)) {
-+      $this->expandArguments($query, $args);
-+      // To protect against SQL injection, Drupal only supports executing one
-+      // statement at a time.  Thus, the presence of a SQL delimiter (the
-+      // semicolon) is not allowed unless the option is set.  Allowing
-+      // semicolons should only be needed for special cases like defining a
-+      // function or stored procedure in SQL. Trim any trailing delimiter to
-+      // minimize false positives unless delimiter is allowed.
-+      $trim_chars = " \xA0\t\n\r\0\x0B";
-+      if (empty($options['allow_delimiter_in_query'])) {
-+        $trim_chars .= ';';
-+      }
-+      $query = rtrim($query, $trim_chars);
-+      if (strpos($query, ';') !== FALSE && empty($options['allow_delimiter_in_query'])) {
-+        throw new \InvalidArgumentException('; is not supported in SQL strings. Use only one statement at a time.');
-+      }
-+      $stmt = $this->prepareStatement($query, $options);
-+    }
-+    elseif ($query instanceof StatementInterface) {
-+      @trigger_error('Passing a StatementInterface object as a $query argument to ' . __METHOD__ . ' is deprecated in drupal:9.2.0 and is removed in drupal:10.0.0. Call the execute method from the StatementInterface object directly instead. See https://www.drupal.org/node/3154439', E_USER_DEPRECATED);
-+      $stmt = $query;
-+    }
-+    elseif ($query instanceof \PDOStatement) {
-+      @trigger_error('Passing a \\PDOStatement object as a $query argument to ' . __METHOD__ . ' is deprecated in drupal:9.2.0 and is removed in drupal:10.0.0. Call the execute method from the StatementInterface object directly instead. See https://www.drupal.org/node/3154439', E_USER_DEPRECATED);
-+      $stmt = $query;
-+    }
-+
-     try {
--      // We allow either a pre-bound statement object (deprecated) or a literal
--      // string. In either case, we want to end up with an executed statement
--      // object, which we pass to PDOStatement::execute.
--      if ($query instanceof StatementInterface) {
--        @trigger_error('Passing a StatementInterface object as a $query argument to ' . __METHOD__ . ' is deprecated in drupal:9.2.0 and is removed in drupal:10.0.0. Call the execute method from the StatementInterface object directly instead. See https://www.drupal.org/node/3154439', E_USER_DEPRECATED);
--        $stmt = $query;
-+      if (is_string($query)) {
-+        $stmt->execute($args, $options);
-+      }
-+      elseif ($query instanceof StatementInterface) {
-         $stmt->execute(NULL, $options);
-       }
-       elseif ($query instanceof \PDOStatement) {
--        @trigger_error('Passing a \\PDOStatement object as a $query argument to ' . __METHOD__ . ' is deprecated in drupal:9.2.0 and is removed in drupal:10.0.0. Call the execute method from the StatementInterface object directly instead. See https://www.drupal.org/node/3154439', E_USER_DEPRECATED);
--        $stmt = $query;
-         $stmt->execute();
-       }
--      else {
--        $this->expandArguments($query, $args);
--        // To protect against SQL injection, Drupal only supports executing one
--        // statement at a time.  Thus, the presence of a SQL delimiter (the
--        // semicolon) is not allowed unless the option is set.  Allowing
--        // semicolons should only be needed for special cases like defining a
--        // function or stored procedure in SQL. Trim any trailing delimiter to
--        // minimize false positives unless delimiter is allowed.
--        $trim_chars = " \xA0\t\n\r\0\x0B";
--        if (empty($options['allow_delimiter_in_query'])) {
--          $trim_chars .= ';';
--        }
--        $query = rtrim($query, $trim_chars);
--        if (strpos($query, ';') !== FALSE && empty($options['allow_delimiter_in_query'])) {
--          throw new \InvalidArgumentException('; is not supported in SQL strings. Use only one statement at a time.');
--        }
--        $stmt = $this->prepareStatement($query, $options);
--        $stmt->execute($args, $options);
--      }
- 
-       // Depending on the type of query we may need to return a different value.
-       // See DatabaseConnection::defaultOptions() for a description of each
-@@ -846,13 +860,19 @@ public function query($query, array $args = [], $options = []) {
- 
-         default:
-           throw new \PDOException('Invalid return directive: ' . $options['return']);
-+
-       }
-     }
--    catch (\PDOException $e) {
-+    catch (\Exception $e) {
-       // Most database drivers will return NULL here, but some of them
-       // (e.g. the SQLite driver) may need to re-run the query, so the return
-       // value will be the same as for static::query().
--      return $this->handleQueryException($e, $query, $args, $options);
-+      if (is_string($query)) {
-+        return $this->exceptionHandler($e)->handleExecutionException($stmt, $args, $options);
-+      }
-+      else {
-+        return $this->handleQueryException($e, $query, $args, $options);
-+      }
-     }
-   }
- 
-@@ -875,8 +895,15 @@ public function query($query, array $args = [], $options = []) {
-    *
-    * @throws \Drupal\Core\Database\DatabaseExceptionWrapper
-    * @throws \Drupal\Core\Database\IntegrityConstraintViolationException
-+   *
-+   * @deprecated in drupal:9.2.0 and is removed from drupal:10.0.0. Get a
-+   *   handler through $this->exceptionHandler() instead, and use one of its
-+   *   methods.
-+   *
-+   * @see https://www.drupal.org/node/3187222
-    */
-   protected function handleQueryException(\PDOException $e, $query, array $args = [], $options = []) {
-+    @trigger_error('Connection::handleQueryException() is deprecated in drupal:9.2.0 and is removed in drupal:10.0.0. Get a handler through $this->exceptionHandler() instead, and use one of its methods. See https://www.drupal.org/node/3187222', E_USER_DEPRECATED);
-     if ($options['throw_exception']) {
-       // Wrap the exception in another exception, because PHP does not allow
-       // overriding Exception::getMessage(). Its message is the extra database
-@@ -998,6 +1025,10 @@ public function getDriverClass($class) {
-             $this->driverClasses[$class] = Delete::class;
-             break;
- 
-+          case 'ExceptionHandler':
-+            $this->driverClasses[$class] = ExceptionHandler::class;
-+            break;
-+
-           case 'Insert':
-             $this->driverClasses[$class] = Insert::class;
-             break;
-@@ -1038,6 +1069,20 @@ public function getDriverClass($class) {
-     return $this->driverClasses[$class];
-   }
- 
-+  /**
-+   * Returns the database exceptions handler.
-+   *
-+   * @param \Exception $exception
-+   *   The exception.
-+   *
-+   * @return \Drupal\Core\Database\ExceptionHandler
-+   *   The database exceptions handler.
-+   */
-+  public function exceptionHandler(\Exception $exception) {
-+    $class = $this->getDriverClass('ExceptionHandler');
-+    return new $class($exception);
-+  }
-+
-   /**
-    * Prepares and returns a SELECT query object.
-    *
-diff --git a/core/lib/Drupal/Core/Database/Driver/mysql/Connection.php b/core/lib/Drupal/Core/Database/Driver/mysql/Connection.php
-index fe281cb3d9..2a9c5cb379 100644
---- a/core/lib/Drupal/Core/Database/Driver/mysql/Connection.php
-+++ b/core/lib/Drupal/Core/Database/Driver/mysql/Connection.php
-@@ -10,7 +10,6 @@
- use Drupal\Core\Database\DatabaseNotFoundException;
- use Drupal\Core\Database\DatabaseException;
- use Drupal\Core\Database\Connection as DatabaseConnection;
--use Drupal\Component\Utility\Unicode;
- use Drupal\Core\Database\TransactionNoActiveException;
+ use Drupal\Core\Database\Connection;
++use Drupal\Core\Pager\PagerManagerInterface;
  
  /**
-@@ -89,29 +88,11 @@ class Connection extends DatabaseConnection {
-    */
-   protected $identifierQuotes = ['"', '"'];
+  * Query extender for pager queries.
+@@ -16,13 +17,6 @@
+  */
+ class PagerSelectExtender extends SelectExtender {
  
 -  /**
--   * {@inheritdoc}
+-   * The highest element we've autogenerated so far.
+-   *
+-   * @var int
 -   */
--  public function query($query, array $args = [], $options = []) {
--    try {
--      return parent::query($query, $args, $options);
--    }
--    catch (DatabaseException $e) {
--      if ($e->getPrevious()->errorInfo[1] == 1153) {
--        // If a max_allowed_packet error occurs the message length is truncated.
--        // This should prevent the error from recurring if the exception is
--        // logged to the database using dblog or the like.
--        $message = Unicode::truncateBytes($e->getMessage(), self::MIN_MAX_ALLOWED_PACKET);
--        $e = new DatabaseExceptionWrapper($message, $e->getCode(), $e->getPrevious());
--      }
--      throw $e;
--    }
--  }
+-  public static $maxElement = 0;
 -
    /**
-    * {@inheritdoc}
+    * The number of elements per page to allow.
+    *
+@@ -44,14 +38,48 @@ class PagerSelectExtender extends SelectExtender {
     */
-   protected function handleQueryException(\PDOException $e, $query, array $args = [], $options = []) {
-+    @trigger_error('Connection::handleQueryException() is deprecated in drupal:9.2.0 and is removed in drupal:10.0.0. Get a handler through $this->exceptionHandler() instead, and use one of its methods. See https://www.drupal.org/node/3187222', E_USER_DEPRECATED);
-     // In case of attempted INSERT of a record with an undefined column and no
-     // default value indicated in schema, MySql returns a 1364 error code.
-     // Throw an IntegrityConstraintViolationException here like the other
-diff --git a/core/lib/Drupal/Core/Database/Driver/mysql/ExceptionHandler.php b/core/lib/Drupal/Core/Database/Driver/mysql/ExceptionHandler.php
-new file mode 100644
-index 0000000000..7558b10300
---- /dev/null
-+++ b/core/lib/Drupal/Core/Database/Driver/mysql/ExceptionHandler.php
-@@ -0,0 +1,56 @@
-+<?php
-+
-+namespace Drupal\Core\Database\Driver\mysql;
-+
-+use Drupal\Component\Utility\Unicode;
-+use Drupal\Core\Database\DatabaseExceptionWrapper;
-+use Drupal\Core\Database\ExceptionHandler as BaseExceptionHandler;
-+use Drupal\Core\Database\IntegrityConstraintViolationException;
-+use Drupal\Core\Database\StatementInterface;
-+
-+/**
-+ * MySql database exception handler class.
-+ */
-+class ExceptionHandler extends BaseExceptionHandler {
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function handleExecutionException(StatementInterface $statement, array $arguments = [], array $options = []): void {
-+    if (!($options['throw_exception'] ?? FALSE)) {
-+      return;
-+    }
-+
-+    if ($this->exception instanceof \PDOException) {
-+      // Wrap the exception in another exception, because PHP does not allow
-+      // overriding Exception::getMessage(). Its message is the extra database
-+      // debug information.
-+      $code = is_int($this->exception->getCode()) ? $this->exception->getCode() : 0;
-+
-+      // If a max_allowed_packet error occurs the message length is truncated.
-+      // This should prevent the error from recurring if the exception is logged
-+      // to the database using dblog or the like.
-+      if (($this->exception->errorInfo[1] ?? NULL) === 1153) {
-+        $message = Unicode::truncateBytes($this->exception->getMessage(), Connection::MIN_MAX_ALLOWED_PACKET);
-+        throw new DatabaseExceptionWrapper($message, $code, $this->exception);
-+      }
-+
-+      $message = $this->exception->getMessage() . ": " . $statement->getQueryString() . "; " . print_r($arguments, TRUE);
-+
-+      // SQLSTATE 23xxx errors indicate an integrity constraint violation. Also,
-+      // in case of attempted INSERT of a record with an undefined column and no
-+      // default value indicated in schema, MySql returns a 1364 error code.
-+      if (
-+        substr($this->exception->getCode(), -6, -3) == '23' ||
-+        ($this->exception->errorInfo[1] ?? NULL) === 1364
-+      ) {
-+        throw new IntegrityConstraintViolationException($message, $code, $this->exception);
-+      }
-+
-+      throw new DatabaseExceptionWrapper($message, 0, $this->exception);
-+    }
-+
-+    throw $this->exception;
-+  }
-+
-+}
-diff --git a/core/lib/Drupal/Core/Database/Driver/sqlite/Connection.php b/core/lib/Drupal/Core/Database/Driver/sqlite/Connection.php
-index 64957038d2..684a4c6b73 100644
---- a/core/lib/Drupal/Core/Database/Driver/sqlite/Connection.php
-+++ b/core/lib/Drupal/Core/Database/Driver/sqlite/Connection.php
-@@ -366,6 +366,7 @@ public function prepare($statement, array $driver_options = []) {
-    * {@inheritdoc}
-    */
-   protected function handleQueryException(\PDOException $e, $query, array $args = [], $options = []) {
-+    @trigger_error('Connection::handleQueryException() is deprecated in drupal:9.2.0 and is removed in drupal:10.0.0. Get a handler through $this->exceptionHandler() instead, and use one of its methods. See https://www.drupal.org/node/3187222', E_USER_DEPRECATED);
-     // The database schema might be changed by another process in between the
-     // time that the statement was prepared and the time the statement was run
-     // (e.g. usually happens when running tests). In this case, we need to
-diff --git a/core/lib/Drupal/Core/Database/Driver/sqlite/Statement.php b/core/lib/Drupal/Core/Database/Driver/sqlite/Statement.php
-index d9b422b584..1e895629ea 100644
---- a/core/lib/Drupal/Core/Database/Driver/sqlite/Statement.php
-+++ b/core/lib/Drupal/Core/Database/Driver/sqlite/Statement.php
-@@ -90,6 +90,12 @@ public function execute($args = [], $options = []) {
-       $return = parent::execute($args, $options);
-     }
-     catch (\PDOException $e) {
-+      // The database schema might be changed by another process in between the
-+      // time that the statement was prepared and the time the statement was run
-+      // (e.g. usually happens when running tests). In this case, we need to
-+      // re-run the query.
-+      // @see http://www.sqlite.org/faq.html#q15
-+      // @see http://www.sqlite.org/rescode.html#schema
-       if (!empty($e->errorInfo[1]) && $e->errorInfo[1] === 17) {
-         // The schema has changed. SQLite specifies that we must resend the query.
-         $return = parent::execute($args, $options);
-diff --git a/core/lib/Drupal/Core/Database/ExceptionHandler.php b/core/lib/Drupal/Core/Database/ExceptionHandler.php
-new file mode 100644
-index 0000000000..bcc54549e2
---- /dev/null
-+++ b/core/lib/Drupal/Core/Database/ExceptionHandler.php
-@@ -0,0 +1,92 @@
-+<?php
-+
-+namespace Drupal\Core\Database;
-+
-+/**
-+ * Base Database exception handler class.
-+ *
-+ * This class handles exceptions thrown by the database layer. Database driver
-+ * implementation can provide an alternative implementation to support special
-+ * handling required by that database.
-+ */
-+class ExceptionHandler {
-+
-+  /**
-+   * The exception to be handled.
-+   *
-+   * @var \Exception
-+   */
-+  protected $exception;
-+
-+  /**
-+   * Constructs a ExceptionHandler object.
-+   *
-+   * @param \Exception $exception
-+   *   The exception to be handled.
-+   */
-+  public function __construct(\Exception $exception) {
-+    $this->exception = $exception;
-+  }
-+
-+  /**
-+   * Handles exceptions thrown during the preparation of statement objects.
-+   *
-+   * @param string $sql
-+   *   The SQL statement that was requested to be prepared.
-+   * @param array $options
-+   *   An associative array of options to control how the database operation is
-+   *   run.
-+   *
-+   * @throws \Drupal\Core\Database\DatabaseExceptionWrapper
-+   */
-+  public function handleStatementException(string $sql, array $options = []): void {
-+    if (!($options['throw_exception'] ?? TRUE)) {
-+      return;
-+    }
-+
-+    if ($this->exception instanceof \PDOException) {
-+      // Wrap the exception in another exception, because PHP does not allow
-+      // overriding Exception::getMessage(). Its message is the extra database
-+      // debug information.
-+      $message = $this->exception->getMessage() . ": " . $sql . "; ";
-+      throw new DatabaseExceptionWrapper($message, 0, $this->exception);
-+    }
-+
-+    throw $this->exception;
-+  }
-+
-+  /**
-+   * Handles exceptions thrown during execution of statement objects.
-+   *
-+   * @param \Drupal\Core\Database\StatementInterface $statement
-+   *   The statement object requested to be executed.
-+   * @param array $arguments
-+   *   An array of arguments for the prepared statement.
-+   * @param array $options
-+   *   An associative array of options to control how the database operation is
-+   *   run.
-+   *
-+   * @throws \Drupal\Core\Database\DatabaseExceptionWrapper
-+   * @throws \Drupal\Core\Database\IntegrityConstraintViolationException
-+   */
-+  public function handleExecutionException(StatementInterface $statement, array $arguments = [], array $options = []): void {
-+    if (!($options['throw_exception'] ?? TRUE)) {
-+      return;
-+    }
-+
-+    if ($this->exception instanceof \PDOException) {
-+      // Wrap the exception in another exception, because PHP does not allow
-+      // overriding Exception::getMessage(). Its message is the extra database
-+      // debug information.
-+      $message = $this->exception->getMessage() . ": " . $statement->getQueryString() . "; " . print_r($arguments, TRUE);
-+      // Match all SQLSTATE 23xxx errors.
-+      if (substr($this->exception->getCode(), -6, -3) == '23') {
-+        throw new IntegrityConstraintViolationException($message, $this->exception->getCode(), $this->exception);
-+      }
-+      throw new DatabaseExceptionWrapper($message, 0, $this->exception);
-+    }
-+
-+    throw $this->exception;
-+  }
-+
-+}
-diff --git a/core/tests/Drupal/KernelTests/Core/Database/DatabaseExceptionWrapperTest.php b/core/tests/Drupal/KernelTests/Core/Database/DatabaseExceptionWrapperTest.php
-index 0f4c06a328..dd0860d3bb 100644
---- a/core/tests/Drupal/KernelTests/Core/Database/DatabaseExceptionWrapperTest.php
-+++ b/core/tests/Drupal/KernelTests/Core/Database/DatabaseExceptionWrapperTest.php
-@@ -4,6 +4,7 @@
+   protected $customCountQuery = FALSE;
  
- use Drupal\Core\Database\DatabaseExceptionWrapper;
- use Drupal\Core\Database\Database;
-+use Drupal\Core\Database\StatementWrapper;
- use Drupal\KernelTests\KernelTestBase;
+-  public function __construct(SelectInterface $query, Connection $connection) {
++  /**
++   * The pager manager service.
++   *
++   * @var \Drupal\Core\Pager\PagerManagerInterface
++   */
++  protected $pagerManager;
++
++  /**
++   * Constructs a PagerSelectExtender object.
++   *
++   * @param \Drupal\Core\Database\Query\SelectInterface $query
++   *   Select query object.
++   * @param \Drupal\Core\Database\Connection $connection
++   *   Database connection object.
++   * @param \Drupal\Core\Pager\PagerManagerInterface $pager_manager
++   *   The pager manager service.
++   */
++  public function __construct(SelectInterface $query, Connection $connection, PagerManagerInterface $pager_manager = NULL) {
+     parent::__construct($query, $connection);
++    if (!$pager_manager) {
++      @trigger_error('The pager.manager service must be passed to PagerSelectExtender::__construct(), it is required before drupal:10.0.0.', E_USER_DEPRECATED);
++      $pager_manager = \Drupal::service('pager.manager');
++    }
++    $this->pagerManager = $pager_manager;
+ 
+     // Add pager tag. Do this here to ensure that it is always added before
+     // preExecute() is called.
+     $this->addTag('pager');
+   }
+ 
++  /**
++   * Implements the magic __get() method.
++   *
++   * @todo Remove the method in Drupal 10.
++   */
++  public function __get($name) {
++    if ($name === 'maxElement') {
++      @trigger_error("PagerSelectExtender::\$maxElement should not be accessed in drupal:9.2.0 and will error in drupal:10.0.0. Use \Drupal::service('pager.manager')->getMaxPagerElementId() instead. See https://www.drupal.org/node/3194594", E_USER_DEPRECATED);
++      return $this->pagerManager->getMaxPagerElementId();
++    }
++  }
++
+   /**
+    * Override the execute method.
+    *
+@@ -73,9 +101,7 @@ public function execute() {
+     $this->ensureElement();
+ 
+     $total_items = $this->getCountQuery()->execute()->fetchField();
+-    /** @var \Drupal\Core\Pager\PagerManagerInterface $pager_manager */
+-    $pager_manager = \Drupal::service('pager.manager');
+-    $pager = $pager_manager->createPager($total_items, $this->limit, $this->element);
++    $pager = $this->pagerManager->createPager($total_items, $this->limit, $this->element);
+     $this->range($pager->getCurrentPage() * $this->limit, $this->limit);
+ 
+     // Now that we've added our pager-based range instructions, run the query normally.
+@@ -84,15 +110,13 @@ public function execute() {
+ 
+   /**
+    * Ensure that there is an element associated with this query.
+-   * If an element was not specified previously, then the value of the
+-   * $maxElement counter is taken, after which the counter is incremented.
+    *
+    * After running this method, access $this->element to get the element for this
+    * query.
+    */
+   protected function ensureElement() {
+     if (!isset($this->element)) {
+-      $this->element = self::$maxElement++;
++      $this->element = $this->pagerManager->getMaxPagerElementId() + 1;
+     }
+   }
+ 
+@@ -151,9 +175,6 @@ public function limit($limit = 10) {
+    * whatever reason you want to explicitly define an element for a given query,
+    * you may do so here.
+    *
+-   * Setting the element here also increments the static $maxElement counter,
+-   * which is used for determining the $element when there's none specified.
+-   *
+    * Note that no collision detection is done when setting an element ID
+    * explicitly, so it is possible for two pagers to end up using the same ID
+    * if both are set explicitly.
+@@ -163,10 +184,22 @@ public function limit($limit = 10) {
+    */
+   public function element($element) {
+     $this->element = $element;
+-    if ($element >= self::$maxElement) {
+-      self::$maxElement = $element + 1;
+-    }
+     return $this;
+   }
+ 
++  /**
++   * Gets the element ID for this pager query.
++   *
++   * The element is used to differentiate different pager queries on the same
++   * page so that they may be operated independently.
++   *
++   * @return int
++   *   Element ID that is used to differentiate between different pager
++   *   queries.
++   */
++  public function getElement(): int {
++    $this->ensureElement();
++    return $this->element;
++  }
++
+ }
+diff --git a/core/lib/Drupal/Core/Database/Query/Select.php b/core/lib/Drupal/Core/Database/Query/Select.php
+index 94cbf92b14c8050c65cc273d16cd911e4875c84c..82fa4d15dd69eb805b51bfb4027d408f3826720e 100644
+--- a/core/lib/Drupal/Core/Database/Query/Select.php
++++ b/core/lib/Drupal/Core/Database/Query/Select.php
+@@ -319,12 +319,15 @@ public function havingCompile(Connection $connection) {
+    */
+   public function extend($extender_name) {
+     $parts = explode('\\', $extender_name);
+-    $class = end($parts);
+-    $driver_class = $this->connection->getDriverClass($class);
+-    if ($driver_class !== $class) {
+-      return new $driver_class($this, $this->connection);
++    $base_class = end($parts);
++    $driver_class = $this->connection->getDriverClass($base_class);
++    $class = $driver_class !== $base_class ? $driver_class : $extender_name;
++    if (is_subclass_of($class, PagerSelectExtender::class)) {
++      return new $class($this, $this->connection, \Drupal::service('pager.manager'));
++    }
++    else {
++      return new $class($this, $this->connection);
+     }
+-    return new $extender_name($this, $this->connection);
+   }
+ 
+   /**
+diff --git a/core/lib/Drupal/Core/Database/Query/SelectExtender.php b/core/lib/Drupal/Core/Database/Query/SelectExtender.php
+index 0681813f04cc47821b225e41282ef1322324fcb0..bc0f284f8040a4415da9b770cd8b8231d67cffa4 100644
+--- a/core/lib/Drupal/Core/Database/Query/SelectExtender.php
++++ b/core/lib/Drupal/Core/Database/Query/SelectExtender.php
+@@ -222,12 +222,15 @@ public function extend($extender_name) {
+     // you will replace all the earlier extenders with the last extender,
+     // instead of creating list of objects that extend each other.
+     $parts = explode('\\', $extender_name);
+-    $class = end($parts);
+-    $driver_class = $this->connection->getDriverClass($class);
+-    if ($driver_class !== $class) {
+-      return new $driver_class($this, $this->connection);
++    $base_class = end($parts);
++    $driver_class = $this->connection->getDriverClass($base_class);
++    $class = $driver_class !== $base_class ? $driver_class : $extender_name;
++    if (is_subclass_of($class, PagerSelectExtender::class)) {
++      return new $class($this, $this->connection, \Drupal::service('pager.manager'));
++    }
++    else {
++      return new $class($this, $this->connection);
+     }
+-    return new $extender_name($this, $this->connection);
+   }
+ 
+   /* Alter accessors to expose the query data to alter hooks. */
+diff --git a/core/lib/Drupal/Core/Entity/Query/QueryBase.php b/core/lib/Drupal/Core/Entity/Query/QueryBase.php
+index a1e5e2c92311f8f5101b69d4a7ae41153e13dfab..6c43c919eef1469992ddc12e465c23a988a214c5 100644
+--- a/core/lib/Drupal/Core/Entity/Query/QueryBase.php
++++ b/core/lib/Drupal/Core/Entity/Query/QueryBase.php
+@@ -2,7 +2,6 @@
+ 
+ namespace Drupal\Core\Entity\Query;
+ 
+-use Drupal\Core\Database\Query\PagerSelectExtender;
+ use Drupal\Core\Entity\EntityTypeInterface;
+ use Drupal\Core\Utility\TableSort;
+ 
+@@ -289,10 +288,7 @@ public function pager($limit = 10, $element = NULL) {
+     // Even when not using SQL, storing the element PagerSelectExtender is as
+     // good as anywhere else.
+     if (!isset($element)) {
+-      $element = PagerSelectExtender::$maxElement++;
+-    }
+-    elseif ($element >= PagerSelectExtender::$maxElement) {
+-      PagerSelectExtender::$maxElement = $element + 1;
++      $element = \Drupal::service('pager.manager')->getMaxPagerElementId() + 1;
+     }
+ 
+     $this->pager = [
+diff --git a/core/lib/Drupal/Core/Pager/PagerManager.php b/core/lib/Drupal/Core/Pager/PagerManager.php
+index 5e29724dc1d903f41cbaf1f5eeb7559445f102d9..36d10a1de4b366465681e08ec58580e788e3e354 100644
+--- a/core/lib/Drupal/Core/Pager/PagerManager.php
++++ b/core/lib/Drupal/Core/Pager/PagerManager.php
+@@ -90,12 +90,9 @@ public function getUpdatedParameters(array $query, $element, $index) {
+   }
+ 
+   /**
+-   * Gets the extent of the pager page element IDs.
+-   *
+-   * @return int
+-   *   The maximum element ID available, -1 if there are no elements.
++   * {@inheritdoc}
+    */
+-  protected function getMaxPagerElementId() {
++  public function getMaxPagerElementId() {
+     return empty($this->pagers) ? -1 : max(array_keys($this->pagers));
+   }
+ 
+diff --git a/core/lib/Drupal/Core/Pager/PagerManagerInterface.php b/core/lib/Drupal/Core/Pager/PagerManagerInterface.php
+index 94db9320ac330430eaf0434c32faf35954957d99..b818b81341dc2e29ea462f65f133bd3fa7222b5c 100644
+--- a/core/lib/Drupal/Core/Pager/PagerManagerInterface.php
++++ b/core/lib/Drupal/Core/Pager/PagerManagerInterface.php
+@@ -33,7 +33,7 @@ interface PagerManagerInterface {
+    * before executing it. For example:
+    * @code
+    *   $query = $connection->select('some_table')
+-   *     ->extend('Drupal\Core\Database\Query\PagerSelectExtender');
++   *     ->extend(PagerSelectExtender::class);
+    * @endcode
+    *
+    * However, if you are using a different method for generating the items to be
+@@ -163,4 +163,12 @@ public function findPage(int $pager_id = 0): int;
+    */
+   public function getUpdatedParameters(array $query, $element, $index);
+ 
++  /**
++   * Gets the extent of the pager page element IDs.
++   *
++   * @return int
++   *   The maximum element ID available, -1 if there are no elements.
++   */
++  public function getMaxPagerElementId();
++
+ }
+diff --git a/core/modules/system/tests/src/Functional/Database/SelectPagerDefaultTest.php b/core/modules/system/tests/src/Functional/Database/SelectPagerDefaultTest.php
+index 7a6b0cf443f5781992789937db22a9d7e8c051b3..4da8e0aa2359aff191c547f1e922ef939c234ace 100644
+--- a/core/modules/system/tests/src/Functional/Database/SelectPagerDefaultTest.php
++++ b/core/modules/system/tests/src/Functional/Database/SelectPagerDefaultTest.php
+@@ -144,34 +144,37 @@ public function testElementNumbers() {
+     \Drupal::getContainer()->get('request_stack')->push($request);
+ 
+     $connection = Database::getConnection();
+-    $name = $connection->select('test', 't')
++    $query = $connection->select('test', 't')
+       ->extend(PagerSelectExtender::class)
+       ->element(2)
+       ->fields('t', ['name'])
+       ->orderBy('age')
+-      ->limit(1)
+-      ->execute()
++      ->limit(1);
++    $this->assertSame(2, $query->getElement());
++    $name = $query->execute()
+       ->fetchField();
+     $this->assertEqual($name, 'Paul', 'Pager query #1 with a specified element ID returned the correct results.');
+ 
+-    // Setting an element smaller than the previous one
+-    // should not overwrite the pager $maxElement with a smaller value.
+-    $name = $connection->select('test', 't')
++    // Setting an element smaller than the previous one should not collide with
++    // the existing pager.
++    $query = $connection->select('test', 't')
+       ->extend(PagerSelectExtender::class)
+       ->element(1)
+       ->fields('t', ['name'])
+       ->orderBy('age')
+-      ->limit(1)
+-      ->execute()
++      ->limit(1);
++    $this->assertSame(1, $query->getElement());
++    $name = $query->execute()
+       ->fetchField();
+     $this->assertEqual($name, 'George', 'Pager query #2 with a specified element ID returned the correct results.');
+ 
+-    $name = $connection->select('test', 't')
++    $query = $connection->select('test', 't')
+       ->extend(PagerSelectExtender::class)
+       ->fields('t', ['name'])
+       ->orderBy('age')
+-      ->limit(1)
+-      ->execute()
++      ->limit(1);
++    $this->assertSame(3, $query->getElement());
++    $name = $query->execute()
+       ->fetchField();
+     $this->assertEqual($name, 'John', 'Pager query #3 with a generated element ID returned the correct results.');
+ 
+diff --git a/core/tests/Drupal/Tests/Core/Database/SelectTest.php b/core/tests/Drupal/KernelTests/Core/Database/SelectExtenderTest.php
+similarity index 92%
+rename from core/tests/Drupal/Tests/Core/Database/SelectTest.php
+rename to core/tests/Drupal/KernelTests/Core/Database/SelectExtenderTest.php
+index 867cc61989fe7d181ddff729793e96b33ecebf17..5a23f9a2500ac3b17e68aad479fb6ecbd94bc77b 100644
+--- a/core/tests/Drupal/Tests/Core/Database/SelectTest.php
++++ b/core/tests/Drupal/KernelTests/Core/Database/SelectExtenderTest.php
+@@ -1,20 +1,20 @@
+ <?php
+ 
+-namespace Drupal\Tests\Core\Database;
++namespace Drupal\KernelTests\Core\Database;
+ 
+ use Composer\Autoload\ClassLoader;
+ use Drupal\Core\Database\Query\SelectExtender;
++use Drupal\KernelTests\KernelTestBase;
+ use Drupal\Tests\Core\Database\Stub\StubConnection;
+ use Drupal\Tests\Core\Database\Stub\StubPDO;
+-use Drupal\Tests\UnitTestCase;
  
  /**
-@@ -50,14 +51,53 @@ public function testPrepareQuery() {
-   }
+- * Tests the Connection class.
++ * Tests the Select query extender classes.
+  *
+  * @coversDefaultClass \Drupal\Core\Database\Query\Select
+  * @group Database
+  */
+-class SelectTest extends UnitTestCase {
++class SelectExtenderTest extends KernelTestBase {
  
    /**
--   * Tests Connection::prepareStatement exceptions.
-+   * Tests deprecation of Connection::handleQueryException.
-+   *
-+   * @group legacy
+    * Data provider for testExtend().
+@@ -25,7 +25,7 @@ class SelectTest extends UnitTestCase {
+    *   - The database driver namespace.
+    *   - The namespaced class name for which to extend.
     */
--  public function testPrepareStatement() {
-+  public function testHandleQueryExceptionDeprecation(): void {
-+    $this->expectDeprecation('Passing a StatementInterface object as a $query argument to Drupal\Core\Database\Connection::query is deprecated in drupal:9.2.0 and is removed in drupal:10.0.0. Call the execute method from the StatementInterface object directly instead. See https://www.drupal.org/node/3154439');
-+    $this->expectDeprecation('Connection::handleQueryException() is deprecated in drupal:9.2.0 and is removed in drupal:10.0.0. Get a handler through $this->exceptionHandler() instead, and use one of its methods. See https://www.drupal.org/node/3187222');
-+    $this->expectException(DatabaseExceptionWrapper::class);
-+    $stmt = Database::getConnection()->prepareStatement('SELECT * FROM {does_not_exist}', []);
-+    Database::getConnection()->query($stmt);
-+  }
-+
-+  /**
-+   * Tests Connection::prepareStatement exceptions on execution.
-+   *
-+   * Core database drivers use PDO emulated statements or the StatementPrefetch
-+   * class, which defer the statement check to the moment of the execution.
-+   */
-+  public function testPrepareStatementFailOnExecution() {
-     $this->expectException(\PDOException::class);
-     $stmt = Database::getConnection()->prepareStatement('bananas', []);
-     $stmt->execute();
+-  public function providerExtend() {
++  public function providerExtend(): array {
+     return [
+       [
+         'Drupal\Core\Database\Query\PagerSelectExtender',
+@@ -115,7 +115,7 @@ public function providerExtend() {
+    * @covers \Drupal\Core\Database\Query\SelectExtender::extend
+    * @dataProvider providerExtend
+    */
+-  public function testExtend($expected, $namespace, $extend) {
++  public function testExtend(string $expected, string $namespace, string $extend): void {
+     $additional_class_loader = new ClassLoader();
+     $additional_class_loader->addPsr4("Drupal\\corefake\\Driver\\Database\\corefake\\", __DIR__ . "/../../../../../tests/fixtures/database_drivers/module/corefake/src/Driver/Database/corefake");
+     $additional_class_loader->addPsr4("Drupal\\corefake\\Driver\\Database\\corefakeWithAllCustomClasses\\", __DIR__ . "/../../../../../tests/fixtures/database_drivers/module/corefake/src/Driver/Database/corefakeWithAllCustomClasses");
+@@ -130,7 +130,7 @@ public function testExtend($expected, $namespace, $extend) {
+ 
+     // Get an instance of the class \Drupal\Core\Database\Query\SelectExtender.
+     $select_extender = $connection->select('test')->extend(SelectExtender::class);
+-    $this->assertEquals('Drupal\Core\Database\Query\SelectExtender', get_class($select_extender));
++    $this->assertEquals(SelectExtender::class, get_class($select_extender));
+ 
+     // Tests the method \Drupal\Core\Database\Query\SelectExtender::extend().
+     $select_extender_extended = $select_extender->extend($extend);
+diff --git a/core/tests/Drupal/KernelTests/Core/Pager/PagerManagerTest.php b/core/tests/Drupal/KernelTests/Core/Pager/PagerManagerTest.php
+index 3f1442141cc8d9386c33daf7d484e15c9de0b898..2f5d31161aade6fb61bdc9d208521b534222ba47 100644
+--- a/core/tests/Drupal/KernelTests/Core/Pager/PagerManagerTest.php
++++ b/core/tests/Drupal/KernelTests/Core/Pager/PagerManagerTest.php
+@@ -53,4 +53,36 @@ public function testFindPage() {
+     $this->assertEquals(10, $pager_manager->findPage(1));
    }
  
 +  /**
-+   * Tests Connection::prepareStatement exceptions on preparation.
++   * @covers ::getMaxPagerElementId
 +   *
-+   * Core database drivers use PDO emulated statements or the StatementPrefetch
-+   * class, which defer the statement check to the moment of the execution. In
-+   * order to test a failure at preparation time, we have to force the
-+   * connection not to emulate statement preparation. Still, this is only valid
-+   * for drivers that implement StatementWrapper.
++   * @dataProvider providerTestGetMaxPagerElementId
 +   */
-+  public function testPrepareStatementFailOnPreparation() {
-+    $stmt = Database::getConnection()->prepareStatement('bananas', []);
-+    if (!$stmt instanceof StatementWrapper) {
-+      $this->markTestSkipped('This test is only applicable for drivers that implement StatementWrapper');
++  public function testGetMaxPagerElementId(array $elements, int $expected_max_element_id): void {
++    /* @var $pager_manager \Drupal\Core\Pager\PagerManagerInterface */
++    $pager_manager = $this->container->get('pager.manager');
++
++    foreach ($elements as $element) {
++      $pager_manager->createPager(30, 10, $element);
 +    }
 +
-+    $connection_info = Database::getConnectionInfo('default');
-+    $connection_info['default']['pdo'][\PDO::ATTR_EMULATE_PREPARES] = FALSE;
-+    Database::addConnectionInfo('default', 'foo', $connection_info['default']);
-+    $foo_connection = Database::getConnection('foo', 'default');
-+    $this->expectException(DatabaseExceptionWrapper::class);
-+    $stmt = $foo_connection->prepareStatement('bananas', []);
++    $this->assertEquals($expected_max_element_id, $pager_manager->getMaxPagerElementId());
 +  }
 +
-   /**
-    * Tests the expected database exception thrown for inexistent tables.
-    */
-diff --git a/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php b/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
-index 64efa32515..0b71cb7374 100644
---- a/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
-+++ b/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
-@@ -149,6 +149,11 @@ public function providerGetDriverClass() {
-         'Drupal\corefake\Driver\Database\corefake',
-         'Delete',
-       ],
-+      [
-+        'Drupal\Core\Database\ExceptionHandler',
-+        'Drupal\corefake\Driver\Database\corefake',
-+        'ExceptionHandler',
-+      ],
-       [
-         'Drupal\Core\Database\Query\Insert',
-         'Drupal\corefake\Driver\Database\corefake',
-@@ -201,6 +206,11 @@ public function providerGetDriverClass() {
-         'Drupal\corefake\Driver\Database\corefakeWithAllCustomClasses',
-         'Delete',
-       ],
-+      [
-+        'Drupal\corefake\Driver\Database\corefakeWithAllCustomClasses\ExceptionHandler',
-+        'Drupal\corefake\Driver\Database\corefakeWithAllCustomClasses',
-+        'ExceptionHandler',
-+      ],
-       [
-         'Drupal\corefake\Driver\Database\corefakeWithAllCustomClasses\Insert',
-         'Drupal\corefake\Driver\Database\corefakeWithAllCustomClasses',
-diff --git a/core/tests/fixtures/database_drivers/module/corefake/src/Driver/Database/corefakeWithAllCustomClasses/ExceptionHandler.php b/core/tests/fixtures/database_drivers/module/corefake/src/Driver/Database/corefakeWithAllCustomClasses/ExceptionHandler.php
-new file mode 100644
-index 0000000000..9dc9122124
---- /dev/null
-+++ b/core/tests/fixtures/database_drivers/module/corefake/src/Driver/Database/corefakeWithAllCustomClasses/ExceptionHandler.php
-@@ -0,0 +1,12 @@
-+<?php
++  /**
++   * Provides test cases for PagerManagerTest::testGetMaxPagerElementId().
++   *
++   * @return array
++   *   An array of test cases, each which the following values:
++   *   - Array of elements to pass to PagerManager::createPager().
++   *   - The expected value returned by PagerManager::getMaxPagerElementId().
++   */
++  public function providerTestGetMaxPagerElementId(): array {
++    return [
++      'no_pager' => [[], -1],
++      'single_pager' => [[0], 0],
++      'multiple_pagers' => [[30, 10, 20], 30],
++    ];
++  }
 +
-+namespace Drupal\corefake\Driver\Database\corefakeWithAllCustomClasses;
-+
-+use Drupal\Core\Database\ExceptionHandler as BaseExceptionHandler;
-+
-+/**
-+ * CorefakeWithAllCustomClasses implementation of \Drupal\Core\Database\Delete.
-+ */
-+class ExceptionHandler extends BaseExceptionHandler {
-+
-+}
+ }
+ 
