@@ -49,7 +49,7 @@ index 82edd46046..c0d6553d91 100644
 +#      # @see https://www.drupal.org/project/drupal/issues/2869825
 +#      nightwatchjs:
 diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
-index 3f194e1aa0..a672de6e8c 100644
+index 3f194e1aa0..48f73f8047 100644
 --- a/core/lib/Drupal/Core/Database/Connection.php
 +++ b/core/lib/Drupal/Core/Database/Connection.php
 @@ -156,6 +156,11 @@
@@ -130,15 +130,18 @@ index 3f194e1aa0..a672de6e8c 100644
            case 'Condition':
              $this->driverClasses[$class] = Condition::class;
              break;
-@@ -1228,6 +1250,7 @@ public function condition($conjunction) {
+@@ -1228,9 +1250,7 @@ public function condition($conjunction) {
     *   The sanitized database name.
     */
    public function escapeDatabase($database) {
-+//    @trigger_error(__METHOD__ . ' is deprecated in drupal:9.x.0 and is removed from drupal:10.0.0. @todo. See https://www.drupal.org/node/1234567', E_USER_DEPRECATED);
-     $database = preg_replace('/[^A-Za-z0-9_]+/', '', $database);
-     [$start_quote, $end_quote] = $this->identifierQuotes;
-     return $start_quote . $database . $end_quote;
-@@ -1251,6 +1274,7 @@ public function escapeDatabase($database) {
+-    $database = preg_replace('/[^A-Za-z0-9_]+/', '', $database);
+-    [$start_quote, $end_quote] = $this->identifierQuotes;
+-    return $start_quote . $database . $end_quote;
++    return $this->identifierHandler->getPlatformDatabaseName($database);
+   }
+ 
+   /**
+@@ -1251,6 +1271,7 @@ public function escapeDatabase($database) {
     * @see \Drupal\Core\Database\Connection::setPrefix()
     */
    public function escapeTable($table) {
@@ -146,7 +149,7 @@ index 3f194e1aa0..a672de6e8c 100644
      if (!isset($this->escapedTables[$table])) {
        $this->escapedTables[$table] = preg_replace('/[^A-Za-z0-9_.]+/', '', $table);
      }
-@@ -1271,14 +1295,7 @@ public function escapeTable($table) {
+@@ -1271,14 +1292,7 @@ public function escapeTable($table) {
     *   The sanitized field name.
     */
    public function escapeField($field) {
@@ -162,20 +165,25 @@ index 3f194e1aa0..a672de6e8c 100644
    }
  
    /**
-@@ -1296,6 +1313,7 @@ public function escapeField($field) {
+@@ -1296,11 +1310,7 @@ public function escapeField($field) {
     *   The sanitized alias name.
     */
    public function escapeAlias($field) {
-+//    @trigger_error(__METHOD__ . ' is deprecated in drupal:9.x.0 and is removed from drupal:10.0.0. @todo. See https://www.drupal.org/node/1234567', E_USER_DEPRECATED);
-     if (!isset($this->escapedAliases[$field])) {
-       [$start_quote, $end_quote] = $this->identifierQuotes;
-       $this->escapedAliases[$field] = $start_quote . preg_replace('/[^A-Za-z0-9_]+/', '', $field) . $end_quote;
+-    if (!isset($this->escapedAliases[$field])) {
+-      [$start_quote, $end_quote] = $this->identifierQuotes;
+-      $this->escapedAliases[$field] = $start_quote . preg_replace('/[^A-Za-z0-9_]+/', '', $field) . $end_quote;
+-    }
+-    return $this->escapedAliases[$field];
++    return $this->identifierHandler->getPlatformAliasName($field, IdentifierHandler::ALIAS);
+   }
+ 
+   /**
 diff --git a/core/lib/Drupal/Core/Database/IdentifierHandler.php b/core/lib/Drupal/Core/Database/IdentifierHandler.php
 new file mode 100644
-index 0000000000..1b573e78a1
+index 0000000000..e245e66a26
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/IdentifierHandler.php
-@@ -0,0 +1,77 @@
+@@ -0,0 +1,103 @@
 +<?php
 +
 +namespace Drupal\Core\Database;
@@ -210,7 +218,7 @@ index 0000000000..1b573e78a1
 +  protected $identifiers;
 +
 +  public function __construct() {
-+    $this->setIdentifier("", "", static::COLUMN);
++//    $this->setIdentifier("", "", static::COLUMN);
 +  }
 +
 +  public function __destruct() {
@@ -237,6 +245,19 @@ index 0000000000..1b573e78a1
 +  /**
 +   * @todo
 +   */
++  public function getPlatformDatabaseName(string $original_name, bool $quoted = TRUE): string {
++    if (!isset($this->identifiers['original'][$original_name][static::DATABASE])) {
++      $this->setIdentifier($original_name, preg_replace('/[^A-Za-z0-9_]+/', '', $original_name), static::DATABASE);
++    }
++    [$start_quote, $end_quote] = $this->identifierQuotes;
++    return $quoted ?
++      $start_quote . $this->identifiers['original'][$original_name][static::DATABASE]['database'] . $end_quote :
++      $this->identifiers['original'][$original_name][static::DATABASE]['database'];
++  }
++
++  /**
++   * @todo
++   */
 +  public function getPlatformColumnName(string $original_name, bool $quoted = TRUE): string {
 +    if ($original_name === '') {
 +      return '';
@@ -250,6 +271,19 @@ index 0000000000..1b573e78a1
 +    return $quoted ?
 +      $start_quote . str_replace(".", "$end_quote.$start_quote", $this->identifiers['original'][$original_name][static::COLUMN]['database']) . $end_quote :
 +      $this->identifiers['original'][$original_name][static::COLUMN]['database'];
++  }
++
++  /**
++   * @todo
++   */
++  public function getPlatformAliasName(string $original_name, int $type, bool $quoted = TRUE): string {
++    if (!isset($this->identifiers['original'][$original_name][static::ALIAS])) {
++      $this->setIdentifier($original_name, preg_replace('/[^A-Za-z0-9_]+/', '', $original_name), $type | static::ALIAS);
++    }
++    [$start_quote, $end_quote] = $this->identifierQuotes;
++    return $quoted ?
++      $start_quote . $this->identifiers['original'][$original_name][static::ALIAS]['database'] . $end_quote :
++      $this->identifiers['original'][$original_name][static::ALIAS]['database'];
 +  }
 +
 +}
