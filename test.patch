@@ -1,12 +1,428 @@
+diff --git a/core/drupalci.yml b/core/drupalci.yml
+index 82edd46046..c0d6553d91 100644
+--- a/core/drupalci.yml
++++ b/core/drupalci.yml
+@@ -25,24 +25,24 @@ build:
+         testgroups: '--all'
+         suppress-deprecations: false
+         halt-on-fail: false
+-      run_tests.build:
+-        # Limit concurrency due to disk space concerns.
+-        concurrency: 15
+-        types: 'PHPUnit-Build'
+-        testgroups: '--all'
+-        suppress-deprecations: false
+-        halt-on-fail: false
+-      run_tests.functional:
+-        types: 'PHPUnit-Functional'
+-        testgroups: '--all'
+-        suppress-deprecations: false
+-        halt-on-fail: false
+-      run_tests.javascript:
+-        concurrency: 15
+-        types: 'PHPUnit-FunctionalJavascript'
+-        testgroups: '--all'
+-        suppress-deprecations: false
+-        halt-on-fail: false
+-      # Run nightwatch testing.
+-      # @see https://www.drupal.org/project/drupal/issues/2869825
+-      nightwatchjs:
++#      run_tests.build:
++#        # Limit concurrency due to disk space concerns.
++#        concurrency: 15
++#        types: 'PHPUnit-Build'
++#        testgroups: '--all'
++#        suppress-deprecations: false
++#        halt-on-fail: false
++#      run_tests.functional:
++#        types: 'PHPUnit-Functional'
++#        testgroups: '--all'
++#        suppress-deprecations: false
++#        halt-on-fail: false
++#      run_tests.javascript:
++#        concurrency: 15
++#        types: 'PHPUnit-FunctionalJavascript'
++#        testgroups: '--all'
++#        suppress-deprecations: false
++#        halt-on-fail: false
++#      # Run nightwatch testing.
++#      # @see https://www.drupal.org/project/drupal/issues/2869825
++#      nightwatchjs:
+diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
+index 3f194e1aa0..d2a59b9408 100644
+--- a/core/lib/Drupal/Core/Database/Connection.php
++++ b/core/lib/Drupal/Core/Database/Connection.php
+@@ -157,41 +157,9 @@
+   protected $unprefixedTablesMap = [];
+ 
+   /**
+-   * List of escaped database, table, and field names, keyed by unescaped names.
+-   *
+-   * @var array
+-   *
+-   * @deprecated in drupal:9.0.0 and is removed from drupal:10.0.0. This is no
+-   *   longer used. Use \Drupal\Core\Database\Connection::$escapedTables or
+-   *   \Drupal\Core\Database\Connection::$escapedFields instead.
+-   *
+-   * @see https://www.drupal.org/node/2986894
+-   */
+-  protected $escapedNames = [];
+-
+-  /**
+-   * List of escaped table names, keyed by unescaped names.
+-   *
+-   * @var array
+-   */
+-  protected $escapedTables = [];
+-
+-  /**
+-   * List of escaped field names, keyed by unescaped names.
+-   *
+-   * There are cases in which escapeField() is called on an empty string. In
+-   * this case it should always return an empty string.
+-   *
+-   * @var array
++   * @todo
+    */
+-  protected $escapedFields = ["" => ""];
+-
+-  /**
+-   * List of escaped aliases names, keyed by unescaped aliases.
+-   *
+-   * @var array
+-   */
+-  protected $escapedAliases = [];
++  protected $identifierHandler;
+ 
+   /**
+    * Post-root (non-nested) transaction commit callbacks.
+@@ -208,9 +176,23 @@
+    * quotation mark.
+    *
+    * @var string[]
++   *
++   * @todo deprecate
+    */
+   protected $identifierQuotes;
+ 
++  /**
++   * Implements the magic __get() method.
++   *
++   * @todo Remove the method in Drupal 10.
++   */
++  public function __get($name) {
++    if (in_array($name, ['escapedNames', 'escapedTables', 'escapedFields', 'escapedAliases'])) {
++      @trigger_error("Connection::\${$name} should not be accessed in drupal:9.x.0 and is removed from drupal:10.0.0. This is no longer used. See https://www.drupal.org/node/1234567", E_USER_DEPRECATED);
++      return [];
++    }
++  }
++
+   /**
+    * Constructs a Connection object.
+    *
+@@ -260,6 +242,10 @@ public function __construct(\PDO $connection, array $connection_options) {
+ 
+     $this->connection = $connection;
+     $this->connectionOptions = $connection_options;
++
++    // Initialize the identifier handler.
++    $identifier_handler_class = $this->getDriverClass('IdentifierHandler');
++    $this->identifierHandler = new $identifier_handler_class($this->identifierQuotes, $this->prefixes);
+   }
+ 
+   /**
+@@ -459,7 +445,12 @@ protected function setPrefix($prefix) {
+    *   The properly-prefixed string.
+    */
+   public function prefixTables($sql) {
+-    return str_replace($this->prefixSearch, $this->prefixReplace, $sql);
++    $replacements = $tables = [];
++    preg_match_all('/(\{(\S*)\})/', $sql, $tables, PREG_SET_ORDER, 0);
++    foreach ($tables as $table) {
++      $replacements[$table[1]] = $this->identifierHandler->getPlatformTableName($table[2], TRUE, TRUE);
++    }
++    return str_replace(array_keys($replacements), array_values($replacements), $sql);
+   }
+ 
+   /**
+@@ -524,9 +515,7 @@ public function getUnprefixedTablesMap() {
+    * @return string
+    */
+   public function getFullQualifiedTableName($table) {
+-    $options = $this->getConnectionOptions();
+-    $prefix = $this->tablePrefix($table);
+-    return $options['database'] . '.' . $prefix . $table;
++    return $this->identifierHandler->getPlatformDatabaseName($this->getConnectionOptions()['database']) . '.' . $this->identifierHandler->getPlatformTableName($table, TRUE, TRUE);
+   }
+ 
+   /**
+@@ -990,6 +979,10 @@ public function getDriverClass($class) {
+       }
+       else {
+         switch ($class) {
++          case 'IdentifierHandler':
++            $this->driverClasses[$class] = IdentifierHandler::class;
++            break;
++
+           case 'Condition':
+             $this->driverClasses[$class] = Condition::class;
+             break;
+@@ -1228,9 +1221,7 @@ public function condition($conjunction) {
+    *   The sanitized database name.
+    */
+   public function escapeDatabase($database) {
+-    $database = preg_replace('/[^A-Za-z0-9_]+/', '', $database);
+-    [$start_quote, $end_quote] = $this->identifierQuotes;
+-    return $start_quote . $database . $end_quote;
++    return $this->identifierHandler->getPlatformDatabaseName($database);
+   }
+ 
+   /**
+@@ -1251,10 +1242,7 @@ public function escapeDatabase($database) {
+    * @see \Drupal\Core\Database\Connection::setPrefix()
+    */
+   public function escapeTable($table) {
+-    if (!isset($this->escapedTables[$table])) {
+-      $this->escapedTables[$table] = preg_replace('/[^A-Za-z0-9_.]+/', '', $table);
+-    }
+-    return $this->escapedTables[$table];
++    return $this->identifierHandler->getPlatformTableName($table);
+   }
+ 
+   /**
+@@ -1271,14 +1259,7 @@ public function escapeTable($table) {
+    *   The sanitized field name.
+    */
+   public function escapeField($field) {
+-    if (!isset($this->escapedFields[$field])) {
+-      $escaped = preg_replace('/[^A-Za-z0-9_.]+/', '', $field);
+-      [$start_quote, $end_quote] = $this->identifierQuotes;
+-      // Sometimes fields have the format table_alias.field. In such cases
+-      // both identifiers should be quoted, for example, "table_alias"."field".
+-      $this->escapedFields[$field] = $start_quote . str_replace('.', $end_quote . '.' . $start_quote, $escaped) . $end_quote;
+-    }
+-    return $this->escapedFields[$field];
++    return $this->identifierHandler->getPlatformColumnName($field);
+   }
+ 
+   /**
+@@ -1296,11 +1277,7 @@ public function escapeField($field) {
+    *   The sanitized alias name.
+    */
+   public function escapeAlias($field) {
+-    if (!isset($this->escapedAliases[$field])) {
+-      [$start_quote, $end_quote] = $this->identifierQuotes;
+-      $this->escapedAliases[$field] = $start_quote . preg_replace('/[^A-Za-z0-9_]+/', '', $field) . $end_quote;
+-    }
+-    return $this->escapedAliases[$field];
++    return $this->identifierHandler->getPlatformAliasName($field);
+   }
+ 
+   /**
+@@ -1968,4 +1945,18 @@ public function getProvider(): string {
+     return ($first === 'Drupal' && strtolower($second) === $second) ? $second : 'core';
+   }
+ 
++  /**
++   * @todo
++   */
++  public function getIdentifierHandler(): IdentifierHandler {
++    return $this->identifierHandler;
++  }
++
++  /**
++   * @todo remove, debug only
++   */
++  public function dumpIdentifiers(): void {
++    $this->identifierHandler->doDump();
++  }
++
+ }
 diff --git a/core/lib/Drupal/Core/Database/Driver/sqlite/Schema.php b/core/lib/Drupal/Core/Database/Driver/sqlite/Schema.php
-index 2c0f98dc03..7a131cd857 100644
+index 2c0f98dc03..d577f3b068 100644
 --- a/core/lib/Drupal/Core/Database/Driver/sqlite/Schema.php
 +++ b/core/lib/Drupal/Core/Database/Driver/sqlite/Schema.php
-@@ -78,6 +78,7 @@ protected function createIndexSql($tablename, $schema) {
-         $sql[] = 'CREATE INDEX ' . $info['schema'] . '.' . $info['table'] . '_' . $key . ' ON ' . $info['table'] . ' (' . $this->createKeySql($fields) . ")\n";
+@@ -70,14 +70,15 @@ protected function createIndexSql($tablename, $schema) {
+     $info = $this->getPrefixInfo($tablename);
+     if (!empty($schema['unique keys'])) {
+       foreach ($schema['unique keys'] as $key => $fields) {
+-        $sql[] = 'CREATE UNIQUE INDEX ' . $info['schema'] . '.' . $info['table'] . '_' . $key . ' ON ' . $info['table'] . ' (' . $this->createKeySql($fields) . ")\n";
++        $sql[] = 'CREATE UNIQUE INDEX ' . $info['schema'] . '.' . $info['table'] . '_' . $key . ' ON ' . $info['schema'] . '.' . $info['table'] . ' (' . $this->createKeySql($fields) . ")\n";
+       }
+     }
+     if (!empty($schema['indexes'])) {
+       foreach ($schema['indexes'] as $key => $fields) {
+-        $sql[] = 'CREATE INDEX ' . $info['schema'] . '.' . $info['table'] . '_' . $key . ' ON ' . $info['table'] . ' (' . $this->createKeySql($fields) . ")\n";
++        $sql[] = 'CREATE INDEX ' . $info['schema'] . '.' . $info['table'] . '_' . $key . ' ON ' . $info['schema'] . '.' . $info['table'] . ' (' . $this->createKeySql($fields) . ")\n";
        }
      }
 +dump('sqlite', $tablename, $info, $sql);
      return $sql;
+   }
+ 
+diff --git a/core/lib/Drupal/Core/Database/IdentifierHandler.php b/core/lib/Drupal/Core/Database/IdentifierHandler.php
+new file mode 100644
+index 0000000000..d949368d04
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/IdentifierHandler.php
+@@ -0,0 +1,140 @@
++<?php
++
++namespace Drupal\Core\Database;
++
++/**
++ * @todo
++ */
++class IdentifierHandler {
++
++  const DATABASE = 0x4;
++  const TABLE = 0x7;
++  const PREFIXED_TABLE = 0x8;
++  const COLUMN = 0xC;
++  const ALIAS = 0x10;
++
++  /**
++   * The identifier quote characters for the database type.
++   *
++   * An array containing the start and end identifier quote characters for the
++   * database type. The ANSI SQL standard identifier quote character is a double
++   * quotation mark.
++   *
++   * @var string[]
++   */
++  protected $identifierQuotes;
++
++  /**
++   * The table prefixes used by this database connection.
++   *
++   * @var array
++   */
++  protected $prefixes;
++
++  /**
++   * @todo
++   */
++  protected $identifiers;
++
++  /**
++   * Constructs a Connection object.
++   *
++   * @param string[] $identifier_quotes
++   *   The identifier quote characters. Defaults to an empty strings.
++   * @param string[] $prefixes
++   *   @todo
++   */
++  public function __construct(array $identifier_quotes, array $prefixes) {
++    $this->identifierQuotes = $identifier_quotes;
++    $this->prefixes = $prefixes;
++  }
++
++  /**
++   * @todo
++   */
++  protected function setIdentifier(string $identifier, string $db_identifier, int $type): void {
++    $is_alias = (bool) ($type & static::ALIAS);
++    $type = $type & 0xF;
++    if (!$is_alias) {
++      $this->identifiers['original'][$identifier][$type] = $db_identifier;
++      $this->identifiers['platform'][$db_identifier][$type] = $identifier;
++    }
++    else {
++      $this->identifiers['original'][$identifier][static::ALIAS][$type] = $db_identifier;
++      $this->identifiers['platform'][$db_identifier][static::ALIAS][$type] = $identifier;
++    }
++  }
++
++  /**
++   * @todo
++   */
++  protected function hasIdentifier(string $identifier, int $type = 0): bool {
++    return $type ? isset($this->identifiers['original'][$identifier][$type]) : isset($this->identifiers['original'][$identifier]);
++  }
++
++  /**
++   * @todo remove, debug only
++   */
++  public function doDump() {
++    dump($this->identifiers);
++  }
++
++  /**
++   * @todo
++   */
++  public function getPlatformDatabaseName(string $original_name, bool $quoted = TRUE): string {
++    if (!$this->hasIdentifier($original_name, static::DATABASE)) {
++      $this->setIdentifier($original_name, preg_replace('/[^A-Za-z0-9_]+/', '', $original_name), static::DATABASE);
++    }
++    [$start_quote, $end_quote] = $this->identifierQuotes;
++    return $quoted ?
++      $start_quote . $this->identifiers['original'][$original_name][static::DATABASE] . $end_quote :
++      $this->identifiers['original'][$original_name][static::DATABASE];
++  }
++
++  /**
++   * @todo
++   */
++  public function getPlatformTableName(string $original_name, bool $prefixed = FALSE, bool $quoted = FALSE): string {
++    if (!$this->hasIdentifier($original_name, static::TABLE)) {
++      $table_name = preg_replace('/[^A-Za-z0-9_.]+/', '', $original_name);
++      $this->setIdentifier($original_name, $table_name, static::TABLE);
++      $prefix = isset($this->prefixes[$table_name]) ? $this->prefixes[$table_name] : $this->prefixes['default'];
++      $this->setIdentifier($original_name, $prefix . $table_name, static::PREFIXED_TABLE);
++    }
++    [$start_quote, $end_quote] = $this->identifierQuotes;
++    $table = $prefixed ? $this->identifiers['original'][$original_name][static::PREFIXED_TABLE] : $this->identifiers['original'][$original_name][static::TABLE];
++    return $quoted ? $start_quote . str_replace(".", "$end_quote.$start_quote", $table) . $end_quote : $table;
++  }
++
++  /**
++   * @todo
++   */
++  public function getPlatformColumnName(string $original_name, bool $quoted = TRUE): string {
++    if ($original_name === '') {
++      return '';
++    }
++    if (!$this->hasIdentifier($original_name, static::COLUMN)) {
++      $this->setIdentifier($original_name, preg_replace('/[^A-Za-z0-9_.]+/', '', $original_name), static::COLUMN);
++    }
++    // Sometimes fields have the format table_alias.field. In such cases
++    // both identifiers should be quoted, for example, "table_alias"."field".
++    [$start_quote, $end_quote] = $this->identifierQuotes;
++    return $quoted ?
++      $start_quote . str_replace(".", "$end_quote.$start_quote", $this->identifiers['original'][$original_name][static::COLUMN]) . $end_quote :
++      $this->identifiers['original'][$original_name][static::COLUMN];
++  }
++
++  /**
++   * @todo
++   */
++  public function getPlatformAliasName(string $original_name, int $type = 0, bool $quoted = TRUE): string {
++    if (!$this->hasIdentifier($original_name, static::ALIAS)) {
++      $this->setIdentifier($original_name, preg_replace('/[^A-Za-z0-9_]+/', '', $original_name), $type | static::ALIAS);
++    }
++    [$start_quote, $end_quote] = $this->identifierQuotes;
++    $alias = $this->identifiers['original'][$original_name][static::ALIAS][$type] ?? $this->identifiers['original'][$original_name][static::ALIAS][0];
++    return $quoted ? $start_quote . $alias . $end_quote : $alias;
++  }
++
++}
+diff --git a/core/lib/Drupal/Core/Database/Schema.php b/core/lib/Drupal/Core/Database/Schema.php
+index fe932d3bce..dce9e3004d 100644
+--- a/core/lib/Drupal/Core/Database/Schema.php
++++ b/core/lib/Drupal/Core/Database/Schema.php
+@@ -89,6 +89,7 @@ protected function getPrefixInfo($table = 'default', $add_prefix = TRUE) {
+     if ($add_prefix) {
+       $table = $info['prefix'] . $table;
+     }
++dump('pre*******', $table, $info, $add_prefix);
+     // If the prefix contains a period in it, then that means the prefix also
+     // contains a schema reference in which case we will change the schema key
+     // to the value before the period in the prefix. Everything after the dot
+@@ -102,6 +103,7 @@ protected function getPrefixInfo($table = 'default', $add_prefix = TRUE) {
+     else {
+       $info['table'] = $table;
+     }
++dump('post', $info);
+     return $info;
    }
  
