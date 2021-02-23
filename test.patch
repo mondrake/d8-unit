@@ -49,7 +49,7 @@ index 82edd46046..c0d6553d91 100644
 +#      # @see https://www.drupal.org/project/drupal/issues/2869825
 +#      nightwatchjs:
 diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
-index 3f194e1aa0..ad70c4d8c3 100644
+index 3f194e1aa0..0571c02d35 100644
 --- a/core/lib/Drupal/Core/Database/Connection.php
 +++ b/core/lib/Drupal/Core/Database/Connection.php
 @@ -157,41 +157,9 @@
@@ -65,15 +65,15 @@ index 3f194e1aa0..ad70c4d8c3 100644
 -   *   \Drupal\Core\Database\Connection::$escapedFields instead.
 -   *
 -   * @see https://www.drupal.org/node/2986894
--   */
++   * @todo
+    */
 -  protected $escapedNames = [];
 -
 -  /**
 -   * List of escaped table names, keyed by unescaped names.
 -   *
 -   * @var array
-+   * @todo
-    */
+-   */
 -  protected $escapedTables = [];
 -
 -  /**
@@ -96,42 +96,53 @@ index 3f194e1aa0..ad70c4d8c3 100644
  
    /**
     * Post-root (non-nested) transaction commit callbacks.
-@@ -208,9 +176,23 @@
-    * quotation mark.
-    *
-    * @var string[]
-+   *
-+   * @todo deprecate
-    */
-   protected $identifierQuotes;
+@@ -201,15 +169,16 @@
+   protected $rootTransactionEndCallbacks = [];
  
-+  /**
+   /**
+-   * The identifier quote characters for the database type.
+-   *
+-   * An array containing the start and end identifier quote characters for the
+-   * database type. The ANSI SQL standard identifier quote character is a double
+-   * quotation mark.
 +   * Implements the magic __get() method.
-+   *
+    *
+-   * @var string[]
 +   * @todo Remove the method in Drupal 10.
-+   */
+    */
+-  protected $identifierQuotes;
 +  public function __get($name) {
-+    if (in_array($name, ['escapedNames', 'escapedTables', 'escapedFields', 'escapedAliases'])) {
++    if (in_array($name, ['escapedNames', 'escapedTables', 'escapedFields', 'escapedAliases', 'identifierQuotes'])) {
 +      @trigger_error("Connection::\${$name} should not be accessed in drupal:9.x.0 and is removed from drupal:10.0.0. This is no longer used. See https://www.drupal.org/node/1234567", E_USER_DEPRECATED);
 +      return [];
 +    }
 +  }
-+
+ 
    /**
     * Constructs a Connection object.
-    *
-@@ -260,6 +242,10 @@ public function __construct(\PDO $connection, array $connection_options) {
+@@ -223,12 +192,6 @@
+    *   - Other driver-specific options.
+    */
+   public function __construct(\PDO $connection, array $connection_options) {
+-    if ($this->identifierQuotes === NULL) {
+-      @trigger_error('In drupal:10.0.0 not setting the $identifierQuotes property in the concrete Connection class will result in an RuntimeException. See https://www.drupal.org/node/2986894', E_USER_DEPRECATED);
+-      $this->identifierQuotes = ['', ''];
+-    }
+-
+-    assert(count($this->identifierQuotes) === 2 && Inspector::assertAllStrings($this->identifierQuotes), '\Drupal\Core\Database\Connection::$identifierQuotes must contain 2 string values');
+     // The 'transactions' option is deprecated.
+     if (isset($connection_options['transactions'])) {
+       @trigger_error('Passing a \'transactions\' connection option to ' . __METHOD__ . ' is deprecated in drupal:9.1.0 and is removed in drupal:10.0.0. All database drivers must support transactions. See https://www.drupal.org/node/2278745', E_USER_DEPRECATED);
+@@ -413,7 +376,7 @@ protected function setPrefix($prefix) {
+       $this->prefixes = ['default' => $prefix];
+     }
  
-     $this->connection = $connection;
-     $this->connectionOptions = $connection_options;
-+
-+    // Initialize the identifier handler.
-+    $identifier_handler_class = $this->getDriverClass('IdentifierHandler');
-+    $this->identifierHandler = new $identifier_handler_class($this->identifierQuotes, $this->prefixes);
-   }
- 
-   /**
-@@ -442,6 +428,10 @@ protected function setPrefix($prefix) {
+-    [$start_quote, $end_quote] = $this->identifierQuotes;
++    [$start_quote, $end_quote] = ['"', '"'];
+     // Set up variables for use in prefixTables(). Replace table-specific
+     // prefixes first.
+     $this->prefixSearch = [];
+@@ -442,6 +405,10 @@ protected function setPrefix($prefix) {
          $this->unprefixedTablesMap[$prefix . $table_name] = $table_name;
        }
      }
@@ -142,7 +153,7 @@ index 3f194e1aa0..ad70c4d8c3 100644
    }
  
    /**
-@@ -459,7 +449,12 @@ protected function setPrefix($prefix) {
+@@ -459,7 +426,12 @@ protected function setPrefix($prefix) {
     *   The properly-prefixed string.
     */
    public function prefixTables($sql) {
@@ -156,7 +167,23 @@ index 3f194e1aa0..ad70c4d8c3 100644
    }
  
    /**
-@@ -524,9 +519,7 @@ public function getUnprefixedTablesMap() {
+@@ -483,7 +455,14 @@ public function prefixTables($sql) {
+    *   This method should only be called by database API code.
+    */
+   public function quoteIdentifiers($sql) {
+-    return str_replace(['[', ']'], $this->identifierQuotes, $sql);
++    preg_match_all('/(\[(.+?)\])/', $sql, $matches);
++    $identifiers = [];
++    $i = 0;
++    foreach($matches[1] as $match) {
++      $identifiers[$match] = $this->identifierHandler->getPlatformIdentifierName($matches[2][$i]);
++      $i++;
++    }
++    return strtr($sql, $identifiers);
+   }
+ 
+   /**
+@@ -524,9 +503,7 @@ public function getUnprefixedTablesMap() {
     * @return string
     */
    public function getFullQualifiedTableName($table) {
@@ -167,7 +194,16 @@ index 3f194e1aa0..ad70c4d8c3 100644
    }
  
    /**
-@@ -990,6 +983,10 @@ public function getDriverClass($class) {
+@@ -679,7 +656,7 @@ public function makeSequenceName($table, $field) {
+     $sequence_name = $this->prefixTables('{' . $table . '}_' . $field . '_seq');
+     // Remove identifier quotes as we are constructing a new name from a
+     // prefixed and quoted table name.
+-    return str_replace($this->identifierQuotes, '', $sequence_name);
++    return str_replace(['"', '"'], '', $sequence_name);
+   }
+ 
+   /**
+@@ -990,6 +967,10 @@ public function getDriverClass($class) {
        }
        else {
          switch ($class) {
@@ -178,7 +214,7 @@ index 3f194e1aa0..ad70c4d8c3 100644
            case 'Condition':
              $this->driverClasses[$class] = Condition::class;
              break;
-@@ -1228,9 +1225,7 @@ public function condition($conjunction) {
+@@ -1228,9 +1209,7 @@ public function condition($conjunction) {
     *   The sanitized database name.
     */
    public function escapeDatabase($database) {
@@ -189,7 +225,7 @@ index 3f194e1aa0..ad70c4d8c3 100644
    }
  
    /**
-@@ -1251,10 +1246,7 @@ public function escapeDatabase($database) {
+@@ -1251,10 +1230,7 @@ public function escapeDatabase($database) {
     * @see \Drupal\Core\Database\Connection::setPrefix()
     */
    public function escapeTable($table) {
@@ -201,7 +237,7 @@ index 3f194e1aa0..ad70c4d8c3 100644
    }
  
    /**
-@@ -1271,14 +1263,7 @@ public function escapeTable($table) {
+@@ -1271,14 +1247,7 @@ public function escapeTable($table) {
     *   The sanitized field name.
     */
    public function escapeField($field) {
@@ -217,7 +253,7 @@ index 3f194e1aa0..ad70c4d8c3 100644
    }
  
    /**
-@@ -1296,11 +1281,7 @@ public function escapeField($field) {
+@@ -1296,11 +1265,7 @@ public function escapeField($field) {
     *   The sanitized alias name.
     */
    public function escapeAlias($field) {
@@ -230,7 +266,7 @@ index 3f194e1aa0..ad70c4d8c3 100644
    }
  
    /**
-@@ -1968,4 +1949,18 @@ public function getProvider(): string {
+@@ -1968,4 +1933,18 @@ public function getProvider(): string {
      return ($first === 'Drupal' && strtolower($second) === $second) ? $second : 'core';
    }
  
@@ -249,12 +285,88 @@ index 3f194e1aa0..ad70c4d8c3 100644
 +  }
 +
  }
+diff --git a/core/lib/Drupal/Core/Database/Driver/mysql/Connection.php b/core/lib/Drupal/Core/Database/Driver/mysql/Connection.php
+index fe281cb3d9..df25f7c570 100644
+--- a/core/lib/Drupal/Core/Database/Driver/mysql/Connection.php
++++ b/core/lib/Drupal/Core/Database/Driver/mysql/Connection.php
+@@ -85,9 +85,15 @@ class Connection extends DatabaseConnection {
+   const MIN_MAX_ALLOWED_PACKET = 1024;
+ 
+   /**
+-   * {@inheritdoc}
++   * Constructs a connection object.
+    */
+-  protected $identifierQuotes = ['"', '"'];
++  public function __construct(\PDO $connection, array $connection_options) {
++    parent::__construct($connection, $connection_options);
++
++    // Initialize the identifier handler.
++    $identifier_handler_class = $this->getDriverClass('IdentifierHandler');
++    $this->identifierHandler = new $identifier_handler_class($this->prefixes);
++  }
+ 
+   /**
+    * {@inheritdoc}
+diff --git a/core/lib/Drupal/Core/Database/Driver/pgsql/Connection.php b/core/lib/Drupal/Core/Database/Driver/pgsql/Connection.php
+index b996735aab..92cac62667 100644
+--- a/core/lib/Drupal/Core/Database/Driver/pgsql/Connection.php
++++ b/core/lib/Drupal/Core/Database/Driver/pgsql/Connection.php
+@@ -68,11 +68,6 @@ class Connection extends DatabaseConnection {
+    */
+   protected $transactionalDDLSupport = TRUE;
+ 
+-  /**
+-   * {@inheritdoc}
+-   */
+-  protected $identifierQuotes = ['"', '"'];
+-
+   /**
+    * Constructs a connection object.
+    */
+@@ -86,6 +81,10 @@ public function __construct(\PDO $connection, array $connection_options) {
+     if (isset($connection_options['init_commands'])) {
+       $this->connection->exec(implode('; ', $connection_options['init_commands']));
+     }
++
++    // Initialize the identifier handler.
++    $identifier_handler_class = $this->getDriverClass('IdentifierHandler');
++    $this->identifierHandler = new $identifier_handler_class($this->prefixes);
+   }
+ 
+   /**
+diff --git a/core/lib/Drupal/Core/Database/Driver/sqlite/Connection.php b/core/lib/Drupal/Core/Database/Driver/sqlite/Connection.php
+index 64957038d2..7e688b14ef 100644
+--- a/core/lib/Drupal/Core/Database/Driver/sqlite/Connection.php
++++ b/core/lib/Drupal/Core/Database/Driver/sqlite/Connection.php
+@@ -74,11 +74,6 @@ class Connection extends DatabaseConnection {
+    */
+   protected $transactionalDDLSupport = TRUE;
+ 
+-  /**
+-   * {@inheritdoc}
+-   */
+-  protected $identifierQuotes = ['"', '"'];
+-
+   /**
+    * Constructs a \Drupal\Core\Database\Driver\sqlite\Connection object.
+    */
+@@ -111,6 +106,10 @@ public function __construct(\PDO $connection, array $connection_options) {
+     }
+     // Regenerate the prefixes replacement table.
+     $this->setPrefix($prefixes);
++
++    // Initialize the identifier handler.
++    $identifier_handler_class = $this->getDriverClass('IdentifierHandler');
++    $this->identifierHandler = new $identifier_handler_class($prefixes);
+   }
+ 
+   /**
 diff --git a/core/lib/Drupal/Core/Database/IdentifierHandler.php b/core/lib/Drupal/Core/Database/IdentifierHandler.php
 new file mode 100644
-index 0000000000..fdae2a2a05
+index 0000000000..dc931ae9fc
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/IdentifierHandler.php
-@@ -0,0 +1,151 @@
+@@ -0,0 +1,166 @@
 +<?php
 +
 +namespace Drupal\Core\Database;
@@ -264,10 +376,13 @@ index 0000000000..fdae2a2a05
 + */
 +class IdentifierHandler {
 +
++  const GENERIC = 0x0;
 +  const DATABASE = 0x4;
++  const SEQUENCE = 0x5;
 +  const TABLE = 0x7;
 +  const PREFIXED_TABLE = 0x8;
 +  const COLUMN = 0xC;
++  const INDEX = 0xD;
 +  const ALIAS = 0x10;
 +
 +  /**
@@ -301,9 +416,9 @@ index 0000000000..fdae2a2a05
 +   * @param string[] $prefixes
 +   *   @todo
 +   */
-+  public function __construct(array $identifier_quotes, array $prefixes) {
-+    $this->identifierQuotes = $identifier_quotes;
++  public function __construct(array $prefixes, array $identifier_quotes = ['"', '"']) {
 +    $this->setPrefix($prefixes);
++    $this->identifierQuotes = $identifier_quotes;
 +  }
 +
 +  /**
@@ -345,6 +460,18 @@ index 0000000000..fdae2a2a05
 +   */
 +  public function doDump() {
 +    dump($this->identifiers);
++  }
++
++  /**
++   * @todo
++   */
++  public function getPlatformIdentifierName(string $original_name, bool $quoted = TRUE): string {
++    if (!$this->hasIdentifier($original_name, static::GENERIC)) {
++      $this->setIdentifier($original_name, $original_name, static::GENERIC);
++    }
++    [$start_quote, $end_quote] = $this->identifierQuotes;
++    $identifier = $this->identifiers['identifier'][$original_name][static::GENERIC];
++    return $quoted ? $start_quote . $identifier . $end_quote : $identifier;
 +  }
 +
 +  /**
@@ -406,3 +533,24 @@ index 0000000000..fdae2a2a05
 +  }
 +
 +}
+diff --git a/core/tests/Drupal/Tests/Core/Database/Stub/StubConnection.php b/core/tests/Drupal/Tests/Core/Database/Stub/StubConnection.php
+index 146ba0891c..d90fb019c7 100644
+--- a/core/tests/Drupal/Tests/Core/Database/Stub/StubConnection.php
++++ b/core/tests/Drupal/Tests/Core/Database/Stub/StubConnection.php
+@@ -45,12 +45,15 @@ class StubConnection extends Connection {
+    *   A class to use as a statement class for deprecation testing.
+    */
+   public function __construct(\PDO $connection, array $connection_options, $identifier_quotes = ['', ''], $statement_class = NULL) {
+-    $this->identifierQuotes = $identifier_quotes;
+     if ($statement_class) {
+       $this->statementClass = $statement_class;
+       $this->statementWrapperClass = NULL;
+     }
+     parent::__construct($connection, $connection_options);
++
++    // Initialize the identifier handler.
++    $identifier_handler_class = $this->getDriverClass('IdentifierHandler');
++    $this->identifierHandler = new $identifier_handler_class($this->prefixes, $identifier_quotes);
+   }
+ 
+   /**
