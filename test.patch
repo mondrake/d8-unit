@@ -49,7 +49,7 @@ index 82edd46046..c0d6553d91 100644
 +#      # @see https://www.drupal.org/project/drupal/issues/2869825
 +#      nightwatchjs:
 diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
-index a5c78acc44..1cf68f102a 100644
+index a5c78acc44..c92ab833dc 100644
 --- a/core/lib/Drupal/Core/Database/Connection.php
 +++ b/core/lib/Drupal/Core/Database/Connection.php
 @@ -2,7 +2,6 @@
@@ -60,24 +60,39 @@ index a5c78acc44..1cf68f102a 100644
  use Drupal\Core\Database\Query\Condition;
  use Drupal\Core\Database\Query\Delete;
  use Drupal\Core\Database\Query\Insert;
-@@ -129,13 +128,6 @@ abstract class Connection {
-    */
+@@ -130,69 +129,9 @@ abstract class Connection {
    protected $schema = NULL;
  
--  /**
+   /**
 -   * The prefixes used by this database connection.
 -   *
 -   * @var array
 -   */
 -  protected $prefixes = [];
 -
-   /**
-    * List of search values for use in prefixTables().
-    *
-@@ -158,41 +150,9 @@ abstract class Connection {
-   protected $unprefixedTablesMap = [];
- 
-   /**
+-  /**
+-   * List of search values for use in prefixTables().
+-   *
+-   * @var array
++   * @todo
+    */
+-  protected $prefixSearch = [];
+-
+-  /**
+-   * List of replacement values for use in prefixTables().
+-   *
+-   * @var array
+-   */
+-  protected $prefixReplace = [];
+-
+-  /**
+-   * List of un-prefixed table names, keyed by prefixed table names.
+-   *
+-   * @var array
+-   */
+-  protected $unprefixedTablesMap = [];
+-
+-  /**
 -   * List of escaped database, table, and field names, keyed by unescaped names.
 -   *
 -   * @var array
@@ -104,8 +119,7 @@ index a5c78acc44..1cf68f102a 100644
 -   * this case it should always return an empty string.
 -   *
 -   * @var array
-+   * @todo
-    */
+-   */
 -  protected $escapedFields = ["" => ""];
 -
 -  /**
@@ -118,23 +132,23 @@ index a5c78acc44..1cf68f102a 100644
  
    /**
     * Post-root (non-nested) transaction commit callbacks.
-@@ -202,15 +162,16 @@ abstract class Connection {
+@@ -202,15 +141,16 @@ abstract class Connection {
    protected $rootTransactionEndCallbacks = [];
  
    /**
 -   * The identifier quote characters for the database type.
--   *
++   * Implements the magic __get() method.
+    *
 -   * An array containing the start and end identifier quote characters for the
 -   * database type. The ANSI SQL standard identifier quote character is a double
 -   * quotation mark.
-+   * Implements the magic __get() method.
-    *
+-   *
 -   * @var string[]
 +   * @todo Remove the method in Drupal 10.
     */
 -  protected $identifierQuotes;
 +  public function __get($name) {
-+    if (in_array($name, ['escapedNames', 'escapedTables', 'escapedFields', 'escapedAliases', 'identifierQuotes', 'prefixes'])) {
++    if (in_array($name, ['escapedNames', 'escapedTables', 'escapedFields', 'escapedAliases', 'identifierQuotes', 'prefixes', 'prefixSearch', 'prefixReplace', 'unprefixedTablesMap'])) {
 +      @trigger_error("Connection::\${$name} should not be accessed in drupal:9.x.0 and is removed from drupal:10.0.0. This is no longer used. See https://www.drupal.org/node/1234567", E_USER_DEPRECATED);
 +      return [];
 +    }
@@ -142,7 +156,7 @@ index a5c78acc44..1cf68f102a 100644
  
    /**
     * Constructs a Connection object.
-@@ -224,12 +185,6 @@ abstract class Connection {
+@@ -224,12 +164,6 @@ abstract class Connection {
     *   - Other driver-specific options.
     */
    public function __construct(\PDO $connection, array $connection_options) {
@@ -155,54 +169,61 @@ index a5c78acc44..1cf68f102a 100644
      // The 'transactions' option is deprecated.
      if (isset($connection_options['transactions'])) {
        @trigger_error('Passing a \'transactions\' connection option to ' . __METHOD__ . ' is deprecated in drupal:9.1.0 and is removed in drupal:10.0.0. All database drivers must support transactions. See https://www.drupal.org/node/2278745', E_USER_DEPRECATED);
-@@ -408,18 +363,18 @@ public function getConnectionOptions() {
+@@ -249,9 +183,6 @@ public function __construct(\PDO $connection, array $connection_options) {
+       @trigger_error('Support for database drivers located in the "drivers/lib/Drupal/Driver/Database" directory is deprecated in drupal:9.1.0 and is removed in drupal:10.0.0. Contributed and custom database drivers should be provided by modules and use the namespace "Drupal\MODULE_NAME\Driver\Database\DRIVER_NAME". See https://www.drupal.org/node/3123251', E_USER_DEPRECATED);
+     }
+ 
+-    // Initialize and prepare the connection prefix.
+-    $this->setPrefix(isset($connection_options['prefix']) ? $connection_options['prefix'] : '');
+-
+     // Set a Statement class, unless the driver opted out.
+     // @todo remove this in Drupal 10 https://www.drupal.org/node/3177490
+     if (!empty($this->statementClass)) {
+@@ -407,42 +338,7 @@ public function getConnectionOptions() {
+    *   forms documented in default.settings.php.
     */
    protected function setPrefix($prefix) {
-     if (is_array($prefix)) {
+-    if (is_array($prefix)) {
 -      $this->prefixes = $prefix + ['default' => ''];
-+      $prefix = $prefix + ['default' => ''];
-     }
-     else {
+-    }
+-    else {
 -      $this->prefixes = ['default' => $prefix];
-+      $prefix = ['default' => $prefix];
-     }
- 
+-    }
+-
 -    [$start_quote, $end_quote] = $this->identifierQuotes;
-+    [$start_quote, $end_quote] = ['"', '"'];
-     // Set up variables for use in prefixTables(). Replace table-specific
-     // prefixes first.
-     $this->prefixSearch = [];
-     $this->prefixReplace = [];
+-    // Set up variables for use in prefixTables(). Replace table-specific
+-    // prefixes first.
+-    $this->prefixSearch = [];
+-    $this->prefixReplace = [];
 -    foreach ($this->prefixes as $key => $val) {
-+    foreach ($prefix as $key => $val) {
-       if ($key != 'default') {
-         $this->prefixSearch[] = '{' . $key . '}';
-         // $val can point to another database like 'database.users'. In this
-@@ -433,16 +388,20 @@ protected function setPrefix($prefix) {
-     // $this->prefixes['default'] can point to another database like
-     // 'other_db.'. In this instance we need to quote the identifiers correctly.
-     // For example, "other_db"."PREFIX_table_name".
+-      if ($key != 'default') {
+-        $this->prefixSearch[] = '{' . $key . '}';
+-        // $val can point to another database like 'database.users'. In this
+-        // instance we need to quote the identifiers correctly.
+-        $val = str_replace('.', $end_quote . '.' . $start_quote, $val);
+-        $this->prefixReplace[] = $start_quote . $val . $key . $end_quote;
+-      }
+-    }
+-    // Then replace remaining tables with the default prefix.
+-    $this->prefixSearch[] = '{';
+-    // $this->prefixes['default'] can point to another database like
+-    // 'other_db.'. In this instance we need to quote the identifiers correctly.
+-    // For example, "other_db"."PREFIX_table_name".
 -    $this->prefixReplace[] = $start_quote . str_replace('.', $end_quote . '.' . $start_quote, $this->prefixes['default']);
-+    $this->prefixReplace[] = $start_quote . str_replace('.', $end_quote . '.' . $start_quote, $prefix['default']);
-     $this->prefixSearch[] = '}';
-     $this->prefixReplace[] = $end_quote;
- 
-     // Set up a map of prefixed => un-prefixed tables.
+-    $this->prefixSearch[] = '}';
+-    $this->prefixReplace[] = $end_quote;
+-
+-    // Set up a map of prefixed => un-prefixed tables.
 -    foreach ($this->prefixes as $table_name => $prefix) {
-+    foreach ($prefix as $table_name => $px) {
-       if ($table_name !== 'default') {
+-      if ($table_name !== 'default') {
 -        $this->unprefixedTablesMap[$prefix . $table_name] = $table_name;
-+        $this->unprefixedTablesMap[$px . $table_name] = $table_name;
-       }
-     }
-+
-+    if ($this->identifierHandler) {
-+      $this->identifierHandler->setPrefix($prefix);
-+    }
+-      }
+-    }
++    @trigger_error(__METHOD__ . '() is deprecated in drupal:9.x.0 and is removed from drupal:10.0.0. @todo. See https://www.drupal.org/node/1234567', E_USER_DEPRECATED);
    }
  
    /**
-@@ -460,7 +419,12 @@ protected function setPrefix($prefix) {
+@@ -460,7 +356,12 @@ protected function setPrefix($prefix) {
     *   The properly-prefixed string.
     */
    public function prefixTables($sql) {
@@ -216,7 +237,7 @@ index a5c78acc44..1cf68f102a 100644
    }
  
    /**
-@@ -484,7 +448,14 @@ public function prefixTables($sql) {
+@@ -484,7 +385,14 @@ public function prefixTables($sql) {
     *   This method should only be called by database API code.
     */
    public function quoteIdentifiers($sql) {
@@ -232,7 +253,7 @@ index a5c78acc44..1cf68f102a 100644
    }
  
    /**
-@@ -495,14 +466,12 @@ public function quoteIdentifiers($sql) {
+@@ -495,14 +403,12 @@ public function quoteIdentifiers($sql) {
     *
     * @param string $table
     *   (optional) The table to find the prefix for.
@@ -251,7 +272,17 @@ index a5c78acc44..1cf68f102a 100644
    }
  
    /**
-@@ -525,9 +494,7 @@ public function getUnprefixedTablesMap() {
+@@ -513,7 +419,8 @@ public function tablePrefix($table = 'default') {
+    *   names (i.e. prefix + table_name).
+    */
+   public function getUnprefixedTablesMap() {
+-    return $this->unprefixedTablesMap;
++    @trigger_error(__METHOD__ . '() is deprecated in drupal:9.x.0 and is removed from drupal:10.0.0. @todo. See https://www.drupal.org/node/1234567', E_USER_DEPRECATED);
++    return [];
+   }
+ 
+   /**
+@@ -525,9 +432,7 @@ public function getUnprefixedTablesMap() {
     * @return string
     */
    public function getFullQualifiedTableName($table) {
@@ -262,7 +293,7 @@ index a5c78acc44..1cf68f102a 100644
    }
  
    /**
-@@ -677,10 +644,7 @@ public function getLogger() {
+@@ -677,10 +582,7 @@ public function getLogger() {
     *   A table prefix-parsed string for the sequence name.
     */
    public function makeSequenceName($table, $field) {
@@ -274,7 +305,7 @@ index a5c78acc44..1cf68f102a 100644
    }
  
    /**
-@@ -991,6 +955,10 @@ public function getDriverClass($class) {
+@@ -991,6 +893,10 @@ public function getDriverClass($class) {
        }
        else {
          switch ($class) {
@@ -285,7 +316,7 @@ index a5c78acc44..1cf68f102a 100644
            case 'Condition':
              $this->driverClasses[$class] = Condition::class;
              break;
-@@ -1229,9 +1197,7 @@ public function condition($conjunction) {
+@@ -1229,9 +1135,7 @@ public function condition($conjunction) {
     *   The sanitized database name.
     */
    public function escapeDatabase($database) {
@@ -296,7 +327,7 @@ index a5c78acc44..1cf68f102a 100644
    }
  
    /**
-@@ -1252,10 +1218,7 @@ public function escapeDatabase($database) {
+@@ -1252,10 +1156,7 @@ public function escapeDatabase($database) {
     * @see \Drupal\Core\Database\Connection::setPrefix()
     */
    public function escapeTable($table) {
@@ -308,7 +339,7 @@ index a5c78acc44..1cf68f102a 100644
    }
  
    /**
-@@ -1272,14 +1235,7 @@ public function escapeTable($table) {
+@@ -1272,14 +1173,7 @@ public function escapeTable($table) {
     *   The sanitized field name.
     */
    public function escapeField($field) {
@@ -324,7 +355,7 @@ index a5c78acc44..1cf68f102a 100644
    }
  
    /**
-@@ -1297,11 +1253,7 @@ public function escapeField($field) {
+@@ -1297,11 +1191,7 @@ public function escapeField($field) {
     *   The sanitized alias name.
     */
    public function escapeAlias($field) {
@@ -337,7 +368,7 @@ index a5c78acc44..1cf68f102a 100644
    }
  
    /**
-@@ -1982,4 +1934,18 @@ public function getPagerManager(): PagerManagerInterface {
+@@ -1982,4 +1872,18 @@ public function getPagerManager(): PagerManagerInterface {
      return \Drupal::service('pager.manager');
    }
  
@@ -378,6 +409,34 @@ index fe281cb3d9..43f439c235 100644
  
    /**
     * {@inheritdoc}
+diff --git a/core/lib/Drupal/Core/Database/Driver/mysql/Schema.php b/core/lib/Drupal/Core/Database/Driver/mysql/Schema.php
+index e05f10c86e..318f1da86f 100644
+--- a/core/lib/Drupal/Core/Database/Driver/mysql/Schema.php
++++ b/core/lib/Drupal/Core/Database/Driver/mysql/Schema.php
+@@ -48,17 +48,15 @@ class Schema extends DatabaseSchema {
+    *   A keyed array with information about the database, table name and prefix.
+    */
+   protected function getPrefixInfo($table = 'default', $add_prefix = TRUE) {
+-    $info = ['prefix' => $this->connection->tablePrefix($table)];
+-    if ($add_prefix) {
+-      $table = $info['prefix'] . $table;
+-    }
+-    if (($pos = strpos($table, '.')) !== FALSE) {
+-      $info['database'] = substr($table, 0, $pos);
+-      $info['table'] = substr($table, ++$pos);
++    $info = ['prefix' => $this->connection->getIdentifierHandler()->tablePrefix($table)];
++    $table_identifier = $this->connection->getIdentifierHandler()->getPlatformTableName($table ?? '', $add_prefix);
++    if (($pos = strpos($table_identifier, '.')) !== FALSE) {
++      $info['database'] = substr($table_identifier, 0, $pos);
++      $info['table'] = substr($table_identifier, ++$pos);
+     }
+     else {
+       $info['database'] = $this->connection->getConnectionOptions()['database'];
+-      $info['table'] = $table;
++      $info['table'] = $table_identifier;
+     }
+     return $info;
+   }
 diff --git a/core/lib/Drupal/Core/Database/Driver/pgsql/Connection.php b/core/lib/Drupal/Core/Database/Driver/pgsql/Connection.php
 index b996735aab..ada53b70c0 100644
 --- a/core/lib/Drupal/Core/Database/Driver/pgsql/Connection.php
@@ -421,7 +480,7 @@ index 1e7c4b6dca..f74c5e31a4 100644
  
      // Retrieve the max identifier length which is usually 63 characters
 diff --git a/core/lib/Drupal/Core/Database/Driver/sqlite/Connection.php b/core/lib/Drupal/Core/Database/Driver/sqlite/Connection.php
-index 64957038d2..55d5ceeaf3 100644
+index 64957038d2..5567ed65b4 100644
 --- a/core/lib/Drupal/Core/Database/Driver/sqlite/Connection.php
 +++ b/core/lib/Drupal/Core/Database/Driver/sqlite/Connection.php
 @@ -74,11 +74,6 @@ class Connection extends DatabaseConnection {
@@ -451,10 +510,12 @@ index 64957038d2..55d5ceeaf3 100644
      foreach ($prefixes as &$prefix) {
        // Empty prefix means query the main database -- no need to attach anything.
        if (!empty($prefix)) {
-@@ -111,6 +112,10 @@ public function __construct(\PDO $connection, array $connection_options) {
+@@ -109,8 +110,10 @@ public function __construct(\PDO $connection, array $connection_options) {
+         $prefix .= '.';
+       }
      }
-     // Regenerate the prefixes replacement table.
-     $this->setPrefix($prefixes);
+-    // Regenerate the prefixes replacement table.
+-    $this->setPrefix($prefixes);
 +
 +    // Initialize the identifier handler.
 +    $identifier_handler_class = $this->getDriverClass('IdentifierHandler');
@@ -462,16 +523,18 @@ index 64957038d2..55d5ceeaf3 100644
    }
  
    /**
-@@ -387,7 +392,7 @@ public function queryTemporary($query, array $args = [], array $options = []) {
+@@ -387,9 +390,7 @@ public function queryTemporary($query, array $args = [], array $options = []) {
      // Generate a new temporary table name and protect it from prefixing.
      // SQLite requires that temporary tables to be non-qualified.
      $tablename = $this->generateTemporaryTableName();
 -    $prefixes = $this->prefixes;
-+    $prefixes = $this->identifierHandler->getPrefix();
-     $prefixes[$tablename] = '';
-     $this->setPrefix($prefixes);
+-    $prefixes[$tablename] = '';
+-    $this->setPrefix($prefixes);
++    $this->identifierHandler->addPrefix($tablename, '');
  
-@@ -461,10 +466,8 @@ public function nextId($existing_id = 0) {
+     $this->query('CREATE TEMPORARY TABLE ' . $tablename . ' AS ' . $query, $args, $options);
+     return $tablename;
+@@ -461,10 +462,8 @@ public function nextId($existing_id = 0) {
     * {@inheritdoc}
     */
    public function getFullQualifiedTableName($table) {
@@ -485,10 +548,10 @@ index 64957038d2..55d5ceeaf3 100644
    /**
 diff --git a/core/lib/Drupal/Core/Database/IdentifierHandler.php b/core/lib/Drupal/Core/Database/IdentifierHandler.php
 new file mode 100644
-index 0000000000..e41a08e39a
+index 0000000000..b26c961ae0
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/IdentifierHandler.php
-@@ -0,0 +1,237 @@
+@@ -0,0 +1,233 @@
 +<?php
 +
 +namespace Drupal\Core\Database;
@@ -539,19 +602,15 @@ index 0000000000..e41a08e39a
 +   *   The identifier quote characters. Defaults to an empty strings.
 +   */
 +  public function __construct(array $prefixes, array $identifier_quotes = ['"', '"']) {
-+    $this->setPrefix($prefixes);
++    $this->prefixes = $prefix;
 +    $this->identifierQuotes = $identifier_quotes;
 +  }
 +
 +  /**
-+   * Set the list of prefixes used by this database connection.
-+   *
-+   * @param array $prefix
-+   *   An array of prefixes, in any of the multiple forms documented in
-+   *   default.settings.php.
++   * @todo
 +   */
-+  public function setPrefix(array $prefix): void {
-+    $this->prefixes = $prefix;
++  public function addPrefix(string $table, string $prefix): void {
++    $this->prefixes[$table] = $prefix;
 +    // @todo remove.
 +    $this->identifiers = [];
 +  }
@@ -569,7 +628,7 @@ index 0000000000..e41a08e39a
 +   * This function is for when you want to know the prefix of a table. This
 +   * is not used in prefixTables due to performance reasons.
 +   *
-+   * @param $table
++   * @param string $table
 +   *   (optional) The table to find the prefix for.
 +   *
 +   * @todo remove in D10
@@ -778,8 +837,61 @@ index fe932d3bce..01f077e193 100644
        }
        elseif ($default_prefix && substr($table->table_name, 0, $default_prefix_length) !== $default_prefix) {
          // This table name does not start the default prefix, which means that
+diff --git a/core/modules/migrate/src/Plugin/migrate/id_map/Sql.php b/core/modules/migrate/src/Plugin/migrate/id_map/Sql.php
+index 37c1c32b57..a7e0c7cfc6 100644
+--- a/core/modules/migrate/src/Plugin/migrate/id_map/Sql.php
++++ b/core/modules/migrate/src/Plugin/migrate/id_map/Sql.php
+@@ -169,7 +169,7 @@ public function __construct(array $configuration, $plugin_id, $plugin_definition
+ 
+     // Default generated table names, limited to 63 characters.
+     $machine_name = str_replace(':', '__', $this->migration->id());
+-    $prefix_length = strlen($this->database->tablePrefix());
++    $prefix_length = strlen($this->database->getIdentifierHandler()->tablePrefix());
+     $this->mapTableName = 'migrate_map_' . mb_strtolower($machine_name);
+     $this->mapTableName = mb_substr($this->mapTableName, 0, 63 - $prefix_length);
+     $this->messageTableName = 'migrate_message_' . mb_strtolower($machine_name);
+diff --git a/core/modules/migrate/tests/src/Unit/MigrateSqlIdMapTest.php b/core/modules/migrate/tests/src/Unit/MigrateSqlIdMapTest.php
+index 4d598d05d0..2534827f16 100644
+--- a/core/modules/migrate/tests/src/Unit/MigrateSqlIdMapTest.php
++++ b/core/modules/migrate/tests/src/Unit/MigrateSqlIdMapTest.php
+@@ -963,7 +963,7 @@ public function testGetQualifiedMapTablePrefix() {
+     // The SQLite driver is a special flower. It will prefix tables with
+     // PREFIX.TABLE, instead of the standard PREFIXTABLE.
+     // @see \Drupal\Core\Database\Driver\sqlite\Connection::__construct()
+-    $this->assertEquals('prefix.migrate_map_sql_idmap_test', $qualified_map_table);
++    $this->assertEquals('"prefix"."migrate_map_sql_idmap_test"', $qualified_map_table);
+   }
+ 
+   /**
+diff --git a/core/modules/system/tests/src/Kernel/Scripts/DbCommandBaseTest.php b/core/modules/system/tests/src/Kernel/Scripts/DbCommandBaseTest.php
+index 0b31ec6db9..340af96c5f 100644
+--- a/core/modules/system/tests/src/Kernel/Scripts/DbCommandBaseTest.php
++++ b/core/modules/system/tests/src/Kernel/Scripts/DbCommandBaseTest.php
+@@ -87,19 +87,19 @@ public function testPrefix() {
+       '--database' => 'magic_db',
+       '--prefix' => 'extra',
+     ]);
+-    $this->assertEquals('extra', $command->getDatabaseConnection($command_tester->getInput())->tablePrefix());
++    $this->assertEquals('extra', $command->getDatabaseConnection($command_tester->getInput())->getIdentifierHandler()->tablePrefix());
+ 
+     $command_tester->execute([
+       '-db-url' => Database::getConnectionInfoAsUrl(),
+       '--prefix' => 'extra2',
+     ]);
+-    $this->assertEquals('extra2', $command->getDatabaseConnection($command_tester->getInput())->tablePrefix());
++    $this->assertEquals('extra2', $command->getDatabaseConnection($command_tester->getInput())->getIdentifierHandler()->tablePrefix());
+ 
+     // This breaks simpletest cleanup.
+     //    $command_tester->execute([
+     //      '--prefix' => 'notsimpletest',
+     //    ]);
+-    //    $this->assertEquals('notsimpletest', $command->getDatabaseConnection($command_tester->getInput())->tablePrefix());
++    //    $this->assertEquals('notsimpletest', $command->getDatabaseConnection($command_tester->getInput())->getIdentifierHandler()->tablePrefix());
+   }
+ 
+ }
 diff --git a/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php b/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
-index c4eb924f0b..bda1fffbc0 100644
+index c4eb924f0b..ea344f80f7 100644
 --- a/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
 +++ b/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
 @@ -3,6 +3,7 @@
@@ -799,7 +911,11 @@ index c4eb924f0b..bda1fffbc0 100644
     */
    public function testPrefixRoundTrip($expected, $prefix_info) {
      $mock_pdo = $this->createMock('Drupal\Tests\Core\Database\Stub\StubPDO');
-@@ -63,6 +66,7 @@ public function testPrefixRoundTrip($expected, $prefix_info) {
+@@ -60,9 +63,11 @@ public function testPrefixRoundTrip($expected, $prefix_info) {
+     $set_prefix->setAccessible(TRUE);
+ 
+     // Set the prefix data.
++    $this->expectDeprecation('Drupal\Core\Database\Connection::setPrefix() is deprecated in drupal:9.x.0 and is removed from drupal:10.0.0. @todo. See https://www.drupal.org/node/1234567');
      $set_prefix->invokeArgs($connection, [$prefix_info]);
      // Check the round-trip.
      foreach ($expected as $table => $prefix) {
@@ -807,7 +923,7 @@ index c4eb924f0b..bda1fffbc0 100644
        $this->assertEquals($prefix, $connection->tablePrefix($table));
      }
    }
-@@ -601,29 +605,11 @@ public function testEscapeDatabase($expected, $name, array $identifier_quote = [
+@@ -601,29 +606,11 @@ public function testEscapeDatabase($expected, $name, array $identifier_quote = [
     * @group legacy
     */
    public function testIdentifierQuotesDeprecation() {
