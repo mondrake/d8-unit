@@ -1,3 +1,16 @@
+diff --git a/core/includes/install.inc b/core/includes/install.inc
+index 3983773e81..d501fd278e 100644
+--- a/core/includes/install.inc
++++ b/core/includes/install.inc
+@@ -1165,8 +1165,6 @@ function install_profile_info($profile, $langcode = 'en') {
+  * @see \Drupal\Core\Site\Settings::initialize()
+  */
+ function db_installer_object($driver, $namespace = NULL) {
+-  // We cannot use Database::getConnection->getDriverClass() here, because
+-  // the connection object is not yet functional.
+   if ($namespace) {
+     $task_class = $namespace . "\\Install\\Tasks";
+     return new $task_class();
 diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
 index e0f9c5f631..18a55734f3 100644
 --- a/core/lib/Drupal/Core/Database/Connection.php
@@ -265,6 +278,115 @@ index 11782fc1ca..252a30717e 100644
  }
  
  
+diff --git a/core/lib/Drupal/Core/Database/Driver/pgsql/Connection.php b/core/lib/Drupal/Core/Database/Driver/pgsql/Connection.php
+index a5b6ae3296..cb5d370323 100644
+--- a/core/lib/Drupal/Core/Database/Driver/pgsql/Connection.php
++++ b/core/lib/Drupal/Core/Database/Driver/pgsql/Connection.php
+@@ -2,12 +2,16 @@
+ 
+ namespace Drupal\Core\Database\Driver\pgsql;
+ 
+-use Drupal\Core\Database\Database;
+ use Drupal\Core\Database\Connection as DatabaseConnection;
++use Drupal\Core\Database\Database;
+ use Drupal\Core\Database\DatabaseAccessDeniedException;
+ use Drupal\Core\Database\DatabaseNotFoundException;
++use Drupal\Core\Database\ExceptionHandler;
++use Drupal\Core\Database\Query\Condition;
++use Drupal\Core\Database\Query\Merge;
+ use Drupal\Core\Database\StatementInterface;
+ use Drupal\Core\Database\StatementWrapper;
++use Drupal\Core\Database\Transaction;
+ 
+ // cSpell:ignore ilike nextval
+ 
+@@ -368,6 +372,86 @@ public function rollbackSavepoint($savepoint_name = 'mimic_implicit_commit') {
+     }
+   }
+ 
++  /**
++   * {@inheritdoc}
++   */
++  public function exceptionHandler() {
++    return new ExceptionHandler();
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function select($table, $alias = NULL, array $options = []) {
++    return new Select($this, $table, $alias, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function insert($table, array $options = []) {
++    return new Insert($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function merge($table, array $options = []) {
++    return new Merge($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function upsert($table, array $options = []) {
++    return new Upsert($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function update($table, array $options = []) {
++    return new Update($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function delete($table, array $options = []) {
++    return new Delete($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function truncate($table, array $options = []) {
++    return new Truncate($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function schema() {
++    if (empty($this->schema)) {
++      $this->schema = new Schema($this);
++    }
++    return $this->schema;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function condition($conjunction) {
++    return new Condition($conjunction, FALSE);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function startTransaction($name = '') {
++    return new Transaction($this, $name);
++  }
++
+ }
+ 
+ /**
 diff --git a/core/lib/Drupal/Core/Database/Driver/sqlite/Connection.php b/core/lib/Drupal/Core/Database/Driver/sqlite/Connection.php
 index 4a43d11aa5..7086c06c4c 100644
 --- a/core/lib/Drupal/Core/Database/Driver/sqlite/Connection.php
@@ -414,6 +536,29 @@ index 0681813f04..9a86e0b028 100644
    }
  
    /* Alter accessors to expose the query data to alter hooks. */
+diff --git a/core/modules/system/system.install b/core/modules/system/system.install
+index 57119b8691..0ec3efa35e 100644
+--- a/core/modules/system/system.install
++++ b/core/modules/system/system.install
+@@ -433,7 +433,8 @@ function system_requirements($phase) {
+ 
+   if ($phase === 'runtime' || $phase === 'update') {
+     // Database information.
+-    $class = Database::getConnection()->getDriverClass('Install\\Tasks');
++    $connection = Database::getConnection();
++    $class = $connection->getConnectionOptions()['namespace'] . '\\Install\\Tasks';
+     /** @var \Drupal\Core\Database\Install\Tasks $tasks */
+     $tasks = new $class();
+     $requirements['database_system'] = [
+@@ -442,7 +443,7 @@ function system_requirements($phase) {
+     ];
+     $requirements['database_system_version'] = [
+       'title' => t('Database system version'),
+-      'value' => Database::getConnection()->version(),
++      'value' => $connection->version(),
+     ];
+ 
+     $errors = $tasks->engineVersionRequirementsCheck();
 diff --git a/core/modules/system/tests/modules/database_statement_monitoring_test/src/LoggedStatementsTrait.php b/core/modules/system/tests/modules/database_statement_monitoring_test/src/LoggedStatementsTrait.php
 index 677f4fd891..2265348abe 100644
 --- a/core/modules/system/tests/modules/database_statement_monitoring_test/src/LoggedStatementsTrait.php
