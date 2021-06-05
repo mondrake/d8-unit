@@ -1,5 +1,5 @@
 diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
-index e0f9c5f631..56f03d78db 100644
+index e0f9c5f631..51a357ec1f 100644
 --- a/core/lib/Drupal/Core/Database/Connection.php
 +++ b/core/lib/Drupal/Core/Database/Connection.php
 @@ -67,9 +67,22 @@
@@ -20,19 +20,19 @@ index e0f9c5f631..56f03d78db 100644
 +   *
 +   * @var array
 +   */
-+  protected $driverOverridenClasses = [];
++  protected $driverOverriddenClasses = [];
 +
    /**
     * The name of the Statement class for this connection.
     *
-@@ -1046,6 +1059,26 @@ protected function expandArguments(&$query, &$args) {
+@@ -1046,6 +1059,24 @@ protected function expandArguments(&$query, &$args) {
      return $modified;
    }
  
 +  /**
 +   * Gets a driver-specific override class, if any exists.
 +   *
-+   * @param string $class
++   * @param string $class_name
 +   *   The fully qualified class name for which we want the potentially
 +   *   driver-specific class.
 +   *
@@ -44,15 +44,13 @@ index e0f9c5f631..56f03d78db 100644
 +    if (count($parts) === 1) {
 +      throw new \InvalidArgumentException("$class_name must be a fully qualified class name");
 +    }
-+global $xxx;
-+if ($xxx === TRUE) dump([$class_name, $parts, $this->driverOverridenClasses]);
-+    return $this->driverOverridenClasses[end($parts)] ?? $class_name;
++    return $this->driverOverriddenClasses[end($parts)] ?? $class_name;
 +  }
 +
    /**
     * Gets the driver-specific override class if any for the specified class.
     *
-@@ -1056,6 +1089,7 @@ protected function expandArguments(&$query, &$args) {
+@@ -1056,6 +1087,7 @@ protected function expandArguments(&$query, &$args) {
     *   The name of the class that should be used for this driver.
     */
    public function getDriverClass($class) {
@@ -235,10 +233,18 @@ index 677f4fd891..2265348abe 100644
        // Override because we've altered the namespace in
        // \Drupal\KernelTests\Core\Cache\EndOfTransactionQueriesTest::getDatabaseConnectionInfo()
 diff --git a/core/tests/Drupal/KernelTests/Core/Database/SelectExtenderTest.php b/core/tests/Drupal/KernelTests/Core/Database/SelectExtenderTest.php
-index 5a23f9a250..8da3cbe17e 100644
+index 5a23f9a250..06e253860d 100644
 --- a/core/tests/Drupal/KernelTests/Core/Database/SelectExtenderTest.php
 +++ b/core/tests/Drupal/KernelTests/Core/Database/SelectExtenderTest.php
-@@ -117,13 +117,16 @@ public function providerExtend(): array {
+@@ -5,7 +5,6 @@
+ use Composer\Autoload\ClassLoader;
+ use Drupal\Core\Database\Query\SelectExtender;
+ use Drupal\KernelTests\KernelTestBase;
+-use Drupal\Tests\Core\Database\Stub\StubConnection;
+ use Drupal\Tests\Core\Database\Stub\StubPDO;
+ 
+ /**
+@@ -117,12 +116,14 @@ public function providerExtend(): array {
     */
    public function testExtend(string $expected, string $namespace, string $extend): void {
      $additional_class_loader = new ClassLoader();
@@ -249,34 +255,151 @@ index 5a23f9a250..8da3cbe17e 100644
  
      $mock_pdo = $this->createMock(StubPDO::class);
 -    $connection = new StubConnection($mock_pdo, ['namespace' => $namespace]);
--
-+    $connection_class = "$namespace\\Connection"; 
++    $connection_class = "$namespace\\Connection";
 +    $connection = new $connection_class($mock_pdo, ['namespace' => $namespace]);
-+global $xxx;
-+$xxx = TRUE;
+ 
      // Tests the method \Drupal\Core\Database\Query\Select::extend().
      $select = $connection->select('test')->extend($extend);
-     $this->assertEquals($expected, get_class($select));
-@@ -135,6 +138,7 @@ public function testExtend(string $expected, string $namespace, string $extend):
-     // Tests the method \Drupal\Core\Database\Query\SelectExtender::extend().
-     $select_extender_extended = $select_extender->extend($extend);
-     $this->assertEquals($expected, get_class($select_extender_extended));
-+$xxx = FALSE;
+diff --git a/core/tests/fixtures/database_drivers/custom/fake/Connection.php b/core/tests/fixtures/database_drivers/custom/fake/Connection.php
+index ec0c9cf2dc..1af84f8526 100644
+--- a/core/tests/fixtures/database_drivers/custom/fake/Connection.php
++++ b/core/tests/fixtures/database_drivers/custom/fake/Connection.php
+@@ -3,12 +3,38 @@
+ namespace Drupal\Driver\Database\fake;
+ 
+ use Drupal\Core\Database\Connection as CoreConnection;
++use Drupal\Core\Database\ExceptionHandler;
++use Drupal\Core\Database\Query\Condition;
++use Drupal\Core\Database\Query\Delete;
++use Drupal\Core\Database\Query\Insert;
++use Drupal\Core\Database\Query\Merge;
++use Drupal\Core\Database\Query\Select;
++use Drupal\Core\Database\Query\Truncate;
++use Drupal\Core\Database\Query\Update;
++use Drupal\Core\Database\Query\Upsert;
++use Drupal\Core\Database\StatementWrapper;
++use Drupal\Core\Database\Transaction;
+ 
+ /**
+  * A fake Connection class for testing purposes.
+  */
+ class Connection extends CoreConnection {
+ 
++  /**
++   * {@inheritdoc}
++   */
++  protected $statementClass = NULL;
++
++  /**
++   * {@inheritdoc}
++   */
++  protected $statementWrapperClass = StatementWrapper::class;
++
++  /**
++   * {@inheritdoc}
++   */
++  protected $identifierQuotes = ['"', '"'];
++
+   /**
+    * Public property so we can test driver loading mechanism.
+    *
+@@ -65,4 +91,84 @@ public function nextId($existing_id = 0) {
+     return 0;
    }
  
++  /**
++   * {@inheritdoc}
++   */
++  public function exceptionHandler() {
++    return new ExceptionHandler();
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function select($table, $alias = NULL, array $options = []) {
++    return new Select($this, $table, $alias, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function insert($table, array $options = []) {
++    return new Insert($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function merge($table, array $options = []) {
++    return new Merge($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function upsert($table, array $options = []) {
++    return new Upsert($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function update($table, array $options = []) {
++    return new Update($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function delete($table, array $options = []) {
++    return new Delete($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function truncate($table, array $options = []) {
++    return new Truncate($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function schema() {
++    if (empty($this->schema)) {
++      $this->schema = new Schema($this);
++    }
++    return $this->schema;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function condition($conjunction) {
++    return new Condition($conjunction, FALSE);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function startTransaction($name = '') {
++    return new Transaction($this, $name);
++  }
++
  }
 diff --git a/core/tests/fixtures/database_drivers/module/corefake/src/Driver/Database/corefakeWithAllCustomClasses/Connection.php b/core/tests/fixtures/database_drivers/module/corefake/src/Driver/Database/corefakeWithAllCustomClasses/Connection.php
-index ecf7e5cccc..dc0180f477 100644
+index ecf7e5cccc..2cb594bf28 100644
 --- a/core/tests/fixtures/database_drivers/module/corefake/src/Driver/Database/corefakeWithAllCustomClasses/Connection.php
 +++ b/core/tests/fixtures/database_drivers/module/corefake/src/Driver/Database/corefakeWithAllCustomClasses/Connection.php
-@@ -9,6 +9,16 @@
+@@ -9,9 +9,99 @@
   */
  class Connection extends BaseConnection {
  
 +  /**
 +   * {@inheritdoc}
 +   */
-+  protected $driverOverridenClasses = [
++  protected $driverOverriddenClasses = [
 +    'PagerSelectExtender' => PagerSelectExtender::class,
 +    'SearchQuery' => SearchQuery::class,
 +    'TableSortExtender' => TableSortExtender::class,
@@ -286,3 +409,86 @@ index ecf7e5cccc..dc0180f477 100644
    /**
     * {@inheritdoc}
     */
+   public $driver = 'corefakeWithAllCustomClasses';
+ 
++  /**
++   * {@inheritdoc}
++   */
++  public function exceptionHandler() {
++    return new ExceptionHandler();
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function select($table, $alias = NULL, array $options = []) {
++    return new Select($this, $table, $alias, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function insert($table, array $options = []) {
++    return new Insert($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function merge($table, array $options = []) {
++    return new Merge($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function upsert($table, array $options = []) {
++    return new Upsert($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function update($table, array $options = []) {
++    return new Update($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function delete($table, array $options = []) {
++    return new Delete($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function truncate($table, array $options = []) {
++    return new Truncate($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function schema() {
++    if (empty($this->schema)) {
++      $this->schema = new Schema($this);
++    }
++    return $this->schema;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function condition($conjunction) {
++    return new Condition($conjunction, FALSE);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function startTransaction($name = '') {
++    return new Transaction($this, $name);
++  }
++
+ }
