@@ -310,6 +310,24 @@ index 0000000000..5eee532103
 +  }
 +
 +}
+diff --git a/core/lib/Drupal/Core/Pager/PagerManagerInterface.php b/core/lib/Drupal/Core/Pager/PagerManagerInterface.php
+index 113fcb8430..c4e31f5bff 100644
+--- a/core/lib/Drupal/Core/Pager/PagerManagerInterface.php
++++ b/core/lib/Drupal/Core/Pager/PagerManagerInterface.php
+@@ -29,11 +29,11 @@ interface PagerManagerInterface {
+    * If the items being displayed result from a database query performed using
+    * Drupal's database API, and if you have control over the construction of the
+    * database query, you do not need to call this function directly; instead,
+-   * you can extend the query object with the 'PagerSelectExtender' extender
++   * you can extend the query object with the 'pager' select query extender
+    * before executing it. For example:
+    * @code
+    *   $query = $connection->select('some_table')
+-   *     ->extend(PagerSelectExtender::class);
++   *     ->extend('pager');
+    * @endcode
+    *
+    * However, if you are using a different method for generating the items to be
 diff --git a/core/modules/comment/src/CommentStorage.php b/core/modules/comment/src/CommentStorage.php
 index 1b2c1b843a..ab9bf4c0a1 100644
 --- a/core/modules/comment/src/CommentStorage.php
@@ -400,7 +418,7 @@ index 3a5ec47c74..f5befb746e 100644
  
        $query->join('comment_entity_statistics', 'ces', "[n].[nid] = [ces].[entity_id] AND [ces].[field_name] = 'comment_forum' AND [ces].[entity_type] = 'node'");
 diff --git a/core/modules/help_topics/src/Plugin/Search/HelpSearch.php b/core/modules/help_topics/src/Plugin/Search/HelpSearch.php
-index 49b0038d0d..f4ef9dbd2c 100644
+index 49b0038d0d..3345b18256 100644
 --- a/core/modules/help_topics/src/Plugin/Search/HelpSearch.php
 +++ b/core/modules/help_topics/src/Plugin/Search/HelpSearch.php
 @@ -6,7 +6,6 @@
@@ -411,11 +429,21 @@ index 49b0038d0d..f4ef9dbd2c 100644
  use Drupal\Core\Database\StatementInterface;
  use Drupal\Core\Language\LanguageInterface;
  use Drupal\Core\Language\LanguageManagerInterface;
-@@ -221,7 +220,7 @@ protected function findResults() {
+@@ -18,7 +17,6 @@
+ use Drupal\search\Plugin\SearchIndexingInterface;
+ use Drupal\search\Plugin\SearchPluginBase;
+ use Drupal\search\SearchIndexInterface;
+-use Drupal\search\SearchQuery;
+ use Symfony\Component\DependencyInjection\ContainerInterface;
+ 
+ /**
+@@ -220,8 +218,8 @@ protected function findResults() {
+       ->select('search_index', 'i')
        // Restrict the search to the current interface language.
        ->condition('i.langcode', $this->languageManager->getCurrentLanguage()->getId())
-       ->extend(SearchQuery::class)
+-      ->extend(SearchQuery::class)
 -      ->extend(PagerSelectExtender::class);
++      ->extend('search_query')
 +      ->extend('pager');
      $query->innerJoin('help_search_items', 'hsi', '[i].[sid] = [hsi].[sid] AND [i].[type] = :type', [':type' => $this->getType()]);
      if ($denied_permissions) {
@@ -442,7 +470,7 @@ index 74e94fca5d..541b1d69d5 100644
  
      return $query;
 diff --git a/core/modules/node/src/Plugin/Search/NodeSearch.php b/core/modules/node/src/Plugin/Search/NodeSearch.php
-index b23112ae31..e67422c6e6 100644
+index b23112ae31..cee836e659 100644
 --- a/core/modules/node/src/Plugin/Search/NodeSearch.php
 +++ b/core/modules/node/src/Plugin/Search/NodeSearch.php
 @@ -7,7 +7,6 @@
@@ -453,15 +481,234 @@ index b23112ae31..e67422c6e6 100644
  use Drupal\Core\Database\Query\SelectExtender;
  use Drupal\Core\Database\StatementInterface;
  use Drupal\Core\Entity\EntityTypeManagerInterface;
-@@ -263,7 +262,7 @@ protected function findResults() {
+@@ -23,7 +22,6 @@
+ use Drupal\search\Plugin\ConfigurableSearchPluginBase;
+ use Drupal\search\Plugin\SearchIndexingInterface;
+ use Drupal\search\SearchIndexInterface;
+-use Drupal\search\SearchQuery;
+ use Symfony\Component\DependencyInjection\ContainerInterface;
+ 
+ /**
+@@ -262,8 +260,8 @@ protected function findResults() {
+     // Build matching conditions.
      $query = $this->databaseReplica
        ->select('search_index', 'i')
-       ->extend(SearchQuery::class)
+-      ->extend(SearchQuery::class)
 -      ->extend(PagerSelectExtender::class);
++      ->extend('search_query')
 +      ->extend('pager');
      $query->join('node_field_data', 'n', '[n].[nid] = [i].[sid] AND [n].[langcode] = [i].[langcode]');
      $query->condition('n.status', 1)
        ->addTag('node_access')
+diff --git a/core/modules/search/search.services.yml b/core/modules/search/search.services.yml
+index 8f6e2a0fcc..107038260c 100644
+--- a/core/modules/search/search.services.yml
++++ b/core/modules/search/search.services.yml
+@@ -16,3 +16,15 @@ services:
+   search.text_processor:
+     class: Drupal\search\SearchTextProcessor
+     arguments: ['@transliteration', '@config.factory', '@module_handler']
++
++  select_extender_factory.search_query:
++    class: Drupal\search\SearchQueryFactory
++    arguments: ['@config.factory', '@search.text_processor']
++    tags:
++      - { name: backend_overridable }
++
++  select_extender_factory.views_search_query:
++    class: Drupal\search\ViewsSearchQueryFactory
++    arguments: ['@config.factory', '@search.text_processor']
++    tags:
++      - { name: backend_overridable }
+diff --git a/core/modules/search/src/SearchQuery.php b/core/modules/search/src/SearchQuery.php
+index 92a1e10a74..2776dc65b0 100644
+--- a/core/modules/search/src/SearchQuery.php
++++ b/core/modules/search/src/SearchQuery.php
+@@ -2,6 +2,8 @@
+ 
+ namespace Drupal\search;
+ 
++use Drupal\Core\Config\ConfigFactoryInterface;
++use Drupal\Core\Database\Connection;
+ use Drupal\Core\Database\Query\SelectExtender;
+ use Drupal\Core\Database\Query\SelectInterface;
+ 
+@@ -73,6 +75,20 @@ class SearchQuery extends SelectExtender {
+    */
+   const NO_KEYWORD_MATCHES = 8;
+ 
++  /**
++   * The config factory.
++   *
++   * @var \Drupal\Core\Config\ConfigFactoryInterface
++   */
++  protected $configFactory;
++
++  /**
++   * The search text processor service.
++   *
++   * @var \Drupal\search\SearchTextProcessorInterface
++   */
++  protected $searchTextProcessor;
++
+   /**
+    * The keywords and advanced search options that are entered by the user.
+    *
+@@ -186,6 +202,24 @@ class SearchQuery extends SelectExtender {
+    */
+   protected $multiply = [];
+ 
++  /**
++   * Constructs a TableSortExtender object.
++   *
++   * @param \Drupal\Core\Database\Query\SelectInterface $query
++   *   Select query object.
++   * @param \Drupal\Core\Database\Connection $connection
++   *   Database connection object.
++   * @param \Drupal\Core\Config\ConfigFactoryInterface $config_factory
++   *   The config factory.
++   * @param \Drupal\search\SearchTextProcessorInterface $search_text_processor
++   *   The search text processor service.
++   */
++  public function __construct(SelectInterface $query, Connection $connection, ConfigFactoryInterface $config_factory = NULL, SearchTextProcessorInterface $search_text_processor = NULL) {
++    parent::__construct($query, $connection);
++    $this->configFactory = $config_factory;
++    $this->searchTextProcessor = $search_text_processor;
++  }
++
+   /**
+    * Sets the search query expression.
+    *
+@@ -231,9 +265,7 @@ protected function parseSearchExpression() {
+ 
+     // Classify tokens.
+     $in_or = FALSE;
+-    $limit_combinations = \Drupal::config('search.settings')->get('and_or_limit');
+-    /** @var \Drupal\search\SearchTextProcessorInterface $text_processor */
+-    $text_processor = \Drupal::service('search.text_processor');
++    $limit_combinations = $this->configFactory->get('search.settings')->get('and_or_limit');
+     // The first search expression does not count as AND.
+     $and_count = -1;
+     $or_count = 0;
+@@ -256,7 +288,7 @@ protected function parseSearchExpression() {
+       // Simplify keyword according to indexing rules and external
+       // preprocessors. Use same process as during search indexing, so it
+       // will match search index.
+-      $words = $text_processor->analyze($match[2]);
++      $words = $this->searchTextProcessor->analyze($match[2]);
+       // Re-explode in case simplification added more words, except when
+       // matching a phrase.
+       $words = $phrase ? [$words] : preg_split('/ /', $words, -1, PREG_SPLIT_NO_EMPTY);
+@@ -364,7 +396,7 @@ protected function parseWord($word) {
+     $split = explode(' ', $word);
+     foreach ($split as $s) {
+       $num = is_numeric($s);
+-      if ($num || mb_strlen($s) >= \Drupal::config('search.settings')->get('index.minimum_word_size')) {
++      if ($num || mb_strlen($s) >= $this->configFactory->get('search.settings')->get('index.minimum_word_size')) {
+         if (!isset($this->words[$s])) {
+           $this->words[$s] = $s;
+           $num_new_scores++;
+diff --git a/core/modules/search/src/SearchQueryFactory.php b/core/modules/search/src/SearchQueryFactory.php
+new file mode 100644
+index 0000000000..968dbe8380
+--- /dev/null
++++ b/core/modules/search/src/SearchQueryFactory.php
+@@ -0,0 +1,56 @@
++<?php
++
++namespace Drupal\search;
++
++use Drupal\Core\Config\ConfigFactoryInterface;
++use Drupal\Core\Database\Connection;
++use Drupal\Core\Database\Query\SelectInterface;
++
++/**
++ * Select extender factory for search queries.
++ */
++class SearchQueryFactory {
++
++    /**
++     * The config factory.
++     *
++     * @var \Drupal\Core\Config\ConfigFactoryInterface
++     */
++    protected $configFactory;
++
++    /**
++     * The search text processor service.
++     *
++     * @var \Drupal\search\SearchTextProcessorInterface
++     */
++    protected $searchTextProcessor;
++
++    /**
++     * Constructs a SearchQueryFactory object.
++     *
++     * @param \Drupal\Core\Config\ConfigFactoryInterface $config_factory
++     *   The config factory.
++     * @param \Drupal\search\SearchTextProcessorInterface $search_text_processor
++     *   The search text processor service.
++     */
++    public function __construct(ConfigFactoryInterface $config_factory, SearchTextProcessorInterface $search_text_processor) {
++      $this->configFactory = $config_factory;
++      $this->searchTextProcessor = $search_text_processor;
++    }
++
++    /**
++     * Returns a query extender for search queries.
++     *
++     * @param \Drupal\Core\Database\Query\SelectInterface $query
++     *   Select query object.
++     * @param \Drupal\Core\Database\Connection $connection
++     *   Database connection object.
++     *
++     * @return Drupal\search\SearchQuery
++     *   A query extender for search queries.
++     */
++    public function get(SelectInterface $query, Connection $connection): SearchQuery {
++      return new SearchQuery($query, $connection, $this->configFactory, $this->searchTextProcessor);
++    }
++
++}
+diff --git a/core/modules/search/tests/src/Kernel/SearchMatchTest.php b/core/modules/search/tests/src/Kernel/SearchMatchTest.php
+index 511c0ef678..513d597b10 100644
+--- a/core/modules/search/tests/src/Kernel/SearchMatchTest.php
++++ b/core/modules/search/tests/src/Kernel/SearchMatchTest.php
+@@ -6,7 +6,6 @@
+ use Drupal\Core\Language\LanguageInterface;
+ use Drupal\KernelTests\KernelTestBase;
+ use Drupal\search\SearchIndexInterface;
+-use Drupal\search\SearchQuery;
+ 
+ /**
+  * Indexes content and queries it.
+@@ -165,7 +164,7 @@ public function _testQueries() {
+     $connection = Database::getConnection();
+     foreach ($queries as $query => $results) {
+       $result = $connection->select('search_index', 'i')
+-        ->extend(SearchQuery::class)
++        ->extend('search_query')
+         ->searchExpression($query, static::SEARCH_TYPE)
+         ->execute();
+ 
+@@ -185,7 +184,7 @@ public function _testQueries() {
+     ];
+     foreach ($queries as $query => $results) {
+       $result = $connection->select('search_index', 'i')
+-        ->extend(SearchQuery::class)
++        ->extend('search_query')
+         ->searchExpression($query, static::SEARCH_TYPE_2)
+         ->execute();
+ 
+@@ -208,7 +207,7 @@ public function _testQueries() {
+     ];
+     foreach ($queries as $query => $results) {
+       $result = $connection->select('search_index', 'i')
+-        ->extend(SearchQuery::class)
++        ->extend('search_query')
+         ->searchExpression($query, static::SEARCH_TYPE_JPN)
+         ->execute();
+ 
 diff --git a/core/modules/system/tests/modules/database_test/src/Controller/DatabaseTestController.php b/core/modules/system/tests/modules/database_test/src/Controller/DatabaseTestController.php
 index 2364e39fc7..7efff27676 100644
 --- a/core/modules/system/tests/modules/database_test/src/Controller/DatabaseTestController.php
