@@ -8073,19 +8073,15 @@ index 0000000000..0e5f7d3b50
 +}
 diff --git a/core/modules/mysql/tests/src/Kernel/mysql/ConnectionUnitTest.php b/core/modules/mysql/tests/src/Kernel/mysql/ConnectionUnitTest.php
 new file mode 100644
-index 0000000000..65df5e7124
+index 0000000000..54bb043815
 --- /dev/null
 +++ b/core/modules/mysql/tests/src/Kernel/mysql/ConnectionUnitTest.php
-@@ -0,0 +1,188 @@
+@@ -0,0 +1,184 @@
 +<?php
 +
 +namespace Drupal\Tests\mysql\Kernel\mysql;
 +
-+use Drupal\Core\Database\Connection;
 +use Drupal\Core\Database\Database;
-+use Drupal\Core\Database\DatabaseExceptionWrapper;
-+use Drupal\Core\Database\Query\Condition;
-+use Drupal\Core\Database\StatementWrapper;
 +use Drupal\KernelTests\Core\Database\DriverSpecificDatabaseTestBase;
 +
 +/**
@@ -13294,9 +13290,263 @@ index 9cb1dc2def..c16e4a9d51 100644
      $this->assertSame(1, $this->containerBuilds);
    }
  
+diff --git a/core/tests/Drupal/KernelTests/Core/Database/ConnectionUnitTest.php b/core/tests/Drupal/KernelTests/Core/Database/ConnectionUnitTest.php
+index 67a81adbfb..33be46a2de 100644
+--- a/core/tests/Drupal/KernelTests/Core/Database/ConnectionUnitTest.php
++++ b/core/tests/Drupal/KernelTests/Core/Database/ConnectionUnitTest.php
+@@ -2,7 +2,6 @@
+ 
+ namespace Drupal\KernelTests\Core\Database;
+ 
+-use Drupal\Component\Render\FormattableMarkup;
+ use Drupal\Core\Database\Database;
+ use Drupal\KernelTests\KernelTestBase;
+ 
+@@ -13,241 +12,6 @@
+  */
+ class ConnectionUnitTest extends KernelTestBase {
+ 
+-  /**
+-   * A target connection identifier to be used for testing.
+-   */
+-  const TEST_TARGET_CONNECTION = 'DatabaseConnectionUnitTest';
+-
+-  /**
+-   * The default database connection used for testing.
+-   *
+-   * @var \Drupal\Core\Database\Connection
+-   */
+-  protected $connection;
+-
+-  /**
+-   * A database connection used for monitoring processes.
+-   *
+-   * @var \Drupal\Core\Database\Connection
+-   */
+-  protected $monitor;
+-
+-  /**
+-   * {@inheritdoc}
+-   */
+-  protected function setUp(): void {
+-    parent::setUp();
+-
+-    $this->connection = Database::getConnection();
+-
+-    // Create an additional connection to monitor the connections being opened
+-    // and closed in this test.
+-    $connection_info = Database::getConnectionInfo();
+-    Database::addConnectionInfo('default', 'monitor', $connection_info['default']);
+-    $this->monitor = Database::getConnection('monitor');
+-  }
+-
+-  /**
+-   * Returns a set of queries specific for the database in testing.
+-   */
+-  protected function getQuery() {
+-    if ($this->connection->databaseType() == 'pgsql') {
+-      return [
+-        'connection_id' => 'SELECT pg_backend_pid()',
+-        'processlist' => 'SELECT pid FROM pg_stat_activity',
+-        'show_tables' => 'SELECT * FROM pg_catalog.pg_tables',
+-      ];
+-    }
+-    else {
+-      return [
+-        'connection_id' => 'SELECT CONNECTION_ID()',
+-        'processlist' => 'SHOW PROCESSLIST',
+-        'show_tables' => 'SHOW TABLES',
+-      ];
+-    }
+-  }
+-
+-  /**
+-   * Adds a new database connection info to Database.
+-   */
+-  protected function addConnection() {
+-    // Add a new target to the connection, by cloning the current connection.
+-    $connection_info = Database::getConnectionInfo();
+-    Database::addConnectionInfo('default', static::TEST_TARGET_CONNECTION, $connection_info['default']);
+-
+-    // Verify that the new target exists.
+-    $info = Database::getConnectionInfo();
+-    // New connection info found.
+-    $this->assertSame($connection_info['default'], $info[static::TEST_TARGET_CONNECTION]);
+-  }
+-
+-  /**
+-   * Returns the connection ID of the current test connection.
+-   *
+-   * @return int
+-   */
+-  protected function getConnectionId() {
+-    return (int) Database::getConnection(static::TEST_TARGET_CONNECTION)->query($this->getQuery()['connection_id'])->fetchField();
+-  }
+-
+-  /**
+-   * Asserts that a connection ID exists.
+-   *
+-   * @param int $id
+-   *   The connection ID to verify.
+-   */
+-  protected function assertConnection($id) {
+-    $list = $this->monitor->query($this->getQuery()['processlist'])->fetchAllKeyed(0, 0);
+-    $this->assertTrue(isset($list[$id]), new FormattableMarkup('Connection ID @id found.', ['@id' => $id]));
+-  }
+-
+-  /**
+-   * Asserts that a connection ID does not exist.
+-   *
+-   * @param int $id
+-   *   The connection ID to verify.
+-   */
+-  protected function assertNoConnection($id) {
+-    $list = $this->monitor->query($this->getQuery()['processlist'])->fetchAllKeyed(0, 0);
+-    $this->assertFalse(isset($list[$id]), new FormattableMarkup('Connection ID @id not found.', ['@id' => $id]));
+-  }
+-
+-  /**
+-   * Tests Database::closeConnection() without query.
+-   *
+-   * @todo getConnectionId() executes a query.
+-   */
+-  public function testOpenClose() {
+-    // Do not run this test for an SQLite database.
+-    $database_type = $this->connection->databaseType();
+-    if ($database_type != 'mysql' && $database_type != 'pgsql') {
+-      $this->markTestSkipped("This tests only runs on MySQL and PostgreSQL");
+-    }
+-
+-    // Add and open a new connection.
+-    $this->addConnection();
+-    $id = $this->getConnectionId();
+-    Database::getConnection(static::TEST_TARGET_CONNECTION);
+-
+-    // Verify that there is a new connection.
+-    $this->assertConnection($id);
+-
+-    // Close the connection.
+-    Database::closeConnection(static::TEST_TARGET_CONNECTION);
+-    // Wait 20ms to give the database engine sufficient time to react.
+-    usleep(20000);
+-
+-    // Verify that we are back to the original connection count.
+-    $this->assertNoConnection($id);
+-  }
+-
+-  /**
+-   * Tests Database::closeConnection() with a query.
+-   */
+-  public function testOpenQueryClose() {
+-    // Do not run this test for an SQLite database.
+-    $database_type = $this->connection->databaseType();
+-    if ($database_type != 'mysql' && $database_type != 'pgsql') {
+-      $this->markTestSkipped("This tests only runs on MySQL and PostgreSQL");
+-    }
+-
+-    // Add and open a new connection.
+-    $this->addConnection();
+-    $id = $this->getConnectionId();
+-    Database::getConnection(static::TEST_TARGET_CONNECTION);
+-
+-    // Verify that there is a new connection.
+-    $this->assertConnection($id);
+-
+-    // Execute a query.
+-    Database::getConnection(static::TEST_TARGET_CONNECTION)->query($this->getQuery()['show_tables']);
+-
+-    // Close the connection.
+-    Database::closeConnection(static::TEST_TARGET_CONNECTION);
+-    // Wait 20ms to give the database engine sufficient time to react.
+-    usleep(20000);
+-
+-    // Verify that we are back to the original connection count.
+-    $this->assertNoConnection($id);
+-  }
+-
+-  /**
+-   * Tests Database::closeConnection() with a query and custom prefetch method.
+-   */
+-  public function testOpenQueryPrefetchClose() {
+-    // Do not run this test for an SQLite database.
+-    $database_type = $this->connection->databaseType();
+-    if ($database_type != 'mysql' && $database_type != 'pgsql') {
+-      $this->markTestSkipped("This tests only runs on MySQL and PostgreSQL");
+-    }
+-
+-    // Add and open a new connection.
+-    $this->addConnection();
+-    $id = $this->getConnectionId();
+-    Database::getConnection(static::TEST_TARGET_CONNECTION);
+-
+-    // Verify that there is a new connection.
+-    $this->assertConnection($id);
+-
+-    // Execute a query.
+-    Database::getConnection(static::TEST_TARGET_CONNECTION)->query($this->getQuery()['show_tables'])->fetchCol();
+-
+-    // Close the connection.
+-    Database::closeConnection(static::TEST_TARGET_CONNECTION);
+-    // Wait 20ms to give the database engine sufficient time to react.
+-    usleep(20000);
+-
+-    // Verify that we are back to the original connection count.
+-    $this->assertNoConnection($id);
+-  }
+-
+-  /**
+-   * Tests Database::closeConnection() with a select query.
+-   */
+-  public function testOpenSelectQueryClose() {
+-    // Do not run this test for an SQLite database.
+-    $database_type = $this->connection->databaseType();
+-    if ($database_type != 'mysql' && $database_type != 'pgsql') {
+-      $this->markTestSkipped("This tests only runs on MySQL and PostgreSQL");
+-    }
+-
+-    // Add and open a new connection.
+-    $this->addConnection();
+-    $id = $this->getConnectionId();
+-    Database::getConnection(static::TEST_TARGET_CONNECTION);
+-
+-    // Verify that there is a new connection.
+-    $this->assertConnection($id);
+-
+-    // Create a table.
+-    $name = 'foo';
+-    Database::getConnection(static::TEST_TARGET_CONNECTION)->schema()->createTable($name, [
+-      'fields' => [
+-        'name' => [
+-          'type' => 'varchar',
+-          'length' => 255,
+-        ],
+-      ],
+-    ]);
+-
+-    // Execute a query.
+-    Database::getConnection(static::TEST_TARGET_CONNECTION)->select('foo', 'f')
+-      ->fields('f', ['name'])
+-      ->execute()
+-      ->fetchAll();
+-
+-    // Drop the table.
+-    Database::getConnection(static::TEST_TARGET_CONNECTION)->schema()->dropTable($name);
+-
+-    // Close the connection.
+-    Database::closeConnection(static::TEST_TARGET_CONNECTION);
+-    // Wait 20ms to give the database engine sufficient time to react.
+-    usleep(20000);
+-
+-    // Verify that we are back to the original connection count.
+-    $this->assertNoConnection($id);
+-  }
+-
+   /**
+    * Tests pdo options override.
+    */
 diff --git a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificDatabaseTestBase.php b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificDatabaseTestBase.php
 new file mode 100644
-index 0000000000..7a58279213
+index 0000000000..a6acacc8e1
 --- /dev/null
 +++ b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificDatabaseTestBase.php
 @@ -0,0 +1,38 @@
@@ -13304,14 +13554,14 @@ index 0000000000..7a58279213
 +
 +namespace Drupal\KernelTests\Core\Database;
 +
-+use Drupal\Core\Database\Database;
++// cSpell:ignore mymodule mydriver
 +
 +/**
 + * Base class for driver specific database tests.
 + *
 + * Driver specific tests should be created in the
 + * \Drupal\Tests\mymodule\Kernel\mydriver namespace, and it execution will only
-+ * occure when the database driver of the SUT is provided by 'mymodule' and
++ * occur when the database driver of the SUT is provided by 'mymodule' and
 + * named 'mydriver'.
 + */
 +abstract class DriverSpecificDatabaseTestBase extends DatabaseTestBase {
