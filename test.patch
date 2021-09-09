@@ -8071,6 +8071,200 @@ index 0000000000..0e5f7d3b50
 +  }
 +
 +}
+diff --git a/core/modules/mysql/tests/src/Kernel/mysql/ConnectionUnitTest.php b/core/modules/mysql/tests/src/Kernel/mysql/ConnectionUnitTest.php
+new file mode 100644
+index 0000000000..67ce1a6ac4
+--- /dev/null
++++ b/core/modules/mysql/tests/src/Kernel/mysql/ConnectionUnitTest.php
+@@ -0,0 +1,188 @@
++<?php
++
++namespace Drupal\Tests\mysql\Kernel\mysql;
++
++use Drupal\Core\Database\Connection;
++use Drupal\Core\Database\Database;
++use Drupal\Core\Database\DatabaseExceptionWrapper;
++use Drupal\Core\Database\Query\Condition;
++use Drupal\Core\Database\StatementWrapper;
++use Drupal\KernelTests\Core\Database\DriverSpecificDatabaseTestBase;
++
++/**
++ * MySQL-specific connection unit tests.
++ *
++ * @group Database
++ */
++class ConnectionUnitTest extends DriverSpecificDatabaseTestBase {
++
++  /**
++   * A target connection identifier to be used for testing.
++   */
++  const TEST_TARGET_CONNECTION = 'DatabaseConnectionUnitTest';
++
++  /**
++   * The process id of the connection under test.
++   *
++   * @var int
++   */
++  protected int $id;
++
++  /**
++   * A database connection used for monitoring processes.
++   *
++   * @var \Drupal\Core\Database\Connection
++   */
++  protected Connection $monitor;
++
++  /**
++   * {@inheritdoc}
++   */
++  protected function setUp(): void {
++    parent::setUp();
++
++    // Create an additional connection to monitor the connections being opened
++    // and closed in this test.
++    $connection_info = Database::getConnectionInfo();
++    Database::addConnectionInfo('default', 'monitor', $connection_info['default']);
++    $this->monitor = Database::getConnection('monitor');
++
++    // Add a new target to the connection, by cloning the current connection.
++    $connection_info = Database::getConnectionInfo();
++    Database::addConnectionInfo('default', static::TEST_TARGET_CONNECTION, $connection_info['default']);
++
++    // Verify that the new target exists.
++    $info = Database::getConnectionInfo();
++
++    // New connection info found.
++    $this->assertSame($connection_info['default'], $info[static::TEST_TARGET_CONNECTION]);
++
++    // Add and open a new connection.
++    Database::getConnection(static::TEST_TARGET_CONNECTION);
++
++    // Verify that there is a new connection.
++    $this->id = $this->getConnectionId();
++    $this->assertConnection($this->id);
++  }
++
++  /**
++   * Returns a set of queries specific for MySQL.
++   */
++  protected function getQuery(): array {
++    return [
++      'connection_id' => 'SELECT CONNECTION_ID()',
++      'processlist' => 'SHOW PROCESSLIST',
++      'show_tables' => 'SHOW TABLES',
++    ];
++  }
++
++  /**
++   * Returns the connection ID of the current test connection.
++   *
++   * @return int
++   */
++  protected function getConnectionId(): int {
++    return (int) Database::getConnection(static::TEST_TARGET_CONNECTION)->query($this->getQuery()['connection_id'])->fetchField();
++  }
++
++  /**
++   * Asserts that a connection ID exists.
++   *
++   * @param int $id
++   *   The connection ID to verify.
++   */
++  protected function assertConnection(int $id): void {
++    $this->assertArrayHasKey($id, $this->monitor->query($this->getQuery()['processlist'])->fetchAllKeyed(0, 0));
++  }
++
++  /**
++   * Asserts that a connection ID does not exist.
++   *
++   * @param int $id
++   *   The connection ID to verify.
++   */
++  protected function assertNoConnection(int $id): void {
++    $this->assertArrayNotHasKey($id, $this->monitor->query($this->getQuery()['processlist'])->fetchAllKeyed(0, 0));
++  }
++
++  /**
++   * Tests Database::closeConnection() without query.
++   *
++   * @todo getConnectionId() executes a query.
++   */
++  public function testOpenClose(): void {
++    // Close the connection.
++    Database::closeConnection(static::TEST_TARGET_CONNECTION);
++    // Wait 20ms to give the database engine sufficient time to react.
++    usleep(20000);
++
++    // Verify that we are back to the original connection count.
++    $this->assertNoConnection($this->id);
++  }
++
++  /**
++   * Tests Database::closeConnection() with a query.
++   */
++  public function testOpenQueryClose(): void {
++    // Execute a query.
++    Database::getConnection(static::TEST_TARGET_CONNECTION)->query($this->getQuery()['show_tables']);
++
++    // Close the connection.
++    Database::closeConnection(static::TEST_TARGET_CONNECTION);
++    // Wait 20ms to give the database engine sufficient time to react.
++    usleep(20000);
++
++    // Verify that we are back to the original connection count.
++    $this->assertNoConnection($this->id);
++  }
++
++  /**
++   * Tests Database::closeConnection() with a query and custom prefetch method.
++   */
++  public function testOpenQueryPrefetchClose(): void {
++    // Execute a query.
++    Database::getConnection(static::TEST_TARGET_CONNECTION)->query($this->getQuery()['show_tables'])->fetchCol();
++
++    // Close the connection.
++    Database::closeConnection(static::TEST_TARGET_CONNECTION);
++    // Wait 20ms to give the database engine sufficient time to react.
++    usleep(20000);
++
++    // Verify that we are back to the original connection count.
++    $this->assertNoConnection($this->id);
++  }
++
++  /**
++   * Tests Database::closeConnection() with a select query.
++   */
++  public function testOpenSelectQueryClose(): void {
++    // Create a table.
++    $name = 'foo';
++    Database::getConnection(static::TEST_TARGET_CONNECTION)->schema()->createTable($name, [
++      'fields' => [
++        'name' => [
++          'type' => 'varchar',
++          'length' => 255,
++        ],
++      ],
++    ]);
++
++    // Execute a query.
++    Database::getConnection(static::TEST_TARGET_CONNECTION)->select('foo', 'f')
++      ->fields('f', ['name'])
++      ->execute()
++      ->fetchAll();
++
++    // Drop the table.
++    Database::getConnection(static::TEST_TARGET_CONNECTION)->schema()->dropTable($name);
++
++    // Close the connection.
++    Database::closeConnection(static::TEST_TARGET_CONNECTION);
++    // Wait 20ms to give the database engine sufficient time to react.
++    usleep(20000);
++
++    // Verify that we are back to the original connection count.
++    $this->assertNoConnection($this->id);
++  }
++
++}
 diff --git a/core/modules/pgsql/pgsql.info.yml b/core/modules/pgsql/pgsql.info.yml
 new file mode 100644
 index 0000000000..93ad5d8e1f
@@ -10487,79 +10681,25 @@ index 0000000000..35823a270b
 +}
 diff --git a/core/modules/pgsql/tests/src/Kernel/pgsql/ConnectionUnitTest.php b/core/modules/pgsql/tests/src/Kernel/pgsql/ConnectionUnitTest.php
 new file mode 100644
-index 0000000000..97ec706726
+index 0000000000..3bea902865
 --- /dev/null
 +++ b/core/modules/pgsql/tests/src/Kernel/pgsql/ConnectionUnitTest.php
-@@ -0,0 +1,188 @@
+@@ -0,0 +1,25 @@
 +<?php
 +
 +namespace Drupal\Tests\pgsql\Kernel\pgsql;
 +
-+use Drupal\Core\Database\Connection;
-+use Drupal\Core\Database\Database;
-+use Drupal\Core\Database\DatabaseExceptionWrapper;
-+use Drupal\Core\Database\Query\Condition;
-+use Drupal\Core\Database\StatementWrapper;
-+use Drupal\KernelTests\Core\Database\DriverSpecificDatabaseTestBase;
++use Drupal\Tests\mysql\Kernel\mysql\MySqlConnectionUnitTest;
 +
 +/**
-+ * PostgreSQL specific connection unit tests.
++ * PostgreSQL-specific connection unit tests.
 + *
 + * @group Database
 + */
-+class ConnectionUnitTest extends DriverSpecificDatabaseTestBase {
++class ConnectionUnitTest extends MySqlConnectionUnitTest {
 +
 +  /**
-+   * A target connection identifier to be used for testing.
-+   */
-+  const TEST_TARGET_CONNECTION = 'DatabaseConnectionUnitTest';
-+
-+  /**
-+   * The process id of the connection under test.
-+   *
-+   * @var int
-+   */
-+  protected int $id;
-+
-+  /**
-+   * A database connection used for monitoring processes.
-+   *
-+   * @var \Drupal\Core\Database\Connection
-+   */
-+  protected Connection $monitor;
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  protected function setUp(): void {
-+    parent::setUp();
-+
-+    // Create an additional connection to monitor the connections being opened
-+    // and closed in this test.
-+    $connection_info = Database::getConnectionInfo();
-+    Database::addConnectionInfo('default', 'monitor', $connection_info['default']);
-+    $this->monitor = Database::getConnection('monitor');
-+
-+    // Add a new target to the connection, by cloning the current connection.
-+    $connection_info = Database::getConnectionInfo();
-+    Database::addConnectionInfo('default', static::TEST_TARGET_CONNECTION, $connection_info['default']);
-+
-+    // Verify that the new target exists.
-+    $info = Database::getConnectionInfo();
-+
-+    // New connection info found.
-+    $this->assertSame($connection_info['default'], $info[static::TEST_TARGET_CONNECTION]);
-+
-+    // Add and open a new connection.
-+    Database::getConnection(static::TEST_TARGET_CONNECTION);
-+
-+    // Verify that there is a new connection.
-+    $this->id = $this->getConnectionId();
-+    $this->assertConnection($this->id);
-+  }
-+
-+  /**
-+   * Returns a set of queries specific for the database in testing.
++   * Returns a set of queries specific for PostgreSQL.
 +   */
 +  protected function getQuery(): array {
 +    return [
@@ -10567,115 +10707,6 @@ index 0000000000..97ec706726
 +      'processlist' => 'SELECT pid FROM pg_stat_activity',
 +      'show_tables' => 'SELECT * FROM pg_catalog.pg_tables',
 +    ];
-+  }
-+
-+  /**
-+   * Returns the connection ID of the current test connection.
-+   *
-+   * @return int
-+   */
-+  protected function getConnectionId(): int {
-+    return (int) Database::getConnection(static::TEST_TARGET_CONNECTION)->query($this->getQuery()['connection_id'])->fetchField();
-+  }
-+
-+  /**
-+   * Asserts that a connection ID exists.
-+   *
-+   * @param int $id
-+   *   The connection ID to verify.
-+   */
-+  protected function assertConnection(int $id): void {
-+    $this->assertArrayHasKey($id, $this->monitor->query($this->getQuery()['processlist'])->fetchAllKeyed(0, 0));
-+  }
-+
-+  /**
-+   * Asserts that a connection ID does not exist.
-+   *
-+   * @param int $id
-+   *   The connection ID to verify.
-+   */
-+  protected function assertNoConnection(int $id): void {
-+    $this->assertArrayNotHasKey($id, $this->monitor->query($this->getQuery()['processlist'])->fetchAllKeyed(0, 0));
-+  }
-+
-+  /**
-+   * Tests Database::closeConnection() without query.
-+   *
-+   * @todo getConnectionId() executes a query.
-+   */
-+  public function testOpenClose(): void {
-+    // Close the connection.
-+    Database::closeConnection(static::TEST_TARGET_CONNECTION);
-+    // Wait 20ms to give the database engine sufficient time to react.
-+    usleep(20000);
-+
-+    // Verify that we are back to the original connection count.
-+    $this->assertNoConnection($this->id);
-+  }
-+
-+  /**
-+   * Tests Database::closeConnection() with a query.
-+   */
-+  public function testOpenQueryClose(): void {
-+    // Execute a query.
-+    Database::getConnection(static::TEST_TARGET_CONNECTION)->query($this->getQuery()['show_tables']);
-+
-+    // Close the connection.
-+    Database::closeConnection(static::TEST_TARGET_CONNECTION);
-+    // Wait 20ms to give the database engine sufficient time to react.
-+    usleep(20000);
-+
-+    // Verify that we are back to the original connection count.
-+    $this->assertNoConnection($this->id);
-+  }
-+
-+  /**
-+   * Tests Database::closeConnection() with a query and custom prefetch method.
-+   */
-+  public function testOpenQueryPrefetchClose(): void {
-+    // Execute a query.
-+    Database::getConnection(static::TEST_TARGET_CONNECTION)->query($this->getQuery()['show_tables'])->fetchCol();
-+
-+    // Close the connection.
-+    Database::closeConnection(static::TEST_TARGET_CONNECTION);
-+    // Wait 20ms to give the database engine sufficient time to react.
-+    usleep(20000);
-+
-+    // Verify that we are back to the original connection count.
-+    $this->assertNoConnection($this->id);
-+  }
-+
-+  /**
-+   * Tests Database::closeConnection() with a select query.
-+   */
-+  public function testOpenSelectQueryClose(): void {
-+    // Create a table.
-+    $name = 'foo';
-+    Database::getConnection(static::TEST_TARGET_CONNECTION)->schema()->createTable($name, [
-+      'fields' => [
-+        'name' => [
-+          'type' => 'varchar',
-+          'length' => 255,
-+        ],
-+      ],
-+    ]);
-+
-+    // Execute a query.
-+    Database::getConnection(static::TEST_TARGET_CONNECTION)->select('foo', 'f')
-+      ->fields('f', ['name'])
-+      ->execute()
-+      ->fetchAll();
-+
-+    // Drop the table.
-+    Database::getConnection(static::TEST_TARGET_CONNECTION)->schema()->dropTable($name);
-+
-+    // Close the connection.
-+    Database::closeConnection(static::TEST_TARGET_CONNECTION);
-+    // Wait 20ms to give the database engine sufficient time to react.
-+    usleep(20000);
-+
-+    // Verify that we are back to the original connection count.
-+    $this->assertNoConnection($this->id);
 +  }
 +
 +}
