@@ -482,7 +482,7 @@ index 106add49ef..4b186dfa4d 100644
      $tables = [];
  
 diff --git a/core/lib/Drupal/Core/Database/Driver/sqlite/Connection.php b/core/lib/Drupal/Core/Database/Driver/sqlite/Connection.php
-index bb1c15def9..3a1d61a720 100644
+index bb1c15def9..5c4ab61def 100644
 --- a/core/lib/Drupal/Core/Database/Driver/sqlite/Connection.php
 +++ b/core/lib/Drupal/Core/Database/Driver/sqlite/Connection.php
 @@ -4,6 +4,7 @@
@@ -537,24 +537,24 @@ index bb1c15def9..3a1d61a720 100644
  
      $this->query('CREATE TEMPORARY TABLE ' . $tablename . ' AS ' . $query, $args, $options);
      return $tablename;
-@@ -469,10 +464,8 @@ public function nextId($existing_id = 0) {
+@@ -469,10 +464,7 @@ public function nextId($existing_id = 0) {
     * {@inheritdoc}
     */
    public function getFullQualifiedTableName($table) {
 -    $prefix = $this->tablePrefix($table);
 -
-     // Don't include the SQLite database file name as part of the table name.
+-    // Don't include the SQLite database file name as part of the table name.
 -    return $prefix . $table;
-+    return $this->identifierHandler->getPlatformTableName($table, TRUE, TRUE);
++    return 'main.' . $this->identifierHandler->getPlatformTableName($table, TRUE, TRUE);
    }
  
    /**
 diff --git a/core/lib/Drupal/Core/Database/IdentifierHandler.php b/core/lib/Drupal/Core/Database/IdentifierHandler.php
 new file mode 100644
-index 0000000000..41da52728a
+index 0000000000..5742e0a272
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/IdentifierHandler.php
-@@ -0,0 +1,196 @@
+@@ -0,0 +1,198 @@
 +<?php
 +
 +namespace Drupal\Core\Database;
@@ -588,8 +588,10 @@ index 0000000000..41da52728a
 +   * The table prefix used by this database connection.
 +   *
 +   * @var string
++   *
++   * @todo add property 'string' typehint for PHP 8.0.
 +   */
-+  protected string $tablePrefix;
++  protected $tablePrefix;
 +
 +  /**
 +   * @todo
@@ -801,6 +803,79 @@ index 31f456233b..147149d213 100644
    }
  
    /**
+diff --git a/core/modules/system/tests/src/Functional/Database/TemporaryQueryTest.php b/core/modules/system/tests/src/Functional/Database/TemporaryQueryTest.php
+deleted file mode 100644
+index 419363a2cb..0000000000
+--- a/core/modules/system/tests/src/Functional/Database/TemporaryQueryTest.php
++++ /dev/null
+@@ -1,67 +0,0 @@
+-<?php
+-
+-namespace Drupal\Tests\system\Functional\Database;
+-
+-use Drupal\Core\Database\Database;
+-
+-/**
+- * Tests the temporary query functionality.
+- *
+- * @group Database
+- * @group legacy
+- */
+-class TemporaryQueryTest extends DatabaseTestBase {
+-
+-  /**
+-   * {@inheritdoc}
+-   */
+-  protected static $modules = ['database_test'];
+-
+-  /**
+-   * {@inheritdoc}
+-   */
+-  protected $defaultTheme = 'stark';
+-
+-  /**
+-   * Returns the number of rows of a table.
+-   */
+-  public function countTableRows($table_name) {
+-    return Database::getConnection()->select($table_name)->countQuery()->execute()->fetchField();
+-  }
+-
+-  /**
+-   * Confirms that temporary tables work and are limited to one request.
+-   */
+-  public function testTemporaryQuery() {
+-    $this->expectDeprecation('Connection::queryTemporary() is deprecated in drupal:9.3.0 and is removed from drupal:10.0.0. There is no replacement. See https://www.drupal.org/node/3211781');
+-    $this->expectDeprecation('Connection::generateTemporaryTableName() is deprecated in drupal:9.3.0 and is removed from drupal:10.0.0. There is no replacement. See https://www.drupal.org/node/3211781');
+-
+-    $connection = Database::getConnection();
+-    $this->drupalGet('database_test/db_query_temporary');
+-    $data = json_decode($this->getSession()->getPage()->getContent());
+-    if ($data) {
+-      $this->assertEquals($this->countTableRows('test'), $data->row_count, 'The temporary table contains the correct amount of rows.');
+-      $this->assertFalse($connection->schema()->tableExists($data->table_name), 'The temporary table is, indeed, temporary.');
+-    }
+-    else {
+-      $this->fail('The creation of the temporary table failed.');
+-    }
+-
+-    // Now try to run two temporary queries in the same request.
+-    $table_name_test = $connection->queryTemporary('SELECT [name] FROM {test}', []);
+-    $table_name_task = $connection->queryTemporary('SELECT [pid] FROM {test_task}', []);
+-
+-    $this->assertEquals($this->countTableRows('test'), $this->countTableRows($table_name_test), 'A temporary table was created successfully in this request.');
+-    $this->assertEquals($this->countTableRows('test_task'), $this->countTableRows($table_name_task), 'A second temporary table was created successfully in this request.');
+-
+-    // Check that leading whitespace and comments do not cause problems
+-    // in the modified query.
+-    $sql = "
+-      -- Let's select some rows into a temporary table
+-      SELECT [name] FROM {test}
+-    ";
+-    $table_name_test = $connection->queryTemporary($sql, []);
+-    $this->assertEquals($this->countTableRows('test'), $this->countTableRows($table_name_test), 'Leading white space and comments do not interfere with temporary table creation.');
+-  }
+-
+-}
 diff --git a/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php b/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
 index b105f79192..11331fbd22 100644
 --- a/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
