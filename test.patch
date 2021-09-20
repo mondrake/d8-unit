@@ -350,6 +350,38 @@ index f19f5c6b96..178288cf27 100644
 +  }
 +
  }
+diff --git a/core/lib/Drupal/Core/Database/Database.php b/core/lib/Drupal/Core/Database/Database.php
+index 2771166e48..ea6a96ce92 100644
+--- a/core/lib/Drupal/Core/Database/Database.php
++++ b/core/lib/Drupal/Core/Database/Database.php
+@@ -216,25 +216,8 @@
+     }
+ 
+     // Parse the prefix information.
+-    // @todo in Drupal 10, fail hard if $info['prefix'] is an array.
+-    // @see https://www.drupal.org/project/drupal/issues/3124382
+-    if (!isset($info['prefix'])) {
+-      // Default to an empty prefix.
+-      $info['prefix'] = '';
+-    }
+-    elseif (is_array($info['prefix'])) {
+-      $prefix = $info['prefix']['default'] ?? '';
+-      unset($info['prefix']['default']);
+-      // If there are keys left besides the 'default' one, we are in a
+-      // multi-prefix scenario (for per-table prefixing, or migrations).
+-      // In that case, we put the non-default keys in a 'extra_prefix' key
+-      // to avoid mixing up with the normal 'prefix', which is a string since
+-      // Drupal 9.1.0.
+-      if (count($info['prefix'])) {
+-        $info['extra_prefix'] = $info['prefix'];
+-      }
+-      $info['prefix'] = $prefix;
+-    }
++    $info['prefix'] = $info['prefix'] ?? '';
++    assert(is_string($info['prefix']), "The 'prefix' key of the database connection array must be a string.");
+ 
+     // Fallback for Drupal 7 settings.php if namespace is not provided.
+     if (empty($info['namespace'])) {
 diff --git a/core/lib/Drupal/Core/Database/Driver/mysql/Connection.php b/core/lib/Drupal/Core/Database/Driver/mysql/Connection.php
 index ef6027256c..3fb737c7fc 100644
 --- a/core/lib/Drupal/Core/Database/Driver/mysql/Connection.php
@@ -876,6 +908,170 @@ index 419363a2cb..0000000000
 -  }
 -
 -}
+diff --git a/core/tests/Drupal/FunctionalTests/Installer/InstallerWithTablePrefixArrayTest.php b/core/tests/Drupal/FunctionalTests/Installer/InstallerWithTablePrefixArrayTest.php
+deleted file mode 100644
+index ca645e95a7..0000000000
+--- a/core/tests/Drupal/FunctionalTests/Installer/InstallerWithTablePrefixArrayTest.php
++++ /dev/null
+@@ -1,41 +0,0 @@
+-<?php
+-
+-namespace Drupal\FunctionalTests\Installer;
+-
+-/**
+- * Tests the interactive installer with deprecated table prefix array.
+- *
+- * @group Installer
+- */
+-class InstallerWithTablePrefixArrayTest extends InstallerTestBase {
+-
+-  /**
+-   * {@inheritdoc}
+-   */
+-  protected $defaultTheme = 'stark';
+-
+-  /**
+-   * Ensures that the status report raises the warning after installation.
+-   */
+-  public function testInstall(): void {
+-    $this->drupalGet('admin/reports/status');
+-    $this->assertSession()->pageTextNotContains("There is at least one database entry in the \$database array in settings.php that has a 'prefix' value in the format of an array. Per-table prefixes are no longer supported.");
+-
+-    // Add a database with a multi-entry 'prefix' array.
+-    $settings['databases']['test_fu']['default'] = (object) [
+-      'value' => [
+-        'database' => 'drupal_db',
+-        'prefix' => ['default' => 'foo', 'other_table' => 'qux'],
+-        'host' => 'localhost',
+-        'namespace' => 'Drupal\Core\Database\Driver\sqlite',
+-        'driver' => 'sqlite',
+-      ],
+-      'required' => TRUE,
+-    ];
+-    $this->writeSettings($settings);
+-
+-    $this->drupalGet('admin/reports/status');
+-    $this->assertSession()->pageTextContains("There is at least one database entry in the \$database array in settings.php that has a 'prefix' value in the format of an array. Per-table prefixes are no longer supported.");
+-  }
+-
+-}
+diff --git a/core/tests/Drupal/KernelTests/Core/Database/ConnectionTest.php b/core/tests/Drupal/KernelTests/Core/Database/ConnectionTest.php
+index 570146fc10..11f046bb3b 100644
+--- a/core/tests/Drupal/KernelTests/Core/Database/ConnectionTest.php
++++ b/core/tests/Drupal/KernelTests/Core/Database/ConnectionTest.php
+@@ -176,13 +176,10 @@ public function testPerTablePrefixOption() {
+       'test_table' => $connection_info['default']['prefix'] . '_bar',
+     ];
+     Database::addConnectionInfo('default', 'foo', $new_connection_info);
++
++    $this->expectException(\AssertionError::class);
++    $this->expectExceptionMessage("The 'prefix' key of the database connection array must be a string.");
+     $foo_connection = Database::getConnection('foo', 'default');
+-    $this->assertInstanceOf(Connection::class, $foo_connection);
+-    $this->assertIsString($foo_connection->getConnectionOptions()['prefix']);
+-    $this->assertSame($connection_info['default']['prefix'], $foo_connection->getConnectionOptions()['prefix']);
+-    $this->assertSame([
+-      'test_table' => $connection_info['default']['prefix'] . '_bar',
+-    ], $foo_connection->getConnectionOptions()['extra_prefix']);
+   }
+ 
+   /**
+@@ -195,11 +192,10 @@ public function testPrefixArrayOption() {
+       'default' => $connection_info['default']['prefix'],
+     ];
+     Database::addConnectionInfo('default', 'foo', $new_connection_info);
++
++    $this->expectException(\AssertionError::class);
++    $this->expectExceptionMessage("The 'prefix' key of the database connection array must be a string.");
+     $foo_connection = Database::getConnection('foo', 'default');
+-    $this->assertInstanceOf(Connection::class, $foo_connection);
+-    $this->assertIsString($foo_connection->getConnectionOptions()['prefix']);
+-    $this->assertSame($connection_info['default']['prefix'], $foo_connection->getConnectionOptions()['prefix']);
+-    $this->assertArrayNotHasKey('extra_prefix', $foo_connection->getConnectionOptions());
+   }
+ 
+   /**
+diff --git a/core/tests/Drupal/KernelTests/Core/Database/SchemaTest.php b/core/tests/Drupal/KernelTests/Core/Database/SchemaTest.php
+index eb8ea41d37..3b5ed6dbb2 100644
+--- a/core/tests/Drupal/KernelTests/Core/Database/SchemaTest.php
++++ b/core/tests/Drupal/KernelTests/Core/Database/SchemaTest.php
+@@ -1197,20 +1197,6 @@ public function testFindPrimaryKeyColumns() {
+    * Tests the findTables() method.
+    */
+   public function testFindTables() {
+-    // We will be testing with three tables, two of them using the default
+-    // prefix and the third one with an individually specified prefix.
+-    // Set up a new connection with different connection info.
+-    $connection_info = Database::getConnectionInfo();
+-
+-    // Add per-table prefix to the second table.
+-    $new_connection_info = $connection_info['default'];
+-    $new_connection_info['prefix'] = [
+-      'default' => $connection_info['default']['prefix'],
+-      'test_2_table' => $connection_info['default']['prefix'] . '_shared_',
+-    ];
+-    Database::addConnectionInfo('test', 'default', $new_connection_info);
+-    Database::setActiveConnection('test');
+-    $test_schema = Database::getConnection()->schema();
+ 
+     // Create the tables.
+     $table_specification = [
+@@ -1222,35 +1208,31 @@ public function testFindTables() {
+         ],
+       ],
+     ];
+-    $test_schema->createTable('test_1_table', $table_specification);
+-    $test_schema->createTable('test_2_table', $table_specification);
+-    $test_schema->createTable('the_third_table', $table_specification);
++    $this->schema->createTable('test_1_table', $table_specification);
++    $this->schema->createTable('test_2_table', $table_specification);
++    $this->schema->createTable('the_third_table', $table_specification);
+ 
+     // Check the "all tables" syntax.
+-    $tables = $test_schema->findTables('%');
++    $tables = $this->schema->findTables('%');
+     sort($tables);
+     $expected = [
+       // The 'config' table is added by
+       // \Drupal\KernelTests\KernelTestBase::containerBuild().
+       'config',
+       'test_1_table',
+-      // This table uses a per-table prefix, yet it is returned as un-prefixed.
+       'test_2_table',
+       'the_third_table',
+     ];
+     $this->assertEquals($expected, $tables, 'All tables were found.');
+ 
+     // Check the restrictive syntax.
+-    $tables = $test_schema->findTables('test_%');
++    $tables = $this->schema->findTables('test_%');
+     sort($tables);
+     $expected = [
+       'test_1_table',
+       'test_2_table',
+     ];
+     $this->assertEquals($expected, $tables, 'Two tables were found.');
+-
+-    // Go back to the initial connection.
+-    Database::setActiveConnection('default');
+   }
+ 
+   /**
+diff --git a/core/tests/Drupal/KernelTests/KernelTestBaseDatabaseDriverModuleTest.php b/core/tests/Drupal/KernelTests/KernelTestBaseDatabaseDriverModuleTest.php
+index b72e2972e2..72595efc32 100644
+--- a/core/tests/Drupal/KernelTests/KernelTestBaseDatabaseDriverModuleTest.php
++++ b/core/tests/Drupal/KernelTests/KernelTestBaseDatabaseDriverModuleTest.php
+@@ -44,9 +44,7 @@ protected function getDatabaseConnectionInfo() {
+       foreach ($connection_info as $target => $value) {
+         // Replace the full table prefix definition to ensure that no table
+         // prefixes of the test runner leak into the test.
+-        $connection_info[$target]['prefix'] = [
+-          'default' => $this->databasePrefix,
+-        ];
++        $connection_info[$target]['prefix'] = $this->databasePrefix;
+       }
+     }
+     return $connection_info;
 diff --git a/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php b/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
 index b105f79192..11331fbd22 100644
 --- a/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
