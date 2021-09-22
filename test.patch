@@ -1,442 +1,113 @@
-diff --git a/core/misc/cspell/dictionary.txt b/core/misc/cspell/dictionary.txt
-index 3edb584964..f8b855e1bf 100644
---- a/core/misc/cspell/dictionary.txt
-+++ b/core/misc/cspell/dictionary.txt
-@@ -111,6 +111,7 @@ autosubmit
- autowire
- autowired
- autowiring
-+avif
- backend's
- backlink
- backlinks
-diff --git a/core/modules/system/src/Plugin/ImageToolkit/GDToolkit.php b/core/modules/system/src/Plugin/ImageToolkit/GDToolkit.php
-index 4c95e1c5af..6e7760b40f 100644
---- a/core/modules/system/src/Plugin/ImageToolkit/GDToolkit.php
-+++ b/core/modules/system/src/Plugin/ImageToolkit/GDToolkit.php
-@@ -257,7 +257,11 @@ public function save($destination) {
-     }
-     else {
-       // Image types that support alpha need to be saved accordingly.
--      if (in_array($this->getType(), [IMAGETYPE_PNG, IMAGETYPE_WEBP], TRUE)) {
-+      if (in_array($this->getType(), [
-+        IMAGETYPE_PNG,
-+        IMAGETYPE_WEBP,
-+        IMAGETYPE_AVIF,
-+      ], TRUE)) {
-         imagealphablending($this->getResource(), FALSE);
-         imagesavealpha($this->getResource(), TRUE);
-       }
-@@ -282,8 +286,12 @@ public function save($destination) {
-   public function parseFile() {
-     $data = @getimagesize($this->getSource());
-     if ($data && in_array($data[2], static::supportedTypes())) {
--      $this->setType($data[2]);
-+      $type = $data[2];
-+      $this->setType($type);
-       $this->preLoadInfo = $data;
-+      if ($type === IMAGETYPE_AVIF) {
-+        return $this->load();
-+      }
-       return TRUE;
-     }
-     return FALSE;
-@@ -467,7 +475,20 @@ public function extensionToImageType($extension) {
-    *   IMAGETYPE_* constant (e.g. IMAGETYPE_JPEG, IMAGETYPE_PNG, etc.).
-    */
-   protected static function supportedTypes() {
--    return [IMAGETYPE_PNG, IMAGETYPE_JPEG, IMAGETYPE_GIF, IMAGETYPE_WEBP];
-+    $toolkit_supported_types = [];
-+    foreach([
-+      IMAGETYPE_PNG,
-+      IMAGETYPE_JPEG,
-+      IMAGETYPE_GIF,
-+      IMAGETYPE_WEBP,
-+      IMAGETYPE_AVIF,
-+    ] as $type) {
-+      $extension = image_type_to_extension($type, FALSE);
-+      if (function_exists("imagecreatefrom$extension") && function_exists("image$extension")) {
-+        $toolkit_supported_types[] = $type;
-+      }
-+    }
-+    return $toolkit_supported_types;
+diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
+index f19f5c6b96..1bca62c6e8 100644
+--- a/core/lib/Drupal/Core/Database/Connection.php
++++ b/core/lib/Drupal/Core/Database/Connection.php
+@@ -437,6 +437,22 @@ public function getConnectionOptions() {
+     return $this->connectionOptions;
    }
  
- }
-diff --git a/core/modules/system/src/Plugin/ImageToolkit/Operation/gd/CreateNew.php b/core/modules/system/src/Plugin/ImageToolkit/Operation/gd/CreateNew.php
-index 0c3559ed2b..a78a48f291 100644
---- a/core/modules/system/src/Plugin/ImageToolkit/Operation/gd/CreateNew.php
-+++ b/core/modules/system/src/Plugin/ImageToolkit/Operation/gd/CreateNew.php
-@@ -94,6 +94,7 @@ protected function execute(array $arguments) {
-     switch ($type) {
-       case IMAGETYPE_PNG:
-       case IMAGETYPE_WEBP:
-+      case IMAGETYPE_AVIF:
-         imagealphablending($res, FALSE);
-         $transparency = imagecolorallocatealpha($res, 0, 0, 0, 127);
-         imagefill($res, 0, 0, $transparency);
-diff --git a/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php b/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php
-index 9717f578f0..5c06909f42 100644
---- a/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php
-+++ b/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php
-@@ -12,6 +12,7 @@
-  * Tests that core image manipulations work properly: scale, resize, rotate,
-  * crop, scale and crop, and desaturate.
-  *
-+ * @coversDefaultClass \Drupal\system\Plugin\ImageToolkit\GDToolkit
-  * @group Image
-  */
- class ToolkitGdTest extends KernelTestBase {
-@@ -108,19 +109,15 @@ public function getPixelColor(ImageInterface $image, $x, $y) {
++  /**
++   * Allows the connection to access additional databases.
++   *
++   * Database systems usually group tables in 'databases' or 'schemas', that
++   * can be accessed with syntax like 'SELECT * FROM database.table'. Normally
++   * Drupal accesses tables in a single database/schema, but in some cases it
++   * may be necessary to access tables from other databases/schemas in the same
++   * database server. This method can be called to ensure that the additional
++   * database/schema is accessible.
++   *
++   * @param string $database
++   *   The database to be attached to the connection.
++   */
++  public function attachDatabase(string $database): void {
++  }
++
+   /**
+    * Set the list of prefixes used by this database connection.
+    *
+diff --git a/core/lib/Drupal/Core/Database/Driver/sqlite/Connection.php b/core/lib/Drupal/Core/Database/Driver/sqlite/Connection.php
+index bb1c15def9..c0cd2e2acd 100644
+--- a/core/lib/Drupal/Core/Database/Driver/sqlite/Connection.php
++++ b/core/lib/Drupal/Core/Database/Driver/sqlite/Connection.php
+@@ -91,15 +91,15 @@ public function __construct(\PDO $connection, array $connection_options) {
+       if (!empty($prefix)) {
+         // Only attach the database once.
+         if (!isset($this->attachedDatabases[$prefix])) {
+-          $this->attachedDatabases[$prefix] = $prefix;
+           if ($connection_options['database'] === ':memory:') {
+             // In memory database use ':memory:' as database name. According to
+             // http://www.sqlite.org/inmemorydb.html it will open a unique
+             // database so attaching it twice is not a problem.
++            $this->attachedDatabases[$prefix] = $prefix;
+             $this->query('ATTACH DATABASE :database AS :prefix', [':database' => $connection_options['database'], ':prefix' => $prefix]);
+           }
+           else {
+-            $this->query('ATTACH DATABASE :database AS :prefix', [':database' => $connection_options['database'] . '-' . $prefix, ':prefix' => $prefix]);
++            $this->attachDatabase($prefix);
+           }
+         }
+ 
+@@ -211,6 +211,14 @@ public function __destruct() {
+     parent::__destruct();
+   }
+ 
++  /**
++   * {@inheritdoc}
++   */
++  public function attachDatabase(string $database): void {
++    $this->attachedDatabases[$database] = $database;
++    $this->query('ATTACH DATABASE :database_file AS :database', [':database_file' => $this->connectionOptions['database'] . '-' . $database, ':database' => $database]);
++  }
++
+   /**
+    * Gets all the attached databases.
+    *
+@@ -431,6 +439,7 @@ public function mapConditionOperator($operator) {
+    * {@inheritdoc}
+    */
+   public function prepareStatement(string $query, array $options, bool $allow_row_count = FALSE): StatementInterface {
++global $xxx; if ($xxx) dump($query);
+     try {
+       $query = $this->preprocessStatement($query, $options);
+       $statement = new Statement($this->connection, $this, $query, $options['pdo'] ?? [], $allow_row_count);
+diff --git a/core/modules/migrate/tests/src/Kernel/MigrateTestBase.php b/core/modules/migrate/tests/src/Kernel/MigrateTestBase.php
+index 25c1b4e730..3a8a4a67ab 100644
+--- a/core/modules/migrate/tests/src/Kernel/MigrateTestBase.php
++++ b/core/modules/migrate/tests/src/Kernel/MigrateTestBase.php
+@@ -67,6 +67,10 @@ protected function setUp() {
+     parent::setUp();
+     $this->createMigrationConnection();
+     $this->sourceDatabase = Database::getConnection('default', 'migrate');
++    // Attach the original test prefix as a database, for SQLite to attach its
++    // database file.
++global $xxx; $xxx = TRUE;
++    $this->sourceDatabase->attachDatabase(substr($this->sourceDatabase->getConnectionOptions()['prefix'], 0, -1));
    }
  
    /**
--   * Since PHP can't visually check that our images have been manipulated
--   * properly, build a list of expected color values for each of the corners and
--   * the expected height and widths for the final images.
-+   * @covers ::getSupportedExtensions
-+   * @covers ::extensionToImageType
-    */
--  public function testManipulations() {
+@@ -94,10 +98,6 @@ private function createMigrationConnection() {
+       // Simpletest uses 7 character prefixes at most so this can't cause
+       // collisions.
+       $connection_info[$target]['prefix'] = $prefix . '0';
 -
--    // Test that the image factory is set to use the GD toolkit.
--    $this->assertEquals('gd', $this->imageFactory->getToolkitId(), 'The image factory is set to use the \'gd\' image toolkit.');
-+  public function testSupportedExtensions(): void {
-+    $this->assertEquals('gd', $this->imageFactory->getToolkitId());
- 
-     // Test the list of supported extensions.
--    $expected_extensions = ['png', 'gif', 'jpeg', 'jpg', 'jpe', 'webp'];
--    $supported_extensions = $this->imageFactory->getSupportedExtensions();
--    $this->assertEquals($expected_extensions, array_intersect($expected_extensions, $supported_extensions));
-+    $expected_extensions = ['png', 'gif', 'jpeg', 'jpg', 'jpe', 'webp', 'avif'];
-+    $this->assertEqualsCanonicalizing($expected_extensions, $this->imageFactory->getSupportedExtensions());
- 
-     // Test that the supported extensions map to correct internal GD image
-     // types.
-@@ -131,26 +128,44 @@ public function testManipulations() {
-       'jpg' => IMAGETYPE_JPEG,
-       'jpe' => IMAGETYPE_JPEG,
-       'webp' => IMAGETYPE_WEBP,
-+      'avif' => IMAGETYPE_AVIF,
-     ];
-     $image = $this->imageFactory->get();
-     foreach ($expected_image_types as $extension => $expected_image_type) {
--      $image_type = $image->getToolkit()->extensionToImageType($extension);
--      $this->assertSame($expected_image_type, $image_type);
-+      $this->assertSame($expected_image_type, $image->getToolkit()->extensionToImageType($extension));
+-      // Add the original simpletest prefix so SQLite can attach its database.
+-      // @see \Drupal\Core\Database\Driver\sqlite\Connection::init()
+-      $connection_info[$target]['extra_prefix'][$prefix] = $prefix;
      }
-+  }
-+
-+  /**
-+   * Data provider for ::testManipulations().
-+   */
-+  public function providerTestImageFiles(): array {
-+    return [
-+      ['image-test.png'],
-+      ['image-test.gif'],
-+      ['image-test-no-transparency.gif'],
-+      ['image-test.jpg'],
-+      ['img-test.webp'],
-+      ['img-test.avif'],
-+    ];
-+  }
-+
-+  /**
-+   * Since PHP can't visually check that our images have been manipulated
-+   * properly, build a list of expected color values for each of the corners and
-+   * the expected height and widths for the final images.
-+   *
-+   * @dataProvider providerTestImageFiles
-+   */
-+  public function testManipulations(string $file_name): void {
-+
-+    // Test that the image factory is set to use the GD toolkit.
-+    $this->assertEquals('gd', $this->imageFactory->getToolkitId(), 'The image factory is set to use the \'gd\' image toolkit.');
- 
-     // Typically the corner colors will be unchanged. These colors are in the
-     // order of top-left, top-right, bottom-right, bottom-left.
-     $default_corners = [$this->red, $this->green, $this->blue, $this->transparent];
- 
--    // A list of files that will be tested.
--    $files = [
--      'image-test.png',
--      'image-test.gif',
--      'image-test-no-transparency.gif',
--      'image-test.jpg',
--      'img-test.webp',
--    ];
+     Database::addConnectionInfo('migrate', 'default', $connection_info['default']);
+   }
+diff --git a/core/modules/migrate/tests/src/Kernel/Plugin/MigrationPluginListTest.php b/core/modules/migrate/tests/src/Kernel/Plugin/MigrationPluginListTest.php
+index b3be1a339a..b9a1c2b7f1 100644
+--- a/core/modules/migrate/tests/src/Kernel/Plugin/MigrationPluginListTest.php
++++ b/core/modules/migrate/tests/src/Kernel/Plugin/MigrationPluginListTest.php
+@@ -139,10 +139,6 @@ public function testGetDefinitions() {
+       // Simpletest uses 7 character prefixes at most so this can't cause
+       // collisions.
+       $connection_info[$target]['prefix'] = $prefix . '0';
 -
-     // Setup a list of tests to perform on each type.
-     $operations = [
-       'resize' => [
-@@ -230,6 +245,13 @@ public function testManipulations() {
-         'arguments' => ['extension' => 'webp'],
-         'corners' => $default_corners,
-       ],
-+      'convert_avif' => [
-+        'function' => 'convert',
-+        'width' => 40,
-+        'height' => 20,
-+        'arguments' => ['extension' => 'avif'],
-+        'corners' => $default_corners,
-+      ],
-     ];
- 
-     // Systems using non-bundled GD2 don't have imagerotate. Test if available.
-@@ -295,117 +317,129 @@ public function testManipulations() {
-     $directory = Settings::get('file_public_path') . '/imagetest';
-     \Drupal::service('file_system')->prepareDirectory($directory, FileSystemInterface::CREATE_DIRECTORY);
- 
--    foreach ($files as $file) {
--      foreach ($operations as $op => $values) {
--        // Load up a fresh image.
--        $image = $this->imageFactory->get('core/tests/fixtures/files/' . $file);
--        $toolkit = $image->getToolkit();
--        if (!$image->isValid()) {
--          $this->fail(new FormattableMarkup('Could not load image %file.', ['%file' => $file]));
--          continue 2;
--        }
--        $image_original_type = $image->getToolkit()->getType();
--
--        // All images should be converted to truecolor when loaded.
--        $image_truecolor = imageistruecolor($toolkit->getResource());
--        $this->assertTrue($image_truecolor, new FormattableMarkup('Image %file after load is a truecolor image.', ['%file' => $file]));
-+    foreach ($operations as $op => $values) {
-+      // Load up a fresh image.
-+      $image = $this->imageFactory->get('core/tests/fixtures/files/' . $file_name);
-+      $toolkit = $image->getToolkit();
-+      if (!$image->isValid()) {
-+        $this->fail("Could not load image '$file_name'.");
-+      }
-+      $image_original_type = $image->getToolkit()->getType();
- 
--        // Store the original GD resource.
--        $old_res = $toolkit->getResource();
-+      // All images should be converted to truecolor when loaded.
-+      $image_truecolor = imageistruecolor($toolkit->getResource());
-+      $this->assertTrue($image_truecolor, "Image '$file_name' after load is a truecolor image.");
- 
--        // Perform our operation.
--        $image->apply($values['function'], $values['arguments']);
-+      // Store the original GD resource.
-+      $old_res = $toolkit->getResource();
- 
--        // If the operation replaced the resource, check that the old one has
--        // been destroyed.
--        $new_res = $toolkit->getResource();
--        if ($new_res !== $old_res) {
--          // @todo In https://www.drupal.org/node/3133236 convert this to
--          //   $this->assertIsNotResource($old_res).
--          $this->assertFalse(is_resource($old_res), new FormattableMarkup("'%operation' destroyed the original resource.", ['%operation' => $values['function']]));
--        }
-+      // Perform our operation.
-+      $image->apply($values['function'], $values['arguments']);
- 
--        // To keep from flooding the test with assert values, make a general
--        // value for whether each group of values fail.
--        $correct_dimensions_real = TRUE;
--        $correct_dimensions_object = TRUE;
-+      // If the operation replaced the resource, check that the old one has
-+      // been destroyed.
-+      $new_res = $toolkit->getResource();
-+      if ($new_res !== $old_res) {
-+        // @todo In https://www.drupal.org/node/3133236 convert this to
-+        //   $this->assertIsNotResource($old_res).
-+        $this->assertFalse(is_resource($old_res), "'{$values['function']}' destroyed the original resource.");
-+      }
- 
--        if (imagesy($toolkit->getResource()) != $values['height'] || imagesx($toolkit->getResource()) != $values['width']) {
--          $correct_dimensions_real = FALSE;
--        }
-+      // To keep from flooding the test with assert values, make a general
-+      // value for whether each group of values fail.
-+      $correct_dimensions_real = TRUE;
-+      $correct_dimensions_object = TRUE;
- 
--        // Check that the image object has an accurate record of the dimensions.
--        if ($image->getWidth() != $values['width'] || $image->getHeight() != $values['height']) {
--          $correct_dimensions_object = FALSE;
--        }
-+      if (imagesy($toolkit->getResource()) != $values['height'] || imagesx($toolkit->getResource()) != $values['width']) {
-+        $correct_dimensions_real = FALSE;
-+      }
- 
--        $file_path = $directory . '/' . $op . image_type_to_extension($image->getToolkit()->getType());
--        $image->save($file_path);
--
--        $this->assertTrue($correct_dimensions_real, new FormattableMarkup('Image %file after %action action has proper dimensions.', ['%file' => $file, '%action' => $op]));
--        $this->assertTrue($correct_dimensions_object, new FormattableMarkup('Image %file object after %action action is reporting the proper height and width values.', ['%file' => $file, '%action' => $op]));
--
--        // JPEG colors will always be messed up due to compression. So we skip
--        // these tests if the original or the result is in jpeg format.
--        if ($image->getToolkit()->getType() != IMAGETYPE_JPEG && $image_original_type != IMAGETYPE_JPEG) {
--          // Now check each of the corners to ensure color correctness.
--          foreach ($values['corners'] as $key => $corner) {
--            // The test gif that does not have transparency color set is a
--            // special case.
--            if ($file === 'image-test-no-transparency.gif') {
--              if ($op == 'desaturate') {
--                // For desaturating, keep the expected color from the test
--                // data, but set alpha channel to fully opaque.
--                $corner[3] = 0;
--              }
--              elseif ($corner === $this->transparent) {
--                // Set expected pixel to yellow where the others have
--                // transparent.
--                $corner = $this->yellow;
--              }
--            }
-+      // Check that the image object has an accurate record of the dimensions.
-+      if ($image->getWidth() != $values['width'] || $image->getHeight() != $values['height']) {
-+        $correct_dimensions_object = FALSE;
-+      }
- 
--            // Get the location of the corner.
--            switch ($key) {
--              case 0:
--                $x = 0;
--                $y = 0;
--                break;
--
--              case 1:
--                $x = $image->getWidth() - 1;
--                $y = 0;
--                break;
--
--              case 2:
--                $x = $image->getWidth() - 1;
--                $y = $image->getHeight() - 1;
--                break;
--
--              case 3:
--                $x = 0;
--                $y = $image->getHeight() - 1;
--                break;
-+      $file_path = $directory . '/' . $op . image_type_to_extension($image->getToolkit()->getType());
-+      $image->save($file_path);
-+
-+      $this->assertTrue($correct_dimensions_real, "Image '$file_name' after '$op' action has proper dimensions.");
-+      $this->assertTrue($correct_dimensions_object, "Image '$file_name' object after '$op' action is reporting the proper height and width values.");
-+
-+      // JPEG colors will always be messed up due to compression. So we skip
-+      // these tests if the original or the result is in jpeg format.
-+      if ($image->getToolkit()->getType() != IMAGETYPE_JPEG && $image_original_type != IMAGETYPE_JPEG) {
-+        // Now check each of the corners to ensure color correctness.
-+        foreach ($values['corners'] as $key => $corner) {
-+          // The test gif that does not have transparency color set is a
-+          // special case.
-+          if ($file_name === 'image-test-no-transparency.gif') {
-+            if ($op == 'desaturate') {
-+              // For desaturating, keep the expected color from the test
-+              // data, but set alpha channel to fully opaque.
-+              $corner[3] = 0;
-             }
--            $color = $this->getPixelColor($image, $x, $y);
--            // We also skip the color test for transparency for gif <-> png
--            // conversion. The convert operation cannot handle that correctly.
--            if ($image->getToolkit()->getType() == $image_original_type || $corner != $this->transparent) {
--              $correct_colors = $this->colorsAreEqual($color, $corner);
--              $this->assertTrue($correct_colors, new FormattableMarkup('Image %file object after %action action has the correct color placement at corner %corner.',
--                ['%file' => $file, '%action' => $op, '%corner' => $key]));
-+            elseif ($corner === $this->transparent) {
-+              // Set expected pixel to yellow where the others have
-+              // transparent.
-+              $corner = $this->yellow;
-             }
-           }
--        }
- 
--        // Check that saved image reloads without raising PHP errors.
--        $image_reloaded = $this->imageFactory->get($file_path);
--        $resource = $image_reloaded->getToolkit()->getResource();
-+          // Get the location of the corner.
-+          switch ($key) {
-+            case 0:
-+              $x = 0;
-+              $y = 0;
-+              break;
-+
-+            case 1:
-+              $x = $image->getWidth() - 1;
-+              $y = 0;
-+              break;
-+
-+            case 2:
-+              $x = $image->getWidth() - 1;
-+              $y = $image->getHeight() - 1;
-+              break;
-+
-+            case 3:
-+              $x = 0;
-+              $y = $image->getHeight() - 1;
-+              break;
-+          }
-+          $color = $this->getPixelColor($image, $x, $y);
-+          // We also skip the color test for transparency for gif <-> png
-+          // conversion. The convert operation cannot handle that correctly.
-+          if ($image->getToolkit()->getType() == $image_original_type || $corner != $this->transparent) {
-+            $correct_colors = $this->colorsAreEqual($color, $corner);
-+            $this->assertTrue($correct_colors, "Image '$file_name' object after '$op' action has the correct color placement at corner '$key'");
-+          }
-+        }
-       }
-+
-+      // Check that saved image reloads without raising PHP errors.
-+      $image_reloaded = $this->imageFactory->get($file_path);
-+      $resource = $image_reloaded->getToolkit()->getResource();
+-      // Add the original simpletest prefix so SQLite can attach its database.
+-      // @see \Drupal\Core\Database\Driver\sqlite\Connection::init()
+-      $connection_info[$target]['extra_prefix'][$prefix] = $prefix;
      }
-+  }
-+
-+  /**
-+   * Tests creation of image from scratch, and saving to storage.
-+   */
-+  public function testCreateImageFromScratch(): void {
-+    $this->assertEquals('gd', $this->imageFactory->getToolkitId());
-+
-+    // Prepare a directory for test file results.
-+    $directory = Settings::get('file_public_path') . '/imagetest';
-+    \Drupal::service('file_system')->prepareDirectory($directory, FileSystemInterface::CREATE_DIRECTORY);
+     Database::addConnectionInfo('migrate', 'default', $connection_info['default']);
  
--    // Test creation of image from scratch, and saving to storage.
--    foreach ([IMAGETYPE_PNG, IMAGETYPE_GIF, IMAGETYPE_JPEG, IMAGETYPE_WEBP] as $type) {
-+    foreach ([
-+      IMAGETYPE_PNG,
-+      IMAGETYPE_GIF,
-+      IMAGETYPE_JPEG,
-+      IMAGETYPE_WEBP,
-+      IMAGETYPE_AVIF,
-+    ] as $type) {
-       $image = $this->imageFactory->get();
-       $image->createNew(50, 20, image_type_to_extension($type, FALSE), '#ffff00');
-       $file = 'from_null' . image_type_to_extension($type);
-@@ -431,8 +465,14 @@ public function testManipulations() {
-         $this->assertNull($image_reloaded->getToolkit()->getTransparentColor(), new FormattableMarkup('Image file %file has no color channel set.', ['%file' => $file]));
-       }
-     }
-+  }
-+
-+  /**
-+   * Tests failures of the 'create_new' operation.
-+   */
-+  public function testCreateNewFailures(): void {
-+    $this->assertEquals('gd', $this->imageFactory->getToolkitId());
- 
--    // Test failures of the 'create_new' operation.
-     $image = $this->imageFactory->get();
-     $image->createNew(-50, 20);
-     $this->assertFalse($image->isValid(), 'CreateNew with negative width fails.');
-diff --git a/core/tests/fixtures/files/img-test.avif b/core/tests/fixtures/files/img-test.avif
-new file mode 100644
-index 0000000000000000000000000000000000000000..86414841dec7f4cea3bb488ac07e44b0019f5805
-GIT binary patch
-literal 376
-zcmZQzV30{GsVvCNOfzHv0uY^8mYJ5DnV1ITe#%WPNd$=lfnr8VP7#F3z)+BxTmoam
-zXug8Xl3Xx{5lG5q=Hw@Xcq|SKj6etkjACFq3CPsQ%*+E>02BmbDIh163Cc?>Gcfeb
-zO-xS(@e4BxiVA>qP-a1LK9Cm4EG_^`0NENKJ`f8OBo>3zfJ_2mvBWY%=SBqv1}+W@
-zQT5p#92p={fr8A6Od!p`%)!9{q{K4|auY#(AOO0Lg^{Vb1<1_GO-U?4Xfz6Qoxs2#
-z#K7|MhmPyAz~rSN|I?%y3a9sa7|xPl&~cml#-Bs9uTP6%;sNo?_hd_Ijf=7?Zm529
-l?b|uqz-5KOqE^AF$sblV%#`4FtLWXLqY^(!pz`tj4**I4QP2PY
-
-literal 0
-HcmV?d00001
-
