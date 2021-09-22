@@ -1,1283 +1,396 @@
-diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
-index f19f5c6b96..c4322ebd80 100644
---- a/core/lib/Drupal/Core/Database/Connection.php
-+++ b/core/lib/Drupal/Core/Database/Connection.php
-@@ -2,7 +2,6 @@
- 
- namespace Drupal\Core\Database;
- 
--use Drupal\Component\Assertion\Inspector;
- use Drupal\Core\Database\Query\Condition;
- use Drupal\Core\Database\Query\Delete;
- use Drupal\Core\Database\Query\Insert;
-@@ -135,69 +134,9 @@
-   protected $schema = NULL;
- 
-   /**
--   * The prefixes used by this database connection.
--   *
--   * @var array
--   */
--  protected $prefixes = [];
--
--  /**
--   * List of search values for use in prefixTables().
--   *
--   * @var array
--   */
--  protected $prefixSearch = [];
--
--  /**
--   * List of replacement values for use in prefixTables().
--   *
--   * @var array
--   */
--  protected $prefixReplace = [];
--
--  /**
--   * List of un-prefixed table names, keyed by prefixed table names.
--   *
--   * @var array
--   */
--  protected $unprefixedTablesMap = [];
--
--  /**
--   * List of escaped database, table, and field names, keyed by unescaped names.
--   *
--   * @var array
--   *
--   * @deprecated in drupal:9.0.0 and is removed from drupal:10.0.0. This is no
--   *   longer used. Use \Drupal\Core\Database\Connection::$escapedTables or
--   *   \Drupal\Core\Database\Connection::$escapedFields instead.
--   *
--   * @see https://www.drupal.org/node/2986894
--   */
--  protected $escapedNames = [];
--
--  /**
--   * List of escaped table names, keyed by unescaped names.
--   *
--   * @var array
--   */
--  protected $escapedTables = [];
--
--  /**
--   * List of escaped field names, keyed by unescaped names.
--   *
--   * There are cases in which escapeField() is called on an empty string. In
--   * this case it should always return an empty string.
--   *
--   * @var array
--   */
--  protected $escapedFields = ["" => ""];
--
--  /**
--   * List of escaped aliases names, keyed by unescaped aliases.
--   *
--   * @var array
-+   * @todo
-    */
--  protected $escapedAliases = [];
-+  protected $identifierHandler;
- 
-   /**
-    * Post-root (non-nested) transaction commit callbacks.
-@@ -207,15 +146,16 @@
-   protected $rootTransactionEndCallbacks = [];
- 
-   /**
--   * The identifier quote characters for the database type.
--   *
--   * An array containing the start and end identifier quote characters for the
--   * database type. The ANSI SQL standard identifier quote character is a double
--   * quotation mark.
-+   * Implements the magic __get() method.
-    *
--   * @var string[]
-+   * @todo Remove the method in Drupal 10.
-    */
--  protected $identifierQuotes;
-+  public function __get($name) {
-+    if (in_array($name, ['escapedNames', 'escapedTables', 'escapedFields', 'escapedAliases', 'identifierQuotes', 'prefixes', 'prefixSearch', 'prefixReplace', 'unprefixedTablesMap'])) {
-+      @trigger_error("Connection::\${$name} should not be accessed in drupal:9.x.0 and is removed from drupal:10.0.0. This is no longer used. See https://www.drupal.org/node/1234567", E_USER_DEPRECATED);
-+      return [];
-+    }
-+  }
- 
-   /**
-    * Constructs a Connection object.
-@@ -227,16 +167,8 @@
-    *   - prefix
-    *   - namespace
-    *   - Other driver-specific options.
--   *   An 'extra_prefix' option may be present to allow BC for attaching
--   *   per-table prefixes, but it is meant for internal use only.
-    */
-   public function __construct(\PDO $connection, array $connection_options) {
--    if ($this->identifierQuotes === NULL) {
--      @trigger_error('In drupal:10.0.0 not setting the $identifierQuotes property in the concrete Connection class will result in an RuntimeException. See https://www.drupal.org/node/2986894', E_USER_DEPRECATED);
--      $this->identifierQuotes = ['', ''];
--    }
--
--    assert(count($this->identifierQuotes) === 2 && Inspector::assertAllStrings($this->identifierQuotes), '\Drupal\Core\Database\Connection::$identifierQuotes must contain 2 string values');
- 
-     // The 'transactions' option is deprecated.
-     if (isset($connection_options['transactions'])) {
-@@ -244,40 +176,6 @@ public function __construct(\PDO $connection, array $connection_options) {
-       unset($connection_options['transactions']);
+diff --git a/core/misc/cspell/dictionary.txt b/core/misc/cspell/dictionary.txt
+index 3edb584964..f8b855e1bf 100644
+--- a/core/misc/cspell/dictionary.txt
++++ b/core/misc/cspell/dictionary.txt
+@@ -111,6 +111,7 @@ autosubmit
+ autowire
+ autowired
+ autowiring
++avif
+ backend's
+ backlink
+ backlinks
+diff --git a/core/modules/system/src/Plugin/ImageToolkit/GDToolkit.php b/core/modules/system/src/Plugin/ImageToolkit/GDToolkit.php
+index 4c95e1c5af..da69663d24 100644
+--- a/core/modules/system/src/Plugin/ImageToolkit/GDToolkit.php
++++ b/core/modules/system/src/Plugin/ImageToolkit/GDToolkit.php
+@@ -257,7 +257,11 @@ public function save($destination) {
      }
- 
--    // Manage the table prefix.
--    if (isset($connection_options['prefix']) && is_array($connection_options['prefix'])) {
--      if (count($connection_options['prefix']) > 1) {
--        // If there are keys left besides the 'default' one, we are in a
--        // multi-prefix scenario (for per-table prefixing, or migrations).
--        // In that case, we put the non-default keys in a 'extra_prefix' key
--        // to avoid mixing up with the normal 'prefix', which is a string since
--        // Drupal 9.1.0.
--        $prefix = $connection_options['prefix']['default'] ?? '';
--        unset($connection_options['prefix']['default']);
--        if (isset($connection_options['extra_prefix'])) {
--          $connection_options['extra_prefix'] = array_merge($connection_options['extra_prefix'], $connection_options['prefix']);
--        }
--        else {
--          $connection_options['extra_prefix'] = $connection_options['prefix'];
--        }
--      }
--      else {
--        $prefix = $connection_options['prefix']['default'] ?? '';
--      }
--      $connection_options['prefix'] = $prefix;
--    }
--
--    // Initialize and prepare the connection prefix.
--    if (!isset($connection_options['extra_prefix'])) {
--      $prefix = $connection_options['prefix'] ?? '';
--    }
--    else {
--      $default_prefix = $connection_options['prefix'] ?? '';
--      $prefix = $connection_options['extra_prefix'];
--      $prefix['default'] = $default_prefix;
--    }
--    $this->setPrefix($prefix);
--
-     // Work out the database driver namespace if none is provided. This normally
-     // written to setting.php by installer or set by
-     // \Drupal\Core\Database\Database::parseConnectionInfo().
-@@ -444,42 +342,14 @@ public function getConnectionOptions() {
-    *   Either a single prefix, or an array of prefixes.
+     else {
+       // Image types that support alpha need to be saved accordingly.
+-      if (in_array($this->getType(), [IMAGETYPE_PNG, IMAGETYPE_WEBP], TRUE)) {
++      if (in_array($this->getType(), [
++        IMAGETYPE_PNG,
++        IMAGETYPE_WEBP,
++        IMAGETYPE_AVIF,
++      ], TRUE)) {
+         imagealphablending($this->getResource(), FALSE);
+         imagesavealpha($this->getResource(), TRUE);
+       }
+@@ -467,7 +471,13 @@ public function extensionToImageType($extension) {
+    *   IMAGETYPE_* constant (e.g. IMAGETYPE_JPEG, IMAGETYPE_PNG, etc.).
     */
-   protected function setPrefix($prefix) {
--    if (is_array($prefix)) {
--      $this->prefixes = $prefix + ['default' => ''];
--    }
--    else {
--      $this->prefixes = ['default' => $prefix];
--    }
-+    @trigger_error(__METHOD__ . '() is deprecated in drupal:9.x.0 and is removed from drupal:10.0.0. @todo. See https://www.drupal.org/node/1234567', E_USER_DEPRECATED);
-+  }
- 
--    [$start_quote, $end_quote] = $this->identifierQuotes;
--    // Set up variables for use in prefixTables(). Replace table-specific
--    // prefixes first.
--    $this->prefixSearch = [];
--    $this->prefixReplace = [];
--    foreach ($this->prefixes as $key => $val) {
--      if ($key != 'default') {
--        $this->prefixSearch[] = '{' . $key . '}';
--        // $val can point to another database like 'database.users'. In this
--        // instance we need to quote the identifiers correctly.
--        $val = str_replace('.', $end_quote . '.' . $start_quote, $val);
--        $this->prefixReplace[] = $start_quote . $val . $key . $end_quote;
--      }
--    }
--    // Then replace remaining tables with the default prefix.
--    $this->prefixSearch[] = '{';
--    // $this->prefixes['default'] can point to another database like
--    // 'other_db.'. In this instance we need to quote the identifiers correctly.
--    // For example, "other_db"."PREFIX_table_name".
--    $this->prefixReplace[] = $start_quote . str_replace('.', $end_quote . '.' . $start_quote, $this->prefixes['default']);
--    $this->prefixSearch[] = '}';
--    $this->prefixReplace[] = $end_quote;
--
--    // Set up a map of prefixed => un-prefixed tables.
--    foreach ($this->prefixes as $table_name => $prefix) {
--      if ($table_name !== 'default') {
--        $this->unprefixedTablesMap[$prefix . $table_name] = $table_name;
--      }
--    }
-+  /**
-+   * @todo
-+   */
-+  public function attachDatabase(string $database): void {
-+    return;
+   protected static function supportedTypes() {
+-    return [IMAGETYPE_PNG, IMAGETYPE_JPEG, IMAGETYPE_GIF, IMAGETYPE_WEBP];
++    return [
++      IMAGETYPE_PNG,
++      IMAGETYPE_JPEG,
++      IMAGETYPE_GIF,
++      IMAGETYPE_WEBP,
++      IMAGETYPE_AVIF,
++    ];
    }
  
-   /**
-@@ -497,7 +367,12 @@ protected function setPrefix($prefix) {
-    *   The properly-prefixed string.
-    */
-   public function prefixTables($sql) {
--    return str_replace($this->prefixSearch, $this->prefixReplace, $sql);
-+    $replacements = $tables = [];
-+    preg_match_all('/(\{(\S*)\})/', $sql, $tables, PREG_SET_ORDER, 0);
-+    foreach ($tables as $table) {
-+      $replacements[$table[1]] = $this->identifierHandler->getPlatformTableName($table[2], TRUE, TRUE);
-+    }
-+    return str_replace(array_keys($replacements), array_values($replacements), $sql);
-   }
- 
-   /**
-@@ -521,7 +396,14 @@ public function prefixTables($sql) {
-    *   This method should only be called by database API code.
-    */
-   public function quoteIdentifiers($sql) {
--    return str_replace(['[', ']'], $this->identifierQuotes, $sql);
-+    preg_match_all('/(\[(.+?)\])/', $sql, $matches);
-+    $identifiers = [];
-+    $i = 0;
-+    foreach ($matches[1] as $match) {
-+      $identifiers[$match] = $this->identifierHandler->getPlatformIdentifierName($matches[2][$i]);
-+      $i++;
-+    }
-+    return strtr($sql, $identifiers);
-   }
- 
-   /**
-@@ -534,12 +416,8 @@ public function quoteIdentifiers($sql) {
-    *   (optional) The table to find the prefix for.
-    */
-   public function tablePrefix($table = 'default') {
--    if (isset($this->prefixes[$table])) {
--      return $this->prefixes[$table];
--    }
--    else {
--      return $this->prefixes['default'];
--    }
-+    // @todo deprecate the $table argument.
-+    return $this->identifierHandler->getTablePrefix();
-   }
- 
-   /**
-@@ -550,7 +428,8 @@ public function tablePrefix($table = 'default') {
-    *   names (i.e. prefix + table_name).
-    */
-   public function getUnprefixedTablesMap() {
--    return $this->unprefixedTablesMap;
-+    @trigger_error(__METHOD__ . '() is deprecated in drupal:9.x.0 and is removed from drupal:10.0.0. @todo. See https://www.drupal.org/node/1234567', E_USER_DEPRECATED);
-+    return [];
-   }
- 
-   /**
-@@ -562,9 +441,7 @@ public function getUnprefixedTablesMap() {
-    * @return string
-    */
-   public function getFullQualifiedTableName($table) {
--    $options = $this->getConnectionOptions();
--    $prefix = $this->tablePrefix($table);
--    return $options['database'] . '.' . $prefix . $table;
-+    return $this->identifierHandler->getPlatformDatabaseName($this->getConnectionOptions()['database']) . '.' . $this->identifierHandler->getPlatformTableName($table, TRUE, TRUE);
-   }
- 
-   /**
-@@ -780,10 +657,7 @@ public function getLogger() {
-    *   A table prefix-parsed string for the sequence name.
-    */
-   public function makeSequenceName($table, $field) {
--    $sequence_name = $this->prefixTables('{' . $table . '}_' . $field . '_seq');
--    // Remove identifier quotes as we are constructing a new name from a
--    // prefixed and quoted table name.
--    return str_replace($this->identifierQuotes, '', $sequence_name);
-+    return $this->identifierHandler->getPlatformTableName($table, TRUE, FALSE) . "_{$field}_seq";
-   }
- 
-   /**
-@@ -1357,9 +1231,7 @@ public function condition($conjunction) {
-    *   The sanitized database name.
-    */
-   public function escapeDatabase($database) {
--    $database = preg_replace('/[^A-Za-z0-9_]+/', '', $database);
--    [$start_quote, $end_quote] = $this->identifierQuotes;
--    return $start_quote . $database . $end_quote;
-+    return $this->identifierHandler->getPlatformDatabaseName($database);
-   }
- 
-   /**
-@@ -1380,10 +1252,7 @@ public function escapeDatabase($database) {
-    * @see \Drupal\Core\Database\Connection::setPrefix()
-    */
-   public function escapeTable($table) {
--    if (!isset($this->escapedTables[$table])) {
--      $this->escapedTables[$table] = preg_replace('/[^A-Za-z0-9_.]+/', '', $table);
--    }
--    return $this->escapedTables[$table];
-+    return $this->identifierHandler->getPlatformTableName($table);
-   }
- 
-   /**
-@@ -1400,14 +1269,7 @@ public function escapeTable($table) {
-    *   The sanitized field name.
-    */
-   public function escapeField($field) {
--    if (!isset($this->escapedFields[$field])) {
--      $escaped = preg_replace('/[^A-Za-z0-9_.]+/', '', $field);
--      [$start_quote, $end_quote] = $this->identifierQuotes;
--      // Sometimes fields have the format table_alias.field. In such cases
--      // both identifiers should be quoted, for example, "table_alias"."field".
--      $this->escapedFields[$field] = $start_quote . str_replace('.', $end_quote . '.' . $start_quote, $escaped) . $end_quote;
--    }
--    return $this->escapedFields[$field];
-+    return $this->identifierHandler->getPlatformColumnName($field);
-   }
- 
-   /**
-@@ -1425,11 +1287,7 @@ public function escapeField($field) {
-    *   The sanitized alias name.
-    */
-   public function escapeAlias($field) {
--    if (!isset($this->escapedAliases[$field])) {
--      [$start_quote, $end_quote] = $this->identifierQuotes;
--      $this->escapedAliases[$field] = $start_quote . preg_replace('/[^A-Za-z0-9_]+/', '', $field) . $end_quote;
--    }
--    return $this->escapedAliases[$field];
-+    return $this->identifierHandler->getPlatformAliasName($field);
-   }
- 
-   /**
-@@ -2121,4 +1979,11 @@ public function getPagerManager(): PagerManagerInterface {
-     return \Drupal::service('pager.manager');
-   }
- 
-+  /**
-+   * @todo
-+   */
-+  public function getIdentifierHandler(): IdentifierHandler {
-+    return $this->identifierHandler;
-+  }
-+
  }
-diff --git a/core/lib/Drupal/Core/Database/Database.php b/core/lib/Drupal/Core/Database/Database.php
-index 2771166e48..6416af2d89 100644
---- a/core/lib/Drupal/Core/Database/Database.php
-+++ b/core/lib/Drupal/Core/Database/Database.php
-@@ -216,25 +216,8 @@
-     }
- 
-     // Parse the prefix information.
--    // @todo in Drupal 10, fail hard if $info['prefix'] is an array.
--    // @see https://www.drupal.org/project/drupal/issues/3124382
--    if (!isset($info['prefix'])) {
--      // Default to an empty prefix.
--      $info['prefix'] = '';
--    }
--    elseif (is_array($info['prefix'])) {
--      $prefix = $info['prefix']['default'] ?? '';
--      unset($info['prefix']['default']);
--      // If there are keys left besides the 'default' one, we are in a
--      // multi-prefix scenario (for per-table prefixing, or migrations).
--      // In that case, we put the non-default keys in a 'extra_prefix' key
--      // to avoid mixing up with the normal 'prefix', which is a string since
--      // Drupal 9.1.0.
--      if (count($info['prefix'])) {
--        $info['extra_prefix'] = $info['prefix'];
--      }
--      $info['prefix'] = $prefix;
--    }
-+    $info['prefix'] = $info['prefix'] ?? '';
-+    assert(!is_array($info['prefix']), "The 'prefix' key of the database connection array must be a string.");
- 
-     // Fallback for Drupal 7 settings.php if namespace is not provided.
-     if (empty($info['namespace'])) {
-diff --git a/core/lib/Drupal/Core/Database/Driver/mysql/Connection.php b/core/lib/Drupal/Core/Database/Driver/mysql/Connection.php
-index ef6027256c..3fb737c7fc 100644
---- a/core/lib/Drupal/Core/Database/Driver/mysql/Connection.php
-+++ b/core/lib/Drupal/Core/Database/Driver/mysql/Connection.php
-@@ -11,6 +11,7 @@
- use Drupal\Core\Database\DatabaseNotFoundException;
- use Drupal\Core\Database\DatabaseException;
- use Drupal\Core\Database\Connection as DatabaseConnection;
-+use Drupal\Core\Database\IdentifierHandler;
- use Drupal\Core\Database\TransactionNoActiveException;
- 
- /**
-@@ -84,11 +85,6 @@ class Connection extends DatabaseConnection {
-    */
-   const MIN_MAX_ALLOWED_PACKET = 1024;
- 
--  /**
--   * {@inheritdoc}
--   */
--  protected $identifierQuotes = ['"', '"'];
--
-   /**
-    * {@inheritdoc}
-    */
-@@ -112,10 +108,11 @@ public function __construct(\PDO $connection, array $connection_options) {
-         break;
-       }
-     }
--    if ($this->identifierQuotes === ['"', '"'] && !$is_ansi_quotes_mode) {
--      $this->identifierQuotes = ['`', '`'];
--    }
-+
-     parent::__construct($connection, $connection_options);
-+
-+    // Initialize the identifier handler.
-+    $this->identifierHandler = new IdentifierHandler($connection_options['prefix'], $is_ansi_quotes_mode ? ['"', '"'] : ['`', '`']);
-   }
- 
-   /**
-diff --git a/core/lib/Drupal/Core/Database/Driver/mysql/Schema.php b/core/lib/Drupal/Core/Database/Driver/mysql/Schema.php
-index e05f10c86e..aaca542c50 100644
---- a/core/lib/Drupal/Core/Database/Driver/mysql/Schema.php
-+++ b/core/lib/Drupal/Core/Database/Driver/mysql/Schema.php
-@@ -48,9 +48,13 @@ class Schema extends DatabaseSchema {
-    *   A keyed array with information about the database, table name and prefix.
-    */
-   protected function getPrefixInfo($table = 'default', $add_prefix = TRUE) {
--    $info = ['prefix' => $this->connection->tablePrefix($table)];
--    if ($add_prefix) {
--      $table = $info['prefix'] . $table;
-+    $prefix = $this->connection->tablePrefix($table);
-+    $info = ['prefix' => $prefix];
-+    if (strpos($table, '%') !== FALSE) {
-+      $table = ($add_prefix ? $prefix : '') . $table;
-+    }
-+    else {
-+      $table = $this->connection->getIdentifierHandler()->getPlatformTableName($table ?? '', $add_prefix);
-     }
-     if (($pos = strpos($table, '.')) !== FALSE) {
-       $info['database'] = substr($table, 0, $pos);
-diff --git a/core/lib/Drupal/Core/Database/Driver/pgsql/Connection.php b/core/lib/Drupal/Core/Database/Driver/pgsql/Connection.php
-index a5b6ae3296..778cd54e0c 100644
---- a/core/lib/Drupal/Core/Database/Driver/pgsql/Connection.php
-+++ b/core/lib/Drupal/Core/Database/Driver/pgsql/Connection.php
-@@ -6,6 +6,7 @@
- use Drupal\Core\Database\Connection as DatabaseConnection;
- use Drupal\Core\Database\DatabaseAccessDeniedException;
- use Drupal\Core\Database\DatabaseNotFoundException;
-+use Drupal\Core\Database\IdentifierHandler;
- use Drupal\Core\Database\StatementInterface;
- use Drupal\Core\Database\StatementWrapper;
- 
-@@ -68,11 +69,6 @@ class Connection extends DatabaseConnection {
-    */
-   protected $transactionalDDLSupport = TRUE;
- 
--  /**
--   * {@inheritdoc}
--   */
--  protected $identifierQuotes = ['"', '"'];
--
-   /**
-    * Constructs a connection object.
-    */
-@@ -86,6 +82,9 @@ public function __construct(\PDO $connection, array $connection_options) {
-     if (isset($connection_options['init_commands'])) {
-       $this->connection->exec(implode('; ', $connection_options['init_commands']));
-     }
-+
-+    // Initialize the identifier handler.
-+    $this->identifierHandler = new IdentifierHandler($connection_options['prefix']);
-   }
- 
-   /**
-@@ -313,13 +312,10 @@ public function nextId($existing = 0) {
-    * {@inheritdoc}
-    */
-   public function getFullQualifiedTableName($table) {
--    $options = $this->getConnectionOptions();
--    $prefix = $this->tablePrefix($table);
--
-     // The fully qualified table name in PostgreSQL is in the form of
-     // <database>.<schema>.<table>, so we have to include the 'public' schema in
-     // the return value.
--    return $options['database'] . '.public.' . $prefix . $table;
-+    return $this->getConnectionOptions()['database'] . '.public.' . $this->identifierHandler->getPlatformTableName($table, TRUE, FALSE);
-   }
- 
-   /**
-diff --git a/core/lib/Drupal/Core/Database/Driver/pgsql/Schema.php b/core/lib/Drupal/Core/Database/Driver/pgsql/Schema.php
-index 106add49ef..4b186dfa4d 100644
---- a/core/lib/Drupal/Core/Database/Driver/pgsql/Schema.php
-+++ b/core/lib/Drupal/Core/Database/Driver/pgsql/Schema.php
-@@ -511,8 +511,15 @@ public function tableExists($table) {
-    * {@inheritdoc}
-    */
-   public function findTables($table_expression) {
--    $individually_prefixed_tables = $this->connection->getUnprefixedTablesMap();
--    $default_prefix = $this->connection->tablePrefix();
-+    // Set up a map of prefixed => un-prefixed tables.
-+    $individually_prefixed_tables = [];
-+    foreach ($this->connection->getIdentifierHandler()->getPrefix() as $table_name => $prefix) {
-+      if ($table_name !== 'default') {
-+        $individually_prefixed_tables[$prefix . $table_name] = $table_name;
-+      }
-+    }
-+
-+    $default_prefix = $this->connection->tablePrefix('default');
-     $default_prefix_length = strlen($default_prefix);
-     $tables = [];
- 
-diff --git a/core/lib/Drupal/Core/Database/Driver/sqlite/Connection.php b/core/lib/Drupal/Core/Database/Driver/sqlite/Connection.php
-index bb1c15def9..65937a4b91 100644
---- a/core/lib/Drupal/Core/Database/Driver/sqlite/Connection.php
-+++ b/core/lib/Drupal/Core/Database/Driver/sqlite/Connection.php
-@@ -4,6 +4,7 @@
- 
- use Drupal\Core\Database\DatabaseNotFoundException;
- use Drupal\Core\Database\Connection as DatabaseConnection;
-+use Drupal\Core\Database\IdentifierHandler;
- use Drupal\Core\Database\StatementInterface;
- 
- /**
-@@ -73,43 +74,37 @@ class Connection extends DatabaseConnection {
-    */
-   protected $transactionalDDLSupport = TRUE;
- 
--  /**
--   * {@inheritdoc}
--   */
--  protected $identifierQuotes = ['"', '"'];
--
-   /**
-    * Constructs a \Drupal\Core\Database\Driver\sqlite\Connection object.
-    */
-   public function __construct(\PDO $connection, array $connection_options) {
-     parent::__construct($connection, $connection_options);
- 
--    // Attach one database for each registered prefix.
--    $prefixes = $this->prefixes;
--    foreach ($prefixes as &$prefix) {
--      // Empty prefix means query the main database -- no need to attach anything.
--      if (!empty($prefix)) {
--        // Only attach the database once.
--        if (!isset($this->attachedDatabases[$prefix])) {
-+    $prefix = $connection_options['prefix'] ?? '';
-+    // Empty prefix means query the main database -- no need to attach anything.
-+    if ($prefix !== '') {
-+      // Only attach the database once.
-+      if (!isset($this->attachedDatabases[$prefix])) {
-+        $this->attachedDatabases[$prefix] = $prefix;
-+        if ($connection_options['database'] === ':memory:') {
-+          // In memory database use ':memory:' as database name. According to
-+          // http://www.sqlite.org/inmemorydb.html it will open a unique
-+          // database so attaching it twice is not a problem.
-           $this->attachedDatabases[$prefix] = $prefix;
--          if ($connection_options['database'] === ':memory:') {
--            // In memory database use ':memory:' as database name. According to
--            // http://www.sqlite.org/inmemorydb.html it will open a unique
--            // database so attaching it twice is not a problem.
--            $this->query('ATTACH DATABASE :database AS :prefix', [':database' => $connection_options['database'], ':prefix' => $prefix]);
--          }
--          else {
--            $this->query('ATTACH DATABASE :database AS :prefix', [':database' => $connection_options['database'] . '-' . $prefix, ':prefix' => $prefix]);
--          }
-+          $this->query('ATTACH DATABASE :database AS :prefix', [':database' => $connection_options['database'], ':prefix' => $prefix]);
-+        }
-+        else {
-+          $this->attachDatabase($prefix);
-         }
--
--        // Add a ., so queries become prefix.table, which is proper syntax for
--        // querying an attached database.
--        $prefix .= '.';
-       }
-+
-+      // Add a ., so queries become prefix.table, which is proper syntax for
-+      // querying an attached database.
-+      $prefix .= '.';
-     }
--    // Regenerate the prefixes replacement table.
--    $this->setPrefix($prefixes);
-+
-+    // Initialize the identifier handler.
-+    $this->identifierHandler = new IdentifierHandler($prefix);
-   }
- 
-   /**
-@@ -211,6 +206,15 @@ public function __destruct() {
-     parent::__destruct();
-   }
- 
-+  /**
-+   * @todo
-+   */
-+  public function attachDatabase(string $database): void {
-+    $this->attachedDatabases[$database] = $database;
-+    $this->query('ATTACH DATABASE :database_file AS :database', [':database_file' => $this->connectionOptions['database'] . '-' . $database, ':database' => $database]);
-+    return;
-+  }
-+
-   /**
-    * Gets all the attached databases.
-    *
-@@ -391,9 +395,7 @@ public function queryTemporary($query, array $args = [], array $options = []) {
-     // Generate a new temporary table name and protect it from prefixing.
-     // SQLite requires that temporary tables to be non-qualified.
-     $tablename = $this->generateTemporaryTableName();
--    $prefixes = $this->prefixes;
--    $prefixes[$tablename] = '';
--    $this->setPrefix($prefixes);
-+    $this->identifierHandler->addPrefix($tablename, '');
- 
-     $this->query('CREATE TEMPORARY TABLE ' . $tablename . ' AS ' . $query, $args, $options);
-     return $tablename;
-@@ -469,10 +471,8 @@ public function nextId($existing_id = 0) {
-    * {@inheritdoc}
-    */
-   public function getFullQualifiedTableName($table) {
--    $prefix = $this->tablePrefix($table);
--
-     // Don't include the SQLite database file name as part of the table name.
--    return $prefix . $table;
-+    return $this->identifierHandler->getPlatformTableName($table, TRUE, TRUE);
-   }
- 
-   /**
-diff --git a/core/lib/Drupal/Core/Database/IdentifierHandler.php b/core/lib/Drupal/Core/Database/IdentifierHandler.php
-new file mode 100644
-index 0000000000..5742e0a272
---- /dev/null
-+++ b/core/lib/Drupal/Core/Database/IdentifierHandler.php
-@@ -0,0 +1,198 @@
-+<?php
-+
-+namespace Drupal\Core\Database;
-+
-+/**
-+ * @todo
-+ */
-+class IdentifierHandler {
-+
-+  const GENERIC = 0x0;
-+  const DATABASE = 0x4;
-+  const SEQUENCE = 0x5;
-+  const TABLE = 0x7;
-+  const PREFIXED_TABLE = 0x8;
-+  const COLUMN = 0xC;
-+  const INDEX = 0xD;
-+  const ALIAS = 0x10;
-+
-+  /**
-+   * The identifier quote characters for the database type.
-+   *
-+   * An array containing the start and end identifier quote characters for the
-+   * database type. The ANSI SQL standard identifier quote character is a double
-+   * quotation mark.
-+   *
-+   * @var string[]
-+   */
-+  protected $identifierQuotes;
-+
-+  /**
-+   * The table prefix used by this database connection.
-+   *
-+   * @var string
-+   *
-+   * @todo add property 'string' typehint for PHP 8.0.
-+   */
-+  protected $tablePrefix;
-+
-+  /**
-+   * @todo
-+   */
-+  protected $identifiers;
-+
-+  /**
-+   * Constructs an IdentifierHandler object.
-+   *
-+   * @param string $table_prefix
-+   *   The table prefix to be used by the database connection.
-+   * @param string[] $identifier_quotes
-+   *   The identifier quote characters.
-+   */
-+  public function __construct(string $table_prefix, array $identifier_quotes = ['"', '"']) {
-+    $this->tablePrefix = $table_prefix;
-+    $this->identifierQuotes = $identifier_quotes;
-+  }
-+
-+  /**
-+   * @todo
-+   */
-+  public function getTablePrefix(): string {
-+    return $this->tablePrefix;
-+  }
-+
-+  /**
-+   * @todo
-+   */
-+  protected function setIdentifier(string $identifier, string $platform_identifier, int $type): void {
-+    $is_alias = (bool) ($type & static::ALIAS);
-+    $type = $type & 0xF;
-+    if (!$is_alias) {
-+      $this->identifiers['identifier'][$identifier][$type] = $platform_identifier;
-+      $this->identifiers['platform'][$platform_identifier][$type] = $identifier;
-+    }
-+    else {
-+      $this->identifiers['identifier'][$identifier][static::ALIAS][$type] = $platform_identifier;
-+      $this->identifiers['platform'][$platform_identifier][static::ALIAS][$type] = $identifier;
-+    }
-+  }
-+
-+  /**
-+   * @todo
-+   */
-+  protected function hasIdentifier(string $identifier, int $type = 0): bool {
-+    return isset($this->identifiers['identifier'][$identifier][$type]);
-+  }
-+
-+  /**
-+   * @todo
-+   */
-+  public function getPlatformIdentifierName(string $original_name, bool $quoted = TRUE): string {
-+    if (!$this->hasIdentifier($original_name, static::GENERIC)) {
-+      $this->setIdentifier($original_name, $this->resolvePlatformGenericIdentifier($original_name), static::GENERIC);
-+    }
-+    [$start_quote, $end_quote] = $this->identifierQuotes;
-+    $identifier = $this->identifiers['identifier'][$original_name][static::GENERIC];
-+    return $quoted ? $start_quote . $identifier . $end_quote : $identifier;
-+  }
-+
-+  /**
-+   * @todo
-+   */
-+  public function getPlatformDatabaseName(string $original_name, bool $quoted = TRUE): string {
-+    $original_name = preg_replace('/[^A-Za-z0-9_]+/', '', $original_name);
-+    if (!$this->hasIdentifier($original_name, static::DATABASE)) {
-+      $this->setIdentifier($original_name, $this->resolvePlatformDatabaseIdentifier($original_name), static::DATABASE);
-+    }
-+    [$start_quote, $end_quote] = $this->identifierQuotes;
-+    return $quoted ?
-+      $start_quote . $this->identifiers['identifier'][$original_name][static::DATABASE] . $end_quote :
-+      $this->identifiers['identifier'][$original_name][static::DATABASE];
-+  }
-+
-+  /**
-+   * @todo
-+   */
-+  public function getPlatformTableName(string $original_name, bool $prefixed = FALSE, bool $quoted = FALSE): string {
-+    $original_name = preg_replace('/[^A-Za-z0-9_.]+/', '', $original_name);
-+    if (!$this->hasIdentifier($original_name, static::TABLE)) {
-+      $table_name = $this->resolvePlatformTableIdentifier($original_name);
-+      $this->setIdentifier($original_name, $table_name, static::TABLE);
-+      $this->setIdentifier($original_name, $this->getTablePrefix() . $table_name, static::PREFIXED_TABLE);
-+    }
-+    [$start_quote, $end_quote] = $this->identifierQuotes;
-+    $table = $prefixed ? $this->identifiers['identifier'][$original_name][static::PREFIXED_TABLE] : $this->identifiers['identifier'][$original_name][static::TABLE];
-+    return $quoted ? $start_quote . str_replace(".", "$end_quote.$start_quote", $table) . $end_quote : $table;
-+  }
-+
-+  /**
-+   * @todo
-+   */
-+  public function getPlatformColumnName(string $original_name, bool $quoted = TRUE): string {
-+    if ($original_name === '') {
-+      return '';
-+    }
-+    $original_name = preg_replace('/[^A-Za-z0-9_.]+/', '', $original_name);
-+    if (!$this->hasIdentifier($original_name, static::COLUMN)) {
-+      $this->setIdentifier($original_name, $this->resolvePlatformColumnIdentifier($original_name), static::COLUMN);
-+    }
-+    // Sometimes fields have the format table_alias.field. In such cases
-+    // both identifiers should be quoted, for example, "table_alias"."field".
-+    [$start_quote, $end_quote] = $this->identifierQuotes;
-+    return $quoted ?
-+      $start_quote . str_replace(".", "$end_quote.$start_quote", $this->identifiers['identifier'][$original_name][static::COLUMN]) . $end_quote :
-+      $this->identifiers['identifier'][$original_name][static::COLUMN];
-+  }
-+
-+  /**
-+   * @todo
-+   */
-+  public function getPlatformAliasName(string $original_name, int $type = 0, bool $quoted = TRUE): string {
-+    $original_name = preg_replace('/[^A-Za-z0-9_]+/', '', $original_name);
-+    if ($original_name[0] === $this->identifierQuotes[0]) {
-+      $original_name = substr($original_name, 1, -1);
-+    }
-+    if (!$this->hasIdentifier($original_name, static::ALIAS)) {
-+      $this->setIdentifier($original_name, $this->resolvePlatformGenericIdentifier($original_name, $type), $type | static::ALIAS);
-+    }
-+    [$start_quote, $end_quote] = $this->identifierQuotes;
-+    $alias = $this->identifiers['identifier'][$original_name][static::ALIAS][$type] ?? $this->identifiers['identifier'][$original_name][static::ALIAS][0];
-+    return $quoted ? $start_quote . $alias . $end_quote : $alias;
-+  }
-+
-+  /**
-+   * @todo
-+   */
-+  protected function resolvePlatformGenericIdentifier(string $identifier): string {
-+    return $identifier;
-+  }
-+
-+  /**
-+   * @todo
-+   */
-+  protected function resolvePlatformDatabaseIdentifier(string $identifier): string {
-+    return $identifier;
-+  }
-+
-+  /**
-+   * @todo
-+   */
-+  protected function resolvePlatformTableIdentifier(string $identifier): string {
-+    return $identifier;
-+  }
-+
-+  /**
-+   * @todo
-+   */
-+  protected function resolvePlatformColumnIdentifier(string $identifier): string {
-+    return $identifier;
-+  }
-+
-+  /**
-+   * @todo
-+   */
-+  protected function resolvePlatformAliasIdentifier(string $identifier, int $type = 0): string {
-+    return $identifier;
-+  }
-+
-+}
-diff --git a/core/lib/Drupal/Core/Database/Schema.php b/core/lib/Drupal/Core/Database/Schema.php
-index 9083b27492..71c71c4461 100644
---- a/core/lib/Drupal/Core/Database/Schema.php
-+++ b/core/lib/Drupal/Core/Database/Schema.php
-@@ -82,12 +82,16 @@ public function nextPlaceholder() {
-    *   A keyed array with information about the schema, table name and prefix.
-    */
-   protected function getPrefixInfo($table = 'default', $add_prefix = TRUE) {
-+    $prefix = $this->connection->tablePrefix($table);
-     $info = [
-       'schema' => $this->defaultSchema,
--      'prefix' => $this->connection->tablePrefix($table),
-+      'prefix' => $prefix,
-     ];
--    if ($add_prefix) {
--      $table = $info['prefix'] . $table;
-+    if (strpos($table, '%') !== FALSE) {
-+      $table = ($add_prefix ? $prefix : '') . $table;
-+    }
-+    else {
-+      $table = $this->connection->getIdentifierHandler()->getPlatformTableName($table ?? '', $add_prefix);
-     }
-     // If the prefix contains a period in it, then that means the prefix also
-     // contains a schema reference in which case we will change the schema key
-@@ -191,8 +195,10 @@ public function findTables($table_expression) {
-     $condition = $this->buildTableNameCondition('%', 'LIKE');
-     $condition->compile($this->connection, $this);
- 
--    $individually_prefixed_tables = $this->connection->getUnprefixedTablesMap();
--    $default_prefix = $this->connection->tablePrefix();
-+    // Set up a map of prefixed => un-prefixed tables.
-+    $individually_prefixed_tables = [];
-+
-+    $default_prefix = $this->connection->tablePrefix('default');
-     $default_prefix_length = strlen($default_prefix);
-     $tables = [];
-     // Normally, we would heartily discourage the use of string
-diff --git a/core/modules/migrate/tests/src/Kernel/MigrateTestBase.php b/core/modules/migrate/tests/src/Kernel/MigrateTestBase.php
-index 25c1b4e730..6b3f34dbb8 100644
---- a/core/modules/migrate/tests/src/Kernel/MigrateTestBase.php
-+++ b/core/modules/migrate/tests/src/Kernel/MigrateTestBase.php
-@@ -67,6 +67,9 @@ protected function setUp() {
-     parent::setUp();
-     $this->createMigrationConnection();
-     $this->sourceDatabase = Database::getConnection('default', 'migrate');
-+    // Attach the original test prefix as a database, for SQLite to attach its
-+    // database file.
-+    $this->sourceDatabase->attachDatabase(substr($this->sourceDatabase->getConnectionOptions()['prefix'],0, -1));
-   }
- 
-   /**
-@@ -94,10 +97,6 @@ private function createMigrationConnection() {
-       // Simpletest uses 7 character prefixes at most so this can't cause
-       // collisions.
-       $connection_info[$target]['prefix'] = $prefix . '0';
--
--      // Add the original simpletest prefix so SQLite can attach its database.
--      // @see \Drupal\Core\Database\Driver\sqlite\Connection::init()
--      $connection_info[$target]['extra_prefix'][$prefix] = $prefix;
-     }
-     Database::addConnectionInfo('migrate', 'default', $connection_info['default']);
-   }
-diff --git a/core/modules/migrate/tests/src/Unit/MigrateSqlIdMapTest.php b/core/modules/migrate/tests/src/Unit/MigrateSqlIdMapTest.php
-index 31f456233b..147149d213 100644
---- a/core/modules/migrate/tests/src/Unit/MigrateSqlIdMapTest.php
-+++ b/core/modules/migrate/tests/src/Unit/MigrateSqlIdMapTest.php
-@@ -971,7 +971,7 @@ public function testGetQualifiedMapTablePrefix() {
-     // The SQLite driver is a special flower. It will prefix tables with
-     // PREFIX.TABLE, instead of the standard PREFIXTABLE.
-     // @see \Drupal\Core\Database\Driver\sqlite\Connection::__construct()
--    $this->assertEquals('prefix.migrate_map_sql_idmap_test', $qualified_map_table);
-+    $this->assertEquals('"prefix"."migrate_map_sql_idmap_test"', $qualified_map_table);
-   }
- 
-   /**
-diff --git a/core/modules/system/tests/src/Functional/Database/TemporaryQueryTest.php b/core/modules/system/tests/src/Functional/Database/TemporaryQueryTest.php
-deleted file mode 100644
-index 419363a2cb..0000000000
---- a/core/modules/system/tests/src/Functional/Database/TemporaryQueryTest.php
-+++ /dev/null
-@@ -1,67 +0,0 @@
--<?php
--
--namespace Drupal\Tests\system\Functional\Database;
--
--use Drupal\Core\Database\Database;
--
--/**
-- * Tests the temporary query functionality.
-- *
-- * @group Database
-- * @group legacy
-- */
--class TemporaryQueryTest extends DatabaseTestBase {
--
--  /**
--   * {@inheritdoc}
--   */
--  protected static $modules = ['database_test'];
--
--  /**
--   * {@inheritdoc}
--   */
--  protected $defaultTheme = 'stark';
--
--  /**
--   * Returns the number of rows of a table.
--   */
--  public function countTableRows($table_name) {
--    return Database::getConnection()->select($table_name)->countQuery()->execute()->fetchField();
--  }
--
--  /**
--   * Confirms that temporary tables work and are limited to one request.
--   */
--  public function testTemporaryQuery() {
--    $this->expectDeprecation('Connection::queryTemporary() is deprecated in drupal:9.3.0 and is removed from drupal:10.0.0. There is no replacement. See https://www.drupal.org/node/3211781');
--    $this->expectDeprecation('Connection::generateTemporaryTableName() is deprecated in drupal:9.3.0 and is removed from drupal:10.0.0. There is no replacement. See https://www.drupal.org/node/3211781');
--
--    $connection = Database::getConnection();
--    $this->drupalGet('database_test/db_query_temporary');
--    $data = json_decode($this->getSession()->getPage()->getContent());
--    if ($data) {
--      $this->assertEquals($this->countTableRows('test'), $data->row_count, 'The temporary table contains the correct amount of rows.');
--      $this->assertFalse($connection->schema()->tableExists($data->table_name), 'The temporary table is, indeed, temporary.');
--    }
--    else {
--      $this->fail('The creation of the temporary table failed.');
--    }
--
--    // Now try to run two temporary queries in the same request.
--    $table_name_test = $connection->queryTemporary('SELECT [name] FROM {test}', []);
--    $table_name_task = $connection->queryTemporary('SELECT [pid] FROM {test_task}', []);
--
--    $this->assertEquals($this->countTableRows('test'), $this->countTableRows($table_name_test), 'A temporary table was created successfully in this request.');
--    $this->assertEquals($this->countTableRows('test_task'), $this->countTableRows($table_name_task), 'A second temporary table was created successfully in this request.');
--
--    // Check that leading whitespace and comments do not cause problems
--    // in the modified query.
--    $sql = "
--      -- Let's select some rows into a temporary table
--      SELECT [name] FROM {test}
--    ";
--    $table_name_test = $connection->queryTemporary($sql, []);
--    $this->assertEquals($this->countTableRows('test'), $this->countTableRows($table_name_test), 'Leading white space and comments do not interfere with temporary table creation.');
--  }
--
--}
-diff --git a/core/tests/Drupal/FunctionalTests/Installer/InstallerWithTablePrefixArrayTest.php b/core/tests/Drupal/FunctionalTests/Installer/InstallerWithTablePrefixArrayTest.php
-deleted file mode 100644
-index ca645e95a7..0000000000
---- a/core/tests/Drupal/FunctionalTests/Installer/InstallerWithTablePrefixArrayTest.php
-+++ /dev/null
-@@ -1,41 +0,0 @@
--<?php
--
--namespace Drupal\FunctionalTests\Installer;
--
--/**
-- * Tests the interactive installer with deprecated table prefix array.
-- *
-- * @group Installer
-- */
--class InstallerWithTablePrefixArrayTest extends InstallerTestBase {
--
--  /**
--   * {@inheritdoc}
--   */
--  protected $defaultTheme = 'stark';
--
--  /**
--   * Ensures that the status report raises the warning after installation.
--   */
--  public function testInstall(): void {
--    $this->drupalGet('admin/reports/status');
--    $this->assertSession()->pageTextNotContains("There is at least one database entry in the \$database array in settings.php that has a 'prefix' value in the format of an array. Per-table prefixes are no longer supported.");
--
--    // Add a database with a multi-entry 'prefix' array.
--    $settings['databases']['test_fu']['default'] = (object) [
--      'value' => [
--        'database' => 'drupal_db',
--        'prefix' => ['default' => 'foo', 'other_table' => 'qux'],
--        'host' => 'localhost',
--        'namespace' => 'Drupal\Core\Database\Driver\sqlite',
--        'driver' => 'sqlite',
--      ],
--      'required' => TRUE,
--    ];
--    $this->writeSettings($settings);
--
--    $this->drupalGet('admin/reports/status');
--    $this->assertSession()->pageTextContains("There is at least one database entry in the \$database array in settings.php that has a 'prefix' value in the format of an array. Per-table prefixes are no longer supported.");
--  }
--
--}
-diff --git a/core/tests/Drupal/KernelTests/Core/Database/ConnectionTest.php b/core/tests/Drupal/KernelTests/Core/Database/ConnectionTest.php
-index 570146fc10..2716777f4c 100644
---- a/core/tests/Drupal/KernelTests/Core/Database/ConnectionTest.php
-+++ b/core/tests/Drupal/KernelTests/Core/Database/ConnectionTest.php
-@@ -175,14 +175,9 @@ public function testPerTablePrefixOption() {
-       'default' => $connection_info['default']['prefix'],
-       'test_table' => $connection_info['default']['prefix'] . '_bar',
-     ];
-+    $this->expectException(\AssertionError::class);
-+    $this->expectExceptionMessage("The 'prefix' key of the database connection array must be a string.");
-     Database::addConnectionInfo('default', 'foo', $new_connection_info);
--    $foo_connection = Database::getConnection('foo', 'default');
--    $this->assertInstanceOf(Connection::class, $foo_connection);
--    $this->assertIsString($foo_connection->getConnectionOptions()['prefix']);
--    $this->assertSame($connection_info['default']['prefix'], $foo_connection->getConnectionOptions()['prefix']);
--    $this->assertSame([
--      'test_table' => $connection_info['default']['prefix'] . '_bar',
--    ], $foo_connection->getConnectionOptions()['extra_prefix']);
-   }
- 
-   /**
-@@ -194,12 +189,9 @@ public function testPrefixArrayOption() {
-     $new_connection_info['prefix'] = [
-       'default' => $connection_info['default']['prefix'],
-     ];
-+    $this->expectException(\AssertionError::class);
-+    $this->expectExceptionMessage("The 'prefix' key of the database connection array must be a string.");
-     Database::addConnectionInfo('default', 'foo', $new_connection_info);
--    $foo_connection = Database::getConnection('foo', 'default');
--    $this->assertInstanceOf(Connection::class, $foo_connection);
--    $this->assertIsString($foo_connection->getConnectionOptions()['prefix']);
--    $this->assertSame($connection_info['default']['prefix'], $foo_connection->getConnectionOptions()['prefix']);
--    $this->assertArrayNotHasKey('extra_prefix', $foo_connection->getConnectionOptions());
-   }
- 
-   /**
-diff --git a/core/tests/Drupal/KernelTests/Core/Database/SchemaTest.php b/core/tests/Drupal/KernelTests/Core/Database/SchemaTest.php
-index eb8ea41d37..3b5ed6dbb2 100644
---- a/core/tests/Drupal/KernelTests/Core/Database/SchemaTest.php
-+++ b/core/tests/Drupal/KernelTests/Core/Database/SchemaTest.php
-@@ -1197,20 +1197,6 @@ public function testFindPrimaryKeyColumns() {
-    * Tests the findTables() method.
-    */
-   public function testFindTables() {
--    // We will be testing with three tables, two of them using the default
--    // prefix and the third one with an individually specified prefix.
--    // Set up a new connection with different connection info.
--    $connection_info = Database::getConnectionInfo();
--
--    // Add per-table prefix to the second table.
--    $new_connection_info = $connection_info['default'];
--    $new_connection_info['prefix'] = [
--      'default' => $connection_info['default']['prefix'],
--      'test_2_table' => $connection_info['default']['prefix'] . '_shared_',
--    ];
--    Database::addConnectionInfo('test', 'default', $new_connection_info);
--    Database::setActiveConnection('test');
--    $test_schema = Database::getConnection()->schema();
- 
-     // Create the tables.
-     $table_specification = [
-@@ -1222,35 +1208,31 @@ public function testFindTables() {
-         ],
-       ],
-     ];
--    $test_schema->createTable('test_1_table', $table_specification);
--    $test_schema->createTable('test_2_table', $table_specification);
--    $test_schema->createTable('the_third_table', $table_specification);
-+    $this->schema->createTable('test_1_table', $table_specification);
-+    $this->schema->createTable('test_2_table', $table_specification);
-+    $this->schema->createTable('the_third_table', $table_specification);
- 
-     // Check the "all tables" syntax.
--    $tables = $test_schema->findTables('%');
-+    $tables = $this->schema->findTables('%');
-     sort($tables);
-     $expected = [
-       // The 'config' table is added by
-       // \Drupal\KernelTests\KernelTestBase::containerBuild().
-       'config',
-       'test_1_table',
--      // This table uses a per-table prefix, yet it is returned as un-prefixed.
-       'test_2_table',
-       'the_third_table',
-     ];
-     $this->assertEquals($expected, $tables, 'All tables were found.');
- 
-     // Check the restrictive syntax.
--    $tables = $test_schema->findTables('test_%');
-+    $tables = $this->schema->findTables('test_%');
-     sort($tables);
-     $expected = [
-       'test_1_table',
-       'test_2_table',
-     ];
-     $this->assertEquals($expected, $tables, 'Two tables were found.');
--
--    // Go back to the initial connection.
--    Database::setActiveConnection('default');
-   }
- 
-   /**
-diff --git a/core/tests/Drupal/KernelTests/KernelTestBaseDatabaseDriverModuleTest.php b/core/tests/Drupal/KernelTests/KernelTestBaseDatabaseDriverModuleTest.php
-index b72e2972e2..72595efc32 100644
---- a/core/tests/Drupal/KernelTests/KernelTestBaseDatabaseDriverModuleTest.php
-+++ b/core/tests/Drupal/KernelTests/KernelTestBaseDatabaseDriverModuleTest.php
-@@ -44,9 +44,7 @@ protected function getDatabaseConnectionInfo() {
-       foreach ($connection_info as $target => $value) {
-         // Replace the full table prefix definition to ensure that no table
-         // prefixes of the test runner leak into the test.
--        $connection_info[$target]['prefix'] = [
--          'default' => $this->databasePrefix,
--        ];
-+        $connection_info[$target]['prefix'] = $this->databasePrefix;
-       }
-     }
-     return $connection_info;
-diff --git a/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php b/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
-index b105f79192..11331fbd22 100644
---- a/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
-+++ b/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
-@@ -3,6 +3,7 @@
- namespace Drupal\Tests\Core\Database;
- 
- use Composer\Autoload\ClassLoader;
-+use Drupal\Core\Database\Connection;
- use Drupal\Core\Database\Statement;
- use Drupal\Core\Database\StatementWrapper;
- use Drupal\Tests\Core\Database\Stub\StubConnection;
-@@ -18,55 +19,6 @@
+diff --git a/core/modules/system/src/Plugin/ImageToolkit/Operation/gd/CreateNew.php b/core/modules/system/src/Plugin/ImageToolkit/Operation/gd/CreateNew.php
+index 0c3559ed2b..a78a48f291 100644
+--- a/core/modules/system/src/Plugin/ImageToolkit/Operation/gd/CreateNew.php
++++ b/core/modules/system/src/Plugin/ImageToolkit/Operation/gd/CreateNew.php
+@@ -94,6 +94,7 @@ protected function execute(array $arguments) {
+     switch ($type) {
+       case IMAGETYPE_PNG:
+       case IMAGETYPE_WEBP:
++      case IMAGETYPE_AVIF:
+         imagealphablending($res, FALSE);
+         $transparency = imagecolorallocatealpha($res, 0, 0, 0, 127);
+         imagefill($res, 0, 0, $transparency);
+diff --git a/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php b/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php
+index 9717f578f0..949e00d601 100644
+--- a/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php
++++ b/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php
+@@ -12,6 +12,7 @@
+  * Tests that core image manipulations work properly: scale, resize, rotate,
+  * crop, scale and crop, and desaturate.
+  *
++ * @coversDefaultClass \Drupal\system\Plugin\ImageToolkit\GDToolkit
+  * @group Image
   */
- class ConnectionTest extends UnitTestCase {
- 
--  /**
--   * Data provider for testPrefixRoundTrip().
--   *
--   * @return array
--   *   Array of arrays with the following elements:
--   *   - Arguments to pass to Connection::setPrefix().
--   *   - Expected result from Connection::tablePrefix().
--   */
--  public function providerPrefixRoundTrip() {
--    return [
--      [
--        ['' => 'test_'],
--        'test_',
--      ],
--      [
--        [
--          'fooTable' => 'foo_',
--          'barTable' => 'bar_',
--        ],
--        [
--          'fooTable' => 'foo_',
--          'barTable' => 'bar_',
--        ],
--      ],
--    ];
--  }
--
--  /**
--   * Exercise setPrefix() and tablePrefix().
--   *
--   * @dataProvider providerPrefixRoundTrip
--   */
--  public function testPrefixRoundTrip($expected, $prefix_info) {
--    $mock_pdo = $this->createMock('Drupal\Tests\Core\Database\Stub\StubPDO');
--    $connection = new StubConnection($mock_pdo, []);
--
--    // setPrefix() is protected, so we make it accessible with reflection.
--    $reflection = new \ReflectionClass('Drupal\Tests\Core\Database\Stub\StubConnection');
--    $set_prefix = $reflection->getMethod('setPrefix');
--    $set_prefix->setAccessible(TRUE);
--
--    // Set the prefix data.
--    $set_prefix->invokeArgs($connection, [$prefix_info]);
--    // Check the round-trip.
--    foreach ($expected as $table => $prefix) {
--      $this->assertEquals($prefix, $connection->tablePrefix($table));
--    }
--  }
--
-   /**
-    * Data provider for testPrefixTables().
-    *
-@@ -612,29 +564,11 @@ public function testEscapeDatabase($expected, $name, array $identifier_quote = [
-    * @group legacy
-    */
-   public function testIdentifierQuotesDeprecation() {
--    $this->expectDeprecation('In drupal:10.0.0 not setting the $identifierQuotes property in the concrete Connection class will result in an RuntimeException. See https://www.drupal.org/node/2986894');
--    $mock_pdo = $this->createMock(StubPDO::class);
--    new StubConnection($mock_pdo, [], NULL);
--  }
--
--  /**
--   * @covers ::__construct
--   */
--  public function testIdentifierQuotesAssertCount() {
--    $this->expectException(\AssertionError::class);
--    $this->expectExceptionMessage('\Drupal\Core\Database\Connection::$identifierQuotes must contain 2 string values');
--    $mock_pdo = $this->createMock(StubPDO::class);
--    new StubConnection($mock_pdo, [], ['"']);
--  }
--
--  /**
--   * @covers ::__construct
--   */
--  public function testIdentifierQuotesAssertString() {
--    $this->expectException(\AssertionError::class);
--    $this->expectExceptionMessage('\Drupal\Core\Database\Connection::$identifierQuotes must contain 2 string values');
-+    $this->expectDeprecation('Connection::$identifierQuotes should not be accessed in drupal:9.x.0 and is removed from drupal:10.0.0. This is no longer used. See https://www.drupal.org/node/1234567');
-     $mock_pdo = $this->createMock(StubPDO::class);
--    new StubConnection($mock_pdo, [], [0, '1']);
-+    $mock_connection = new StubConnection($mock_pdo, [], ['"', '"']);
-+    $this->assertInstanceOf(Connection::class, $mock_connection);
-+    $test_identifier_quotes = $mock_connection->identifierQuotes;
+ class ToolkitGdTest extends KernelTestBase {
+@@ -108,19 +109,15 @@ public function getPixelColor(ImageInterface $image, $x, $y) {
    }
  
    /**
-diff --git a/core/tests/Drupal/Tests/Core/Database/Stub/StubConnection.php b/core/tests/Drupal/Tests/Core/Database/Stub/StubConnection.php
-index b553dcce0d..c7d1716f10 100644
---- a/core/tests/Drupal/Tests/Core/Database/Stub/StubConnection.php
-+++ b/core/tests/Drupal/Tests/Core/Database/Stub/StubConnection.php
-@@ -3,6 +3,7 @@
- namespace Drupal\Tests\Core\Database\Stub;
- 
- use Drupal\Core\Database\Connection;
-+use Drupal\Core\Database\IdentifierHandler;
- use Drupal\Core\Database\Log;
- use Drupal\Core\Database\StatementWrapper;
- 
-@@ -44,12 +45,14 @@ class StubConnection extends Connection {
-    *   A class to use as a statement class for deprecation testing.
+-   * Since PHP can't visually check that our images have been manipulated
+-   * properly, build a list of expected color values for each of the corners and
+-   * the expected height and widths for the final images.
++   * @covers ::getSupportedExtensions
++   * @covers ::extensionToImageType
     */
-   public function __construct(\PDO $connection, array $connection_options, $identifier_quotes = ['', ''], $statement_class = NULL) {
--    $this->identifierQuotes = $identifier_quotes;
-     if ($statement_class) {
-       $this->statementClass = $statement_class;
-       $this->statementWrapperClass = NULL;
+-  public function testManipulations() {
+-
+-    // Test that the image factory is set to use the GD toolkit.
+-    $this->assertEquals('gd', $this->imageFactory->getToolkitId(), 'The image factory is set to use the \'gd\' image toolkit.');
++  public function testSupportedExtensions(): void {
++    $this->assertEquals('gd', $this->imageFactory->getToolkitId());
+ 
+     // Test the list of supported extensions.
+-    $expected_extensions = ['png', 'gif', 'jpeg', 'jpg', 'jpe', 'webp'];
+-    $supported_extensions = $this->imageFactory->getSupportedExtensions();
+-    $this->assertEquals($expected_extensions, array_intersect($expected_extensions, $supported_extensions));
++    $expected_extensions = ['png', 'gif', 'jpeg', 'jpg', 'jpe', 'webp', 'avif'];
++    $this->assertEquals($expected_extensions, $this->imageFactory->getSupportedExtensions());
+ 
+     // Test that the supported extensions map to correct internal GD image
+     // types.
+@@ -131,26 +128,44 @@ public function testManipulations() {
+       'jpg' => IMAGETYPE_JPEG,
+       'jpe' => IMAGETYPE_JPEG,
+       'webp' => IMAGETYPE_WEBP,
++      'avif' => IMAGETYPE_AVIF,
+     ];
+     $image = $this->imageFactory->get();
+     foreach ($expected_image_types as $extension => $expected_image_type) {
+-      $image_type = $image->getToolkit()->extensionToImageType($extension);
+-      $this->assertSame($expected_image_type, $image_type);
++      $this->assertSame($expected_image_type, $image->getToolkit()->extensionToImageType($extension));
      }
-     parent::__construct($connection, $connection_options);
++  }
 +
-+    // Initialize the identifier handler.
-+    $this->identifierHandler = new IdentifierHandler($connection_options['prefix'] ?? '', $identifier_quotes);
-   }
++  /**
++   * Data provider for ::testManipulations().
++   */
++  public function providerTestImageFiles(): array {
++    return [
++      ['image-test.png'],
++      ['image-test.gif'],
++      ['image-test-no-transparency.gif'],
++      ['image-test.jpg'],
++      ['img-test.webp'],
++      ['img-test.avif'],
++    ];
++  }
++
++  /**
++   * Since PHP can't visually check that our images have been manipulated
++   * properly, build a list of expected color values for each of the corners and
++   * the expected height and widths for the final images.
++   *
++   * @dataProvider providerTestImageFiles
++   */
++  public function testManipulations(string $file_name): void {
++
++    // Test that the image factory is set to use the GD toolkit.
++    $this->assertEquals('gd', $this->imageFactory->getToolkitId(), 'The image factory is set to use the \'gd\' image toolkit.');
  
-   /**
+     // Typically the corner colors will be unchanged. These colors are in the
+     // order of top-left, top-right, bottom-right, bottom-left.
+     $default_corners = [$this->red, $this->green, $this->blue, $this->transparent];
+ 
+-    // A list of files that will be tested.
+-    $files = [
+-      'image-test.png',
+-      'image-test.gif',
+-      'image-test-no-transparency.gif',
+-      'image-test.jpg',
+-      'img-test.webp',
+-    ];
+-
+     // Setup a list of tests to perform on each type.
+     $operations = [
+       'resize' => [
+@@ -230,6 +245,13 @@ public function testManipulations() {
+         'arguments' => ['extension' => 'webp'],
+         'corners' => $default_corners,
+       ],
++      'convert_avif' => [
++        'function' => 'convert',
++        'width' => 40,
++        'height' => 20,
++        'arguments' => ['extension' => 'avif'],
++        'corners' => $default_corners,
++      ],
+     ];
+ 
+     // Systems using non-bundled GD2 don't have imagerotate. Test if available.
+@@ -295,117 +317,121 @@ public function testManipulations() {
+     $directory = Settings::get('file_public_path') . '/imagetest';
+     \Drupal::service('file_system')->prepareDirectory($directory, FileSystemInterface::CREATE_DIRECTORY);
+ 
+-    foreach ($files as $file) {
+-      foreach ($operations as $op => $values) {
+-        // Load up a fresh image.
+-        $image = $this->imageFactory->get('core/tests/fixtures/files/' . $file);
+-        $toolkit = $image->getToolkit();
+-        if (!$image->isValid()) {
+-          $this->fail(new FormattableMarkup('Could not load image %file.', ['%file' => $file]));
+-          continue 2;
+-        }
+-        $image_original_type = $image->getToolkit()->getType();
++    foreach ($operations as $op => $values) {
++      // Load up a fresh image.
++      $image = $this->imageFactory->get('core/tests/fixtures/files/' . $file_name);
++      $toolkit = $image->getToolkit();
++      if (!$image->isValid()) {
++        $this->fail(new FormattableMarkup('Could not load image %file.', ['%file' => $file_name]));
++        continue 2;
++      }
++      $image_original_type = $image->getToolkit()->getType();
+ 
+-        // All images should be converted to truecolor when loaded.
+-        $image_truecolor = imageistruecolor($toolkit->getResource());
+-        $this->assertTrue($image_truecolor, new FormattableMarkup('Image %file after load is a truecolor image.', ['%file' => $file]));
++      // All images should be converted to truecolor when loaded.
++      $image_truecolor = imageistruecolor($toolkit->getResource());
++      $this->assertTrue($image_truecolor, new FormattableMarkup('Image %file after load is a truecolor image.', ['%file' => $file_name]));
+ 
+-        // Store the original GD resource.
+-        $old_res = $toolkit->getResource();
++      // Store the original GD resource.
++      $old_res = $toolkit->getResource();
+ 
+-        // Perform our operation.
+-        $image->apply($values['function'], $values['arguments']);
++      // Perform our operation.
++      $image->apply($values['function'], $values['arguments']);
+ 
+-        // If the operation replaced the resource, check that the old one has
+-        // been destroyed.
+-        $new_res = $toolkit->getResource();
+-        if ($new_res !== $old_res) {
+-          // @todo In https://www.drupal.org/node/3133236 convert this to
+-          //   $this->assertIsNotResource($old_res).
+-          $this->assertFalse(is_resource($old_res), new FormattableMarkup("'%operation' destroyed the original resource.", ['%operation' => $values['function']]));
+-        }
++      // If the operation replaced the resource, check that the old one has
++      // been destroyed.
++      $new_res = $toolkit->getResource();
++      if ($new_res !== $old_res) {
++        // @todo In https://www.drupal.org/node/3133236 convert this to
++        //   $this->assertIsNotResource($old_res).
++        $this->assertFalse(is_resource($old_res), new FormattableMarkup("'%operation' destroyed the original resource.", ['%operation' => $values['function']]));
++      }
+ 
+-        // To keep from flooding the test with assert values, make a general
+-        // value for whether each group of values fail.
+-        $correct_dimensions_real = TRUE;
+-        $correct_dimensions_object = TRUE;
++      // To keep from flooding the test with assert values, make a general
++      // value for whether each group of values fail.
++      $correct_dimensions_real = TRUE;
++      $correct_dimensions_object = TRUE;
+ 
+-        if (imagesy($toolkit->getResource()) != $values['height'] || imagesx($toolkit->getResource()) != $values['width']) {
+-          $correct_dimensions_real = FALSE;
+-        }
+-
+-        // Check that the image object has an accurate record of the dimensions.
+-        if ($image->getWidth() != $values['width'] || $image->getHeight() != $values['height']) {
+-          $correct_dimensions_object = FALSE;
+-        }
++      if (imagesy($toolkit->getResource()) != $values['height'] || imagesx($toolkit->getResource()) != $values['width']) {
++        $correct_dimensions_real = FALSE;
++      }
+ 
+-        $file_path = $directory . '/' . $op . image_type_to_extension($image->getToolkit()->getType());
+-        $image->save($file_path);
+-
+-        $this->assertTrue($correct_dimensions_real, new FormattableMarkup('Image %file after %action action has proper dimensions.', ['%file' => $file, '%action' => $op]));
+-        $this->assertTrue($correct_dimensions_object, new FormattableMarkup('Image %file object after %action action is reporting the proper height and width values.', ['%file' => $file, '%action' => $op]));
+-
+-        // JPEG colors will always be messed up due to compression. So we skip
+-        // these tests if the original or the result is in jpeg format.
+-        if ($image->getToolkit()->getType() != IMAGETYPE_JPEG && $image_original_type != IMAGETYPE_JPEG) {
+-          // Now check each of the corners to ensure color correctness.
+-          foreach ($values['corners'] as $key => $corner) {
+-            // The test gif that does not have transparency color set is a
+-            // special case.
+-            if ($file === 'image-test-no-transparency.gif') {
+-              if ($op == 'desaturate') {
+-                // For desaturating, keep the expected color from the test
+-                // data, but set alpha channel to fully opaque.
+-                $corner[3] = 0;
+-              }
+-              elseif ($corner === $this->transparent) {
+-                // Set expected pixel to yellow where the others have
+-                // transparent.
+-                $corner = $this->yellow;
+-              }
+-            }
++      // Check that the image object has an accurate record of the dimensions.
++      if ($image->getWidth() != $values['width'] || $image->getHeight() != $values['height']) {
++        $correct_dimensions_object = FALSE;
++      }
+ 
+-            // Get the location of the corner.
+-            switch ($key) {
+-              case 0:
+-                $x = 0;
+-                $y = 0;
+-                break;
+-
+-              case 1:
+-                $x = $image->getWidth() - 1;
+-                $y = 0;
+-                break;
+-
+-              case 2:
+-                $x = $image->getWidth() - 1;
+-                $y = $image->getHeight() - 1;
+-                break;
+-
+-              case 3:
+-                $x = 0;
+-                $y = $image->getHeight() - 1;
+-                break;
++      $file_path = $directory . '/' . $op . image_type_to_extension($image->getToolkit()->getType());
++      $image->save($file_path);
++
++      $this->assertTrue($correct_dimensions_real, new FormattableMarkup('Image %file after %action action has proper dimensions.', ['%file' => $file_name, '%action' => $op]));
++      $this->assertTrue($correct_dimensions_object, new FormattableMarkup('Image %file object after %action action is reporting the proper height and width values.', ['%file' => $file_name, '%action' => $op]));
++
++      // JPEG colors will always be messed up due to compression. So we skip
++      // these tests if the original or the result is in jpeg format.
++      if ($image->getToolkit()->getType() != IMAGETYPE_JPEG && $image_original_type != IMAGETYPE_JPEG) {
++        // Now check each of the corners to ensure color correctness.
++        foreach ($values['corners'] as $key => $corner) {
++          // The test gif that does not have transparency color set is a
++          // special case.
++          if ($file_name === 'image-test-no-transparency.gif') {
++            if ($op == 'desaturate') {
++              // For desaturating, keep the expected color from the test
++              // data, but set alpha channel to fully opaque.
++              $corner[3] = 0;
+             }
+-            $color = $this->getPixelColor($image, $x, $y);
+-            // We also skip the color test for transparency for gif <-> png
+-            // conversion. The convert operation cannot handle that correctly.
+-            if ($image->getToolkit()->getType() == $image_original_type || $corner != $this->transparent) {
+-              $correct_colors = $this->colorsAreEqual($color, $corner);
+-              $this->assertTrue($correct_colors, new FormattableMarkup('Image %file object after %action action has the correct color placement at corner %corner.',
+-                ['%file' => $file, '%action' => $op, '%corner' => $key]));
++            elseif ($corner === $this->transparent) {
++              // Set expected pixel to yellow where the others have
++              // transparent.
++              $corner = $this->yellow;
+             }
+           }
+-        }
+ 
+-        // Check that saved image reloads without raising PHP errors.
+-        $image_reloaded = $this->imageFactory->get($file_path);
+-        $resource = $image_reloaded->getToolkit()->getResource();
++          // Get the location of the corner.
++          switch ($key) {
++            case 0:
++              $x = 0;
++              $y = 0;
++              break;
++
++            case 1:
++              $x = $image->getWidth() - 1;
++              $y = 0;
++              break;
++
++            case 2:
++              $x = $image->getWidth() - 1;
++              $y = $image->getHeight() - 1;
++              break;
++
++            case 3:
++              $x = 0;
++              $y = $image->getHeight() - 1;
++              break;
++          }
++          $color = $this->getPixelColor($image, $x, $y);
++          // We also skip the color test for transparency for gif <-> png
++          // conversion. The convert operation cannot handle that correctly.
++          if ($image->getToolkit()->getType() == $image_original_type || $corner != $this->transparent) {
++            $correct_colors = $this->colorsAreEqual($color, $corner);
++            $this->assertTrue($correct_colors, new FormattableMarkup('Image %file object after %action action has the correct color placement at corner %corner.',
++              ['%file' => $file_name, '%action' => $op, '%corner' => $key]));
++          }
++        }
+       }
++
++      // Check that saved image reloads without raising PHP errors.
++      $image_reloaded = $this->imageFactory->get($file_path);
++      $resource = $image_reloaded->getToolkit()->getResource();
+     }
+ 
+     // Test creation of image from scratch, and saving to storage.
+-    foreach ([IMAGETYPE_PNG, IMAGETYPE_GIF, IMAGETYPE_JPEG, IMAGETYPE_WEBP] as $type) {
++    foreach ([
++      IMAGETYPE_PNG,
++      IMAGETYPE_GIF,
++      IMAGETYPE_JPEG,
++      IMAGETYPE_WEBP,
++      IMAGETYPE_AVIF,
++    ] as $type) {
+       $image = $this->imageFactory->get();
+       $image->createNew(50, 20, image_type_to_extension($type, FALSE), '#ffff00');
+       $file = 'from_null' . image_type_to_extension($type);
+diff --git a/core/tests/fixtures/files/img-test.avif b/core/tests/fixtures/files/img-test.avif
+new file mode 100644
+index 0000000000000000000000000000000000000000..86414841dec7f4cea3bb488ac07e44b0019f5805
+GIT binary patch
+literal 376
+zcmZQzV30{GsVvCNOfzHv0uY^8mYJ5DnV1ITe#%WPNd$=lfnr8VP7#F3z)+BxTmoam
+zXug8Xl3Xx{5lG5q=Hw@Xcq|SKj6etkjACFq3CPsQ%*+E>02BmbDIh163Cc?>Gcfeb
+zO-xS(@e4BxiVA>qP-a1LK9Cm4EG_^`0NENKJ`f8OBo>3zfJ_2mvBWY%=SBqv1}+W@
+zQT5p#92p={fr8A6Od!p`%)!9{q{K4|auY#(AOO0Lg^{Vb1<1_GO-U?4Xfz6Qoxs2#
+z#K7|MhmPyAz~rSN|I?%y3a9sa7|xPl&~cml#-Bs9uTP6%;sNo?_hd_Ijf=7?Zm529
+l?b|uqz-5KOqE^AF$sblV%#`4FtLWXLqY^(!pz`tj4**I4QP2PY
+
+literal 0
+HcmV?d00001
+
