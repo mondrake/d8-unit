@@ -55,7 +55,7 @@ index 0c3559ed2b..a78a48f291 100644
          $transparency = imagecolorallocatealpha($res, 0, 0, 0, 127);
          imagefill($res, 0, 0, $transparency);
 diff --git a/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php b/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php
-index 9717f578f0..846da504fb 100644
+index 9717f578f0..cb97bbee9b 100644
 --- a/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php
 +++ b/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php
 @@ -12,6 +12,7 @@
@@ -88,7 +88,7 @@ index 9717f578f0..846da504fb 100644
 -    $supported_extensions = $this->imageFactory->getSupportedExtensions();
 -    $this->assertEquals($expected_extensions, array_intersect($expected_extensions, $supported_extensions));
 +    $expected_extensions = ['png', 'gif', 'jpeg', 'jpg', 'jpe', 'webp', 'avif'];
-+    $this->assertEquals($expected_extensions, $this->imageFactory->getSupportedExtensions());
++    $this->assertEqualsCanonicalizing($expected_extensions, $this->imageFactory->getSupportedExtensions());
  
      // Test that the supported extensions map to correct internal GD image
      // types.
@@ -162,7 +162,7 @@ index 9717f578f0..846da504fb 100644
      ];
  
      // Systems using non-bundled GD2 don't have imagerotate. Test if available.
-@@ -295,117 +317,120 @@ public function testManipulations() {
+@@ -295,117 +317,130 @@ public function testManipulations() {
      $directory = Settings::get('file_public_path') . '/imagetest';
      \Drupal::service('file_system')->prepareDirectory($directory, FileSystemInterface::CREATE_DIRECTORY);
  
@@ -176,6 +176,10 @@ index 9717f578f0..846da504fb 100644
 -          continue 2;
 -        }
 -        $image_original_type = $image->getToolkit()->getType();
+-
+-        // All images should be converted to truecolor when loaded.
+-        $image_truecolor = imageistruecolor($toolkit->getResource());
+-        $this->assertTrue($image_truecolor, new FormattableMarkup('Image %file after load is a truecolor image.', ['%file' => $file]));
 +    foreach ($operations as $op => $values) {
 +      // Load up a fresh image.
 +      $image = $this->imageFactory->get('core/tests/fixtures/files/' . $file_name);
@@ -185,22 +189,16 @@ index 9717f578f0..846da504fb 100644
 +      }
 +      $image_original_type = $image->getToolkit()->getType();
  
--        // All images should be converted to truecolor when loaded.
--        $image_truecolor = imageistruecolor($toolkit->getResource());
--        $this->assertTrue($image_truecolor, new FormattableMarkup('Image %file after load is a truecolor image.', ['%file' => $file]));
+-        // Store the original GD resource.
+-        $old_res = $toolkit->getResource();
 +      // All images should be converted to truecolor when loaded.
 +      $image_truecolor = imageistruecolor($toolkit->getResource());
 +      $this->assertTrue($image_truecolor, new FormattableMarkup('Image %file after load is a truecolor image.', ['%file' => $file_name]));
  
--        // Store the original GD resource.
--        $old_res = $toolkit->getResource();
-+      // Store the original GD resource.
-+      $old_res = $toolkit->getResource();
- 
 -        // Perform our operation.
 -        $image->apply($values['function'], $values['arguments']);
-+      // Perform our operation.
-+      $image->apply($values['function'], $values['arguments']);
++      // Store the original GD resource.
++      $old_res = $toolkit->getResource();
  
 -        // If the operation replaced the resource, check that the old one has
 -        // been destroyed.
@@ -210,6 +208,13 @@ index 9717f578f0..846da504fb 100644
 -          //   $this->assertIsNotResource($old_res).
 -          $this->assertFalse(is_resource($old_res), new FormattableMarkup("'%operation' destroyed the original resource.", ['%operation' => $values['function']]));
 -        }
++      // Perform our operation.
++      $image->apply($values['function'], $values['arguments']);
+ 
+-        // To keep from flooding the test with assert values, make a general
+-        // value for whether each group of values fail.
+-        $correct_dimensions_real = TRUE;
+-        $correct_dimensions_object = TRUE;
 +      // If the operation replaced the resource, check that the old one has
 +      // been destroyed.
 +      $new_res = $toolkit->getResource();
@@ -219,19 +224,14 @@ index 9717f578f0..846da504fb 100644
 +        $this->assertFalse(is_resource($old_res), new FormattableMarkup("'%operation' destroyed the original resource.", ['%operation' => $values['function']]));
 +      }
  
--        // To keep from flooding the test with assert values, make a general
--        // value for whether each group of values fail.
--        $correct_dimensions_real = TRUE;
--        $correct_dimensions_object = TRUE;
+-        if (imagesy($toolkit->getResource()) != $values['height'] || imagesx($toolkit->getResource()) != $values['width']) {
+-          $correct_dimensions_real = FALSE;
+-        }
 +      // To keep from flooding the test with assert values, make a general
 +      // value for whether each group of values fail.
 +      $correct_dimensions_real = TRUE;
 +      $correct_dimensions_object = TRUE;
  
--        if (imagesy($toolkit->getResource()) != $values['height'] || imagesx($toolkit->getResource()) != $values['width']) {
--          $correct_dimensions_real = FALSE;
--        }
--
 -        // Check that the image object has an accurate record of the dimensions.
 -        if ($image->getWidth() != $values['width'] || $image->getHeight() != $values['height']) {
 -          $correct_dimensions_object = FALSE;
@@ -365,9 +365,20 @@ index 9717f578f0..846da504fb 100644
 +      $image_reloaded = $this->imageFactory->get($file_path);
 +      $resource = $image_reloaded->getToolkit()->getResource();
      }
++  }
++
++  /**
++   * Tests creation of image from scratch, and saving to storage.
++   */
++  public function testCreateImageFromScratch(): void {
++    $this->assertEquals('gd', $this->imageFactory->getToolkitId());
  
-     // Test creation of image from scratch, and saving to storage.
+-    // Test creation of image from scratch, and saving to storage.
 -    foreach ([IMAGETYPE_PNG, IMAGETYPE_GIF, IMAGETYPE_JPEG, IMAGETYPE_WEBP] as $type) {
++    // Prepare a directory for test file results.
++    $directory = Settings::get('file_public_path') . '/imagetest';
++    \Drupal::service('file_system')->prepareDirectory($directory, FileSystemInterface::CREATE_DIRECTORY);
++
 +    foreach ([
 +      IMAGETYPE_PNG,
 +      IMAGETYPE_GIF,
@@ -378,6 +389,31 @@ index 9717f578f0..846da504fb 100644
        $image = $this->imageFactory->get();
        $image->createNew(50, 20, image_type_to_extension($type, FALSE), '#ffff00');
        $file = 'from_null' . image_type_to_extension($type);
+@@ -431,8 +466,14 @@ public function testManipulations() {
+         $this->assertNull($image_reloaded->getToolkit()->getTransparentColor(), new FormattableMarkup('Image file %file has no color channel set.', ['%file' => $file]));
+       }
+     }
++  }
++
++  /**
++   * Tests failures of the 'create_new' operation.
++   */
++  public function testCreateImageFromScratch(): void {
++    $this->assertEquals('gd', $this->imageFactory->getToolkitId());
+ 
+-    // Test failures of the 'create_new' operation.
+     $image = $this->imageFactory->get();
+     $image->createNew(-50, 20);
+     $this->assertFalse($image->isValid(), 'CreateNew with negative width fails.');
+@@ -443,7 +484,7 @@ public function testManipulations() {
+     $image->createNew(50, 20, 'gif', '#ff0000');
+     $this->assertTrue($image->isValid(), 'CreateNew with valid arguments validates the Image.');
+   }
+-
++  
+   /**
+    * Tests that GD resources are freed from memory.
+    *
 diff --git a/core/tests/fixtures/files/img-test.avif b/core/tests/fixtures/files/img-test.avif
 new file mode 100644
 index 0000000000000000000000000000000000000000..86414841dec7f4cea3bb488ac07e44b0019f5805
