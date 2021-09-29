@@ -1,5 +1,5 @@
 diff --git a/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php b/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php
-index 4031189c9b..aca56a22d9 100644
+index 4031189c9b..0e71acc463 100644
 --- a/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php
 +++ b/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php
 @@ -4,53 +4,47 @@
@@ -268,7 +268,7 @@ index 4031189c9b..aca56a22d9 100644
      }
  
      // Systems using non-bundled GD2 don't have imagefilter. Test if available.
-@@ -292,148 +253,211 @@ public function testManipulations() {
+@@ -292,148 +253,213 @@ public function testManipulations() {
        ];
      }
  
@@ -286,6 +286,10 @@ index 4031189c9b..aca56a22d9 100644
 -          continue 2;
 -        }
 -        $image_original_type = $image->getToolkit()->getType();
+-
+-        // All images should be converted to truecolor when loaded.
+-        $image_truecolor = imageistruecolor($toolkit->getResource());
+-        $this->assertTrue($image_truecolor, new FormattableMarkup('Image %file after load is a truecolor image.', ['%file' => $file]));
 +    $ret = [];
 +    foreach ([
 +      'image-test.png',
@@ -299,14 +303,13 @@ index 4031189c9b..aca56a22d9 100644
 +      }
 +    }
  
--        // All images should be converted to truecolor when loaded.
--        $image_truecolor = imageistruecolor($toolkit->getResource());
--        $this->assertTrue($image_truecolor, new FormattableMarkup('Image %file after load is a truecolor image.', ['%file' => $file]));
+-        // Store the original GD resource.
+-        $old_res = $toolkit->getResource();
 +    return $ret;
 +  }
  
--        // Store the original GD resource.
--        $old_res = $toolkit->getResource();
+-        // Perform our operation.
+-        $image->apply($values['function'], $values['arguments']);
 +  /**
 +   * Since PHP can't visually check that our images have been manipulated
 +   * properly, build a list of expected color values for each of the corners and
@@ -320,11 +323,26 @@ index 4031189c9b..aca56a22d9 100644
 +    $toolkit = $image->getToolkit();
 +    $this->assertTrue($image->isValid());
 +    $image_original_type = $image->getToolkit()->getType();
- 
--        // Perform our operation.
--        $image->apply($values['function'], $values['arguments']);
++
 +    // All images should be converted to truecolor when loaded.
 +    $this->assertTrue(imageistruecolor($toolkit->getResource()), "Image '$file_name' after load is a truecolor image.");
++
++    // Store the original GD resource.
++    $old_res = $toolkit->getResource();
++
++    // Perform our operation.
++    $image->apply($values['function'], $values['arguments']);
++
++    // If the operation replaced the resource, check that the old one has
++    // been destroyed.
++    if (PHP_VERSION_ID < 80000) {
++      $new_res = $toolkit->getResource();
++      if ($new_res !== $old_res) {
++        // @todo In https://www.drupal.org/node/3133236 convert this to
++        //   $this->assertIsNotResource($old_res).
++        $this->assertFalse(is_resource($old_res), "'{$values['function']}' destroyed the original resource.");
++      }
++    }
  
 -        // If the operation replaced the resource, check that the old one has
 -        // been destroyed.
@@ -333,32 +351,6 @@ index 4031189c9b..aca56a22d9 100644
 -          // @todo In https://www.drupal.org/node/3133236 convert this to
 -          //   $this->assertIsNotResource($old_res).
 -          $this->assertFalse(is_resource($old_res), new FormattableMarkup("'%operation' destroyed the original resource.", ['%operation' => $values['function']]));
--        }
-+    // Store the original GD resource.
-+    $old_res = $toolkit->getResource();
- 
--        // To keep from flooding the test with assert values, make a general
--        // value for whether each group of values fail.
--        $correct_dimensions_real = TRUE;
--        $correct_dimensions_object = TRUE;
-+    // Perform our operation.
-+    $image->apply($values['function'], $values['arguments']);
- 
--        if (imagesy($toolkit->getResource()) != $values['height'] || imagesx($toolkit->getResource()) != $values['width']) {
--          $correct_dimensions_real = FALSE;
--        }
-+    // If the operation replaced the resource, check that the old one has
-+    // been destroyed.
-+    $new_res = $toolkit->getResource();
-+    if ($new_res !== $old_res) {
-+      // @todo In https://www.drupal.org/node/3133236 convert this to
-+      //   $this->assertIsNotResource($old_res).
-+      $this->assertFalse(is_resource($old_res), "'{$values['function']}' destroyed the original resource.");
-+    }
- 
--        // Check that the image object has an accurate record of the dimensions.
--        if ($image->getWidth() != $values['width'] || $image->getHeight() != $values['height']) {
--          $correct_dimensions_object = FALSE;
 +    // Flush Image object to disk storage.
 +    $file_path = $this->directory . '/' . $operation . image_type_to_extension($image->getToolkit()->getType());
 +    $image->save($file_path);
@@ -380,7 +372,56 @@ index 4031189c9b..aca56a22d9 100644
 +          // data, but set alpha channel to fully opaque.
 +          $expected_color[3] = 0;
          }
--
++        elseif ($expected_color === static::TRANSPARENT) {
++          // Set expected pixel to yellow where the others have
++          // transparent.
++          $expected_color = static::YELLOW;
++        }
++      }
+ 
+-        // To keep from flooding the test with assert values, make a general
+-        // value for whether each group of values fail.
+-        $correct_dimensions_real = TRUE;
+-        $correct_dimensions_object = TRUE;
++      // Get the location of the corner.
++      switch ($key) {
++        case 0:
++          $x = 0;
++          $y = 0;
++          break;
++
++        case 1:
++          $x = $image->getWidth() - 1;
++          $y = 0;
++          break;
++
++        case 2:
++          $x = $image->getWidth() - 1;
++          $y = $image->getHeight() - 1;
++          break;
++
++        case 3:
++          $x = 0;
++          $y = $image->getHeight() - 1;
++          break;
++      }
++      $actual_color = $this->getPixelColor($image, $x, $y);
+ 
+-        if (imagesy($toolkit->getResource()) != $values['height'] || imagesx($toolkit->getResource()) != $values['width']) {
+-          $correct_dimensions_real = FALSE;
+-        }
++      // If image cannot handle transparent colors, skip the pixel color test.
++      if ($actual_color[3] === 0 && $expected_color[3] === 127) {
++        continue;
++      }
+ 
+-        // Check that the image object has an accurate record of the dimensions.
+-        if ($image->getWidth() != $values['width'] || $image->getHeight() != $values['height']) {
+-          $correct_dimensions_object = FALSE;
+-        }
++      // JPEG has small differences in color after processing.
++      $tolerance = $image_original_type === IMAGETYPE_JPEG ? 3 : 0;
+ 
 -        $file_path = $directory . '/' . $op . image_type_to_extension($image->getToolkit()->getType());
 -        $image->save($file_path);
 -
@@ -438,40 +479,23 @@ index 4031189c9b..aca56a22d9 100644
 -                ['%file' => $file, '%action' => $op, '%corner' => $key]));
 -            }
 -          }
-+        elseif ($expected_color === static::TRANSPARENT) {
-+          // Set expected pixel to yellow where the others have
-+          // transparent.
-+          $expected_color = static::YELLOW;
-         }
-+      }
+-        }
++      $this->assertColorsAreEqual($actual_color, $expected_color, $tolerance, "Image '$file_name' object after '$operation' action has the correct color placement at corner '$key'");
++    }
  
 -        // Check that saved image reloads without raising PHP errors.
 -        $image_reloaded = $this->imageFactory->get($file_path);
 -        $resource = $image_reloaded->getToolkit()->getResource();
-+      // Get the location of the corner.
-+      switch ($key) {
-+        case 0:
-+          $x = 0;
-+          $y = 0;
-+          break;
-+
-+        case 1:
-+          $x = $image->getWidth() - 1;
-+          $y = 0;
-+          break;
-+
-+        case 2:
-+          $x = $image->getWidth() - 1;
-+          $y = $image->getHeight() - 1;
-+          break;
-+
-+        case 3:
-+          $x = 0;
-+          $y = $image->getHeight() - 1;
-+          break;
-       }
--    }
-+      $actual_color = $this->getPixelColor($image, $x, $y);
+-      }
++    // Check that saved image reloads without raising PHP errors.
++    $image_reloaded = $this->imageFactory->get($file_path);
++    if (PHP_VERSION_ID >= 80000) {
++      $this->assertInstanceOf(\GDImage::class, $image_reloaded->getToolkit()->getResource());
+     }
++    else {
++      $this->assertIsResource($image_reloaded->getToolkit()->getResource());
++    }
++  }
  
 -    // Test creation of image from scratch, and saving to storage.
 -    foreach ([IMAGETYPE_PNG, IMAGETYPE_GIF, IMAGETYPE_JPEG, IMAGETYPE_WEBP] as $type) {
@@ -488,10 +512,8 @@ index 4031189c9b..aca56a22d9 100644
 -      $image_reloaded = $this->imageFactory->get($file_path);
 -      if (!$image_reloaded->isValid()) {
 -        $this->fail(new FormattableMarkup('Could not load image %file.', ['%file' => $file]));
-+      // If image cannot handle transparent colors, skip the pixel color test.
-+      if ($actual_color[3] === 0 && $expected_color[3] === 127) {
-         continue;
-       }
+-        continue;
+-      }
 -      $this->assertEquals(50, $image_reloaded->getWidth(), new FormattableMarkup('Image file %file has the correct width.', ['%file' => $file]));
 -      $this->assertEquals(20, $image_reloaded->getHeight(), new FormattableMarkup('Image file %file has the correct height.', ['%file' => $file]));
 -      $this->assertEquals(image_type_to_mime_type($type), $image_reloaded->getMimeType(), new FormattableMarkup('Image file %file has the correct MIME type.', ['%file' => $file]));
@@ -501,23 +523,6 @@ index 4031189c9b..aca56a22d9 100644
 -      else {
 -        $this->assertNull($image_reloaded->getToolkit()->getTransparentColor(), new FormattableMarkup('Image file %file has no color channel set.', ['%file' => $file]));
 -      }
-+
-+      // JPEG has small difference in color after processing.
-+      $tolerance = in_array($image_original_type, [IMAGETYPE_JPEG]) ? 3 : 0;
-+
-+      $this->assertColorsAreEqual($actual_color, $expected_color, $tolerance, "Image '$file_name' object after '$operation' action has the correct color placement at corner '$key'");
-+    }
-+
-+    // Check that saved image reloads without raising PHP errors.
-+    $image_reloaded = $this->imageFactory->get($file_path);
-+    if (PHP_VERSION_ID >= 80000) {
-+      $this->assertInstanceOf(\GDImage::class, $image_reloaded->getToolkit()->getResource());
-+    }
-+    else {
-+      $this->assertIsResource($image_reloaded->getToolkit()->getResource());
-     }
-+  }
-+
 +  /**
 +   * @covers ::getSupportedExtensions
 +   * @covers ::extensionToImageType
@@ -526,8 +531,7 @@ index 4031189c9b..aca56a22d9 100644
 +    // Test the list of supported extensions.
 +    $expected_extensions = ['png', 'gif', 'jpeg', 'jpg', 'jpe', 'webp'];
 +    $this->assertEqualsCanonicalizing($expected_extensions, $this->imageFactory->getSupportedExtensions());
- 
--    // Test failures of the 'create_new' operation.
++
 +    // Test that the supported extensions map to correct internal GD image
 +    // types.
 +    $expected_image_types = [
@@ -596,9 +600,10 @@ index 4031189c9b..aca56a22d9 100644
 +    else {
 +      // Check that image has no color channel set.
 +      $this->assertNull($image_reloaded->getToolkit()->getTransparentColor());
-+    }
+     }
 +  }
-+
+ 
+-    // Test failures of the 'create_new' operation.
 +  /**
 +   * Tests failures of the 'create_new' operation.
 +   */
@@ -606,7 +611,7 @@ index 4031189c9b..aca56a22d9 100644
      $image = $this->imageFactory->get();
      $image->createNew(-50, 20);
      $this->assertFalse($image->isValid(), 'CreateNew with negative width fails.');
-@@ -482,10 +506,6 @@ public function testResourceDestruction() {
+@@ -482,10 +508,6 @@ public function testResourceDestruction() {
     * Tests for GIF images with transparency.
     */
    public function testGifTransparentImages() {
@@ -617,7 +622,7 @@ index 4031189c9b..aca56a22d9 100644
      // Test loading an indexed GIF image with transparent color set.
      // Color at top-right pixel should be fully transparent.
      $file = 'image-test-transparent-indexed.gif';
-@@ -493,20 +513,20 @@ public function testGifTransparentImages() {
+@@ -493,20 +515,20 @@ public function testGifTransparentImages() {
      $resource = $image->getToolkit()->getResource();
      $color_index = imagecolorat($resource, $image->getWidth() - 1, 0);
      $color = array_values(imagecolorsforindex($resource, $color_index));
@@ -641,7 +646,7 @@ index 4031189c9b..aca56a22d9 100644
      // Save image.
      $this->assertTrue($image->save($file_path), "New GIF image {$file} was saved.");
      // Reload image.
-@@ -531,34 +551,19 @@ public function testGifTransparentImages() {
+@@ -531,34 +553,19 @@ public function testGifTransparentImages() {
      // can be loaded correctly.
      $file = 'image-test-transparent-out-of-range.gif';
      $image = $this->imageFactory->get('core/tests/fixtures/files/' . $file);
