@@ -135,7 +135,7 @@ index 84171a17b4..239145c7d9 100644
      if (count($unescaped_test_classnames) == 1) {
        $class = new \ReflectionClass($unescaped_test_classnames[0]);
 diff --git a/core/phpunit.xml.dist b/core/phpunit.xml.dist
-index 53a6f7a474..7ba22e820e 100644
+index 53a6f7a474..66bbbf0c78 100644
 --- a/core/phpunit.xml.dist
 +++ b/core/phpunit.xml.dist
 @@ -12,9 +12,9 @@
@@ -150,17 +150,6 @@ index 53a6f7a474..7ba22e820e 100644
    <php>
      <!-- Set error reporting to E_ALL. -->
      <ini name="error_reporting" value="32767"/>
-@@ -57,10 +57,6 @@
-       <file>./tests/TestSuites/BuildTestSuite.php</file>
-     </testsuite>
-   </testsuites>
--  <listeners>
--    <listener class="\Drupal\Tests\Listeners\DrupalListener">
--    </listener>
--  </listeners>
-   <!-- Settings for coverage reports. -->
-   <coverage>
-     <include>
 diff --git a/core/scripts/run-tests.sh b/core/scripts/run-tests.sh
 index 17ec49b9a4..7b82f5c0a4 100755
 --- a/core/scripts/run-tests.sh
@@ -209,10 +198,10 @@ index 7f92b9ed00..101930018e 100644
        // still on-going.
 diff --git a/core/tests/Drupal/TestTools/PhpUnitCompatibility/PhpUnit10/Logging/HtmlOutputLogger.php b/core/tests/Drupal/TestTools/PhpUnitCompatibility/PhpUnit10/Logging/HtmlOutputLogger.php
 new file mode 100644
-index 0000000000..2c732d14e3
+index 0000000000..24af05a92e
 --- /dev/null
 +++ b/core/tests/Drupal/TestTools/PhpUnitCompatibility/PhpUnit10/Logging/HtmlOutputLogger.php
-@@ -0,0 +1,104 @@
+@@ -0,0 +1,117 @@
 +<?php declare(strict_types=1);
 +
 +namespace Drupal\TestTools\PhpUnitCompatibility\PhpUnit10\Logging;
@@ -223,13 +212,20 @@ index 0000000000..2c732d14e3
 +use PHPUnit\Event\Facade;
 +use PHPUnit\Event\TestRunner\Finished as TestRunnerFinished;
 +use PHPUnit\Event\TestRunner\Started as TestRunnerStarted;
-+use PHPUnit\Util\Printer;
++use PHPUnit\TextUI\DefaultResultPrinter;
 +
 +/**
 + * @internal
 + */
-+final class HtmlOutputLogger extends Printer
-+{
++final class HtmlOutputLogger extends DefaultResultPrinter {
++
++  /**
++   * The singleton instance.
++   *
++   * @var self
++   */
++  private self $instance;
++
 +  /**
 +   * File to write html links to.
 +   *
@@ -242,9 +238,61 @@ index 0000000000..2c732d14e3
 +   * @throws \PHPUnit\Util\Exception
 +   * @throws \PHPUnit\Event\UnknownSubscriberTypeException
 +   */
-+  public function __construct() {
++  private function __construct(string $browserTestOutputDirectory) {
++    $this->browserOutputFile = $this->determineBrowserOutputFile($browserTestOutputDirectory);
++    parent::__construct($this->browserOutputFile);
 +    Facade::registerSubscriber(new TestRunnerFinishedSubscriber($this));
 +    Facade::registerSubscriber(new TestRunnerStartedSubscriber($this));
++  }
++
++  /**
++   * @todo
++   *
++   * @throws \PHPUnit\Event\EventFacadeIsSealedException
++   * @throws \PHPUnit\Util\Exception
++   * @throws \PHPUnit\Event\UnknownSubscriberTypeException
++   */
++  public static function init(string $browserTestOutputDirectory): void {
++    if (self::$instance === NULL) {
++      self::$instance = new self($browserTestOutputDirectory);
++    }
++  }
++
++  /**
++   * @todo
++   */
++  public static function log(string $logEntry): void {
++    if (self::$instance === NULL) {
++      return;
++    }
++    self::$instance->write($logEntry);
++  }
++
++  /**
++   * @todo
++   */
++  public function determineBrowserOutputFile(string $browserTestOutputDirectory): string {
++    // Initialize html output debugging.
++    $html_output_directory = rtrim($browserTestOutputDirectory, '/');
++
++    // Check if directory exists.
++    if (!is_dir($html_output_directory) || !is_writable($html_output_directory)) {
++      $this->writeWithColor('bg-red, fg-black', "HTML output directory $html_output_directory is not a writable directory.");
++    }
++    else {
++      // Convert to a canonicalized absolute pathname just in case the current
++      // working directory is changed.
++      $html_output_directory = realpath($html_output_directory);
++      $browserOutputFile = tempnam($html_output_directory, 'browser_output_');
++      if ($browserOutputFile) {
++        return $browserOutputFile;
++      }
++      else {
++        $this->writeWithColor('bg-red, fg-black', "Unable to create a temporary file in $html_output_directory.");
++      }
++    }
++
++    throw new \RuntimeException('Failed to create a temporary file for HTML output logging');
 +  }
 +
 +  /**
@@ -253,67 +301,21 @@ index 0000000000..2c732d14e3
 +   * @see \Drupal\Tests\BrowserTestBase::initBrowserOutputFile()
 +   */
 +  public function testRunnerStarted(TestRunnerStarted $event): void {
-+    $this->browserOutputFile = '';
-+
-+    if ($html_output_directory = getenv('BROWSERTEST_OUTPUT_DIRECTORY')) {
-+      // Initialize html output debugging.
-+      $html_output_directory = rtrim($html_output_directory, '/');
-+
-+      // Check if directory exists.
-+      if (!is_dir($html_output_directory) || !is_writable($html_output_directory)) {
-+        $this->writeWithColor('bg-red, fg-black', "HTML output directory $html_output_directory is not a writable directory.");
-+      }
-+      else {
-+        // Convert to a canonicalized absolute pathname just in case the current
-+        // working directory is changed.
-+        $html_output_directory = realpath($html_output_directory);
-+        $this->browserOutputFile = tempnam($html_output_directory, 'browser_output_');
-+        if ($this->browserOutputFile) {
-+          touch($this->browserOutputFile);
-+        }
-+        else {
-+          $this->writeWithColor('bg-red, fg-black', "Unable to create a temporary file in $html_output_directory.");
-+        }
-+      }
-+    }
-+
-+    if ($this->browserOutputFile !== '') {
-+      putenv('BROWSERTEST_OUTPUT_FILE=' . $this->browserOutputFile);
-+    }
-+    else {
-+      // Remove any environment variable.
-+      putenv('BROWSERTEST_OUTPUT_FILE');
-+    }
 +  }
 +
 +  /**
 +   * Prints the list of HTML output generated during the test.
 +   */
 +  public function testRunnerFinished(TestRunnerFinished $event): void {
-+    if ($this->browserOutputFile !== '') {
-+      $contents = file_get_contents($this->browserOutputFile);
-+      if ($contents) {
-+        $this->writeNewLine();
-+        $this->writeWithColor('bg-yellow, fg-black', 'HTML output was generated');
-+        $this->write($contents);
-+      }
-+      // No need to keep the file around any more.
-+      unlink($this->browserOutputFile);
++    $this->flush();
++    $contents = file_get_contents($this->browserOutputFile);
++    if ($contents) {
++      print "\n";
++      print "HTML output was generated\n";
++      print $contents;
 +    }
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function write(string $buffer): void {
-+    $buffer = Html::escape($buffer);
-+    // Turn HTML output URLs into clickable link <a> tags.
-+    $url_pattern = '@https?://[^\s]+@';
-+    $buffer = preg_replace($url_pattern, '<a href="$0" target="_blank" title="$0">$0</a>', $buffer);
-+    // Make the output readable in HTML by breaking up lines properly.
-+    $buffer = nl2br($buffer);
-+
-+    print $buffer;
++    // No need to keep the file around any more.
++    unlink($this->browserOutputFile);
 +  }
 +
 +}
@@ -525,7 +527,7 @@ index 4b4a2c323d..d1ebff8d30 100644
  
    /**
 diff --git a/core/tests/bootstrap.php b/core/tests/bootstrap.php
-index 5f5b494cfc..2175c2efee 100644
+index 5f5b494cfc..98453ddbc2 100644
 --- a/core/tests/bootstrap.php
 +++ b/core/tests/bootstrap.php
 @@ -9,6 +9,8 @@
@@ -537,11 +539,15 @@ index 5f5b494cfc..2175c2efee 100644
  
  /**
   * Finds all valid extension directories recursively within a given directory.
-@@ -179,3 +181,7 @@ class_alias('\Drupal\Tests\DocumentElement', '\Behat\Mink\Element\DocumentElemen
+@@ -179,3 +181,11 @@ class_alias('\Drupal\Tests\DocumentElement', '\Behat\Mink\Element\DocumentElemen
  // thrown if an assert fails, but this call does not turn runtime assertions on
  // if they weren't on already.
  Handle::register();
 +
++// Functional tests HTML output logging.
 +if (RunnerVersion::getMajor() > 9) {
-+  new HtmlOutputLogger();
++  $browserTestOutputDirectory = getenv('BROWSERTEST_OUTPUT_DIRECTORY');
++  if ($browserTestOutputDirectory !== FALSE) {
++    HtmlOutputLogger::init($browserTestOutputDirectory);
++  }
 +}
