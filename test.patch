@@ -521,25 +521,10 @@ index efd3253354..306a914708 100644
      }
  }
 diff --git a/core/drupalci.yml b/core/drupalci.yml
-index 413272eff3..b8ab270aae 100644
+index 413272eff3..4a492a2b22 100644
 --- a/core/drupalci.yml
 +++ b/core/drupalci.yml
-@@ -6,6 +6,14 @@
- # is 9.4.x.
- build:
-   assessment:
-+    validate_codebase:
-+      # Core's code quality is checked by container_command.commit_checks.
-+      # During development only, run PHPStan across the entire codebase.
-+      # @todo REMOVE BEFORE COMMIT OF #3178534
-+      container_command:
-+        commands:
-+          - "cd ${SOURCE_DIR}/core && sudo -u www-data ../vendor/bin/phpstan analyze"
-+        halt-on-fail: false
-     testing:
-       # Run code quality checks.
-       container_command.commit-checks:
-@@ -21,29 +29,29 @@ build:
+@@ -21,29 +21,29 @@ build:
          testgroups: '--all'
          suppress-deprecations: false
          halt-on-fail: false
@@ -595,6 +580,25 @@ index 413272eff3..b8ab270aae 100644
 +#      # Run nightwatch testing.
 +#      # @see https://www.drupal.org/project/drupal/issues/2869825
 +#      nightwatchjs: {}
+diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
+index 5cb43e5bc4..16bcd77a18 100644
+--- a/core/lib/Drupal/Core/Database/Connection.php
++++ b/core/lib/Drupal/Core/Database/Connection.php
+@@ -521,11 +521,13 @@ public function prepareStatement(string $query, array $options, bool $allow_row_
+ 
+     try {
+       $query = $this->preprocessStatement($query, $options);
+-      return new $this->statementWrapperClass($this, $this->connection, $query, $options['pdo'] ?? [], $allow_row_count);
++      $statement = new $this->statementWrapperClass($this, $this->connection, $query, $options['pdo'] ?? [], $allow_row_count);
+     }
+     catch (\Exception $e) {
+       $this->exceptionHandler()->handleStatementException($e, $query, $options);
+     }
++
++    return $statement;
+   }
+ 
+   /**
 diff --git a/core/lib/Drupal/Core/File/MimeType/MimeTypeGuesser.php b/core/lib/Drupal/Core/File/MimeType/MimeTypeGuesser.php
 index d42f7ab901..90a2c4257e 100644
 --- a/core/lib/Drupal/Core/File/MimeType/MimeTypeGuesser.php
@@ -704,10 +708,10 @@ index de9eefb692..9d3ce78545 100644
    <rule ref="Drupal.Arrays.Array">
 diff --git a/core/phpstan-baseline.neon b/core/phpstan-baseline.neon
 new file mode 100644
-index 0000000000..7ce64be59e
+index 0000000000..84de1f4efc
 --- /dev/null
 +++ b/core/phpstan-baseline.neon
-@@ -0,0 +1,1091 @@
+@@ -0,0 +1,1081 @@
 +parameters:
 +	ignoreErrors:
 +		-
@@ -1229,11 +1233,6 @@ index 0000000000..7ce64be59e
 +			message: "#^Call to deprecated constant REQUEST_TIME\\: Deprecated in drupal\\:8\\.3\\.0 and is removed from drupal\\:10\\.0\\.0\\. Use \\\\Drupal\\:\\:time\\(\\)\\-\\>getRequestTime\\(\\); $#"
 +			count: 1
 +			path: modules/migrate_drupal_ui/src/Form/ReviewForm.php
-+
-+		-
-+			message: "#^Class Drupal\\\\mysql\\\\Driver\\\\Database\\\\mysql\\\\StatementInterface not found\\.$#"
-+			count: 1
-+			path: modules/mysql/src/Driver/Database/mysql/Connection.php
 +
 +		-
 +			message: "#^Call to deprecated constant REQUEST_TIME\\: Deprecated in drupal\\:8\\.3\\.0 and is removed from drupal\\:10\\.0\\.0\\. Use \\\\Drupal\\:\\:time\\(\\)\\-\\>getRequestTime\\(\\); $#"
@@ -1766,11 +1765,6 @@ index 0000000000..7ce64be59e
 +			path: tests/Drupal/Tests/Composer/ComposerTest.php
 +
 +		-
-+			message: "#^Class Drupal\\\\Tests\\\\Core\\\\Database\\\\Driver not found\\.$#"
-+			count: 1
-+			path: tests/Drupal/Tests/Core/Database/ConnectionTest.php
-+
-+		-
 +			message: "#^Class Drupal\\\\Driver\\\\Database\\\\corefake\\\\Install\\\\Tasks not found\\.$#"
 +			count: 1
 +			path: tests/Drupal/Tests/Core/Database/InstallerObjectTest.php
@@ -1801,10 +1795,10 @@ index 0000000000..7ce64be59e
 +			path: tests/Drupal/Tests/Listeners/DrupalListener.php
 diff --git a/core/phpstan.neon.dist b/core/phpstan.neon.dist
 new file mode 100644
-index 0000000000..72f826f639
+index 0000000000..44f4af9b51
 --- /dev/null
 +++ b/core/phpstan.neon.dist
-@@ -0,0 +1,36 @@
+@@ -0,0 +1,38 @@
 +# Configuration file for PHPStan static code checking, see https://phpstan.org .
 +# PHPStan is triggered on Drupal CI in commit-code-check.sh.
 +includes:
@@ -1820,6 +1814,8 @@ index 0000000000..72f826f639
 +
 +  excludePaths:
 +    - '../sites/simpletest/*.php'
++    # Below extends on purpose a non existing class for testing.
++    - modules/system/tests/modules/plugin_test/src/Plugin/plugin_test/fruit/ExtendingNonInstalledClass.php
 +    # @todo files below need to be excluded as they prevent baseline generation.
 +    # Fixing them is a priority.
 +    - modules/link/tests/src/Kernel/LinkItemTest.php
@@ -1842,7 +1838,7 @@ index 0000000000..72f826f639
 +    - "#^Class .* extends @internal class#"
 +    - "#^File .* could not be loaded from module_load_include.#"
 diff --git a/core/scripts/dev/commit-code-check.sh b/core/scripts/dev/commit-code-check.sh
-index e5cba55695..5e758821f1 100755
+index e5cba55695..0d20f8cb7d 100755
 --- a/core/scripts/dev/commit-code-check.sh
 +++ b/core/scripts/dev/commit-code-check.sh
 @@ -11,6 +11,7 @@
@@ -1853,13 +1849,40 @@ index e5cba55695..5e758821f1 100755
  # - ESLint checks JavaScript and YAML files.
  # - Checks .es6.js and .js files are equivalent.
  # - Stylelint checks CSS files.
-@@ -181,6 +182,23 @@
+@@ -110,6 +111,10 @@
+ # This variable will be set to one when the file core/phpcs.xml.dist is changed.
+ PHPCS_XML_DIST_FILE_CHANGED=0
+ 
++# This variable will be set to one when the files core/phpstan-baseline.neon or
++# core/phpstan.neon.dist are changed.
++PHPSTAN_DIST_FILE_CHANGED=0
++
+ # This variable will be set to one when one of the eslint config file is
+ # changed:
+ #  - core/.eslintrc.passing.json
+@@ -126,6 +131,10 @@
+     PHPCS_XML_DIST_FILE_CHANGED=1;
+   fi;
+ 
++  if [[ $FILE == "core/phpstan-baseline.neon" || $FILE == "core/phpstan.neon.dist" ]]; then
++    PHPSTAN_DIST_FILE_CHANGED=1;
++  fi;
++
+   if [[ $FILE == "core/.eslintrc.json" || $FILE == "core/.eslintrc.passing.json" || $FILE == "core/.eslintrc.jquery.json" ]]; then
+     ESLINT_CONFIG_PASSING_FILE_CHANGED=1;
+   fi;
+@@ -181,6 +190,28 @@
  printf -- '-%.0s' {1..100}
  printf "\n"
  
 +# Run PHPStan on all files in one go for better performance.
-+printf "\nRunning PHPStan on changed files.\n"
-+vendor/bin/phpstan analyze --configuration="$TOP_LEVEL/core/phpstan.neon.dist" $ABS_FILES
++if [[ $PHPSTAN_DIST_FILE_CHANGED == "1" ]]; then
++  printf "\nRunning PHPStan on *all* files.\n"
++  vendor/bin/phpstan analyze --no-progress --configuration="$TOP_LEVEL/core/phpstan.neon.dist"
++else
++  printf "\nRunning PHPStan on changed files.\n"
++  vendor/bin/phpstan analyze --no-progress --configuration="$TOP_LEVEL/core/phpstan.neon.dist" $ABS_FILES
++fi
 +if [ "$?" -ne "0" ]; then
 +  # If there are failures set the status to a number other than 0.
 +  FINAL_STATUS=1
