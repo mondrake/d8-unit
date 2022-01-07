@@ -52,18 +52,10 @@ index 5cb43e5bc4..75fd4aad5f 100644
  
      if (isset($connection_options['prefix']) && $connection_options['prefix'] !== '') {
 diff --git a/core/lib/Drupal/Core/Database/Database.php b/core/lib/Drupal/Core/Database/Database.php
-index bb24b63e63..dea6d9854d 100644
+index bb24b63e63..4b82d7f7cc 100644
 --- a/core/lib/Drupal/Core/Database/Database.php
 +++ b/core/lib/Drupal/Core/Database/Database.php
-@@ -4,6 +4,7 @@
- 
- use Composer\Autoload\ClassLoader;
- use Drupal\Core\Extension\ExtensionDiscovery;
-+use Drupal\Core\Extension\InfoParser;
- 
- /**
-  * Primary front-controller for the database system.
-@@ -500,7 +501,9 @@ public static function convertDbUrlToConnectionInfo($url, $root) {
+@@ -500,7 +500,9 @@ public static function convertDbUrlToConnectionInfo($url, $root) {
      }
  
      if (isset($query['module']) && $query['module']) {
@@ -74,7 +66,7 @@ index bb24b63e63..dea6d9854d 100644
        // Set up an additional autoloader. We don't use the main autoloader as
        // this method can be called before Drupal is installed and is never
        // called during regular runtime.
-@@ -508,8 +511,29 @@ public static function convertDbUrlToConnectionInfo($url, $root) {
+@@ -508,8 +510,29 @@ public static function convertDbUrlToConnectionInfo($url, $root) {
        $psr4_base_directory = Database::findDriverAutoloadDirectory($namespace, $root, TRUE);
        $additional_class_loader = new ClassLoader();
        $additional_class_loader->addPsr4($namespace . '\\', $psr4_base_directory);
@@ -105,7 +97,7 @@ index bb24b63e63..dea6d9854d 100644
      }
  
      if (!$module) {
-@@ -530,6 +554,9 @@ public static function convertDbUrlToConnectionInfo($url, $root) {
+@@ -530,6 +553,9 @@ public static function convertDbUrlToConnectionInfo($url, $root) {
      // @see \Drupal\Core\Site\Settings::initialize()
      if (isset($psr4_base_directory)) {
        $options['autoload'] = $psr4_base_directory;
@@ -115,39 +107,48 @@ index bb24b63e63..dea6d9854d 100644
      }
  
      return $options;
-@@ -603,6 +630,10 @@ public static function findDriverAutoloadDirectory($namespace, $root) {
-     if (!isset($modules[$module])) {
-       throw new \RuntimeException(sprintf("Cannot find the module '%s' for the database driver namespace '%s'", $module, $namespace));
-     }
-+dump($modules[$module]);
-+$info_parser = new InfoParser($root);
-+dump($info_parser->parse($modules[$module]->getPathname()));
-+
-     $module_directory = $modules[$module]->getPath();
- 
-     // All code within the Drupal\MODULE namespace is expected to follow a
 diff --git a/core/lib/Drupal/Core/Installer/Form/SiteSettingsForm.php b/core/lib/Drupal/Core/Installer/Form/SiteSettingsForm.php
-index 233853e4b5..2161da0587 100644
+index 233853e4b5..505ed0e509 100644
 --- a/core/lib/Drupal/Core/Installer/Form/SiteSettingsForm.php
 +++ b/core/lib/Drupal/Core/Installer/Form/SiteSettingsForm.php
-@@ -166,6 +166,17 @@ public function validateForm(array &$form, FormStateInterface $form_state) {
-     if ($autoload = Database::findDriverAutoloadDirectory($database['namespace'], DRUPAL_ROOT)) {
+@@ -4,6 +4,9 @@
+ 
+ use Drupal\Component\Utility\Crypt;
+ use Drupal\Core\Database\Database;
++use Drupal\Core\Extension\Dependency;
++use Drupal\Core\Extension\ExtensionDiscovery;
++use Drupal\Core\Extension\InfoParser;
+ use Drupal\Core\File\FileSystemInterface;
+ use Drupal\Core\Form\FormBase;
+ use Drupal\Core\Form\FormStateInterface;
+@@ -167,6 +170,27 @@ public function validateForm(array &$form, FormStateInterface $form_state) {
        $database['autoload'] = $autoload;
      }
+ 
 +    // When the database driver is extending another database driver, then add
 +    // the parent database driver as a dependency.
-+    $parent_class = $database['namespace'] . '\\ParentDatabaseDriver';
-+    if (class_exists($parent_class)) {
-+      $database['dependencies'] = [
-+        $parent_class::getProvider() => [
-+          'namespace' => $parent_class::getNamespace(),
-+          'autoload' => Database::findDriverAutoloadDirectory($parent_class::getNamespace(), DRUPAL_ROOT),
-+        ],
-+      ];
++    [, $module] = explode('\\', $database['namespace'], 2);
++    $extension_discovery = new ExtensionDiscovery(DRUPAL_ROOT, FALSE, []);
++    $modules = $extension_discovery->scan('module');
++    $module_info = (new InfoParser(DRUPAL_ROOT))->parse($modules[$module]->getPathname());
++    if (isset($module_info['dependencies']) && is_array($module_info['dependencies'])) {
++      $database['dependencies'] = [];
++      foreach ($module_info['dependencies'] as $dependency) {
++        $dependency_data = Dependency::createFromString($dependency);
++        $dependency_namespace = "Drupal\\{$dependency->getName()}";
++        if (!isset($modules[$dependency->getName()])) {
++          throw new \RuntimeException(sprintf("Cannot find the module '%s' for the dependency driver namespace '%s'", $dependency->getName(), $dependency_namespace));
++        }
++        $database['dependencies'][$dependency->getName()] = [
++          'namespace' => $dependency_namespace,
++          'autoload' => $modules[$dependency->getName()]->getPath() . '/src/',
++        ];
++      }
 +    }
- 
++
      $form_state->set('database', $database);
      foreach ($this->getDatabaseErrors($database, $form_state->getValue('settings_file')) as $name => $message) {
+       $form_state->setErrorByName($name, $message);
 diff --git a/core/lib/Drupal/Core/Site/Settings.php b/core/lib/Drupal/Core/Site/Settings.php
 index 3998719e8b..402d477a56 100644
 --- a/core/lib/Drupal/Core/Site/Settings.php
