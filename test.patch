@@ -30,83 +30,8 @@ index 72be7750b9..e34ae65a37 100644
   */
  
  /**
-diff --git a/core/drupalci.yml b/core/drupalci.yml
-index 413272eff3..09120f4b35 100644
---- a/core/drupalci.yml
-+++ b/core/drupalci.yml
-@@ -8,10 +8,10 @@ build:
-   assessment:
-     testing:
-       # Run code quality checks.
--      container_command.commit-checks:
--        commands:
--          - "core/scripts/dev/commit-code-check.sh --drupalci"
--        halt-on-fail: true
-+#      container_command.commit-checks:
-+#        commands:
-+#          - "core/scripts/dev/commit-code-check.sh --drupalci"
-+#        halt-on-fail: true
-       # run_tests task is executed several times in order of performance speeds.
-       # halt-on-fail can be set on the run_tests tasks in order to fail fast.
-       # suppress-deprecations is false in order to be alerted to usages of
-@@ -21,29 +21,29 @@ build:
-         testgroups: '--all'
-         suppress-deprecations: false
-         halt-on-fail: false
--      run_tests.kernel:
--        types: 'PHPUnit-Kernel'
--        testgroups: '--all'
--        suppress-deprecations: false
--        halt-on-fail: false
--      run_tests.build:
--        # Limit concurrency due to disk space concerns.
--        concurrency: 15
--        types: 'PHPUnit-Build'
--        testgroups: '--all'
--        suppress-deprecations: false
--        halt-on-fail: false
--      run_tests.functional:
--        types: 'PHPUnit-Functional'
--        testgroups: '--all'
--        suppress-deprecations: false
--        halt-on-fail: false
--      run_tests.javascript:
--        concurrency: 15
--        types: 'PHPUnit-FunctionalJavascript'
--        testgroups: '--all'
--        suppress-deprecations: false
--        halt-on-fail: false
--      # Run nightwatch testing.
--      # @see https://www.drupal.org/project/drupal/issues/2869825
--      nightwatchjs: {}
-+#      run_tests.kernel:
-+#        types: 'PHPUnit-Kernel'
-+#        testgroups: '--all'
-+#        suppress-deprecations: false
-+#        halt-on-fail: false
-+#      run_tests.build:
-+#        # Limit concurrency due to disk space concerns.
-+#        concurrency: 15
-+#        types: 'PHPUnit-Build'
-+#        testgroups: '--all'
-+#        suppress-deprecations: false
-+#        halt-on-fail: false
-+#      run_tests.functional:
-+#        types: 'PHPUnit-Functional'
-+#        testgroups: '--all'
-+#        suppress-deprecations: false
-+#        halt-on-fail: false
-+#      run_tests.javascript:
-+#        concurrency: 15
-+#        types: 'PHPUnit-FunctionalJavascript'
-+#        testgroups: '--all'
-+#        suppress-deprecations: false
-+#        halt-on-fail: false
-+#      # Run nightwatch testing.
-+#      # @see https://www.drupal.org/project/drupal/issues/2869825
-+#      nightwatchjs: {}
 diff --git a/core/lib/Drupal/Core/Database/Database.php b/core/lib/Drupal/Core/Database/Database.php
-index bb24b63e63..b7cae56ac8 100644
+index bb24b63e63..0c5a7e48ec 100644
 --- a/core/lib/Drupal/Core/Database/Database.php
 +++ b/core/lib/Drupal/Core/Database/Database.php
 @@ -3,7 +3,9 @@
@@ -119,79 +44,96 @@ index bb24b63e63..b7cae56ac8 100644
  
  /**
   * Primary front-controller for the database system.
-@@ -500,16 +502,42 @@ public static function convertDbUrlToConnectionInfo($url, $root) {
+@@ -500,16 +502,24 @@ public static function convertDbUrlToConnectionInfo($url, $root) {
      }
  
      if (isset($query['module']) && $query['module']) {
-+      $modules_scan = (new ExtensionDiscovery($root, FALSE, []))->scan('module');
-       $module = $query['module'];
-+      $namespace = "Drupal\\$module\\Driver\\Database\\$driver";
-+      if (!isset($modules_scan[$module])) {
-+        throw new \RuntimeException(sprintf("Cannot find the module '%s' for the database driver namespace '%s'", $module, $namespace));
-+      }
-+      $module_info = (new InfoParser($root))->parse($modules_scan[$module]->getPathname());
+-      $module = $query['module'];
++      $autoloading = $this->determineDriverAutoloading($query['module'], $driver, $root);
 +
        // Set up an additional autoloader. We don't use the main autoloader as
        // this method can be called before Drupal is installed and is never
        // called during regular runtime.
 -      $namespace = "Drupal\\$module\\Driver\\Database\\$driver";
-       $psr4_base_directory = Database::findDriverAutoloadDirectory($namespace, $root, TRUE);
+-      $psr4_base_directory = Database::findDriverAutoloadDirectory($namespace, $root, TRUE);
        $additional_class_loader = new ClassLoader();
-       $additional_class_loader->addPsr4($namespace . '\\', $psr4_base_directory);
--      $additional_class_loader->register(TRUE);
-       $connection_class = $namespace . '\\Connection';
+-      $additional_class_loader->addPsr4($namespace . '\\', $psr4_base_directory);
++      $additional_class_loader->addPsr4($autoloading['namespace'] . '\\', $autoloading['autoload']);
++      $connection_class = $autoloading['autoload'] . '\\Connection';
 +
 +      // When the database driver is extending another database driver, then
 +      // add autoload the parent database driver as well.
-+      $dependencies = [];
-+      if (isset($module_info['dependencies']) && is_array($module_info['dependencies'])) {
-+        foreach ($module_info['dependencies'] as $dependency) {
-+          $dependency_data = Dependency::createFromString($dependency);
-+          $dependency_namespace = "Drupal\\{$dependency_data->getName()}";
-+          if (!isset($modules_scan[$dependency_data->getName()])) {
-+            throw new \RuntimeException(sprintf("Cannot find the module '%s' for the dependency driver namespace '%s'", $dependency_data->getName(), $dependency_namespace));
-+          }
-+          $dependency_autoload = $modules_scan[$dependency_data->getName()]->getPath() . '/src/';
-+          $additional_class_loader->addPsr4($dependency_namespace . '\\', $dependency_autoload);
-+          $dependencies[$dependency_data->getName()] = [
-+            'namespace' => $dependency_namespace,
-+            'autoload' => $dependency_autoload,
-+          ];
++      if (isset($autoloading['dependencies'])) {
++        foreach ($autoloading['dependencies'] as $dependency) {
++          $additional_class_loader->addPsr4($dependency['namespace'] . '\\', $dependency['autoload']);
 +        }
 +      }
 +
-+      $additional_class_loader->register(TRUE);
+       $additional_class_loader->register(TRUE);
+-      $connection_class = $namespace . '\\Connection';
      }
  
      if (!$module) {
-@@ -530,6 +558,9 @@ public static function convertDbUrlToConnectionInfo($url, $root) {
+@@ -528,13 +538,55 @@ public static function convertDbUrlToConnectionInfo($url, $root) {
+     // If the driver is provided by a module add the necessary information to
+     // autoload the code.
      // @see \Drupal\Core\Site\Settings::initialize()
-     if (isset($psr4_base_directory)) {
-       $options['autoload'] = $psr4_base_directory;
-+      if ($dependencies !== []) {
-+        $options['dependencies'] = $dependencies;
+-    if (isset($psr4_base_directory)) {
+-      $options['autoload'] = $psr4_base_directory;
++    if (isset($autoloading)) {
++      $options['autoload'] = $autoloading['autoload'];
++      if (isset($autoloading['dependencies'])) {
++        $options['dependencies'] = $autoloading['dependencies'];
 +      }
      }
  
      return $options;
-diff --git a/core/lib/Drupal/Core/Extension/InfoParser.php b/core/lib/Drupal/Core/Extension/InfoParser.php
-index 594a83ee69..dbaca29371 100644
---- a/core/lib/Drupal/Core/Extension/InfoParser.php
-+++ b/core/lib/Drupal/Core/Extension/InfoParser.php
-@@ -18,9 +18,11 @@ class InfoParser extends InfoParserDynamic {
-    * {@inheritdoc}
-    */
-   public function parse($filename) {
-+global $xxx;
-     if (!isset(static::$parsedInfos[$filename])) {
-       static::$parsedInfos[$filename] = parent::parse($filename);
-     }
-+if ($xxx) {throw new \Exception(var_export([$filename, static::$parsedInfos], TRUE));}
-     return static::$parsedInfos[$filename];
    }
  
++  public static function determineDriverAutoloading(string $module, string $driver, string $root): array {
++    $autoloading = [];
++
++    $module_namespace = "Drupal\\$module";
++    $driver_subnamespace = "\\Driver\\Database\\$driver";
++    $autoloading['namespace'] = $module_namespace . $driver_subnamespace;
++
++    $modules_scan = (new ExtensionDiscovery($root, FALSE, []))->scan('module');
++    if (!isset($modules_scan[$module])) {
++      throw new \RuntimeException(sprintf("Cannot find the module '%s' for the database driver namespace '%s'", $module, $autoloading['namespace']));
++    }
++
++    $module_directory = $modules_scan[$module]->getPath();
++    $autoloading['autoload'] = $module_directory . DIRECTORY_SEPARATOR . 'src' . DIRECTORY_SEPARATOR . str_replace('\\', DIRECTORY_SEPARATOR, $driver_subnamespace) . DIRECTORY_SEPARATOR;
++    if (!is_dir($root . DIRECTORY_SEPARATOR . $autoloading['autoload'])) {
++      throw new \RuntimeException(sprintf("Cannot find the database driver namespace '%s' in module '%s'", $autoloading['namespace'], $module));
++    }
++
++    // When the database driver is extending another database driver, then add
++    // dependencies.
++    $module_info = (new InfoParser($root))->parse($root . DIRECTORY_SEPARATOR . $modules_scan[$module]->getPathname());
++    if (isset($module_info['dependencies']) && is_array($module_info['dependencies'])) {
++      foreach ($module_info['dependencies'] as $dependency) {
++        $dependency_data = Dependency::createFromString($dependency);
++        $dependency_namespace = "Drupal\\{$dependency_data->getName()}";
++        if (!isset($modules_scan[$dependency_data->getName()])) {
++          throw new \RuntimeException(sprintf("Cannot find the module '%s' for the dependency driver namespace '%s'", $dependency_data->getName(), $dependency_namespace));
++        }
++        $dependency_autoload = $modules_scan[$dependency_data->getName()]->getPath() . '/src/';
++        $autoloading['dependencies'][$dependency_data->getName()] = [
++          'namespace' => $dependency_namespace,
++          'autoload' => $dependency_autoload,
++        ];
++      }
++    }
++
++    return $autoloading;
++  }
++
+   /**
+    * Finds the directory to add to the autoloader for the driver's namespace.
+    *
 diff --git a/core/lib/Drupal/Core/Installer/Form/SiteSettingsForm.php b/core/lib/Drupal/Core/Installer/Form/SiteSettingsForm.php
-index 233853e4b5..5cfabc334a 100644
+index 233853e4b5..1a246649e7 100644
 --- a/core/lib/Drupal/Core/Installer/Form/SiteSettingsForm.php
 +++ b/core/lib/Drupal/Core/Installer/Form/SiteSettingsForm.php
 @@ -4,6 +4,9 @@
@@ -219,7 +161,7 @@ index 233853e4b5..5cfabc334a 100644
 +    // the parent database driver as a dependency.
 +    $extension_discovery = new ExtensionDiscovery(DRUPAL_ROOT, FALSE, []);
 +    $modules = $extension_discovery->scan('module');
-+    $provider_info = (new InfoParser(DRUPAL_ROOT))->parse($modules[$provider]->getPathname());
++    $provider_info = (new InfoParser(DRUPAL_ROOT))->parse(DRUPAL_ROOT . DIRECTORY_SEPARATOR . $modules[$provider]->getPathname());
 +    if (isset($provider_info['dependencies']) && is_array($provider_info['dependencies'])) {
 +      $database['dependencies'] = [];
 +      foreach ($provider_info['dependencies'] as $dependency) {
@@ -574,18 +516,10 @@ index c7e4dff8b8..406e992bb0 100644
      $this->assertEquals(\Drupal::service('module_handler')->getModule('driver_test'), new Extension($this->root, 'module', 'core/modules/system/tests/modules/driver_test/driver_test.info.yml'));
  
 diff --git a/core/tests/Drupal/Tests/Core/Database/UrlConversionTest.php b/core/tests/Drupal/Tests/Core/Database/UrlConversionTest.php
-index fb1c9dde8d..24d2d377fc 100644
+index fb1c9dde8d..941dc914ee 100644
 --- a/core/tests/Drupal/Tests/Core/Database/UrlConversionTest.php
 +++ b/core/tests/Drupal/Tests/Core/Database/UrlConversionTest.php
-@@ -49,6 +49,7 @@ protected function setUp(): void {
-    * @dataProvider providerConvertDbUrlToConnectionInfo
-    */
-   public function testDbUrlToConnectionConversion($url, $database_array) {
-+global $xxx; $xxx = TRUE;
-     $result = Database::convertDbUrlToConnectionInfo($url, $this->root);
-     $this->assertEquals($database_array, $result);
-   }
-@@ -133,6 +134,16 @@ public function providerConvertDbUrlToConnectionInfo() {
+@@ -133,6 +133,16 @@ public function providerConvertDbUrlToConnectionInfo() {
            'port' => 3306,
            'namespace' => 'Drupal\driver_test\Driver\Database\DrivertestMysql',
            'autoload' => 'core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/',
@@ -602,7 +536,7 @@ index fb1c9dde8d..24d2d377fc 100644
          ],
        ],
        'MySQL contrib test driver with prefix' => [
-@@ -147,6 +158,16 @@ public function providerConvertDbUrlToConnectionInfo() {
+@@ -147,6 +157,16 @@ public function providerConvertDbUrlToConnectionInfo() {
            'port' => 3306,
            'namespace' => 'Drupal\driver_test\Driver\Database\DrivertestMysql',
            'autoload' => 'core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/',
@@ -619,7 +553,7 @@ index fb1c9dde8d..24d2d377fc 100644
          ],
        ],
        'PostgreSQL contrib test driver without prefix' => [
-@@ -160,6 +181,16 @@ public function providerConvertDbUrlToConnectionInfo() {
+@@ -160,6 +180,16 @@ public function providerConvertDbUrlToConnectionInfo() {
            'port' => 5432,
            'namespace' => 'Drupal\driver_test\Driver\Database\DrivertestPgsql',
            'autoload' => 'core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/',
@@ -636,7 +570,7 @@ index fb1c9dde8d..24d2d377fc 100644
          ],
        ],
        'PostgreSQL contrib test driver with prefix' => [
-@@ -174,6 +205,16 @@ public function providerConvertDbUrlToConnectionInfo() {
+@@ -174,6 +204,16 @@ public function providerConvertDbUrlToConnectionInfo() {
            'port' => 5432,
            'namespace' => 'Drupal\driver_test\Driver\Database\DrivertestPgsql',
            'autoload' => 'core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/',
@@ -653,7 +587,7 @@ index fb1c9dde8d..24d2d377fc 100644
          ],
        ],
        'MySql with a custom query parameter' => [
-@@ -379,6 +420,29 @@ public function providerGetConnectionInfoAsUrl() {
+@@ -379,6 +419,29 @@ public function providerGetConnectionInfoAsUrl() {
      ];
      $expected_url8 = 'DrivertestPgsql://test_user:test_pass@test_host:5432/test_database?module=driver_test#pre';
  
@@ -683,7 +617,7 @@ index fb1c9dde8d..24d2d377fc 100644
      return [
        [$info1, $expected_url1],
        [$info2, $expected_url2],
-@@ -388,6 +452,7 @@ public function providerGetConnectionInfoAsUrl() {
+@@ -388,6 +451,7 @@ public function providerGetConnectionInfoAsUrl() {
        [$info6, $expected_url6],
        [$info7, $expected_url7],
        [$info8, $expected_url8],
