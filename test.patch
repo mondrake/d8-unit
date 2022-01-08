@@ -30,43 +30,29 @@ index 72be7750b9..e34ae65a37 100644
   */
  
  /**
-diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
-index 5cb43e5bc4..75fd4aad5f 100644
---- a/core/lib/Drupal/Core/Database/Connection.php
-+++ b/core/lib/Drupal/Core/Database/Connection.php
-@@ -1806,7 +1806,15 @@ public static function createUrlFromConnectionOptions(array $connection_options)
- 
-     // Add the module when the driver is provided by a module.
-     if (isset($connection_options['module'])) {
--      $db_url .= '?module=' . $connection_options['module'];
-+      $modules = [];
-+      $modules[] = $connection_options['module'];
-+
-+      // Add the parent driver modules, if any.
-+      if (isset($connection_options['dependencies'])) {
-+        $modules = array_merge($modules, array_keys($connection_options['dependencies']));
-+      }
-+
-+      $db_url .= '?module=' . implode(',', $modules);
-     }
- 
-     if (isset($connection_options['prefix']) && $connection_options['prefix'] !== '') {
 diff --git a/core/lib/Drupal/Core/Database/Database.php b/core/lib/Drupal/Core/Database/Database.php
-index bb24b63e63..4b82d7f7cc 100644
+index bb24b63e63..e7a7ab5c4a 100644
 --- a/core/lib/Drupal/Core/Database/Database.php
 +++ b/core/lib/Drupal/Core/Database/Database.php
-@@ -500,7 +500,9 @@ public static function convertDbUrlToConnectionInfo($url, $root) {
-     }
+@@ -3,7 +3,9 @@
+ namespace Drupal\Core\Database;
+ 
+ use Composer\Autoload\ClassLoader;
++use Drupal\Core\Extension\Dependency;
+ use Drupal\Core\Extension\ExtensionDiscovery;
++use Drupal\Core\Extension\InfoParser;
+ 
+ /**
+  * Primary front-controller for the database system.
+@@ -501,6 +503,7 @@ public static function convertDbUrlToConnectionInfo($url, $root) {
  
      if (isset($query['module']) && $query['module']) {
--      $module = $query['module'];
-+      $modules = explode(',', $query['module']);
-+      $module = array_shift($modules);
+       $module = $query['module'];
 +
        // Set up an additional autoloader. We don't use the main autoloader as
        // this method can be called before Drupal is installed and is never
        // called during regular runtime.
-@@ -508,8 +510,29 @@ public static function convertDbUrlToConnectionInfo($url, $root) {
+@@ -508,8 +511,31 @@ public static function convertDbUrlToConnectionInfo($url, $root) {
        $psr4_base_directory = Database::findDriverAutoloadDirectory($namespace, $root, TRUE);
        $additional_class_loader = new ClassLoader();
        $additional_class_loader->addPsr4($namespace . '\\', $psr4_base_directory);
@@ -75,12 +61,14 @@ index bb24b63e63..4b82d7f7cc 100644
 +
 +      // When the database driver is extending another database driver, then
 +      // add autoload the parent database driver as well.
++      $extension_discovery = new ExtensionDiscovery($root, FALSE, []);
++      $modules_scan = $extension_discovery->scan('module');
++      $module_info = (new InfoParser(DRUPAL_ROOT))->parse($modules_scan[$module]->getPathname());
 +      $dependencies = [];
-+      if (count($modules)) {
-+        $extension_discovery = new ExtensionDiscovery($root, FALSE, []);
-+        $modules_scan = $extension_discovery->scan('module');
-+        foreach ($modules as $dependency) {
-+          $dependency_namespace = "Drupal\\$dependency";
++      if (isset($module_info['dependencies']) && is_array($module_info['dependencies'])) {
++        foreach ($module_info['dependencies'] as $dependency) {
++          $dependency_data = Dependency::createFromString($dependency);
++          $dependency_namespace = "Drupal\\{$dependency->getName()}";
 +          if (!isset($modules_scan[$dependency])) {
 +            throw new \RuntimeException(sprintf("Cannot find the module '%s' for the dependency driver namespace '%s'", $dependency, $dependency_namespace));
 +          }
@@ -97,7 +85,7 @@ index bb24b63e63..4b82d7f7cc 100644
      }
  
      if (!$module) {
-@@ -530,6 +553,9 @@ public static function convertDbUrlToConnectionInfo($url, $root) {
+@@ -530,6 +556,9 @@ public static function convertDbUrlToConnectionInfo($url, $root) {
      // @see \Drupal\Core\Site\Settings::initialize()
      if (isset($psr4_base_directory)) {
        $options['autoload'] = $psr4_base_directory;
@@ -487,15 +475,15 @@ index c7e4dff8b8..860adbebcb 100644
      $this->assertEquals(\Drupal::service('module_handler')->getModule('driver_test'), new Extension($this->root, 'module', 'core/modules/system/tests/modules/driver_test/driver_test.info.yml'));
  
 diff --git a/core/tests/Drupal/Tests/Core/Database/UrlConversionTest.php b/core/tests/Drupal/Tests/Core/Database/UrlConversionTest.php
-index fb1c9dde8d..55d609bb2b 100644
+index fb1c9dde8d..e2adf23f04 100644
 --- a/core/tests/Drupal/Tests/Core/Database/UrlConversionTest.php
 +++ b/core/tests/Drupal/Tests/Core/Database/UrlConversionTest.php
-@@ -236,6 +236,108 @@ public function providerConvertDbUrlToConnectionInfo() {
+@@ -236,6 +236,84 @@ public function providerConvertDbUrlToConnectionInfo() {
            'autoload' => 'core/modules/sqlite/src/Driver/Database/sqlite/',
          ],
        ],
 +      'MySQL contrib test driver with parent set and without prefix' => [
-+        'DrivertestMysql://test_user:test_pass@test_host:3306/test_database?module=driver_test,mysql',
++        'DrivertestMysql://test_user:test_pass@test_host:3306/test_database?module=driver_test',
 +        [
 +          'driver' => 'DrivertestMysql',
 +          'username' => 'test_user',
@@ -514,7 +502,7 @@ index fb1c9dde8d..55d609bb2b 100644
 +        ],
 +      ],
 +      'MySQL contrib test driver with prefix and parent set' => [
-+        'DrivertestMysql://test_user:test_pass@test_host:3306/test_database?module=driver_test,mysql#bar',
++        'DrivertestMysql://test_user:test_pass@test_host:3306/test_database?module=driver_test#bar',
 +        [
 +          'driver' => 'DrivertestMysql',
 +          'username' => 'test_user',
@@ -534,7 +522,7 @@ index fb1c9dde8d..55d609bb2b 100644
 +        ],
 +      ],
 +      'PostgreSQL contrib test driver with parent set without prefix' => [
-+        'DrivertestPgsql://test_user:test_pass@test_host:5432/test_database?module=driver_test,pgsql',
++        'DrivertestPgsql://test_user:test_pass@test_host:5432/test_database?module=driver_test',
 +        [
 +          'driver' => 'DrivertestPgsql',
 +          'username' => 'test_user',
@@ -553,7 +541,7 @@ index fb1c9dde8d..55d609bb2b 100644
 +        ],
 +      ],
 +      'PostgreSQL contrib test driver with prefix and parent set' => [
-+        'DrivertestPgsql://test_user:test_pass@test_host:5432/test_database?module=driver_test,pgsql#bar',
++        'DrivertestPgsql://test_user:test_pass@test_host:5432/test_database?module=driver_test#bar',
 +        [
 +          'driver' => 'DrivertestPgsql',
 +          'username' => 'test_user',
@@ -568,30 +556,6 @@ index fb1c9dde8d..55d609bb2b 100644
 +            'pgsql' => [
 +              'namespace' => 'Drupal\pgsql',
 +              'autoload' => 'core/modules/pgsql/src/',
-+            ],
-+          ],
-+        ],
-+      ],
-+      'PostgreSQL contrib test driver with prefix and two parents set' => [
-+        'DrivertestPgsql://test_user:test_pass@test_host:5432/test_database?module=driver_test,pgsql,mysql#bar',
-+        [
-+          'driver' => 'DrivertestPgsql',
-+          'username' => 'test_user',
-+          'password' => 'test_pass',
-+          'host' => 'test_host',
-+          'database' => 'test_database',
-+          'prefix' => 'bar',
-+          'port' => 5432,
-+          'namespace' => 'Drupal\driver_test\Driver\Database\DrivertestPgsql',
-+          'autoload' => 'core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/',
-+          'dependencies' => [
-+            'pgsql' => [
-+              'namespace' => 'Drupal\pgsql',
-+              'autoload' => 'core/modules/pgsql/src/',
-+            ],
-+            'mysql' => [
-+              'namespace' => 'Drupal\mysql',
-+              'autoload' => 'core/modules/mysql/src/',
 +            ],
 +          ],
 +        ],
@@ -599,7 +563,7 @@ index fb1c9dde8d..55d609bb2b 100644
      ];
    }
  
-@@ -379,6 +481,105 @@ public function providerGetConnectionInfoAsUrl() {
+@@ -379,6 +457,82 @@ public function providerGetConnectionInfoAsUrl() {
      ];
      $expected_url8 = 'DrivertestPgsql://test_user:test_pass@test_host:5432/test_database?module=driver_test#pre';
  
@@ -620,7 +584,7 @@ index fb1c9dde8d..55d609bb2b 100644
 +        ],
 +      ],
 +    ];
-+    $expected_url9 = 'DrivertestMysql://test_user:test_pass@test_host:3306/test_database?module=driver_test,mysql';
++    $expected_url9 = 'DrivertestMysql://test_user:test_pass@test_host:3306/test_database?module=driver_test';
 +
 +    $info10 = [
 +      'database' => 'test_database',
@@ -639,7 +603,7 @@ index fb1c9dde8d..55d609bb2b 100644
 +        ],
 +      ],
 +    ];
-+    $expected_url10 = 'DrivertestMysql://test_user:test_pass@test_host:3306/test_database?module=driver_test,mysql#pre';
++    $expected_url10 = 'DrivertestMysql://test_user:test_pass@test_host:3306/test_database?module=driver_test#pre';
 +
 +    $info11 = [
 +      'database' => 'test_database',
@@ -658,7 +622,7 @@ index fb1c9dde8d..55d609bb2b 100644
 +        ],
 +      ],
 +    ];
-+    $expected_url11 = 'DrivertestPgsql://test_user:test_pass@test_host:5432/test_database?module=driver_test,pgsql';
++    $expected_url11 = 'DrivertestPgsql://test_user:test_pass@test_host:5432/test_database?module=driver_test';
 +
 +    $info12 = [
 +      'database' => 'test_database',
@@ -677,35 +641,12 @@ index fb1c9dde8d..55d609bb2b 100644
 +        ],
 +      ],
 +    ];
-+    $expected_url12 = 'DrivertestPgsql://test_user:test_pass@test_host:5432/test_database?module=driver_test,pgsql#pre';
-+
-+    $info13 = [
-+      'database' => 'test_database',
-+      'username' => 'test_user',
-+      'password' => 'test_pass',
-+      'prefix' => 'pre',
-+      'host' => 'test_host',
-+      'port' => '5432',
-+      'driver' => 'DrivertestPgsql',
-+      'namespace' => 'Drupal\\driver_test\\Driver\\Database\\DrivertestPgsql',
-+      'autoload' => 'core/modules/system/tests/modules/driver_test/src/Driver/Database/drivertestpqsql/',
-+      'dependencies' => [
-+        'pgsql' => [
-+          'namespace' => 'Drupal\pgsql',
-+          'autoload' => 'core/modules/pgsql/src/',
-+        ],
-+        'mysql' => [
-+          'namespace' => 'Drupal\mysql\Driver',
-+          'autoload' => 'core/modules/mysql/src/',
-+        ],
-+      ],
-+    ];
-+    $expected_url13 = 'DrivertestPgsql://test_user:test_pass@test_host:5432/test_database?module=driver_test,pgsql,mysql#pre';
++    $expected_url12 = 'DrivertestPgsql://test_user:test_pass@test_host:5432/test_database?module=driver_test#pre';
 +
      return [
        [$info1, $expected_url1],
        [$info2, $expected_url2],
-@@ -388,6 +589,11 @@ public function providerGetConnectionInfoAsUrl() {
+@@ -388,6 +542,10 @@ public function providerGetConnectionInfoAsUrl() {
        [$info6, $expected_url6],
        [$info7, $expected_url7],
        [$info8, $expected_url8],
@@ -713,7 +654,6 @@ index fb1c9dde8d..55d609bb2b 100644
 +      [$info10, $expected_url10],
 +      [$info11, $expected_url11],
 +      [$info12, $expected_url12],
-+      [$info13, $expected_url13],
      ];
    }
  
