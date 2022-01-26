@@ -1,1190 +1,1250 @@
-diff --git a/core/core.services.yml b/core/core.services.yml
-index b225de5f71..6b57894d25 100644
---- a/core/core.services.yml
-+++ b/core/core.services.yml
-@@ -1790,3 +1790,13 @@ services:
-   pager.parameters:
-     class: Drupal\Core\Pager\PagerParameters
-     arguments: ['@request_stack']
-+  select_extender_factory.pager:
-+    class: Drupal\Core\Database\Query\PagerSelectExtenderFactory
-+    arguments: ['@pager.manager']
-+    tags:
-+      - { name: backend_overridable }
-+  select_extender_factory.table_sort:
-+    class: Drupal\Core\Database\Query\TableSortExtenderFactory
-+    arguments: ['@request_stack']
-+    tags:
-+      - { name: backend_overridable }
 diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
-index b3cd1c5b0d..b6742aff5b 100644
+index 04ef0c3170dc26defcf56b7bfbd47a5497d330db..4c45ab4107e96ab0224cb0214b2ad8ff6c9f54a6 100644
 --- a/core/lib/Drupal/Core/Database/Connection.php
 +++ b/core/lib/Drupal/Core/Database/Connection.php
-@@ -1836,19 +1836,6 @@ public function getProvider(): string {
-     return ($first === 'Drupal' && strtolower($second) === $second) ? $second : 'core';
-   }
- 
--  /**
--   * Get the pager manager service, if available.
--   *
--   * @return \Drupal\Core\Pager\PagerManagerInterface
--   *   The pager manager service, if available.
--   *
--   * @throws \Drupal\Core\DependencyInjection\ContainerNotInitializedException
--   *   If the container has not been initialized yet.
--   */
--  public function getPagerManager(): PagerManagerInterface {
--    return \Drupal::service('pager.manager');
--  }
--
-   /**
-    * Runs a simple query to validate json datatype support.
+@@ -67,6 +67,11 @@ abstract class Connection {
+    * Index of what driver-specific class to use for various operations.
     *
-diff --git a/core/lib/Drupal/Core/Database/Query/PagerSelectExtender.php b/core/lib/Drupal/Core/Database/Query/PagerSelectExtender.php
-index 3620d9b5d1..e92689c345 100644
---- a/core/lib/Drupal/Core/Database/Query/PagerSelectExtender.php
-+++ b/core/lib/Drupal/Core/Database/Query/PagerSelectExtender.php
-@@ -3,6 +3,7 @@
- namespace Drupal\Core\Database\Query;
- 
- use Drupal\Core\Database\Connection;
-+use Drupal\Core\Pager\PagerManagerInterface;
- 
- /**
-  * Query extender for pager queries.
-@@ -44,8 +45,14 @@ class PagerSelectExtender extends SelectExtender {
-    *   Select query object.
-    * @param \Drupal\Core\Database\Connection $connection
-    *   Database connection object.
-+   * @param \Drupal\Core\Pager\PagerManagerInterface $pagerManager
-+   *   The pager manager service.
+    * @var array
++   *
++   * @deprecated in drupal:9.4.0 and is removed from drupal:10.0.0. Use
++   *   standard autoloading in the methods that return database operations.
++   *
++   * @see https://www.drupal.org/node/3217534
     */
--  public function __construct(SelectInterface $query, Connection $connection) {
-+  public function __construct(
-+    SelectInterface $query,
-+    Connection $connection,
-+    protected PagerManagerInterface $pagerManager
-+  ) {
-     parent::__construct($query, $connection);
+   protected $driverClasses = [];
  
-     // Add pager tag. Do this here to ensure that it is always added before
-@@ -74,7 +81,7 @@ public function execute() {
-     $this->ensureElement();
- 
-     $total_items = $this->getCountQuery()->execute()->fetchField();
--    $pager = $this->connection->getPagerManager()->createPager($total_items, $this->limit, $this->element);
-+    $pager = $this->pagerManager->createPager($total_items, $this->limit, $this->element);
-     $this->range($pager->getCurrentPage() * $this->limit, $this->limit);
- 
-     // Now that we've added our pager-based range instructions, run the query normally.
-@@ -89,7 +96,7 @@ public function execute() {
-    */
-   protected function ensureElement() {
-     if (!isset($this->element)) {
--      $this->element($this->connection->getPagerManager()->getMaxPagerElementId() + 1);
-+      $this->element($this->pagerManager->getMaxPagerElementId() + 1);
-     }
-   }
- 
-@@ -157,7 +164,7 @@ public function limit($limit = 10) {
-    */
-   public function element($element) {
-     $this->element = $element;
--    $this->connection->getPagerManager()->reservePagerElementId($this->element);
-+    $this->pagerManager->reservePagerElementId($this->element);
-     return $this;
-   }
- 
-diff --git a/core/lib/Drupal/Core/Database/Query/PagerSelectExtenderFactory.php b/core/lib/Drupal/Core/Database/Query/PagerSelectExtenderFactory.php
-new file mode 100644
-index 0000000000..dc8aac6069
---- /dev/null
-+++ b/core/lib/Drupal/Core/Database/Query/PagerSelectExtenderFactory.php
-@@ -0,0 +1,39 @@
-+<?php
-+
-+namespace Drupal\Core\Database\Query;
-+
-+use Drupal\Core\Database\Connection;
-+use Drupal\Core\Pager\PagerManagerInterface;
-+
-+/**
-+ * Select extender factory for pager queries.
-+ */
-+class PagerSelectExtenderFactory {
-+
-+  /**
-+   * Constructs a PagerSelectExtenderFactory object.
-+   *
-+   * @param \Drupal\Core\Pager\PagerManagerInterface $pagerManager
-+   *   The pager manager service.
-+   */
-+  public function __construct(
-+    protected PagerManagerInterface $pagerManager
-+  ) {
-+  }
-+
-+  /**
-+   * Returns a query extender for pager queries.
-+   *
-+   * @param \Drupal\Core\Database\Query\SelectInterface $query
-+   *   Select query object.
-+   * @param \Drupal\Core\Database\Connection $connection
-+   *   Database connection object.
-+   *
-+   * @return \Drupal\Core\Database\Query\PagerSelectExtender
-+   *   A query extender for pager queries.
-+   */
-+  public function get(SelectInterface $query, Connection $connection): PagerSelectExtender {
-+    return new PagerSelectExtender($query, $connection, $this->pagerManager);
-+  }
-+
-+}
-diff --git a/core/lib/Drupal/Core/Database/Query/Select.php b/core/lib/Drupal/Core/Database/Query/Select.php
-index ac7bdd4e6f..9747a1717c 100644
---- a/core/lib/Drupal/Core/Database/Query/Select.php
-+++ b/core/lib/Drupal/Core/Database/Query/Select.php
-@@ -320,13 +320,7 @@ public function havingCompile(Connection $connection) {
-    * {@inheritdoc}
-    */
-   public function extend($extender_name) {
--    $parts = explode('\\', $extender_name);
--    $class = end($parts);
--    $driver_class = $this->connection->getDriverClass($class);
--    if ($driver_class !== $class) {
--      return new $driver_class($this, $this->connection);
--    }
--    return new $extender_name($this, $this->connection);
-+    return \Drupal::service('select_extender_factory.' . $extender_name)->get($this, $this->connection);
-   }
- 
-   /**
-diff --git a/core/lib/Drupal/Core/Database/Query/SelectExtender.php b/core/lib/Drupal/Core/Database/Query/SelectExtender.php
-index 0681813f04..2cb73979f1 100644
---- a/core/lib/Drupal/Core/Database/Query/SelectExtender.php
-+++ b/core/lib/Drupal/Core/Database/Query/SelectExtender.php
-@@ -221,13 +221,7 @@ public function extend($extender_name) {
-     // We cannot call $this->query->extend(), because with multiple extenders
-     // you will replace all the earlier extenders with the last extender,
-     // instead of creating list of objects that extend each other.
--    $parts = explode('\\', $extender_name);
--    $class = end($parts);
--    $driver_class = $this->connection->getDriverClass($class);
--    if ($driver_class !== $class) {
--      return new $driver_class($this, $this->connection);
--    }
--    return new $extender_name($this, $this->connection);
-+    return \Drupal::service('select_extender_factory.' . $extender_name)->get($this, $this->connection);
-   }
- 
-   /* Alter accessors to expose the query data to alter hooks. */
-diff --git a/core/lib/Drupal/Core/Database/Query/TableSortExtender.php b/core/lib/Drupal/Core/Database/Query/TableSortExtender.php
-index 60da1b864a..d2a1777a8b 100644
---- a/core/lib/Drupal/Core/Database/Query/TableSortExtender.php
-+++ b/core/lib/Drupal/Core/Database/Query/TableSortExtender.php
-@@ -4,6 +4,7 @@
- 
- use Drupal\Core\Database\Connection;
- use Drupal\Core\Utility\TableSort;
-+use Symfony\Component\HttpFoundation\RequestStack;
- 
- /**
-  * Query extender class for tablesort queries.
-@@ -11,9 +12,20 @@
- class TableSortExtender extends SelectExtender {
- 
-   /**
--   * {@inheritdoc}
-+   * Constructs a TableSortExtender object.
-+   *
-+   * @param \Drupal\Core\Database\Query\SelectInterface $query
-+   *   Select query object.
-+   * @param \Drupal\Core\Database\Connection $connection
-+   *   Database connection object.
-+   * @param \Symfony\Component\HttpFoundation\RequestStack $requestStack
-+   *   The request stack.
-    */
--  public function __construct(SelectInterface $query, Connection $connection) {
-+  public function __construct(
-+    SelectInterface $query,
-+    Connection $connection,
-+    protected RequestStack $requestStack
-+  ) {
-     parent::__construct($query, $connection);
- 
-     // Add convenience tag to mark that this is an extended query. We have to
-@@ -34,7 +46,7 @@ public function __construct(SelectInterface $query, Connection $connection) {
-    * @see table.html.twig
-    */
-   public function orderByHeader(array $header) {
--    $context = TableSort::getContextFromRequest($header, \Drupal::request());
-+    $context = TableSort::getContextFromRequest($header, $this->requestStack->getCurrentRequest());
-     if (!empty($context['sql'])) {
-       // Based on code from \Drupal\Core\Database\Connection::escapeTable(),
-       // but this can also contain a dot.
-diff --git a/core/lib/Drupal/Core/Database/Query/TableSortExtenderFactory.php b/core/lib/Drupal/Core/Database/Query/TableSortExtenderFactory.php
-new file mode 100644
-index 0000000000..95d3325cc5
---- /dev/null
-+++ b/core/lib/Drupal/Core/Database/Query/TableSortExtenderFactory.php
-@@ -0,0 +1,39 @@
-+<?php
-+
-+namespace Drupal\Core\Database\Query;
-+
-+use Drupal\Core\Database\Connection;
-+use Symfony\Component\HttpFoundation\RequestStack;
-+
-+/**
-+ * Select extender factory for tablesort queries.
-+ */
-+class TableSortExtenderFactory {
-+
-+  /**
-+   * Constructs a TableSortExtenderFactory object.
-+   *
-+   * @param \Symfony\Component\HttpFoundation\RequestStack $requestStack
-+   *   The request stack.
-+   */
-+  public function __construct(
-+    protected RequestStack $requestStack
-+  ) {
-+  }
-+
-+  /**
-+   * Returns a query extender for tablesort queries.
-+   *
-+   * @param \Drupal\Core\Database\Query\SelectInterface $query
-+   *   Select query object.
-+   * @param \Drupal\Core\Database\Connection $connection
-+   *   Database connection object.
-+   *
-+   * @return \Drupal\Core\Database\Query\TableSortExtender
-+   *   A query extender for tablesort queries.
-+   */
-+  public function get(SelectInterface $query, Connection $connection): TableSortExtender {
-+    return new TableSortExtender($query, $connection, $this->requestStack);
-+  }
-+
-+}
-diff --git a/core/lib/Drupal/Core/Pager/PagerManagerInterface.php b/core/lib/Drupal/Core/Pager/PagerManagerInterface.php
-index 113fcb8430..c4e31f5bff 100644
---- a/core/lib/Drupal/Core/Pager/PagerManagerInterface.php
-+++ b/core/lib/Drupal/Core/Pager/PagerManagerInterface.php
-@@ -29,11 +29,11 @@
-    * If the items being displayed result from a database query performed using
-    * Drupal's database API, and if you have control over the construction of the
-    * database query, you do not need to call this function directly; instead,
--   * you can extend the query object with the 'PagerSelectExtender' extender
-+   * you can extend the query object with the 'pager' select query extender
-    * before executing it. For example:
-    * @code
-    *   $query = $connection->select('some_table')
--   *     ->extend(PagerSelectExtender::class);
-+   *     ->extend('pager');
-    * @endcode
+@@ -1122,8 +1127,14 @@ protected function expandArguments(&$query, &$args) {
     *
-    * However, if you are using a different method for generating the items to be
-diff --git a/core/modules/comment/src/CommentStorage.php b/core/modules/comment/src/CommentStorage.php
-index 6bf7025218..4a8122f9c1 100644
---- a/core/modules/comment/src/CommentStorage.php
-+++ b/core/modules/comment/src/CommentStorage.php
-@@ -5,7 +5,6 @@
- use Drupal\Core\Cache\CacheBackendInterface;
- use Drupal\Core\Cache\MemoryCache\MemoryCacheInterface;
- use Drupal\Core\Database\Connection;
--use Drupal\Core\Database\Query\PagerSelectExtender;
- use Drupal\Core\Entity\EntityFieldManagerInterface;
- use Drupal\Core\Entity\EntityTypeBundleInfoInterface;
- use Drupal\Core\Entity\EntityTypeInterface;
-@@ -288,7 +287,7 @@ public function loadThread(EntityInterface $entity, $field_name, $mode, $comment
-       ->addMetaData('field_name', $field_name);
- 
-     if ($comments_per_page) {
--      $query = $query->extend(PagerSelectExtender::class)
-+      $query = $query->extend('pager')
-         ->limit($comments_per_page);
-       if ($pager_id) {
-         $query->element($pager_id);
-diff --git a/core/modules/dblog/src/Controller/DbLogController.php b/core/modules/dblog/src/Controller/DbLogController.php
-index b52ed5015a..195f17b661 100644
---- a/core/modules/dblog/src/Controller/DbLogController.php
-+++ b/core/modules/dblog/src/Controller/DbLogController.php
-@@ -9,8 +9,6 @@
- use Drupal\Component\Utility\UrlHelper;
- use Drupal\Core\Controller\ControllerBase;
- use Drupal\Core\Database\Connection;
--use Drupal\Core\Database\Query\PagerSelectExtender;
--use Drupal\Core\Database\Query\TableSortExtender;
- use Drupal\Core\Datetime\DateFormatterInterface;
- use Drupal\Core\Extension\ModuleHandlerInterface;
- use Drupal\Core\Form\FormBuilderInterface;
-@@ -153,8 +151,8 @@ public function overview(Request $request) {
-     ];
- 
-     $query = $this->database->select('watchdog', 'w')
--      ->extend(PagerSelectExtender::class)
--      ->extend(TableSortExtender::class);
-+      ->extend('pager')
-+      ->extend('table_sort');
-     $query->fields('w', [
-       'wid',
-       'uid',
-@@ -423,8 +421,8 @@ public function topLogMessages($type) {
-     $count_query->condition('type', $type);
- 
-     $query = $this->database->select('watchdog', 'w')
--      ->extend(PagerSelectExtender::class)
--      ->extend(TableSortExtender::class);
-+      ->extend('pager')
-+      ->extend('table_sort');
-     $query->addExpression('COUNT([wid])', 'count');
-     $query = $query
-       ->fields('w', ['message', 'variables'])
-diff --git a/core/modules/forum/src/ForumManager.php b/core/modules/forum/src/ForumManager.php
-index 3e9a16e9a6..29277de9e4 100644
---- a/core/modules/forum/src/ForumManager.php
-+++ b/core/modules/forum/src/ForumManager.php
-@@ -4,8 +4,6 @@
- 
- use Drupal\Core\Config\ConfigFactoryInterface;
- use Drupal\Core\Database\Connection;
--use Drupal\Core\Database\Query\PagerSelectExtender;
--use Drupal\Core\Database\Query\TableSortExtender;
- use Drupal\Core\DependencyInjection\DependencySerializationTrait;
- use Drupal\Core\Entity\EntityFieldManagerInterface;
- use Drupal\Core\Entity\EntityTypeManagerInterface;
-@@ -162,8 +160,8 @@ public function getTopics($tid, AccountInterface $account) {
+    * @return string
+    *   The name of the class that should be used for this driver.
++   *
++   * @deprecated in drupal:9.4.0 and is removed from drupal:10.0.0. Use
++   *   standard autoloading in the methods that return database operations.
++   *
++   * @see https://www.drupal.org/node/3217534
+    */
+   public function getDriverClass($class) {
++    @trigger_error(__METHOD__ . '() is deprecated in drupal:9.4.0 and is removed from drupal:10.0.0. Use standard autoloading in the methods that return database operations. See https://www.drupal.org/node/3217534', E_USER_DEPRECATED);
+     if (empty($this->driverClasses[$class])) {
+       $driver_class = $this->connectionOptions['namespace'] . '\\' . $class;
+       if (class_exists($driver_class)) {
+@@ -1190,6 +1201,7 @@ public function getDriverClass($class) {
+    *   The database exceptions handler.
+    */
+   public function exceptionHandler() {
++    @trigger_error('Using ' . __METHOD__ . '() is deprecated in drupal:9.4.0 and the method will be abstract from drupal:10.0.0. Database drivers must implement it explicitly. See https://www.drupal.org/node/3217534', E_USER_DEPRECATED);
+     $class = $this->getDriverClass('ExceptionHandler');
+     return new $class();
+   }
+@@ -1214,6 +1226,7 @@ public function exceptionHandler() {
+    * @see \Drupal\Core\Database\Query\Select
+    */
+   public function select($table, $alias = NULL, array $options = []) {
++    @trigger_error('Using ' . __METHOD__ . '() is deprecated in drupal:9.4.0 and the method will be abstract from drupal:10.0.0. Database drivers must implement it explicitly. See https://www.drupal.org/node/3217534', E_USER_DEPRECATED);
+     if (!is_null($alias) && !is_string($alias)) {
+       @trigger_error('Passing a non-string \'alias\' argument to ' . __METHOD__ . '() is deprecated in drupal:9.3.0 and will be required in drupal:10.0.0. Refactor your calling code. See https://www.drupal.org/project/drupal/issues/3216552', E_USER_DEPRECATED);
      }
+@@ -1238,6 +1251,7 @@ public function select($table, $alias = NULL, array $options = []) {
+    * @see \Drupal\Core\Database\Connection::defaultOptions()
+    */
+   public function insert($table, array $options = []) {
++    @trigger_error('Using ' . __METHOD__ . '() is deprecated in drupal:9.4.0 and the method will be abstract from drupal:10.0.0. Database drivers must implement it explicitly. See https://www.drupal.org/node/3217534', E_USER_DEPRECATED);
+     $class = $this->getDriverClass('Insert');
+     return new $class($this, $table, $options);
+   }
+@@ -1290,6 +1304,7 @@ public function lastInsertId(?string $name = NULL): string {
+    * @see \Drupal\Core\Database\Query\Merge
+    */
+   public function merge($table, array $options = []) {
++    @trigger_error('Using ' . __METHOD__ . '() is deprecated in drupal:9.4.0 and the method will be abstract from drupal:10.0.0. Database drivers must implement it explicitly. See https://www.drupal.org/node/3217534', E_USER_DEPRECATED);
+     $class = $this->getDriverClass('Merge');
+     return new $class($this, $table, $options);
+   }
+@@ -1308,6 +1323,7 @@ public function merge($table, array $options = []) {
+    * @see \Drupal\Core\Database\Query\Upsert
+    */
+   public function upsert($table, array $options = []) {
++    @trigger_error('Using ' . __METHOD__ . '() is deprecated in drupal:9.4.0 and the method will be abstract from drupal:10.0.0. Database drivers must implement it explicitly. See https://www.drupal.org/node/3217534', E_USER_DEPRECATED);
+     $class = $this->getDriverClass('Upsert');
+     return new $class($this, $table, $options);
+   }
+@@ -1329,6 +1345,7 @@ public function upsert($table, array $options = []) {
+    * @see \Drupal\Core\Database\Connection::defaultOptions()
+    */
+   public function update($table, array $options = []) {
++    @trigger_error('Using ' . __METHOD__ . '() is deprecated in drupal:9.4.0 and the method will be abstract from drupal:10.0.0. Database drivers must implement it explicitly. See https://www.drupal.org/node/3217534', E_USER_DEPRECATED);
+     $class = $this->getDriverClass('Update');
+     return new $class($this, $table, $options);
+   }
+@@ -1350,6 +1367,7 @@ public function update($table, array $options = []) {
+    * @see \Drupal\Core\Database\Connection::defaultOptions()
+    */
+   public function delete($table, array $options = []) {
++    @trigger_error('Using ' . __METHOD__ . '() is deprecated in drupal:9.4.0 and the method will be abstract from drupal:10.0.0. Database drivers must implement it explicitly. See https://www.drupal.org/node/3217534', E_USER_DEPRECATED);
+     $class = $this->getDriverClass('Delete');
+     return new $class($this, $table, $options);
+   }
+@@ -1368,6 +1386,7 @@ public function delete($table, array $options = []) {
+    * @see \Drupal\Core\Database\Query\Truncate
+    */
+   public function truncate($table, array $options = []) {
++    @trigger_error('Using ' . __METHOD__ . '() is deprecated in drupal:9.4.0 and the method will be abstract from drupal:10.0.0. Database drivers must implement it explicitly. See https://www.drupal.org/node/3217534', E_USER_DEPRECATED);
+     $class = $this->getDriverClass('Truncate');
+     return new $class($this, $table, $options);
+   }
+@@ -1381,6 +1400,7 @@ public function truncate($table, array $options = []) {
+    *   The database Schema object for this connection.
+    */
+   public function schema() {
++    @trigger_error('Using ' . __METHOD__ . '() is deprecated in drupal:9.4.0 and the method will be abstract from drupal:10.0.0. Database drivers must implement it explicitly. See https://www.drupal.org/node/3217534', E_USER_DEPRECATED);
+     if (empty($this->schema)) {
+       $class = $this->getDriverClass('Schema');
+       $this->schema = new $class($this);
+@@ -1400,6 +1420,7 @@ public function schema() {
+    * @see \Drupal\Core\Database\Query\Condition
+    */
+   public function condition($conjunction) {
++    @trigger_error('Using ' . __METHOD__ . '() is deprecated in drupal:9.4.0 and the method will be abstract from drupal:10.0.0. Database drivers must implement it explicitly. See https://www.drupal.org/node/3217534', E_USER_DEPRECATED);
+     $class = $this->getDriverClass('Condition');
+     // Creating an instance of the class Drupal\Core\Database\Query\Condition
+     // should only be created from the database layer. This will allow database
+@@ -1557,6 +1578,7 @@ public function transactionDepth() {
+    * @see \Drupal\Core\Database\Transaction
+    */
+   public function startTransaction($name = '') {
++    @trigger_error('Using ' . __METHOD__ . '() is deprecated in drupal:9.4.0 and the method will be abstract from drupal:10.0.0. Database drivers must implement it explicitly. See https://www.drupal.org/node/3217534', E_USER_DEPRECATED);
+     $class = $this->getDriverClass('Transaction');
+     return new $class($this, $name);
+   }
+diff --git a/core/modules/mysql/src/Driver/Database/mysql/Connection.php b/core/modules/mysql/src/Driver/Database/mysql/Connection.php
+index b2de80be4f4a18d44c6d49b1bbf80d0074e07a84..61ece197b8e9deef9a75ff32aefef6df6ae3670b 100644
+--- a/core/modules/mysql/src/Driver/Database/mysql/Connection.php
++++ b/core/modules/mysql/src/Driver/Database/mysql/Connection.php
+@@ -2,14 +2,17 @@
  
-     $query = $this->connection->select('forum_index', 'f')
--      ->extend(PagerSelectExtender::class)
--      ->extend(TableSortExtender::class);
-+      ->extend('pager')
-+      ->extend('table_sort');
-     $query->fields('f');
-     $query
-       ->condition('f.tid', $tid)
-@@ -189,7 +187,7 @@ public function getTopics($tid, AccountInterface $account) {
-       $nodes = $this->entityTypeManager->getStorage('node')->loadMultiple($nids);
+ namespace Drupal\mysql\Driver\Database\mysql;
  
-       $query = $this->connection->select('node_field_data', 'n')
--        ->extend(TableSortExtender::class);
-+        ->extend('table_sort');
-       $query->fields('n', ['nid']);
- 
-       $query->join('comment_entity_statistics', 'ces', "[n].[nid] = [ces].[entity_id] AND [ces].[field_name] = 'comment_forum' AND [ces].[entity_type] = 'node'");
-diff --git a/core/modules/help_topics/src/Plugin/Search/HelpSearch.php b/core/modules/help_topics/src/Plugin/Search/HelpSearch.php
-index 49b0038d0d..c69d531cb0 100644
---- a/core/modules/help_topics/src/Plugin/Search/HelpSearch.php
-+++ b/core/modules/help_topics/src/Plugin/Search/HelpSearch.php
-@@ -6,7 +6,6 @@
- use Drupal\Core\Access\AccessResult;
- use Drupal\Core\Config\Config;
- use Drupal\Core\Database\Connection;
--use Drupal\Core\Database\Query\PagerSelectExtender;
- use Drupal\Core\Database\StatementInterface;
- use Drupal\Core\Language\LanguageInterface;
- use Drupal\Core\Language\LanguageManagerInterface;
-@@ -220,8 +219,8 @@ protected function findResults() {
-       ->select('search_index', 'i')
-       // Restrict the search to the current interface language.
-       ->condition('i.langcode', $this->languageManager->getCurrentLanguage()->getId())
--      ->extend(SearchQuery::class)
--      ->extend(PagerSelectExtender::class);
-+      ->extend('search_query')
-+      ->extend('pager');
-     $query->innerJoin('help_search_items', 'hsi', '[i].[sid] = [hsi].[sid] AND [i].[type] = :type', [':type' => $this->getType()]);
-     if ($denied_permissions) {
-       $query->condition('hsi.permission', $denied_permissions, 'NOT IN');
-diff --git a/core/modules/locale/src/StringDatabaseStorage.php b/core/modules/locale/src/StringDatabaseStorage.php
-index 74e94fca5d..541b1d69d5 100644
---- a/core/modules/locale/src/StringDatabaseStorage.php
-+++ b/core/modules/locale/src/StringDatabaseStorage.php
-@@ -3,7 +3,6 @@
- namespace Drupal\locale;
- 
- use Drupal\Core\Database\Connection;
--use Drupal\Core\Database\Query\PagerSelectExtender;
++use Drupal\Core\Database\Connection as DatabaseConnection;
++use Drupal\Core\Database\Database;
+ use Drupal\Core\Database\DatabaseAccessDeniedException;
+-use Drupal\Core\Database\IntegrityConstraintViolationException;
++use Drupal\Core\Database\DatabaseException;
+ use Drupal\Core\Database\DatabaseExceptionWrapper;
+-use Drupal\Core\Database\StatementWrapper;
+-use Drupal\Core\Database\Database;
+ use Drupal\Core\Database\DatabaseNotFoundException;
+-use Drupal\Core\Database\DatabaseException;
+-use Drupal\Core\Database\Connection as DatabaseConnection;
++use Drupal\Core\Database\IntegrityConstraintViolationException;
++use Drupal\Core\Database\Query\Condition;
++use Drupal\Core\Database\StatementInterface;
++use Drupal\Core\Database\StatementWrapper;
++use Drupal\Core\Database\Transaction;
+ use Drupal\Core\Database\TransactionNoActiveException;
  
  /**
-  * Defines a class to store localized strings in the database.
-@@ -443,7 +442,7 @@ protected function dbStringSelect(array $conditions, array $options = []) {
-     }
- 
-     if (!empty($options['pager limit'])) {
--      $query = $query->extend(PagerSelectExtender::class)->limit($options['pager limit']);
-+      $query = $query->extend('pager')->limit($options['pager limit']);
-     }
- 
-     return $query;
-diff --git a/core/modules/node/src/Plugin/Search/NodeSearch.php b/core/modules/node/src/Plugin/Search/NodeSearch.php
-index 0342c5f01d..3ab001a4eb 100644
---- a/core/modules/node/src/Plugin/Search/NodeSearch.php
-+++ b/core/modules/node/src/Plugin/Search/NodeSearch.php
-@@ -7,7 +7,6 @@
- use Drupal\Core\Cache\CacheableMetadata;
- use Drupal\Core\Config\Config;
- use Drupal\Core\Database\Connection;
--use Drupal\Core\Database\Query\PagerSelectExtender;
- use Drupal\Core\Database\Query\SelectExtender;
- use Drupal\Core\Database\StatementInterface;
- use Drupal\Core\Entity\EntityTypeManagerInterface;
-@@ -262,8 +261,8 @@ protected function findResults() {
-     // Build matching conditions.
-     $query = $this->databaseReplica
-       ->select('search_index', 'i')
--      ->extend(SearchQuery::class)
--      ->extend(PagerSelectExtender::class);
-+      ->extend('search_query')
-+      ->extend('pager');
-     $query->join('node_field_data', 'n', '[n].[nid] = [i].[sid] AND [n].[langcode] = [i].[langcode]');
-     $query->condition('n.status', 1)
-       ->addTag('node_access')
-diff --git a/core/modules/search/search.services.yml b/core/modules/search/search.services.yml
-index 8f6e2a0fcc..107038260c 100644
---- a/core/modules/search/search.services.yml
-+++ b/core/modules/search/search.services.yml
-@@ -16,3 +16,15 @@ services:
-   search.text_processor:
-     class: Drupal\search\SearchTextProcessor
-     arguments: ['@transliteration', '@config.factory', '@module_handler']
-+
-+  select_extender_factory.search_query:
-+    class: Drupal\search\SearchQueryFactory
-+    arguments: ['@config.factory', '@search.text_processor']
-+    tags:
-+      - { name: backend_overridable }
-+
-+  select_extender_factory.views_search_query:
-+    class: Drupal\search\ViewsSearchQueryFactory
-+    arguments: ['@config.factory', '@search.text_processor']
-+    tags:
-+      - { name: backend_overridable }
-diff --git a/core/modules/search/src/Plugin/views/argument/Search.php b/core/modules/search/src/Plugin/views/argument/Search.php
-index ab61880e14..02dee62a84 100644
---- a/core/modules/search/src/Plugin/views/argument/Search.php
-+++ b/core/modules/search/src/Plugin/views/argument/Search.php
-@@ -2,7 +2,6 @@
- 
- namespace Drupal\search\Plugin\views\argument;
- 
--use Drupal\search\ViewsSearchQuery;
- use Drupal\views\Plugin\views\argument\ArgumentPluginBase;
- use Drupal\views\Plugin\views\display\DisplayPluginBase;
- use Drupal\views\ViewExecutable;
-@@ -48,7 +47,7 @@ public function init(ViewExecutable $view, DisplayPluginBase $display, array &$o
-    */
-   protected function queryParseSearchExpression($input) {
-     if (!isset($this->searchQuery)) {
--      $this->searchQuery = \Drupal::service('database.replica')->select('search_index', 'i')->extend(ViewsSearchQuery::class);
-+      $this->searchQuery = \Drupal::service('database.replica')->select('search_index', 'i')->extend('views_search_query');
-       $this->searchQuery->searchExpression($input, $this->searchType);
-       $this->searchQuery->publicParseSearchExpression();
-     }
-diff --git a/core/modules/search/src/Plugin/views/filter/Search.php b/core/modules/search/src/Plugin/views/filter/Search.php
-index c0b0d4516b..1f53254651 100644
---- a/core/modules/search/src/Plugin/views/filter/Search.php
-+++ b/core/modules/search/src/Plugin/views/filter/Search.php
-@@ -3,7 +3,6 @@
- namespace Drupal\search\Plugin\views\filter;
- 
- use Drupal\Core\Form\FormStateInterface;
--use Drupal\search\ViewsSearchQuery;
- use Drupal\views\Plugin\views\filter\FilterPluginBase;
- use Drupal\views\Plugin\views\display\DisplayPluginBase;
- use Drupal\views\ViewExecutable;
-@@ -120,7 +119,7 @@ public function validateExposed(&$form, FormStateInterface $form_state) {
-   protected function queryParseSearchExpression($input) {
-     if (!isset($this->searchQuery)) {
-       $this->parsed = TRUE;
--      $this->searchQuery = \Drupal::service('database.replica')->select('search_index', 'i')->extend(ViewsSearchQuery::class);
-+      $this->searchQuery = \Drupal::service('database.replica')->select('search_index', 'i')->extend('views_search_query');
-       $this->searchQuery->searchExpression($input, $this->searchType);
-       $this->searchQuery->publicParseSearchExpression();
-     }
-diff --git a/core/modules/search/src/SearchQuery.php b/core/modules/search/src/SearchQuery.php
-index 6869da434f..793eed880e 100644
---- a/core/modules/search/src/SearchQuery.php
-+++ b/core/modules/search/src/SearchQuery.php
-@@ -2,6 +2,8 @@
- 
- namespace Drupal\search;
- 
-+use Drupal\Core\Config\ConfigFactoryInterface;
-+use Drupal\Core\Database\Connection;
- use Drupal\Core\Database\Query\SelectExtender;
- use Drupal\Core\Database\Query\SelectInterface;
- 
-@@ -186,6 +188,27 @@ class SearchQuery extends SelectExtender {
-    */
-   protected $multiply = [];
- 
-+  /**
-+   * Constructs a TableSortExtender object.
-+   *
-+   * @param \Drupal\Core\Database\Query\SelectInterface $query
-+   *   Select query object.
-+   * @param \Drupal\Core\Database\Connection $connection
-+   *   Database connection object.
-+   * @param \Drupal\Core\Config\ConfigFactoryInterface $configFactory
-+   *   The config factory.
-+   * @param \Drupal\search\SearchTextProcessorInterface $searchTextProcessor
-+   *   The search text processor service.
-+   */
-+  public function __construct(
-+    SelectInterface $query,
-+    Connection $connection,
-+    protected ConfigFactoryInterface $configFactory,
-+    protected SearchTextProcessorInterface $searchTextProcessor
-+  ) {
-+    parent::__construct($query, $connection);
-+  }
-+
-   /**
-    * Sets the search query expression.
-    *
-@@ -231,9 +254,7 @@ protected function parseSearchExpression() {
- 
-     // Classify tokens.
-     $in_or = FALSE;
--    $limit_combinations = \Drupal::config('search.settings')->get('and_or_limit');
--    /** @var \Drupal\search\SearchTextProcessorInterface $text_processor */
--    $text_processor = \Drupal::service('search.text_processor');
-+    $limit_combinations = $this->configFactory->get('search.settings')->get('and_or_limit');
-     // The first search expression does not count as AND.
-     $and_count = -1;
-     $or_count = 0;
-@@ -256,7 +277,7 @@ protected function parseSearchExpression() {
-       // Simplify keyword according to indexing rules and external
-       // preprocessors. Use same process as during search indexing, so it
-       // will match search index.
--      $words = $text_processor->analyze($match[2]);
-+      $words = $this->searchTextProcessor->analyze($match[2]);
-       // Re-explode in case simplification added more words, except when
-       // matching a phrase.
-       $words = $phrase ? [$words] : preg_split('/ /', $words, -1, PREG_SPLIT_NO_EMPTY);
-@@ -364,7 +385,7 @@ protected function parseWord($word) {
-     $split = explode(' ', $word);
-     foreach ($split as $s) {
-       $num = is_numeric($s);
--      if ($num || mb_strlen($s) >= \Drupal::config('search.settings')->get('index.minimum_word_size')) {
-+      if ($num || mb_strlen($s) >= $this->configFactory->get('search.settings')->get('index.minimum_word_size')) {
-         if (!isset($this->words[$s])) {
-           $this->words[$s] = $s;
-           $num_new_scores++;
-diff --git a/core/modules/search/src/SearchQueryFactory.php b/core/modules/search/src/SearchQueryFactory.php
-new file mode 100644
-index 0000000000..c807d932f3
---- /dev/null
-+++ b/core/modules/search/src/SearchQueryFactory.php
-@@ -0,0 +1,43 @@
-+<?php
-+
-+namespace Drupal\search;
-+
-+use Drupal\Core\Config\ConfigFactoryInterface;
-+use Drupal\Core\Database\Connection;
-+use Drupal\Core\Database\Query\SelectInterface;
-+
-+/**
-+ * Select extender factory for search queries.
-+ */
-+class SearchQueryFactory {
-+
-+  /**
-+   * Constructs a SearchQueryFactory object.
-+   *
-+   * @param \Drupal\Core\Config\ConfigFactoryInterface $configFactory
-+   *   The config factory.
-+   * @param \Drupal\search\SearchTextProcessorInterface $searchTextProcessor
-+   *   The search text processor service.
-+   */
-+  public function __construct(
-+    protected ConfigFactoryInterface $configFactory,
-+    protected SearchTextProcessorInterface $searchTextProcessor
-+  ) {
-+  }
-+
-+  /**
-+   * Returns a query extender for search queries.
-+   *
-+   * @param \Drupal\Core\Database\Query\SelectInterface $query
-+   *   Select query object.
-+   * @param \Drupal\Core\Database\Connection $connection
-+   *   Database connection object.
-+   *
-+   * @return Drupal\search\SearchQuery
-+   *   A query extender for search queries.
-+   */
-+  public function get(SelectInterface $query, Connection $connection): SearchQuery {
-+    return new SearchQuery($query, $connection, $this->configFactory, $this->searchTextProcessor);
-+  }
-+
-+}
-diff --git a/core/modules/search/src/ViewsSearchQueryFactory.php b/core/modules/search/src/ViewsSearchQueryFactory.php
-new file mode 100644
-index 0000000000..70beb8f612
---- /dev/null
-+++ b/core/modules/search/src/ViewsSearchQueryFactory.php
-@@ -0,0 +1,43 @@
-+<?php
-+
-+namespace Drupal\search;
-+
-+use Drupal\Core\Config\ConfigFactoryInterface;
-+use Drupal\Core\Database\Connection;
-+use Drupal\Core\Database\Query\SelectInterface;
-+
-+/**
-+ * Select extender factory for views search queries.
-+ */
-+class ViewsSearchQueryFactory {
-+
-+  /**
-+   * Constructs a ViewsSearchQueryFactory object.
-+   *
-+   * @param \Drupal\Core\Config\ConfigFactoryInterface $configFactory
-+   *   The config factory.
-+   * @param \Drupal\search\SearchTextProcessorInterface $searchTextProcessor
-+   *   The search text processor service.
-+   */
-+  public function __construct(
-+    protected ConfigFactoryInterface $configFactory,
-+    protected SearchTextProcessorInterface $searchTextProcessor
-+  ) {
-+  }
-+
-+  /**
-+   * Returns a query extender for views search queries.
-+   *
-+   * @param \Drupal\Core\Database\Query\SelectInterface $query
-+   *   Select query object.
-+   * @param \Drupal\Core\Database\Connection $connection
-+   *   Database connection object.
-+   *
-+   * @return Drupal\search\ViewsSearchQuery
-+   *   A query extender for views search queries.
-+   */
-+  public function get(SelectInterface $query, Connection $connection): ViewsSearchQuery {
-+    return new ViewsSearchQuery($query, $connection, $this->configFactory, $this->searchTextProcessor);
-+  }
-+
-+}
-diff --git a/core/modules/search/tests/src/Kernel/SearchMatchTest.php b/core/modules/search/tests/src/Kernel/SearchMatchTest.php
-index 9ec5853f72..6915d7dc53 100644
---- a/core/modules/search/tests/src/Kernel/SearchMatchTest.php
-+++ b/core/modules/search/tests/src/Kernel/SearchMatchTest.php
-@@ -6,7 +6,6 @@
- use Drupal\Core\Language\LanguageInterface;
- use Drupal\KernelTests\KernelTestBase;
- use Drupal\search\SearchIndexInterface;
--use Drupal\search\SearchQuery;
- 
- /**
-  * Indexes content and queries it.
-@@ -165,7 +164,7 @@ public function _testQueries() {
-     $connection = Database::getConnection();
-     foreach ($queries as $query => $results) {
-       $result = $connection->select('search_index', 'i')
--        ->extend(SearchQuery::class)
-+        ->extend('search_query')
-         ->searchExpression($query, static::SEARCH_TYPE)
-         ->execute();
- 
-@@ -185,7 +184,7 @@ public function _testQueries() {
-     ];
-     foreach ($queries as $query => $results) {
-       $result = $connection->select('search_index', 'i')
--        ->extend(SearchQuery::class)
-+        ->extend('search_query')
-         ->searchExpression($query, static::SEARCH_TYPE_2)
-         ->execute();
- 
-@@ -208,7 +207,7 @@ public function _testQueries() {
-     ];
-     foreach ($queries as $query => $results) {
-       $result = $connection->select('search_index', 'i')
--        ->extend(SearchQuery::class)
-+        ->extend('search_query')
-         ->searchExpression($query, static::SEARCH_TYPE_JPN)
-         ->execute();
- 
-diff --git a/core/modules/system/tests/modules/database_test/database_test.services.yml b/core/modules/system/tests/modules/database_test/database_test.services.yml
-new file mode 100644
-index 0000000000..25ee69707a
---- /dev/null
-+++ b/core/modules/system/tests/modules/database_test/database_test.services.yml
-@@ -0,0 +1,5 @@
-+services:
-+  select_extender_factory.test_extender:
-+    class: Drupal\database_test\TestExtenderFactory
-+    tags:
-+      - { name: backend_overridable }
-diff --git a/core/modules/system/tests/modules/database_test/src/Controller/DatabaseTestController.php b/core/modules/system/tests/modules/database_test/src/Controller/DatabaseTestController.php
-index ddc5f7577b..4f5bede810 100644
---- a/core/modules/system/tests/modules/database_test/src/Controller/DatabaseTestController.php
-+++ b/core/modules/system/tests/modules/database_test/src/Controller/DatabaseTestController.php
-@@ -4,8 +4,6 @@
- 
- use Drupal\Core\Controller\ControllerBase;
- use Drupal\Core\Database\Connection;
--use Drupal\Core\Database\Query\PagerSelectExtender;
--use Drupal\Core\Database\Query\TableSortExtender;
- use Symfony\Component\DependencyInjection\ContainerInterface;
- use Symfony\Component\HttpFoundation\JsonResponse;
- 
-@@ -56,7 +54,7 @@ public function pagerQueryEven($limit) {
- 
-     // This should result in 2 pages of results.
-     $query = $query
--      ->extend(PagerSelectExtender::class)
-+      ->extend('pager')
-       ->limit($limit);
- 
-     $names = $query->execute()->fetchCol();
-@@ -82,7 +80,7 @@ public function pagerQueryOdd($limit) {
- 
-     // This should result in 4 pages of results.
-     $query = $query
--      ->extend(PagerSelectExtender::class)
-+      ->extend('pager')
-       ->limit($limit);
- 
-     $names = $query->execute()->fetchCol();
-@@ -113,7 +111,7 @@ public function testTablesort() {
-       ->fields('t', ['tid', 'pid', 'task', 'priority']);
- 
-     $query = $query
--      ->extend(TableSortExtender::class)
-+      ->extend('table_sort')
-       ->orderByHeader($header);
- 
-     // We need all the results at once to check the sort.
-@@ -145,7 +143,7 @@ public function testTablesortFirst() {
-       ->fields('t', ['tid', 'pid', 'task', 'priority']);
- 
-     $query = $query
--      ->extend(TableSortExtender::class)
-+      ->extend('table_sort')
-       ->orderByHeader($header)
-       ->orderBy('priority');
- 
-diff --git a/core/modules/system/tests/modules/database_test/src/Form/DatabaseTestForm.php b/core/modules/system/tests/modules/database_test/src/Form/DatabaseTestForm.php
-index 5570c96f5f..07f538ad3a 100644
---- a/core/modules/system/tests/modules/database_test/src/Form/DatabaseTestForm.php
-+++ b/core/modules/system/tests/modules/database_test/src/Form/DatabaseTestForm.php
-@@ -3,8 +3,6 @@
- namespace Drupal\database_test\Form;
- 
- use Drupal\Core\Database\Database;
--use Drupal\Core\Database\Query\PagerSelectExtender;
--use Drupal\Core\Database\Query\TableSortExtender;
- use Drupal\Core\Form\FormBase;
- use Drupal\Core\Form\FormStateInterface;
- use Drupal\user\Entity\User;
-@@ -40,8 +38,8 @@ public function buildForm(array $form, FormStateInterface $form_state) {
-     $count_query->addExpression('COUNT([u].[uid])');
- 
-     $query = $query
--      ->extend(PagerSelectExtender::class)
--      ->extend(TableSortExtender::class);
-+      ->extend('pager')
-+      ->extend('table_sort');
-     $query
-       ->fields('u', ['uid'])
-       ->limit(50)
-diff --git a/core/modules/system/tests/modules/database_test/src/TestExtenderFactory.php b/core/modules/system/tests/modules/database_test/src/TestExtenderFactory.php
-new file mode 100644
-index 0000000000..d4624d14b8
---- /dev/null
-+++ b/core/modules/system/tests/modules/database_test/src/TestExtenderFactory.php
-@@ -0,0 +1,29 @@
-+<?php
-+
-+namespace Drupal\database_test;
-+
-+use Drupal\Core\Database\Connection;
-+use Drupal\Core\Database\Query\SelectExtender;
-+use Drupal\Core\Database\Query\SelectInterface;
-+
-+/**
-+ * Test select extender factory.
-+ */
-+class TestExtenderFactory {
-+
-+  /**
-+   * Returns a test query extender.
-+   *
-+   * @param \Drupal\Core\Database\Query\SelectInterface $query
-+   *   Select query object.
-+   * @param \Drupal\Core\Database\Connection $connection
-+   *   Database connection object.
-+   *
-+   * @return \Drupal\Core\Database\Query\SelectExtender
-+   *   A test query extender.
-+   */
-+  public function get(SelectInterface $query, Connection $connection): SelectExtender {
-+    return new SelectExtender($query, $connection);
-+  }
-+
-+}
-diff --git a/core/modules/system/tests/modules/pager_test/src/Controller/PagerTestController.php b/core/modules/system/tests/modules/pager_test/src/Controller/PagerTestController.php
-index 2cdba66012..7ed5dfa9e7 100644
---- a/core/modules/system/tests/modules/pager_test/src/Controller/PagerTestController.php
-+++ b/core/modules/system/tests/modules/pager_test/src/Controller/PagerTestController.php
-@@ -4,7 +4,6 @@
- 
- use Drupal\Core\Controller\ControllerBase;
- use Drupal\Core\Database\Database;
--use Drupal\Core\Database\Query\PagerSelectExtender;
- use Drupal\Core\Pager\PagerParametersInterface;
- use Drupal\Core\Security\TrustedCallbackInterface;
- use Symfony\Component\DependencyInjection\ContainerInterface;
-@@ -55,7 +54,7 @@ protected function buildTestTable($element, $limit) {
-       ['data' => 'type'],
-       ['data' => 'timestamp'],
-     ];
--    $query = Database::getConnection()->select('watchdog', 'd')->extend(PagerSelectExtender::class)->element($element);
-+    $query = Database::getConnection()->select('watchdog', 'd')->extend('pager')->element($element);
-     $result = $query
-       ->fields('d', ['wid', 'type', 'timestamp'])
-       ->limit($limit)
-diff --git a/core/modules/system/tests/src/Functional/Database/SelectPagerDefaultTest.php b/core/modules/system/tests/src/Functional/Database/SelectPagerDefaultTest.php
-index 41aa5c3a83..ef7079bfdf 100644
---- a/core/modules/system/tests/src/Functional/Database/SelectPagerDefaultTest.php
-+++ b/core/modules/system/tests/src/Functional/Database/SelectPagerDefaultTest.php
-@@ -4,7 +4,6 @@
- 
- use Drupal\Component\Render\FormattableMarkup;
- use Drupal\Core\Database\Database;
--use Drupal\Core\Database\Query\PagerSelectExtender;
- use Symfony\Component\HttpFoundation\Request;
- 
- /**
-@@ -95,7 +94,7 @@ public function testOddPagerQuery() {
-   public function testInnerPagerQuery() {
-     $connection = Database::getConnection();
-     $query = $connection->select('test', 't')
--      ->extend(PagerSelectExtender::class);
-+      ->extend('pager');
-     $query
-       ->fields('t', ['age'])
-       ->orderBy('age')
-@@ -118,7 +117,7 @@ public function testInnerPagerQuery() {
-    */
-   public function testHavingPagerQuery() {
-     $query = Database::getConnection()->select('test', 't')
--      ->extend(PagerSelectExtender::class);
-+      ->extend('pager');
-     $query
-       ->fields('t', ['name'])
-       ->orderBy('name')
-@@ -145,7 +144,7 @@ public function testElementNumbers() {
- 
-     $connection = Database::getConnection();
-     $query = $connection->select('test', 't')
--      ->extend(PagerSelectExtender::class)
-+      ->extend('pager')
-       ->element(2)
-       ->fields('t', ['name'])
-       ->orderBy('age')
-@@ -158,7 +157,7 @@ public function testElementNumbers() {
-     // Setting an element smaller than the previous one should not collide with
-     // the existing pager.
-     $query = $connection->select('test', 't')
--      ->extend(PagerSelectExtender::class)
-+      ->extend('pager')
-       ->element(1)
-       ->fields('t', ['name'])
-       ->orderBy('age')
-@@ -169,7 +168,7 @@ public function testElementNumbers() {
-     $this->assertEquals('George', $name, 'Pager query #2 with a specified element ID returned the correct results.');
- 
-     $query = $connection->select('test', 't')
--      ->extend(PagerSelectExtender::class)
-+      ->extend('pager')
-       ->fields('t', ['name'])
-       ->orderBy('age')
-       ->limit(1);
-diff --git a/core/modules/tracker/src/Controller/TrackerController.php b/core/modules/tracker/src/Controller/TrackerController.php
-index aeb65755ee..469f55a071 100644
---- a/core/modules/tracker/src/Controller/TrackerController.php
-+++ b/core/modules/tracker/src/Controller/TrackerController.php
-@@ -7,7 +7,6 @@
- use Drupal\Core\Cache\CacheableMetadata;
- use Drupal\Core\Controller\ControllerBase;
- use Drupal\Core\Database\Connection;
--use Drupal\Core\Database\Query\PagerSelectExtender;
- use Drupal\Core\Datetime\DateFormatterInterface;
- use Drupal\Core\Entity\EntityTypeManagerInterface;
- use Drupal\Core\Session\AccountInterface;
-@@ -131,13 +130,13 @@ public function checkAccess(UserInterface $user, AccountInterface $account) {
-   public function buildContent(UserInterface $user = NULL) {
-     if ($user) {
-       $query = $this->database->select('tracker_user', 't')
--        ->extend(PagerSelectExtender::class)
-+        ->extend('pager')
-         ->addMetaData('base_table', 'tracker_user')
-         ->condition('t.uid', $user->id());
-     }
-     else {
-       $query = $this->databaseReplica->select('tracker_node', 't')
--        ->extend(PagerSelectExtender::class)
-+        ->extend('pager')
-         ->addMetaData('base_table', 'tracker_node');
-     }
- 
-diff --git a/core/modules/user/src/Plugin/Search/UserSearch.php b/core/modules/user/src/Plugin/Search/UserSearch.php
-index 28f5d0e833..eabe843e77 100644
---- a/core/modules/user/src/Plugin/Search/UserSearch.php
-+++ b/core/modules/user/src/Plugin/Search/UserSearch.php
-@@ -4,7 +4,6 @@
- 
- use Drupal\Core\Access\AccessResult;
- use Drupal\Core\Database\Connection;
--use Drupal\Core\Database\Query\PagerSelectExtender;
- use Drupal\Core\Entity\EntityTypeManagerInterface;
- use Drupal\Core\Extension\ModuleHandlerInterface;
- use Drupal\Core\Session\AccountInterface;
-@@ -120,7 +119,7 @@ public function execute() {
-     // Run the query to find matching users.
-     $query = $this->database
-       ->select('users_field_data', 'users')
--      ->extend(PagerSelectExtender::class);
-+      ->extend('pager');
-     $query->fields('users', ['uid']);
-     $query->condition('default_langcode', 1);
-     if ($this->currentUser->hasPermission('administer users')) {
-diff --git a/core/tests/Drupal/KernelTests/Core/Database/SelectComplexTest.php b/core/tests/Drupal/KernelTests/Core/Database/SelectComplexTest.php
-index 281f3d4d57..8ea4610b13 100644
---- a/core/tests/Drupal/KernelTests/Core/Database/SelectComplexTest.php
-+++ b/core/tests/Drupal/KernelTests/Core/Database/SelectComplexTest.php
-@@ -4,7 +4,6 @@
- 
- use Drupal\Component\Render\FormattableMarkup;
- use Drupal\Core\Database\Database;
--use Drupal\Core\Database\Query\PagerSelectExtender;
- use Drupal\Core\Database\RowCountException;
- use Drupal\user\Entity\User;
- 
-@@ -211,7 +210,7 @@ public function testCountQuery() {
-    */
-   public function testHavingCountQuery() {
-     $query = $this->connection->select('test')
--      ->extend(PagerSelectExtender::class)
-+      ->extend('pager')
-       ->groupBy('age')
-       ->having('[age] + 1 > 0');
-     $query->addField('test', 'age');
-diff --git a/core/tests/Drupal/KernelTests/Core/Database/SelectExtenderTest.php b/core/tests/Drupal/KernelTests/Core/Database/SelectExtenderTest.php
-index 5a23f9a250..e5edc558e1 100644
---- a/core/tests/Drupal/KernelTests/Core/Database/SelectExtenderTest.php
-+++ b/core/tests/Drupal/KernelTests/Core/Database/SelectExtenderTest.php
-@@ -16,6 +16,11 @@
-  */
- class SelectExtenderTest extends KernelTestBase {
+@@ -489,6 +492,86 @@ protected function doCommit() {
+     return $success;
+   }
  
 +  /**
 +   * {@inheritdoc}
 +   */
-+  protected static $modules = ['database_test', 'search'];
++  public function exceptionHandler() {
++    return new ExceptionHandler();
++  }
 +
-   /**
-    * Data provider for testExtend().
-    *
-@@ -23,89 +28,29 @@ class SelectExtenderTest extends KernelTestBase {
-    *   Array of arrays with the following elements:
-    *   - Expected namespaced class name.
-    *   - The database driver namespace.
--   *   - The namespaced class name for which to extend.
-+   *   - The suffix of the select_extender_factory.[suffix] service.
-    */
-   public function providerExtend(): array {
-     return [
-       [
-         'Drupal\Core\Database\Query\PagerSelectExtender',
-         'Drupal\corefake\Driver\Database\corefake',
--        'Drupal\Core\Database\Query\PagerSelectExtender',
--      ],
--      [
--        'Drupal\Core\Database\Query\PagerSelectExtender',
--        'Drupal\corefake\Driver\Database\corefake',
--        '\Drupal\Core\Database\Query\PagerSelectExtender',
--      ],
--      [
--        'Drupal\Core\Database\Query\TableSortExtender',
--        'Drupal\corefake\Driver\Database\corefake',
--        'Drupal\Core\Database\Query\TableSortExtender',
-+        'pager',
-       ],
-       [
-         'Drupal\Core\Database\Query\TableSortExtender',
-         'Drupal\corefake\Driver\Database\corefake',
--        '\Drupal\Core\Database\Query\TableSortExtender',
-+        'table_sort',
-       ],
-       [
-         'Drupal\search\SearchQuery',
-         'Drupal\corefake\Driver\Database\corefake',
--        'Drupal\search\SearchQuery',
--      ],
--      [
--        'Drupal\search\SearchQuery',
--        'Drupal\corefake\Driver\Database\corefake',
--        '\Drupal\search\SearchQuery',
--      ],
--      [
--        'Drupal\search\ViewsSearchQuery',
--        'Drupal\corefake\Driver\Database\corefake',
--        'Drupal\search\ViewsSearchQuery',
-+        'search_query',
-       ],
-       [
-         'Drupal\search\ViewsSearchQuery',
-         'Drupal\corefake\Driver\Database\corefake',
--        '\Drupal\search\ViewsSearchQuery',
--      ],
--      [
--        'Drupal\corefake\Driver\Database\corefakeWithAllCustomClasses\PagerSelectExtender',
--        'Drupal\corefake\Driver\Database\corefakeWithAllCustomClasses',
--        'Drupal\Core\Database\Query\PagerSelectExtender',
--      ],
--      [
--        'Drupal\corefake\Driver\Database\corefakeWithAllCustomClasses\PagerSelectExtender',
--        'Drupal\corefake\Driver\Database\corefakeWithAllCustomClasses',
--        '\Drupal\Core\Database\Query\PagerSelectExtender',
--      ],
--      [
--        'Drupal\corefake\Driver\Database\corefakeWithAllCustomClasses\TableSortExtender',
--        'Drupal\corefake\Driver\Database\corefakeWithAllCustomClasses',
--        'Drupal\Core\Database\Query\TableSortExtender',
--      ],
--      [
--        'Drupal\corefake\Driver\Database\corefakeWithAllCustomClasses\TableSortExtender',
--        'Drupal\corefake\Driver\Database\corefakeWithAllCustomClasses',
--        '\Drupal\Core\Database\Query\TableSortExtender',
--      ],
--      [
--        'Drupal\corefake\Driver\Database\corefakeWithAllCustomClasses\SearchQuery',
--        'Drupal\corefake\Driver\Database\corefakeWithAllCustomClasses',
--        'Drupal\search\SearchQuery',
--      ],
--      [
--        'Drupal\corefake\Driver\Database\corefakeWithAllCustomClasses\SearchQuery',
--        'Drupal\corefake\Driver\Database\corefakeWithAllCustomClasses',
--        '\Drupal\search\SearchQuery',
--      ],
--      [
--        'Drupal\corefake\Driver\Database\corefakeWithAllCustomClasses\ViewsSearchQuery',
--        'Drupal\corefake\Driver\Database\corefakeWithAllCustomClasses',
--        'Drupal\search\ViewsSearchQuery',
--      ],
--      [
--        'Drupal\corefake\Driver\Database\corefakeWithAllCustomClasses\ViewsSearchQuery',
--        'Drupal\corefake\Driver\Database\corefakeWithAllCustomClasses',
--        '\Drupal\search\ViewsSearchQuery',
-+        'views_search_query',
-       ],
-     ];
++  /**
++   * {@inheritdoc}
++   */
++  public function select($table, $alias = NULL, array $options = []) {
++    return new Select($this, $table, $alias, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function insert($table, array $options = []) {
++    return new Insert($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function merge($table, array $options = []) {
++    return new Merge($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function upsert($table, array $options = []) {
++    return new Upsert($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function update($table, array $options = []) {
++    return new Update($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function delete($table, array $options = []) {
++    return new Delete($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function truncate($table, array $options = []) {
++    return new Truncate($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function schema() {
++    if (empty($this->schema)) {
++      $this->schema = new Schema($this);
++    }
++    return $this->schema;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function condition($conjunction) {
++    return new Condition($conjunction, FALSE);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function startTransaction($name = '') {
++    return new Transaction($this, $name);
++  }
++
+ }
+ 
+ 
+diff --git a/core/modules/pgsql/src/Driver/Database/pgsql/Connection.php b/core/modules/pgsql/src/Driver/Database/pgsql/Connection.php
+index b36525b337e72a1a852cf1c2a2101ac64f1ad10a..4e21c1dc231b1caf8d495c545199462ebca5c7f4 100644
+--- a/core/modules/pgsql/src/Driver/Database/pgsql/Connection.php
++++ b/core/modules/pgsql/src/Driver/Database/pgsql/Connection.php
+@@ -2,12 +2,15 @@
+ 
+ namespace Drupal\pgsql\Driver\Database\pgsql;
+ 
+-use Drupal\Core\Database\Database;
+ use Drupal\Core\Database\Connection as DatabaseConnection;
++use Drupal\Core\Database\Database;
+ use Drupal\Core\Database\DatabaseAccessDeniedException;
+ use Drupal\Core\Database\DatabaseNotFoundException;
++use Drupal\Core\Database\ExceptionHandler;
++use Drupal\Core\Database\Query\Condition;
+ use Drupal\Core\Database\StatementInterface;
+ use Drupal\Core\Database\StatementWrapper;
++use Drupal\Core\Database\Transaction;
+ 
+ // cSpell:ignore ilike nextval
+ 
+@@ -380,6 +383,86 @@ public function hasJson(): bool {
+     }
    }
-@@ -116,25 +61,20 @@ public function providerExtend(): array {
-    * @dataProvider providerExtend
+ 
++  /**
++   * {@inheritdoc}
++   */
++  public function exceptionHandler() {
++    return new ExceptionHandler();
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function select($table, $alias = NULL, array $options = []) {
++    return new Select($this, $table, $alias, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function insert($table, array $options = []) {
++    return new Insert($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function merge($table, array $options = []) {
++    return new Merge($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function upsert($table, array $options = []) {
++    return new Upsert($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function update($table, array $options = []) {
++    return new Update($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function delete($table, array $options = []) {
++    return new Delete($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function truncate($table, array $options = []) {
++    return new Truncate($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function schema() {
++    if (empty($this->schema)) {
++      $this->schema = new Schema($this);
++    }
++    return $this->schema;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function condition($conjunction) {
++    return new Condition($conjunction, FALSE);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function startTransaction($name = '') {
++    return new Transaction($this, $name);
++  }
++
+ }
+ 
+ /**
+diff --git a/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php b/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php
+index 17fd2567d574f641076897ff8ce87f8ac31027a5..6a122e3de903a7960faa9c68a5aa0b6e560ec83a 100644
+--- a/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php
++++ b/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php
+@@ -2,9 +2,12 @@
+ 
+ namespace Drupal\sqlite\Driver\Database\sqlite;
+ 
+-use Drupal\Core\Database\DatabaseNotFoundException;
+ use Drupal\Core\Database\Connection as DatabaseConnection;
++use Drupal\Core\Database\DatabaseNotFoundException;
++use Drupal\Core\Database\ExceptionHandler;
++use Drupal\Core\Database\Query\Condition;
+ use Drupal\Core\Database\StatementInterface;
++use Drupal\Core\Database\Transaction;
+ 
+ /**
+  * SQLite implementation of \Drupal\Core\Database\Connection.
+@@ -529,4 +532,84 @@ public static function createUrlFromConnectionOptions(array $connection_options)
+     return $db_url;
+   }
+ 
++  /**
++   * {@inheritdoc}
++   */
++  public function exceptionHandler() {
++    return new ExceptionHandler();
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function select($table, $alias = NULL, array $options = []) {
++    return new Select($this, $table, $alias, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function insert($table, array $options = []) {
++    return new Insert($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function merge($table, array $options = []) {
++    return new Merge($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function upsert($table, array $options = []) {
++    return new Upsert($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function update($table, array $options = []) {
++    return new Update($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function delete($table, array $options = []) {
++    return new Delete($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function truncate($table, array $options = []) {
++    return new Truncate($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function schema() {
++    if (empty($this->schema)) {
++      $this->schema = new Schema($this);
++    }
++    return $this->schema;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function condition($conjunction) {
++    return new Condition($conjunction, FALSE);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function startTransaction($name = '') {
++    return new Transaction($this, $name);
++  }
++
+ }
+diff --git a/core/modules/system/system.install b/core/modules/system/system.install
+index 2e1bab4caaa6f15b7bda40053b5014d5e29e8ec0..ab64dcdf59a0b26964150296669da800064f542c 100644
+--- a/core/modules/system/system.install
++++ b/core/modules/system/system.install
+@@ -526,7 +526,8 @@ function system_requirements($phase) {
+ 
+   if ($phase === 'runtime' || $phase === 'update') {
+     // Database information.
+-    $class = Database::getConnection()->getDriverClass('Install\\Tasks');
++    $connection = Database::getConnection();
++    $class = $connection->getConnectionOptions()['namespace'] . '\\Install\\Tasks';
+     /** @var \Drupal\Core\Database\Install\Tasks $tasks */
+     $tasks = new $class();
+     $requirements['database_system'] = [
+@@ -535,7 +536,7 @@ function system_requirements($phase) {
+     ];
+     $requirements['database_system_version'] = [
+       'title' => t('Database system version'),
+-      'value' => Database::getConnection()->version(),
++      'value' => $connection->version(),
+     ];
+ 
+     $errors = $tasks->engineVersionRequirementsCheck();
+diff --git a/core/modules/system/tests/modules/database_statement_monitoring_test/src/LoggedStatementsTrait.php b/core/modules/system/tests/modules/database_statement_monitoring_test/src/LoggedStatementsTrait.php
+index 677f4fd891825e3282071e9f00ee101573de325c..1f23fcb77dc360e710a85af9147ab725afb82240 100644
+--- a/core/modules/system/tests/modules/database_statement_monitoring_test/src/LoggedStatementsTrait.php
++++ b/core/modules/system/tests/modules/database_statement_monitoring_test/src/LoggedStatementsTrait.php
+@@ -45,6 +45,7 @@ public function resetLoggedStatements() {
     */
-   public function testExtend(string $expected, string $namespace, string $extend): void {
--    $additional_class_loader = new ClassLoader();
--    $additional_class_loader->addPsr4("Drupal\\corefake\\Driver\\Database\\corefake\\", __DIR__ . "/../../../../../tests/fixtures/database_drivers/module/corefake/src/Driver/Database/corefake");
--    $additional_class_loader->addPsr4("Drupal\\corefake\\Driver\\Database\\corefakeWithAllCustomClasses\\", __DIR__ . "/../../../../../tests/fixtures/database_drivers/module/corefake/src/Driver/Database/corefakeWithAllCustomClasses");
--    $additional_class_loader->register(TRUE);
--
+   public function getDriverClass($class) {
+     static $fixed_namespace;
++    @trigger_error(__METHOD__ . '() is deprecated in drupal:9.4.0 and is removed from drupal:10.0.0. Use standard autoloading in the methods that return database operations. See https://www.drupal.org/node/3217534', E_USER_DEPRECATED);
+     if (!$fixed_namespace) {
+       // Override because we've altered the namespace in
+       // \Drupal\KernelTests\Core\Cache\EndOfTransactionQueriesTest::getDatabaseConnectionInfo()
+diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Connection.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Connection.php
+index a87a0d386951d2a3d7f3fa209cd10ddc1897421b..7804b59545e3eb2dde988a8060883c64c8067658 100644
+--- a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Connection.php
++++ b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Connection.php
+@@ -4,6 +4,7 @@
+ 
+ include_once dirname(__DIR__, 8) . '/mysql/src/Driver/Database/mysql/Connection.php';
+ 
++use Drupal\Core\Database\Query\Condition;
+ use Drupal\mysql\Driver\Database\mysql\Connection as CoreConnection;
+ 
+ /**
+@@ -18,4 +19,84 @@ public function driver() {
+     return 'DrivertestMysql';
+   }
+ 
++  /**
++   * {@inheritdoc}
++   */
++  public function exceptionHandler() {
++    return new ExceptionHandler();
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function select($table, $alias = NULL, array $options = []) {
++    return new Select($this, $table, $alias, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function insert($table, array $options = []) {
++    return new Insert($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function merge($table, array $options = []) {
++    return new Merge($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function upsert($table, array $options = []) {
++    return new Upsert($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function update($table, array $options = []) {
++    return new Update($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function delete($table, array $options = []) {
++    return new Delete($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function truncate($table, array $options = []) {
++    return new Truncate($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function schema() {
++    if (empty($this->schema)) {
++      $this->schema = new Schema($this);
++    }
++    return $this->schema;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function condition($conjunction) {
++    return new Condition($conjunction, FALSE);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function startTransaction($name = '') {
++    return new Transaction($this, $name);
++  }
++
+ }
+diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/ExceptionHandler.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/ExceptionHandler.php
+new file mode 100644
+index 0000000000000000000000000000000000000000..45943adbb0edba972a9fd66f60eff22297ad4a37
+--- /dev/null
++++ b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/ExceptionHandler.php
+@@ -0,0 +1,12 @@
++<?php
++
++namespace Drupal\driver_test\Driver\Database\DrivertestMysql;
++
++include_once dirname(__DIR__, 8) . '/mysql/src/Driver/Database/mysql/ExceptionHandler.php';
++
++use Drupal\mysql\Driver\Database\mysql\ExceptionHandler as BaseExceptionHandler;
++
++/**
++ * MySQL test implementation of \Drupal\Core\Database\Query\ExceptionHandler.
++ */
++class ExceptionHandler extends BaseExceptionHandler {}
+diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Connection.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Connection.php
+index 6ef463cb157784a41724f5c9df7ede946a8e9f05..c37e43a504fd0d178ad1c52591fc292785574cb9 100644
+--- a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Connection.php
++++ b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Connection.php
+@@ -4,6 +4,7 @@
+ 
+ include_once dirname(__DIR__, 8) . '/mysql/src/Driver/Database/mysql/Connection.php';
+ 
++use Drupal\Core\Database\Query\Condition;
+ use Drupal\mysql\Driver\Database\mysql\Connection as CoreConnection;
+ 
+ /**
+@@ -48,4 +49,84 @@ protected function getServerVersion(): string {
+     return $this->databaseVersion;
+   }
+ 
++  /**
++   * {@inheritdoc}
++   */
++  public function exceptionHandler() {
++    return new ExceptionHandler();
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function select($table, $alias = NULL, array $options = []) {
++    return new Select($this, $table, $alias, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function insert($table, array $options = []) {
++    return new Insert($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function merge($table, array $options = []) {
++    return new Merge($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function upsert($table, array $options = []) {
++    return new Upsert($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function update($table, array $options = []) {
++    return new Update($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function delete($table, array $options = []) {
++    return new Delete($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function truncate($table, array $options = []) {
++    return new Truncate($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function schema() {
++    if (empty($this->schema)) {
++      $this->schema = new Schema($this);
++    }
++    return $this->schema;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function condition($conjunction) {
++    return new Condition($conjunction, FALSE);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function startTransaction($name = '') {
++    return new Transaction($this, $name);
++  }
++
+ }
+diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/ExceptionHandler.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/ExceptionHandler.php
+new file mode 100644
+index 0000000000000000000000000000000000000000..e411878dff5a18b9e4009dd7d9cf0dc27f0ba7ca
+--- /dev/null
++++ b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/ExceptionHandler.php
+@@ -0,0 +1,12 @@
++<?php
++
++namespace Drupal\driver_test\Driver\Database\DrivertestMysqlDeprecatedVersion;
++
++include_once dirname(__DIR__, 8) . '/mysql/src/Driver/Database/mysql/ExceptionHandler.php';
++
++use Drupal\mysql\Driver\Database\mysql\ExceptionHandler as BaseExceptionHandler;
++
++/**
++ * MySQL test implementation of \Drupal\Core\Database\Query\ExceptionHandler.
++ */
++class ExceptionHandler extends BaseExceptionHandler {}
+diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Connection.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Connection.php
+index e45d48ade944ee3d65c9d3567c024cc77dba820a..9956848373a51e39737a028f42268ab0301dcbd8 100644
+--- a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Connection.php
++++ b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Connection.php
+@@ -4,6 +4,7 @@
+ 
+ include_once dirname(__DIR__, 8) . '/pgsql/src/Driver/Database/pgsql/Connection.php';
+ 
++use Drupal\Core\Database\Query\Condition;
+ use Drupal\pgsql\Driver\Database\pgsql\Connection as CoreConnection;
+ 
+ /**
+@@ -18,4 +19,84 @@ public function driver() {
+     return 'DrivertestPgsql';
+   }
+ 
++  /**
++   * {@inheritdoc}
++   */
++  public function exceptionHandler() {
++    return new ExceptionHandler();
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function select($table, $alias = NULL, array $options = []) {
++    return new Select($this, $table, $alias, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function insert($table, array $options = []) {
++    return new Insert($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function merge($table, array $options = []) {
++    return new Merge($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function upsert($table, array $options = []) {
++    return new Upsert($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function update($table, array $options = []) {
++    return new Update($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function delete($table, array $options = []) {
++    return new Delete($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function truncate($table, array $options = []) {
++    return new Truncate($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function schema() {
++    if (empty($this->schema)) {
++      $this->schema = new Schema($this);
++    }
++    return $this->schema;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function condition($conjunction) {
++    return new Condition($conjunction, FALSE);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function startTransaction($name = '') {
++    return new Transaction($this, $name);
++  }
++
+ }
+diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/ExceptionHandler.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/ExceptionHandler.php
+new file mode 100644
+index 0000000000000000000000000000000000000000..b5e998a566b3d2b13d7c4e5e3ee1c0d28553ec88
+--- /dev/null
++++ b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/ExceptionHandler.php
+@@ -0,0 +1,12 @@
++<?php
++
++namespace Drupal\driver_test\Driver\Database\DrivertestPgsql;
++
++include_once dirname(__DIR__, 8) . '/pgsql/src/Driver/Database/pgsql/ExceptionHandler.php';
++
++use Drupal\pgsql\Driver\Database\pgsql\ExceptionHandler as BaseExceptionHandler;
++
++/**
++ * MySQL test implementation of \Drupal\Core\Database\Query\ExceptionHandler.
++ */
++class ExceptionHandler extends BaseExceptionHandler {}
+diff --git a/core/tests/Drupal/KernelTests/Core/Database/ConnectionTest.php b/core/tests/Drupal/KernelTests/Core/Database/ConnectionTest.php
+index 570146fc10da67be1efeb025711b504c83de093b..8ff3d93e143e33b548a0c013853782ecdf21b395 100644
+--- a/core/tests/Drupal/KernelTests/Core/Database/ConnectionTest.php
++++ b/core/tests/Drupal/KernelTests/Core/Database/ConnectionTest.php
+@@ -100,8 +100,6 @@ public function testConnectionOptions() {
+     // Set up identical replica and confirm connection options are identical.
+     Database::addConnectionInfo('default', 'replica', $connection_info['default']);
+     $db2 = Database::getConnection('replica', 'default');
+-    // Getting a driver class ensures the namespace option is set.
+-    $this->assertEquals($db->getDriverClass('Select'), $db2->getDriverClass('Select'));
+     $connectionOptions2 = $db2->getConnectionOptions();
+ 
+     // Get a fresh copy of the default connection options.
+diff --git a/core/tests/Drupal/KernelTests/Core/Database/SelectExtenderTest.php b/core/tests/Drupal/KernelTests/Core/Database/SelectExtenderTest.php
+index 914231805a205f090173e1886c9e4d045f3542bc..7c1d4b4bc0fd0b707594a11ec12c2b95269fc30b 100644
+--- a/core/tests/Drupal/KernelTests/Core/Database/SelectExtenderTest.php
++++ b/core/tests/Drupal/KernelTests/Core/Database/SelectExtenderTest.php
+@@ -127,12 +127,14 @@ public function testExtendLegacy(string $expected, string $namespace, string $ex
+     $this->expectDeprecation("Passing '%A' as a fully qualified class name to %A is deprecated in drupal:9.4.0 and is removed from drupal:10.0.0. Pass the appropriate suffix for a 'select_extender_factory' service instead. See https://www.drupal.org/node/3218001", E_USER_DEPRECATED);
+ 
+     $additional_class_loader = new ClassLoader();
++    $additional_class_loader->addPsr4("Drupal\\Driver\\Database\\fake\\", __DIR__ . "/../../../../../tests/fixtures/database_drivers/custom/fake");
+     $additional_class_loader->addPsr4("Drupal\\corefake\\Driver\\Database\\corefake\\", __DIR__ . "/../../../../../tests/fixtures/database_drivers/module/corefake/src/Driver/Database/corefake");
+     $additional_class_loader->addPsr4("Drupal\\corefake\\Driver\\Database\\corefakeWithAllCustomClasses\\", __DIR__ . "/../../../../../tests/fixtures/database_drivers/module/corefake/src/Driver/Database/corefakeWithAllCustomClasses");
+     $additional_class_loader->register(TRUE);
+ 
      $mock_pdo = $this->createMock(StubPDO::class);
-     $connection = new StubConnection($mock_pdo, ['namespace' => $namespace]);
+-    $connection = new StubConnection($mock_pdo, ['namespace' => $namespace]);
++    $connection_class = "$namespace\\Connection";
++    $connection = new $connection_class($mock_pdo, ['namespace' => $namespace]);
  
      // Tests the method \Drupal\Core\Database\Query\Select::extend().
      $select = $connection->select('test')->extend($extend);
--    $this->assertEquals($expected, get_class($select));
-+    $this->assertInstanceOf($expected, $select);
+diff --git a/core/tests/Drupal/Tests/Core/Database/ConditionTest.php b/core/tests/Drupal/Tests/Core/Database/ConditionTest.php
+index 05b65b5f7d67961a857d28a32c1c78f12dd1752a..921db314b8e24a9cfb675ad91c54697c7e1c9757 100644
+--- a/core/tests/Drupal/Tests/Core/Database/ConditionTest.php
++++ b/core/tests/Drupal/Tests/Core/Database/ConditionTest.php
+@@ -5,6 +5,7 @@
+ use Drupal\Core\Database\Connection;
+ use Drupal\Core\Database\Query\Condition;
+ use Drupal\Core\Database\Query\PlaceholderInterface;
++use Drupal\Tests\Core\Database\Stub\StubCondition;
+ use Drupal\Tests\Core\Database\Stub\StubConnection;
+ use Drupal\Tests\Core\Database\Stub\StubPDO;
+ use Drupal\Tests\UnitTestCase;
+@@ -184,14 +185,7 @@ public function providerTestCompileWithSqlInjectionForOperator() {
+    * Tests that the core Condition can be overridden.
+    */
+   public function testContribCondition() {
+-    $mockCondition = $this->getMockBuilder(Condition::class)
+-      ->setMockClassName('MockCondition')
+-      ->setConstructorArgs([NULL])
+-      ->disableOriginalConstructor()
+-      ->getMock();
+     $contrib_namespace = 'Drupal\mock\Driver\Database\mock';
+-    $mocked_namespace = $contrib_namespace . '\\Condition';
+-    class_alias('MockCondition', $mocked_namespace);
  
-     // Get an instance of the class \Drupal\Core\Database\Query\SelectExtender.
--    $select_extender = $connection->select('test')->extend(SelectExtender::class);
--    $this->assertEquals(SelectExtender::class, get_class($select_extender));
-+    $select_extender = $connection->select('test')->extend('test_extender');
-+    $this->assertInstanceOf(SelectExtender::class, $select_extender);
+     $options['namespace'] = $contrib_namespace;
+     $options['prefix'] = '';
+@@ -200,7 +194,7 @@ class_alias('MockCondition', $mocked_namespace);
  
-     // Tests the method \Drupal\Core\Database\Query\SelectExtender::extend().
-     $select_extender_extended = $select_extender->extend($extend);
--    $this->assertEquals($expected, get_class($select_extender_extended));
-+    $this->assertInstanceOf($expected, $select_extender_extended);
+     $connection = new StubConnection($mockPdo, $options);
+     $condition = $connection->condition('AND');
+-    $this->assertSame('MockCondition', get_class($condition));
++    $this->assertSame(StubCondition::class, get_class($condition));
    }
  
+   /**
+diff --git a/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php b/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
+index 09b2f1a9ab08008406372f57c4e0b0e05603c45d..86de17a513f0dd24510220172d8287fd04173aef 100644
+--- a/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
++++ b/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
+@@ -316,8 +316,10 @@ public function providerGetDriverClass() {
+   /**
+    * @covers ::getDriverClass
+    * @dataProvider providerGetDriverClass
++   * @group legacy
+    */
+   public function testGetDriverClass($expected, $namespace, $class) {
++    $this->expectDeprecation('Drupal\Core\Database\Connection::getDriverClass() is deprecated in drupal:9.4.0 and is removed from drupal:10.0.0. Use standard autoloading in the methods that return database operations. See https://www.drupal.org/node/3217534');
+     $additional_class_loader = new ClassLoader();
+     $additional_class_loader->addPsr4("Drupal\\corefake\\Driver\\Database\\corefake\\", __DIR__ . "/../../../../../tests/fixtures/database_drivers/module/corefake/src/Driver/Database/corefake");
+     $additional_class_loader->addPsr4("Drupal\\corefake\\Driver\\Database\\corefakeWithAllCustomClasses\\", __DIR__ . "/../../../../../tests/fixtures/database_drivers/module/corefake/src/Driver/Database/corefakeWithAllCustomClasses");
+diff --git a/core/tests/Drupal/Tests/Core/Database/Stub/StubCondition.php b/core/tests/Drupal/Tests/Core/Database/Stub/StubCondition.php
+new file mode 100644
+index 0000000000000000000000000000000000000000..3b7b79a69973aa9dfc61a380334de1756e780595
+--- /dev/null
++++ b/core/tests/Drupal/Tests/Core/Database/Stub/StubCondition.php
+@@ -0,0 +1,11 @@
++<?php
++
++namespace Drupal\Tests\Core\Database\Stub;
++
++use Drupal\Core\Database\Query\Condition;
++
++/**
++ * A stub of core Condition class for testing purposes.
++ */
++class StubCondition extends Condition {
++}
+diff --git a/core/tests/Drupal/Tests/Core/Database/Stub/StubConnection.php b/core/tests/Drupal/Tests/Core/Database/Stub/StubConnection.php
+index b553dcce0dc54868b4ac27b067d817360186d2c4..a12cf67123976623d63e60332423c445d196f506 100644
+--- a/core/tests/Drupal/Tests/Core/Database/Stub/StubConnection.php
++++ b/core/tests/Drupal/Tests/Core/Database/Stub/StubConnection.php
+@@ -3,8 +3,18 @@
+ namespace Drupal\Tests\Core\Database\Stub;
+ 
+ use Drupal\Core\Database\Connection;
++use Drupal\Core\Database\ExceptionHandler;
+ use Drupal\Core\Database\Log;
++use Drupal\Core\Database\Query\Delete;
++use Drupal\Core\Database\Query\Insert;
++use Drupal\Core\Database\Query\Merge;
++use Drupal\Core\Database\Query\Select;
++use Drupal\Core\Database\Query\Truncate;
++use Drupal\Core\Database\Query\Update;
++use Drupal\Core\Database\Query\Upsert;
+ use Drupal\Core\Database\StatementWrapper;
++use Drupal\Core\Database\Transaction;
++use Drupal\Tests\Core\Database\Stub\Driver\Schema;
+ 
+ /**
+  * A stub of the abstract Connection class for testing purposes.
+@@ -110,4 +120,84 @@ public function testLogCaller() {
+     return (new Log())->findCaller();
+   }
+ 
++  /**
++   * {@inheritdoc}
++   */
++  public function exceptionHandler() {
++    return new ExceptionHandler();
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function select($table, $alias = NULL, array $options = []) {
++    return new Select($this, $table, $alias, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function insert($table, array $options = []) {
++    return new Insert($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function merge($table, array $options = []) {
++    return new Merge($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function upsert($table, array $options = []) {
++    return new Upsert($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function update($table, array $options = []) {
++    return new Update($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function delete($table, array $options = []) {
++    return new Delete($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function truncate($table, array $options = []) {
++    return new Truncate($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function schema() {
++    if (empty($this->schema)) {
++      $this->schema = new Schema($this);
++    }
++    return $this->schema;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function condition($conjunction) {
++    return new StubCondition($conjunction, FALSE);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function startTransaction($name = '') {
++    return new Transaction($this, $name);
++  }
++
  }
-diff --git a/core/tests/Drupal/KernelTests/Core/Database/SelectTest.php b/core/tests/Drupal/KernelTests/Core/Database/SelectTest.php
-index fe85345d9b..3301f5b713 100644
---- a/core/tests/Drupal/KernelTests/Core/Database/SelectTest.php
-+++ b/core/tests/Drupal/KernelTests/Core/Database/SelectTest.php
-@@ -5,7 +5,6 @@
- use Drupal\Core\Database\InvalidQueryException;
- use Drupal\Core\Database\Database;
- use Drupal\Core\Database\DatabaseExceptionWrapper;
--use Drupal\Core\Database\Query\SelectExtender;
+diff --git a/core/tests/fixtures/database_drivers/custom/fake/Connection.php b/core/tests/fixtures/database_drivers/custom/fake/Connection.php
+index ec0c9cf2dc90728badbd9bfa19bedac89994a1d3..1af84f85269c61971e5755db43a50115b86fd5e9 100644
+--- a/core/tests/fixtures/database_drivers/custom/fake/Connection.php
++++ b/core/tests/fixtures/database_drivers/custom/fake/Connection.php
+@@ -3,12 +3,38 @@
+ namespace Drupal\Driver\Database\fake;
+ 
+ use Drupal\Core\Database\Connection as CoreConnection;
++use Drupal\Core\Database\ExceptionHandler;
++use Drupal\Core\Database\Query\Condition;
++use Drupal\Core\Database\Query\Delete;
++use Drupal\Core\Database\Query\Insert;
++use Drupal\Core\Database\Query\Merge;
++use Drupal\Core\Database\Query\Select;
++use Drupal\Core\Database\Query\Truncate;
++use Drupal\Core\Database\Query\Update;
++use Drupal\Core\Database\Query\Upsert;
++use Drupal\Core\Database\StatementWrapper;
++use Drupal\Core\Database\Transaction;
  
  /**
-  * Tests the Select query builder.
-@@ -281,7 +280,7 @@ public function testAlwaysFalseCondition() {
+  * A fake Connection class for testing purposes.
+  */
+ class Connection extends CoreConnection {
+ 
++  /**
++   * {@inheritdoc}
++   */
++  protected $statementClass = NULL;
++
++  /**
++   * {@inheritdoc}
++   */
++  protected $statementWrapperClass = StatementWrapper::class;
++
++  /**
++   * {@inheritdoc}
++   */
++  protected $identifierQuotes = ['"', '"'];
++
+   /**
+    * Public property so we can test driver loading mechanism.
+    *
+@@ -65,4 +91,84 @@ public function nextId($existing_id = 0) {
+     return 0;
+   }
+ 
++  /**
++   * {@inheritdoc}
++   */
++  public function exceptionHandler() {
++    return new ExceptionHandler();
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function select($table, $alias = NULL, array $options = []) {
++    return new Select($this, $table, $alias, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function insert($table, array $options = []) {
++    return new Insert($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function merge($table, array $options = []) {
++    return new Merge($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function upsert($table, array $options = []) {
++    return new Upsert($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function update($table, array $options = []) {
++    return new Update($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function delete($table, array $options = []) {
++    return new Delete($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function truncate($table, array $options = []) {
++    return new Truncate($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function schema() {
++    if (empty($this->schema)) {
++      $this->schema = new Schema($this);
++    }
++    return $this->schema;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function condition($conjunction) {
++    return new Condition($conjunction, FALSE);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function startTransaction($name = '') {
++    return new Transaction($this, $name);
++  }
++
+ }
+diff --git a/core/tests/fixtures/database_drivers/module/corefake/src/Driver/Database/corefakeWithAllCustomClasses/Connection.php b/core/tests/fixtures/database_drivers/module/corefake/src/Driver/Database/corefakeWithAllCustomClasses/Connection.php
+index ecf7e5cccc4a66cc3fc74324e0eb119b124e2489..5f44ffa533c57696100d9a884fa6d88b447ee19f 100644
+--- a/core/tests/fixtures/database_drivers/module/corefake/src/Driver/Database/corefakeWithAllCustomClasses/Connection.php
++++ b/core/tests/fixtures/database_drivers/module/corefake/src/Driver/Database/corefakeWithAllCustomClasses/Connection.php
+@@ -14,4 +14,84 @@ class Connection extends BaseConnection {
     */
-   public function testExtenderAlwaysFalseCondition() {
-     $names = $this->connection->select('test', 'test')
--      ->extend(SelectExtender::class)
-+      ->extend('test_extender')
-       ->fields('test', ['name'])
-       ->condition('age', 27)
-       ->execute()->fetchCol();
-@@ -290,7 +289,7 @@ public function testExtenderAlwaysFalseCondition() {
-     $this->assertSame($names[0], 'George');
+   public $driver = 'corefakeWithAllCustomClasses';
  
-     $names = $this->connection->select('test', 'test')
--      ->extend(SelectExtender::class)
-+      ->extend('test_extender')
-       ->fields('test', ['name'])
-       ->condition('age', 27)
-       ->alwaysFalse()
-diff --git a/core/tests/Drupal/KernelTests/Core/Database/TaggingTest.php b/core/tests/Drupal/KernelTests/Core/Database/TaggingTest.php
-index 3a9ea2c7e6..51b0e1a1ee 100644
---- a/core/tests/Drupal/KernelTests/Core/Database/TaggingTest.php
-+++ b/core/tests/Drupal/KernelTests/Core/Database/TaggingTest.php
-@@ -2,8 +2,6 @@
- 
- namespace Drupal\KernelTests\Core\Database;
- 
--use Drupal\Core\Database\Query\SelectExtender;
--
- /**
-  * Tests the tagging capabilities of the Select builder.
-  *
-@@ -62,7 +60,7 @@ public function testHasAnyTag() {
-    */
-   public function testExtenderHasTag() {
-     $query = $this->connection->select('test')
--      ->extend(SelectExtender::class);
-+      ->extend('test_extender');
-     $query->addField('test', 'name');
-     $query->addField('test', 'age', 'age');
- 
-@@ -77,7 +75,7 @@ public function testExtenderHasTag() {
-    */
-   public function testExtenderHasAllTags() {
-     $query = $this->connection->select('test')
--      ->extend(SelectExtender::class);
-+      ->extend('test_extender');
-     $query->addField('test', 'name');
-     $query->addField('test', 'age', 'age');
- 
-@@ -93,7 +91,7 @@ public function testExtenderHasAllTags() {
-    */
-   public function testExtenderHasAnyTag() {
-     $query = $this->connection->select('test')
--      ->extend(SelectExtender::class);
-+      ->extend('test_extender');
-     $query->addField('test', 'name');
-     $query->addField('test', 'age', 'age');
- 
++  /**
++   * {@inheritdoc}
++   */
++  public function exceptionHandler() {
++    return new ExceptionHandler();
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function select($table, $alias = NULL, array $options = []) {
++    return new Select($this, $table, $alias, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function insert($table, array $options = []) {
++    return new Insert($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function merge($table, array $options = []) {
++    return new Merge($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function upsert($table, array $options = []) {
++    return new Upsert($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function update($table, array $options = []) {
++    return new Update($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function delete($table, array $options = []) {
++    return new Delete($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function truncate($table, array $options = []) {
++    return new Truncate($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function schema() {
++    if (empty($this->schema)) {
++      $this->schema = new Schema($this);
++    }
++    return $this->schema;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function condition($conjunction) {
++    return new Condition($conjunction, FALSE);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function startTransaction($name = '') {
++    return new Transaction($this, $name);
++  }
++
+ }
