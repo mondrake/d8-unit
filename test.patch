@@ -1,5 +1,5 @@
 diff --git a/core/lib/Drupal/Core/Database/StatementWrapper.php b/core/lib/Drupal/Core/Database/StatementWrapper.php
-index 8a3bc208c5..ed6b7513f0 100644
+index 8a3bc208c5..7216a9882b 100644
 --- a/core/lib/Drupal/Core/Database/StatementWrapper.php
 +++ b/core/lib/Drupal/Core/Database/StatementWrapper.php
 @@ -7,7 +7,7 @@
@@ -16,45 +16,46 @@ index 8a3bc208c5..ed6b7513f0 100644
    protected $rowCountEnabled = FALSE;
  
 +  /**
-+   * Validity of the last execution of the statement.
++   * Traces if rows can be fetched from the resultset.
 +   *
 +   * @var bool
 +   */
-+  protected bool $currentExecution = FALSE;
++  private $isResultsetIterable = FALSE;
 +
 +  /**
 +   * The current row, retrieved in the current fetch format.
 +   *
 +   * @var mixed
 +   */
-+  protected mixed $currentRow = NULL;
++  private $resultsetRow = NULL;
 +
 +  /**
 +   * The key of the current row.
 +   *
-+   * @var int|null
++   * @var int
 +   */
-+  protected ?int $currentKey = NULL;
++  private $resultsetKey = -1;
 +
    /**
     * Constructs a StatementWrapper object.
     *
-@@ -76,6 +97,9 @@ public function getConnectionTarget(): string {
+@@ -76,6 +97,7 @@ public function getConnectionTarget(): string {
     * {@inheritdoc}
     */
    public function execute($args = [], $options = []) {
-+    $this->currentRow = NULL;
-+    $this->currentKey = NULL;
 +
      if (isset($options['fetch'])) {
        if (is_string($options['fetch'])) {
          // \PDO::FETCH_PROPS_LATE tells __construct() to run before properties
-@@ -92,14 +116,14 @@ public function execute($args = [], $options = []) {
+@@ -92,14 +114,17 @@ public function execute($args = [], $options = []) {
        $query_start = microtime(TRUE);
      }
  
 -    $return = $this->clientStatement->execute($args);
-+    $this->currentExecution = $this->clientStatement->execute($args);
++    // Fetching previous results, if any, should be stopped.
++    $this->markResultsetFetchingComplete();
++
++    $this->isResultsetIterable = $this->clientStatement->execute($args);
  
      if (!empty($logger)) {
        $query_end = microtime(TRUE);
@@ -62,11 +63,11 @@ index 8a3bc208c5..ed6b7513f0 100644
      }
  
 -    return $return;
-+    return $this->currentExecution;
++    return $this->isResultsetIterable;
    }
  
    /**
-@@ -154,15 +178,14 @@ public function fetchAllKeyed($key_index = 0, $value_index = 1) {
+@@ -154,15 +179,14 @@ public function fetchAllKeyed($key_index = 0, $value_index = 1) {
     * {@inheritdoc}
     */
    public function fetchField($index = 0) {
@@ -84,36 +85,34 @@ index 8a3bc208c5..ed6b7513f0 100644
      return $this->fetch(\PDO::FETCH_ASSOC);
    }
  
-@@ -170,10 +193,26 @@ public function fetchAssoc() {
+@@ -170,10 +194,24 @@ public function fetchAssoc() {
     * {@inheritdoc}
     */
    public function fetchObject(string $class_name = NULL, array $constructor_arguments = NULL) {
 +global $xxx;
      if ($class_name) {
 -      return $this->clientStatement->fetchObject($class_name, $constructor_arguments);
-+      $this->currentRow = $this->clientStatement->fetchObject($class_name, $constructor_arguments);
-+if($xxx) dump(['class', $class_name, $constructor_arguments, $this->currentRow]);
++      $this->resultsetRow = $this->clientStatement->fetchObject($class_name, $constructor_arguments);
++if($xxx) dump(['class', $class_name, $constructor_arguments, $this->resultsetRow]);
++    }
++    else {
++      $this->resultsetRow = $this->clientStatement->fetchObject();
++if($xxx) dump(['no class', $class_name, $constructor_arguments, $this->resultsetRow]);
      }
 -    return $this->clientStatement->fetchObject();
-+    else {
-+      $this->currentRow = $this->clientStatement->fetchObject();
-+if($xxx) dump(['no class', $class_name, $constructor_arguments, $this->currentRow]);
-+    }
 +
-+    if ($this->currentRow) {
-+      $this->currentKey = $this->currentKey === NULL ? 0 : $this->currentKey++;
++    if ($this->resultsetRow) {
++      $this->incrementResultsetKey();
 +    }
 +    else {
-+      $this->currentExecution = FALSE;
-+      $this->currentRow = NULL;
-+      $this->currentKey = NULL;
++      $this->markResultsetFetchingComplete();
 +    }
 +
-+    return $this->currentRow;
++    return $this->resultsetRow;
    }
  
    /**
-@@ -215,27 +254,46 @@ public function setFetchMode($mode, $a1 = NULL, $a2 = []) {
+@@ -215,21 +253,34 @@ public function setFetchMode($mode, $a1 = NULL, $a2 = []) {
    public function fetch($mode = NULL, $cursor_orientation = NULL, $cursor_offset = NULL) {
      // Call \PDOStatement::fetchAll to fetch all rows.
      // \PDOStatement is picky about the number of arguments in some cases so we
@@ -122,50 +121,64 @@ index 8a3bc208c5..ed6b7513f0 100644
      switch (func_num_args()) {
        case 0:
 -        return $this->clientStatement->fetch();
-+        $this->currentRow = $this->clientStatement->fetch();
++        $this->resultsetRow = $this->clientStatement->fetch();
 +        break;
  
        case 1:
 -        return $this->clientStatement->fetch($mode);
-+        $this->currentRow = $this->clientStatement->fetch($mode);
++        $this->resultsetRow = $this->clientStatement->fetch($mode);
 +        break;
  
        case 2:
 -        return $this->clientStatement->fetch($mode, $cursor_orientation);
-+        $this->currentRow = $this->clientStatement->fetch($mode, $cursor_orientation);
++        $this->resultsetRow = $this->clientStatement->fetch($mode, $cursor_orientation);
 +        break;
  
        case 3:
        default:
 -        return $this->clientStatement->fetch($mode, $cursor_orientation, $cursor_offset);
-+        $this->currentRow = $this->clientStatement->fetch($mode, $cursor_orientation, $cursor_offset);
++        $this->resultsetRow = $this->clientStatement->fetch($mode, $cursor_orientation, $cursor_offset);
 +        break;
-     }
++    }
 +
-+    if ($this->currentRow) {
-+      $this->currentKey = $this->currentKey === NULL ? 0 : $this->currentKey++;
++    if ($this->resultsetRow) {
++      $this->incrementResultsetKey();
 +    }
 +    else {
-+      $this->currentExecution = FALSE;
-+      $this->currentRow = NULL;
-+      $this->currentKey = NULL;
-+    }
++      $this->markResultsetFetchingComplete();
+     }
 +
-+    return $this->currentRow;
++    return $this->resultsetRow;
    }
  
    /**
-    * {@inheritdoc}
-    */
-   public function fetchAll($mode = NULL, $column_index = NULL, $constructor_arguments = NULL) {
-+    $this->currentExecution = FALSE;
-+    $this->currentRow = NULL;
-+    $this->currentKey = NULL;
-+
-     // Call \PDOStatement::fetchAll to fetch all rows.
-     // \PDOStatement is picky about the number of arguments in some cases so we
+@@ -241,26 +292,100 @@ public function fetchAll($mode = NULL, $column_index = NULL, $constructor_argume
      // need to be pass the exact number of arguments we where given.
-@@ -256,11 +314,62 @@ public function fetchAll($mode = NULL, $column_index = NULL, $constructor_argume
+     switch (func_num_args()) {
+       case 0:
+-        return $this->clientStatement->fetchAll();
++        $ret = $this->clientStatement->fetchAll();
++        break;
+ 
+       case 1:
+-        return $this->clientStatement->fetchAll($mode);
++        $ret = $this->clientStatement->fetchAll($mode);
++        break;
+ 
+       case 2:
+-        return $this->clientStatement->fetchAll($mode, $column_index);
++        $ret = $this->clientStatement->fetchAll($mode, $column_index);
++        break;
+ 
+       case 3:
+       default:
+-        return $this->clientStatement->fetchAll($mode, $column_index, $constructor_arguments);
++        $ret = $this->clientStatement->fetchAll($mode, $column_index, $constructor_arguments);
+     }
++
++    $this->markResultsetFetchingComplete();
++
++    return $ret;
    }
  
    /**
@@ -182,15 +195,31 @@ index 8a3bc208c5..ed6b7513f0 100644
    }
  
 +  /**
++   * Increase the counter of fetched rows.
++   */
++  protected function incrementResultsetKey(): void {
++    $this->resultsetKey++;
++  }
++
++  /**
++   * Informs the iterator that no more rows can be fetched from the resultset.
++   */
++  protected function markResultsetFetchingComplete(): void {
++    $this->isResultsetIterable = FALSE;
++    $this->resultsetRow = NULL;
++    $this->resultsetKey = -1;
++  }
++
++  /**
 +   * {@inheritdoc}
 +   *
 +   * @internal This method should not be called directly.
 +   */
 +  public function current(): mixed {
-+    if ($this->currentExecution && $this->currentKey === NULL) {
++    if ($this->isResultsetIterable && $this->resultsetKey === -1) {
 +      $this->fetch();
 +    }
-+    return $this->currentRow;
++    return $this->resultsetRow;
 +  }
 +
 +  /**
@@ -199,7 +228,7 @@ index 8a3bc208c5..ed6b7513f0 100644
 +   * @internal This method should not be called directly.
 +   */
 +  public function key(): mixed {
-+    return $this->currentKey;
++    return $this->resultsetKey;
 +  }
 +
 +  /**
@@ -226,7 +255,7 @@ index 8a3bc208c5..ed6b7513f0 100644
 +   * @internal This method should not be called directly.
 +   */
 +  public function valid(): bool {
-+    return $this->currentExecution;
++    return $this->isResultsetIterable;
 +  }
 +
  }
