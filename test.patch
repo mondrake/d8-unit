@@ -1,5 +1,5 @@
 diff --git a/core/lib/Drupal/Core/Database/StatementWrapper.php b/core/lib/Drupal/Core/Database/StatementWrapper.php
-index 8a3bc208c5..7ffa9eccbd 100644
+index 8a3bc208c5..b70400dd59 100644
 --- a/core/lib/Drupal/Core/Database/StatementWrapper.php
 +++ b/core/lib/Drupal/Core/Database/StatementWrapper.php
 @@ -7,7 +7,7 @@
@@ -39,40 +39,22 @@ index 8a3bc208c5..7ffa9eccbd 100644
    /**
     * Constructs a StatementWrapper object.
     *
-@@ -76,6 +97,7 @@ public function getConnectionTarget(): string {
-    * {@inheritdoc}
-    */
-   public function execute($args = [], $options = []) {
-+
-     if (isset($options['fetch'])) {
-       if (is_string($options['fetch'])) {
-         // \PDO::FETCH_PROPS_LATE tells __construct() to run before properties
-@@ -92,14 +114,15 @@ public function execute($args = [], $options = []) {
-       $query_start = microtime(TRUE);
+@@ -93,6 +114,7 @@ public function execute($args = [], $options = []) {
      }
  
--    $return = $this->clientStatement->execute($args);
-+    $ret = $this->clientStatement->execute($args);
-+    $this->markResultsetFetchable($ret);
+     $return = $this->clientStatement->execute($args);
++    $this->markResultsetFetchable($return);
  
      if (!empty($logger)) {
        $query_end = microtime(TRUE);
-       $logger->log($this, $args, $query_end - $query_start, $query_start);
-     }
- 
--    return $return;
-+    return $ret;
-   }
- 
-   /**
-@@ -154,15 +177,14 @@ public function fetchAllKeyed($key_index = 0, $value_index = 1) {
+@@ -154,15 +176,14 @@ public function fetchAllKeyed($key_index = 0, $value_index = 1) {
     * {@inheritdoc}
     */
    public function fetchField($index = 0) {
 -    // Call \PDOStatement::fetchColumn to fetch the field.
 -    return $this->clientStatement->fetchColumn($index);
-+    $ret = $this->fetch(\PDO::FETCH_NUM);
-+    return $ret === FALSE ? FALSE : ($ret[$index] ?? NULL);
++    $return = $this->fetch(\PDO::FETCH_NUM);
++    return $return === FALSE ? FALSE : ($return[$index] ?? NULL);
    }
  
    /**
@@ -83,34 +65,30 @@ index 8a3bc208c5..7ffa9eccbd 100644
      return $this->fetch(\PDO::FETCH_ASSOC);
    }
  
-@@ -170,10 +192,24 @@ public function fetchAssoc() {
-    * {@inheritdoc}
+@@ -171,9 +192,20 @@ public function fetchAssoc() {
     */
    public function fetchObject(string $class_name = NULL, array $constructor_arguments = NULL) {
-+global $xxx;
      if ($class_name) {
 -      return $this->clientStatement->fetchObject($class_name, $constructor_arguments);
-+      $this->resultsetRow = $this->clientStatement->fetchObject($class_name, $constructor_arguments);
-+if($xxx) dump(['class', $class_name, $constructor_arguments, $this->resultsetRow]);
++      $row = $this->clientStatement->fetchObject($class_name, $constructor_arguments);
 +    }
 +    else {
-+      $this->resultsetRow = $this->clientStatement->fetchObject();
-+if($xxx) dump(['no class', $class_name, $constructor_arguments, $this->resultsetRow]);
++      $row = $this->clientStatement->fetchObject();
 +    }
 +
-+    if ($this->resultsetRow) {
-+      $this->incrementResultsetKey();
-     }
--    return $this->clientStatement->fetchObject();
++    if ($row) {
++      $this->setCurrentResultsetRow($row);
++    }
 +    else {
 +      $this->markResultsetFetchingComplete();
-+    }
+     }
+-    return $this->clientStatement->fetchObject();
 +
-+    return $this->resultsetRow;
++    return $row;
    }
  
    /**
-@@ -215,21 +251,34 @@ public function setFetchMode($mode, $a1 = NULL, $a2 = []) {
+@@ -215,21 +247,34 @@ public function setFetchMode($mode, $a1 = NULL, $a2 = []) {
    public function fetch($mode = NULL, $cursor_orientation = NULL, $cursor_offset = NULL) {
      // Call \PDOStatement::fetchAll to fetch all rows.
      // \PDOStatement is picky about the number of arguments in some cases so we
@@ -119,64 +97,64 @@ index 8a3bc208c5..7ffa9eccbd 100644
      switch (func_num_args()) {
        case 0:
 -        return $this->clientStatement->fetch();
-+        $this->resultsetRow = $this->clientStatement->fetch();
++        $row = $this->clientStatement->fetch();
 +        break;
  
        case 1:
 -        return $this->clientStatement->fetch($mode);
-+        $this->resultsetRow = $this->clientStatement->fetch($mode);
++        $row = $this->clientStatement->fetch($mode);
 +        break;
  
        case 2:
 -        return $this->clientStatement->fetch($mode, $cursor_orientation);
-+        $this->resultsetRow = $this->clientStatement->fetch($mode, $cursor_orientation);
++        $row = $this->clientStatement->fetch($mode, $cursor_orientation);
 +        break;
  
        case 3:
        default:
 -        return $this->clientStatement->fetch($mode, $cursor_orientation, $cursor_offset);
-+        $this->resultsetRow = $this->clientStatement->fetch($mode, $cursor_orientation, $cursor_offset);
++        $row = $this->clientStatement->fetch($mode, $cursor_orientation, $cursor_offset);
 +        break;
 +    }
 +
-+    if ($this->resultsetRow) {
-+      $this->incrementResultsetKey();
++    if ($row) {
++      $this->setCurrentResultsetRow($row);
 +    }
 +    else {
 +      $this->markResultsetFetchingComplete();
      }
 +
-+    return $this->resultsetRow;
++    return $row;
    }
  
    /**
-@@ -241,26 +290,109 @@ public function fetchAll($mode = NULL, $column_index = NULL, $constructor_argume
+@@ -241,26 +286,116 @@ public function fetchAll($mode = NULL, $column_index = NULL, $constructor_argume
      // need to be pass the exact number of arguments we where given.
      switch (func_num_args()) {
        case 0:
 -        return $this->clientStatement->fetchAll();
-+        $ret = $this->clientStatement->fetchAll();
++        $return = $this->clientStatement->fetchAll();
 +        break;
  
        case 1:
 -        return $this->clientStatement->fetchAll($mode);
-+        $ret = $this->clientStatement->fetchAll($mode);
++        $return = $this->clientStatement->fetchAll($mode);
 +        break;
  
        case 2:
 -        return $this->clientStatement->fetchAll($mode, $column_index);
-+        $ret = $this->clientStatement->fetchAll($mode, $column_index);
++        $return = $this->clientStatement->fetchAll($mode, $column_index);
 +        break;
  
        case 3:
        default:
 -        return $this->clientStatement->fetchAll($mode, $column_index, $constructor_arguments);
-+        $ret = $this->clientStatement->fetchAll($mode, $column_index, $constructor_arguments);
++        $return = $this->clientStatement->fetchAll($mode, $column_index, $constructor_arguments);
      }
 +
 +    $this->markResultsetFetchingComplete();
 +
-+    return $ret;
++    return $return;
    }
  
    /**
@@ -193,7 +171,10 @@ index 8a3bc208c5..7ffa9eccbd 100644
    }
  
 +  /**
-+  * Informs the iterator that whether rows can be fetched from the resultset.
++   * Informs the iterator that whether rows can be fetched from the resultset.
++   *
++   * @var bool $valid
++   *   The result of the execution of the client statement.
 +   */
 +  protected function markResultsetFetchable(bool $valid): void {
 +    $this->isResultsetFetchable = $valid;
@@ -202,9 +183,13 @@ index 8a3bc208c5..7ffa9eccbd 100644
 +  }
 +
 +  /**
-+   * Increase the counter of fetched rows.
++   * Sets the current resultset row for the iterator, and increments the key.
++   *
++   * @var mixed $row
++   *   The last row fetched from the client statement.
 +   */
-+  protected function incrementResultsetKey(): void {
++  protected function setCurrentResultsetRow($row): void {
++    $this->resultsetRow = $row;
 +    $this->resultsetKey++;
 +  }
 +
@@ -266,23 +251,3 @@ index 8a3bc208c5..7ffa9eccbd 100644
 +  }
 +
  }
-diff --git a/core/tests/Drupal/KernelTests/Core/Database/FetchTest.php b/core/tests/Drupal/KernelTests/Core/Database/FetchTest.php
-index c692fa56f5..1129cdf5d0 100644
---- a/core/tests/Drupal/KernelTests/Core/Database/FetchTest.php
-+++ b/core/tests/Drupal/KernelTests/Core/Database/FetchTest.php
-@@ -86,6 +86,7 @@ public function testQueryFetchClass() {
-    * @see \Drupal\Core\Database\StatementPrefetch::fetchObject
-    */
-   public function testQueryFetchObjectClass() {
-+global $xxx; $xxx=TRUE;
-     $records = 0;
-     $query = $this->connection->query('SELECT [name] FROM {test} WHERE [age] = :age', [':age' => 25]);
-     while ($result = $query->fetchObject(FakeRecord::class, [1])) {
-@@ -95,6 +96,7 @@ public function testQueryFetchObjectClass() {
-       $this->assertSame(1, $result->fakeArg, 'The record has received an argument through its constructor.');
-     }
-     $this->assertSame(1, $records, 'There is only one record.');
-+$xxx=FALSE;
-   }
- 
-   /**
