@@ -1,5 +1,5 @@
 diff --git a/core/lib/Drupal/Component/Diff/Diff.php b/core/lib/Drupal/Component/Diff/Diff.php
-index 289bab5f0e..52d0b90021 100644
+index 289bab5f0e..e976082767 100644
 --- a/core/lib/Drupal/Component/Diff/Diff.php
 +++ b/core/lib/Drupal/Component/Diff/Diff.php
 @@ -3,6 +3,13 @@
@@ -16,13 +16,23 @@ index 289bab5f0e..52d0b90021 100644
  
  /**
   * Class representing a 'diff' between two sequences of strings.
-@@ -36,9 +43,55 @@ class Diff {
+@@ -16,6 +23,8 @@
+  */
+ class Diff {
+ 
++  private const CHANGED = 999;
++
+   /**
+    * The list of differences as an array of diff operations.
+    *
+@@ -34,11 +43,80 @@ class Diff {
+    *   An array of strings.
+    */
    public function __construct($from_lines, $to_lines) {
-     $eng = new DiffEngine();
-     $this->edits = $eng->diff($from_lines, $to_lines);
-+dump([$from_lines, $to_lines, $this->edits]);
+-    $eng = new DiffEngine();
+-    $this->edits = $eng->diff($from_lines, $to_lines);
 +    $differ = new Differ(new UnifiedDiffOutputBuilder());
-+dump($this->toDiffOps($differ->diffToArray($from_lines, $to_lines)));
++    $this->edits = $this->toDiffOps($differ->diffToArray($from_lines, $to_lines));
      //$this->_check($from_lines, $to_lines);
    }
  
@@ -31,8 +41,24 @@ index 289bab5f0e..52d0b90021 100644
 +    $hunkMode = NULL;
 +    $hunkSource = [];
 +    $hunkTarget = [];
++
 +    for ($i = 0; $i < count($diffArray); $i++) {
-+      $mode = $diffArray[$i][1] === Differ::REMOVED && $diffArray[$i + 1][1] === Differ::ADDED ? 'change' : $diffArray[$i][1];
++
++      if (($diffArray[$i][1] === Differ::REMOVED || $diffArray[$i][1] === Differ::ADDED) && isset($diffArray[$i + 1])) {
++        if ($diffArray[$i][1] === Differ::REMOVED && $diffArray[$i + 1][1] === Differ::ADDED) {
++          $mode = self::CHANGED;
++        }
++        elseif ($diffArray[$i][1] === Differ::ADDED && $diffArray[$i + 1][1] === Differ::REMOVED) {
++          $mode = self::CHANGED;
++        }
++        else {
++          $mode = $diffArray[$i][1];
++        }
++      }
++      else {
++        $mode = $diffArray[$i][1];
++      }
++
 +      if ($hunkMode === NULL) {
 +        $hunkMode = $mode;
 +      }
@@ -42,37 +68,47 @@ index 289bab5f0e..52d0b90021 100644
 +        $hunkSource = [];
 +        $hunkTarget = [];
 +      }
++
 +      $hunkSource[] = $diffArray[$i][0];
-+      if ($hunkMode === 'change') {
++      if ($hunkMode === self::CHANGED) {
 +        $hunkTarget[] = $diffArray[$i + 1][0];
 +        $i++;
 +      }
 +    }
-+    $ops[] = $this->hunkOp($hunkMode, $hunkSource, $hunkTarget);
++
++    if ($hunkMode !== NULL) {
++      $ops[] = $this->hunkOp($hunkMode, $hunkSource, $hunkTarget);
++    }
++
 +    return $ops;
 +  }
 +
-+  private function hunkOp(int|string $mode, array $source, array $target): DiffOp {
++  private function hunkOp(int $mode, array $source, array $target): DiffOp {
 +    switch ($mode) {
 +      case Differ::OLD:
-+        return new DiffOpCopy($source);
++        $op = new DiffOpCopy($source);
++        break;
 +
-+      case 'change':
-+        return new DiffOpChange($source, $target);
++      case self::CHANGED:
++        $op = new DiffOpChange($source, $target);
++        break;
 +
 +      case Differ::ADDED:
-+        return new DiffOpAdd($source);
++        $op = new DiffOpAdd($source);
++        break;
 +
 +      case Differ::REMOVED:
-+        return new DiffOpDelete($source);
++        $op = new DiffOpDelete($source);
++        break;
 +
 +    }
++    return $op;
 +  }
 +
    /**
     * Compute reversed Diff.
     *
-@@ -50,6 +103,7 @@ public function __construct($from_lines, $to_lines) {
+@@ -50,6 +128,7 @@ public function __construct($from_lines, $to_lines) {
     *   A Diff object representing the inverse of the original diff.
     */
    public function reverse() {
@@ -80,7 +116,7 @@ index 289bab5f0e..52d0b90021 100644
      $rev = $this;
      $rev->edits = [];
      foreach ($this->edits as $edit) {
-@@ -64,6 +118,7 @@ public function reverse() {
+@@ -64,6 +143,7 @@ public function reverse() {
     * @return bool True iff two sequences were identical.
     */
    public function isEmpty() {
@@ -88,7 +124,7 @@ index 289bab5f0e..52d0b90021 100644
      foreach ($this->edits as $edit) {
        if ($edit->type != 'copy') {
          return FALSE;
-@@ -80,6 +135,7 @@ public function isEmpty() {
+@@ -80,6 +160,7 @@ public function isEmpty() {
     * @return int The length of the LCS.
     */
    public function lcs() {
@@ -96,7 +132,7 @@ index 289bab5f0e..52d0b90021 100644
      $lcs = 0;
      foreach ($this->edits as $edit) {
        if ($edit->type == 'copy') {
-@@ -98,6 +154,7 @@ public function lcs() {
+@@ -98,6 +179,7 @@ public function lcs() {
     * @return array The original sequence of strings.
     */
    public function orig() {
@@ -104,7 +140,7 @@ index 289bab5f0e..52d0b90021 100644
      $lines = [];
  
      foreach ($this->edits as $edit) {
-@@ -117,6 +174,7 @@ public function orig() {
+@@ -117,6 +199,7 @@ public function orig() {
     * @return array The sequence of strings.
     */
    public function closing() {
@@ -112,7 +148,7 @@ index 289bab5f0e..52d0b90021 100644
      $lines = [];
  
      foreach ($this->edits as $edit) {
-@@ -133,6 +191,7 @@ public function closing() {
+@@ -133,6 +216,7 @@ public function closing() {
     * This is here only for debugging purposes.
     */
    public function check($from_lines, $to_lines) {
