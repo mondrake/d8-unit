@@ -45,10 +45,10 @@ index 6b972c88d4..2625c4f022 100644
      class: Drupal\Core\Extension\ExtensionPathResolver
      arguments: ['@extension.list.module', '@extension.list.profile', '@extension.list.theme', '@extension.list.theme_engine']
 diff --git a/core/includes/install.inc b/core/includes/install.inc
-index 63b5ee5589..2f0bd5aae1 100644
+index 63b5ee5589..cf5cacf1a6 100644
 --- a/core/includes/install.inc
 +++ b/core/includes/install.inc
-@@ -165,61 +165,26 @@ function drupal_detect_database_types() {
+@@ -165,58 +165,21 @@ function drupal_detect_database_types() {
   *   An array of available database driver installer objects.
   */
  function drupal_get_database_types() {
@@ -104,29 +104,21 @@ index 63b5ee5589..2f0bd5aae1 100644
  
 -  foreach ($drivers as $driver => $namespace) {
 -    $installer_class = $namespace . "\\Install\\Tasks";
--    $installer = new $installer_class();
--    if ($installer->installable()) {
--      $databases[$driver] = $installer;
 +  // Find installable database drivers in modules.
 +  $databases = [];
-+  foreach (\Drupal::service('extension.list.database_driver')->getList() as $module_drivers) {
-+    foreach ($module_drivers as $driver => $autoloading) {
-+      // The directory needs to be added to the autoloader, because this is
-+      // early in the installation process: the module hasn't been enabled
-+      // yet and the database connection info array (including its 'autoload'
-+      // key) hasn't been created yet.
-+      $class_loader->addPsr4($autoloading['namespace'] . '\\', $autoloading['autoload']);
-+      foreach ($autoloading['dependencies'] ?? [] as $dependency) {
-+        $class_loader->addPsr4($dependency['namespace'] . '\\', $dependency['autoload']);
-+      }
-+      $installer_class = $autoloading['namespace'] . "\\Install\\Tasks";
-+      $installer = new $installer_class();
-+      if ($installer->installable()) {
-+        $databases[$driver] = $installer;
-+      }
-     }
-   }
- 
++  foreach (\Drupal::service('extension.list.database_driver')->getList() as $driver) {
++    // The directory needs to be added to the autoloader, because this is early
++    // in the installation process: the module hasn't been enabled yet and the
++    // database connection info array (including its 'autoload' key) hasn't been
++    // created yet.
++    $class_loader->addPsr4($autoloading['namespace'] . '\\', $autoloading['autoload']);
++    foreach ($autoloading['dependencies'] ?? [] as $dependency) {
++      $class_loader->addPsr4($dependency['namespace'] . '\\', $dependency['autoload']);
++    }
++    $installer_class = $autoloading['namespace'] . "\\Install\\Tasks";
+     $installer = new $installer_class();
+     if ($installer->installable()) {
+       $databases[$driver] = $installer;
 diff --git a/core/lib/Drupal/Core/Database/Database.php b/core/lib/Drupal/Core/Database/Database.php
 index 9b5364942b..3fdb454073 100644
 --- a/core/lib/Drupal/Core/Database/Database.php
@@ -277,9 +269,193 @@ index 9b5364942b..3fdb454073 100644
     */
    private static function isWithinModuleNamespace(string $namespace) {
      [$first, $second] = explode('\\', $namespace, 3);
+diff --git a/core/lib/Drupal/Core/Extension/DatabaseDriver.php b/core/lib/Drupal/Core/Extension/DatabaseDriver.php
+new file mode 100644
+index 0000000000..64843bf0ec
+--- /dev/null
++++ b/core/lib/Drupal/Core/Extension/DatabaseDriver.php
+@@ -0,0 +1,178 @@
++<?php
++
++namespace Drupal\Core\Extension;
++
++/**
++ * Defines a database driver extension object.
++ */
++class DatabaseDriver extends Extension {
++
++  /**
++   * Constructs a new DatabaseDriver object.
++   *
++   * @param string $root
++   *   The app root.
++   * @param Extension $module
++   *   The module containing the database driver.
++   * @param string $getDriverName
++   *   The database driver name.
++   */
++  public function __construct(
++    string $root,
++    private Extension $module,
++    private string $driverName)
++  {
++    $this->root = $root;
++    $this->type = 'database_driver';
++  }
++
++  /**
++   * Returns the Extension object of the module containing the database driver.
++   */
++  public function getModule(): Extension {
++    return $this->module;
++  }
++
++  /**
++   * Returns the internal name of the extension.
++   *
++   * @return string
++   */
++  public function getName() {
++    return $this->driverName;
++  }
++
++  /**
++   * Returns the relative path of the extension.
++   *
++   * @return string
++   */
++  public function getPath() {
++    return dirname($this->pathname);
++  }
++
++  /**
++   * Returns the relative path and filename of the extension's info file.
++   *
++   * @return string
++   */
++  public function getPathname() {
++    return $this->pathname;
++  }
++
++  /**
++   * Returns the filename of the extension's info file.
++   *
++   * @return string
++   */
++  public function getFilename() {
++    return basename($this->pathname);
++  }
++
++  /**
++   * Returns the relative path of the main extension file, if any.
++   *
++   * @return string|null
++   */
++  public function getExtensionPathname() {
++    if ($this->filename) {
++      return $this->getPath() . '/' . $this->filename;
++    }
++  }
++
++  /**
++   * Returns the name of the main extension file, if any.
++   *
++   * @return string|null
++   */
++  public function getExtensionFilename() {
++    return $this->filename;
++  }
++
++  /**
++   * Loads the main extension file, if any.
++   *
++   * @return bool
++   *   TRUE if this extension has a main extension file, FALSE otherwise.
++   */
++  public function load() {
++    if ($this->filename) {
++      include_once $this->root . '/' . $this->getPath() . '/' . $this->filename;
++      return TRUE;
++    }
++    return FALSE;
++  }
++
++  /**
++   * Re-routes method calls to SplFileInfo.
++   *
++   * Offers all SplFileInfo methods to consumers; e.g., $extension->getMTime().
++   */
++  public function __call($method, array $args) {
++    if (!isset($this->splFileInfo)) {
++      $this->splFileInfo = new \SplFileInfo($this->root . '/' . $this->pathname);
++    }
++    return call_user_func_array([$this->splFileInfo, $method], $args);
++  }
++
++  /**
++   * Magic method implementation to serialize the extension object.
++   *
++   * @return array
++   *   The names of all variables that should be serialized.
++   */
++  public function __sleep() {
++    // @todo \Drupal\Core\Extension\ThemeExtensionList is adding custom
++    //   properties to the Extension object.
++    $properties = get_object_vars($this);
++    // Don't serialize the app root, since this could change if the install is
++    // moved. Don't serialize splFileInfo because it can not be.
++    unset($properties['splFileInfo'], $properties['root']);
++    return array_keys($properties);
++  }
++
++  /**
++   * Magic method implementation to unserialize the extension object.
++   */
++  public function __wakeup() {
++    // Get the app root from the container. While compiling the container we
++    // have to discover all the extension service files in
++    // \Drupal\Core\DrupalKernel::initializeServiceProviders(). This results in
++    // creating extension objects before the container has the kernel.
++    // Specifically, this occurs during the call to
++    // \Drupal\Core\Extension\ExtensionDiscovery::scanDirectory().
++    $container = \Drupal::hasContainer() ? \Drupal::getContainer() : FALSE;
++    $this->root = $container && $container->hasParameter('app.root') ? $container->getParameter('app.root') : DRUPAL_ROOT;
++  }
++
++  /**
++   * Checks if an extension is marked as experimental.
++   *
++   * @return bool
++   *   TRUE if an extension is marked as experimental, FALSE otherwise.
++   */
++  public function isExperimental(): bool {
++    // Currently, this function checks for both the key/value pairs
++    // 'experimental: true' and 'lifecycle: experimental' to determine if an
++    // extension is marked as experimental.
++    // @todo Remove the check for 'experimental: true' as part of
++    // https://www.drupal.org/node/3250342
++    return (isset($this->info['experimental']) && $this->info['experimental'])
++    || (isset($this->info[ExtensionLifecycle::LIFECYCLE_IDENTIFIER])
++        && $this->info[ExtensionLifecycle::LIFECYCLE_IDENTIFIER] === ExtensionLifecycle::EXPERIMENTAL);
++  }
++
++  /**
++   * Checks if an extension is marked as obsolete.
++   *
++   * @return bool
++   *   TRUE if an extension is marked as obsolete, FALSE otherwise.
++   */
++  public function isObsolete(): bool {
++    // This function checks for 'lifecycle: obsolete' to determine if an
++    // extension is marked as obsolete.
++    return (isset($this->info[ExtensionLifecycle::LIFECYCLE_IDENTIFIER])
++        && $this->info[ExtensionLifecycle::LIFECYCLE_IDENTIFIER] === ExtensionLifecycle::OBSOLETE);
++  }
++
++}
 diff --git a/core/lib/Drupal/Core/Extension/DatabaseDriverList.php b/core/lib/Drupal/Core/Extension/DatabaseDriverList.php
 new file mode 100644
-index 0000000000..36a2af0bcf
+index 0000000000..fd2a41f369
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Extension/DatabaseDriverList.php
 @@ -0,0 +1,147 @@
@@ -387,7 +563,7 @@ index 0000000000..36a2af0bcf
 +        $directoryIterator = new \DirectoryIterator($moduleDriverDirectory);
 +        foreach ($directoryIterator as $fileInfo) {
 +          if ($fileInfo->isDir() && !$fileInfo->isDot() && file_exists($moduleDriverDirectory . DIRECTORY_SEPARATOR . $fileInfo->getFilename() . DIRECTORY_SEPARATOR . 'Install'  . DIRECTORY_SEPARATOR . 'Tasks.php')) {
-+            $extensions[$module->getName() . '\\' . $fileInfo->getFilename()] = $module;
++            $extensions[$module->getName() . '\\' . $fileInfo->getFilename()] = new DatabaseDriver($this->root, $module, $fileInfo->getFilename());
 +          }
 +        }
 +      }
