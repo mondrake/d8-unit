@@ -124,7 +124,7 @@ index 63b5ee5589..9746631ea7 100644
    }
  
 diff --git a/core/lib/Drupal/Core/Database/Database.php b/core/lib/Drupal/Core/Database/Database.php
-index 9b5364942b..aa13b8ea76 100644
+index 9b5364942b..62b389930e 100644
 --- a/core/lib/Drupal/Core/Database/Database.php
 +++ b/core/lib/Drupal/Core/Database/Database.php
 @@ -3,7 +3,9 @@
@@ -170,7 +170,7 @@ index 9b5364942b..aa13b8ea76 100644
      $connection_class = NULL;
      $url_components = parse_url($url);
      $url_component_query = $url_components['query'] ?? '';
-@@ -537,28 +550,41 @@ public static function convertDbUrlToConnectionInfo($url, $root, ?bool $include_
+@@ -537,28 +550,37 @@ public static function convertDbUrlToConnectionInfo($url, $root, ?bool $include_
  
      // Add the module key for core database drivers when the module key is not
      // set.
@@ -184,11 +184,6 @@ index 9b5364942b..aa13b8ea76 100644
 -      $module = $query['module'];
 +      $driver = self::getDriverList()->get($query['module'] . '\\' . $driverName);
 +
-+      $autoloadInfo = [
-+        'namespace' => $driver->getNamespace(),
-+        'autoload' => $driver->getPath(),
-+      ];
-+
        // Set up an additional autoloader. We don't use the main autoloader as
        // this method can be called before Drupal is installed and is never
        // called during regular runtime.
@@ -200,7 +195,8 @@ index 9b5364942b..aa13b8ea76 100644
 +      $connection_class = $driver->getNamespace() . '\\Connection';
 +
 +      // When the database driver is extending another database driver, then
-+      // add autoload the parent database driver as well.
++      // add autoload info for the parent database driver as well.
++      $autoloadInfo = $driver->getAutoloadInfo();
 +      if (isset($autoloadInfo['dependencies'])) {
 +        foreach ($autoloadInfo['dependencies'] as $dependency) {
 +          $additional_class_loader->addPsr4($dependency['namespace'] . '\\', $dependency['autoload']);
@@ -221,7 +217,7 @@ index 9b5364942b..aa13b8ea76 100644
      }
  
      if (!class_exists($connection_class)) {
-@@ -570,13 +596,25 @@ public static function convertDbUrlToConnectionInfo($url, $root, ?bool $include_
+@@ -570,13 +592,28 @@ public static function convertDbUrlToConnectionInfo($url, $root, ?bool $include_
      // If the driver is provided by a module add the necessary information to
      // autoload the code.
      // @see \Drupal\Core\Site\Settings::initialize()
@@ -237,7 +233,10 @@ index 9b5364942b..aa13b8ea76 100644
      return $options;
    }
  
-+  public static function getDriverList() {
++  /**
++   * @todo
++   */
++  public static function getDriverList(): DatabaseDriverList {
 +    if (\Drupal::hasContainer()) {
 +      return \Drupal::service('extension.list.database_driver');
 +    }
@@ -249,7 +248,7 @@ index 9b5364942b..aa13b8ea76 100644
    /**
     * Finds the directory to add to the autoloader for the driver's namespace.
     *
-@@ -631,8 +669,14 @@ public static function convertDbUrlToConnectionInfo($url, $root, ?bool $include_
+@@ -631,8 +668,14 @@ public static function convertDbUrlToConnectionInfo($url, $root, ?bool $include_
     *
     * @throws \RuntimeException
     *   Exception thrown when a module provided database driver does not exist.
@@ -264,7 +263,7 @@ index 9b5364942b..aa13b8ea76 100644
      // As explained by this method's documentation, return FALSE if the
      // namespace is not a sub-namespace of a Drupal module.
      if (!static::isWithinModuleNamespace($namespace)) {
-@@ -703,9 +747,9 @@ public static function getConnectionInfoAsUrl($key = 'default') {
+@@ -703,9 +746,9 @@ public static function getConnectionInfoAsUrl($key = 'default') {
     *   TRUE if the passed in namespace is a sub-namespace of a Drupal module's
     *   namespace.
     *
@@ -279,10 +278,10 @@ index 9b5364942b..aa13b8ea76 100644
      [$first, $second] = explode('\\', $namespace, 3);
 diff --git a/core/lib/Drupal/Core/Extension/DatabaseDriver.php b/core/lib/Drupal/Core/Extension/DatabaseDriver.php
 new file mode 100644
-index 0000000000..249cea10f0
+index 0000000000..6ee22250b9
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Extension/DatabaseDriver.php
-@@ -0,0 +1,116 @@
+@@ -0,0 +1,124 @@
 +<?php
 +
 +namespace Drupal\Core\Extension;
@@ -326,13 +325,21 @@ index 0000000000..249cea10f0
 +
 +  // phpcs:disable
 +  /**
-+   * Returns an array with the driver's dependencies.
++   * Returns an array with the driver's autoload information.
 +   *
-+   * @return array<string, array{'autoload': string, 'namespace': string}>
++   * @return array{
++   *     'namespace': string,
++   *     'autoload': string,
++   *     'dependencies': array{'autoload': string, 'namespace': string},
++   *   }
 +   */
 +  // phpcs:enable
-+  public function getDependencies(): array {
-+    return [];
++  public function getAutoloadInfo(): array {
++    $autoloadInfo = [
++      'namespace' => $this->getNamespace(),
++      'autoload' => $this->getPath(),
++    ];
++    return $autoloadInfo;
 +  }
 +
 +  /**
@@ -401,10 +408,10 @@ index 0000000000..249cea10f0
 +}
 diff --git a/core/lib/Drupal/Core/Extension/DatabaseDriverList.php b/core/lib/Drupal/Core/Extension/DatabaseDriverList.php
 new file mode 100644
-index 0000000000..dc751de190
+index 0000000000..e0cee20160
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Extension/DatabaseDriverList.php
-@@ -0,0 +1,127 @@
+@@ -0,0 +1,171 @@
 +<?php
 +
 +namespace Drupal\Core\Extension;
@@ -457,65 +464,11 @@ index 0000000000..dc751de190
 +  /**
 +   * {@inheritdoc}
 +   */
-+  protected function getInstalledExtensionNames() {
-+    return [];
-+  }
-+
-+  /**
-+   * Returns autoloader information for all database drivers.
-+   *
-+   * For Drupal sites that manage their codebase with Composer, the package
-+   * that provides the database driver should add the driver's namespace to
-+   * Composer's autoloader. However, to support sites that add Drupal modules
-+   * without Composer, and because the database connection must be established
-+   * before Drupal adds the module's entire namespace to the autoloader, the
-+   * database connection info array can include an "autoload" key containing
-+   * the autoload directory for the driver's namespace. For requests that
-+   * connect to the database via a connection info array, the value of the
-+   * "autoload" key is automatically added to the autoloader.
-+   *
-+   * This method can be called to find the default value of that key when the
-+   * database connection info array isn't available. This includes:
-+   * - Console commands and test runners that connect to a database specified
-+   *   by a database URL rather than a connection info array.
-+   * - During installation, prior to the connection info array being written to
-+   *   settings.php.
-+   *
-+   * This method returns an array with the driver's namespace and autoload
-+   * directory that must be added to the autoloader, as well as those of any
-+   * dependency specified in the driver's module.info.yml file.
-+   *
-+   * @return array
-+   *   An associative array in the format
-+   *   @code
-+   *     ['module_a' => [
-+   *        'driver_1' => [
-+   *          'autoload' => 'path_to_modules/module_a/src/Driver/Database/driver_1/',
-+   *          'namespace' => 'Drupal\\module_a\\Driver\\Database\\driver_1',
-+   *          'dependencies' => [
-+   *            'module_x' => [
-+   *              'autoload' => 'path_to_modules/module_x/src/',
-+   *              'namespace' => 'Drupal\\module_x',
-+   *            ],
-+   *          ],
-+   *        ],
-+   *        'driver_2' => [ ... ],
-+   *      'module_b' => [ ... ],
-+   *     ]
-+   *   @endcode
-+   *
-+   * @throws \RuntimeException
-+   *   Exception thrown when a module provided database driver does not exist.
-+   * @throws \Drupal\Core\Extension\InfoParserException
-+   *   Thrown when a module.info.yml fails parsing.
-+   */
 +  protected function doList(): array {
-+    $modules = $this->doScanExtensions();
-+
 +    // Determine the modules that contain at least one installable database
 +    // driver.
 +    $extensions = [];
-+    foreach ($modules as $module) {
++    foreach ($this->doScanExtensions() as $module) {
 +      $moduleDriverDirectory = $this->root . DIRECTORY_SEPARATOR . $module->getPath() . DIRECTORY_SEPARATOR . 'src' . DIRECTORY_SEPARATOR . 'Driver' . DIRECTORY_SEPARATOR . 'Database';
 +      if (is_dir($moduleDriverDirectory)) {
 +        // Use directory iterator to avoid services.
@@ -529,6 +482,104 @@ index 0000000000..dc751de190
 +    }
 +
 +    return $extensions;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function getName($extension_name) {
++    throw new \LogicException(__METHOD__ . '() is not implemented');
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function getExtensionInfo($extension_name) {
++    throw new \LogicException(__METHOD__ . '() is not implemented');
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function getAllAvailableInfo() {
++    throw new \LogicException(__METHOD__ . '() is not implemented');
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  protected function getInstalledExtensionNames() {
++    throw new \LogicException(__METHOD__ . '() is not implemented');
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function getAllInstalledInfo() {
++    throw new \LogicException(__METHOD__ . '() is not implemented');
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  protected function recalculateInfo() {
++    throw new \LogicException(__METHOD__ . '() is not implemented');
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function getPathnames() {
++    throw new \LogicException(__METHOD__ . '() is not implemented');
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  protected function recalculatePathnames() {
++    throw new \LogicException(__METHOD__ . '() is not implemented');
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function setPathname($extension_name, $pathname) {
++    throw new \LogicException(__METHOD__ . '() is not implemented');
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function getPathname($extension_name) {
++    throw new \LogicException(__METHOD__ . '() is not implemented');
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function getPath($extension_name) {
++    throw new \LogicException(__METHOD__ . '() is not implemented');
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  protected function createExtensionInfo(Extension $extension) {
++    throw new \LogicException(__METHOD__ . '() is not implemented');
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function checkIncompatibility($name) {
++    throw new \LogicException(__METHOD__ . '() is not implemented');
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public static function sortByName(Extension $a, Extension $b): int {
++    throw new \LogicException(__METHOD__ . '() is not implemented');
 +  }
 +
 +}
