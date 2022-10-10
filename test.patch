@@ -124,7 +124,7 @@ index 63b5ee5589..9746631ea7 100644
    }
  
 diff --git a/core/lib/Drupal/Core/Database/Database.php b/core/lib/Drupal/Core/Database/Database.php
-index 9b5364942b..d963821138 100644
+index 9b5364942b..4118373f6c 100644
 --- a/core/lib/Drupal/Core/Database/Database.php
 +++ b/core/lib/Drupal/Core/Database/Database.php
 @@ -320,6 +320,18 @@ abstract class Database {
@@ -146,7 +146,13 @@ index 9b5364942b..d963821138 100644
        }
      }
    }
-@@ -529,7 +541,6 @@ public static function convertDbUrlToConnectionInfo($url, $root, ?bool $include_
+@@ -524,12 +536,11 @@ public static function convertDbUrlToConnectionInfo($url, $root, ?bool $include_
+     if (preg_match('/^(.*):\/\//', $url, $matches) !== 1) {
+       throw new \InvalidArgumentException("Missing scheme in URL '$url'");
+     }
+-    $driver = $matches[1];
++    $driverName = $matches[1];
+ 
      // Determine if the database driver is provided by a module.
      // @todo https://www.drupal.org/project/drupal/issues/3250999. Refactor when
      // all database drivers are provided by modules.
@@ -154,12 +160,24 @@ index 9b5364942b..d963821138 100644
      $connection_class = NULL;
      $url_components = parse_url($url);
      $url_component_query = $url_components['query'] ?? '';
-@@ -542,19 +553,27 @@ public static function convertDbUrlToConnectionInfo($url, $root, ?bool $include_
+@@ -537,28 +548,41 @@ public static function convertDbUrlToConnectionInfo($url, $root, ?bool $include_
+ 
+     // Add the module key for core database drivers when the module key is not
+     // set.
+-    if (!isset($query['module']) && in_array($driver, ['mysql', 'pgsql', 'sqlite'], TRUE)) {
+-      $query['module'] = $driver;
++    if (!isset($query['module']) && in_array($driverName, ['mysql', 'pgsql', 'sqlite'], TRUE)) {
++      $query['module'] = $driverName;
      }
  
      if (isset($query['module']) && $query['module']) {
 -      $module = $query['module'];
-+      $autoloadInfo = Database::getDriverAutoloadInfo($root, $query['module'], $driver, $include_test_drivers);
++      $driver = \Drupal::service('extension.list.database_driver')->get($query['module'] . '\\' . $driverName);
++
++      $autoloadInfo = [
++        'namespace' => $driver->getNamespace(),
++        'autoload' => $driver->getPath(),
++      ];
 +
        // Set up an additional autoloader. We don't use the main autoloader as
        // this method can be called before Drupal is installed and is never
@@ -168,8 +186,8 @@ index 9b5364942b..d963821138 100644
 -      $psr4_base_directory = Database::findDriverAutoloadDirectory($namespace, $root, $include_test_drivers);
        $additional_class_loader = new ClassLoader();
 -      $additional_class_loader->addPsr4($namespace . '\\', $psr4_base_directory);
-+      $additional_class_loader->addPsr4($autoloadInfo['namespace'] . '\\', $autoloadInfo['autoload']);
-+      $connection_class = $autoloadInfo['namespace'] . '\\Connection';
++      $additional_class_loader->addPsr4($driver->getNamespace() . '\\', $driver->getPath());
++      $connection_class = $driver->getNamespace() . '\\Connection';
 +
 +      // When the database driver is extending another database driver, then
 +      // add autoload the parent database driver as well.
@@ -188,68 +206,26 @@ index 9b5364942b..d963821138 100644
        // Determine the connection class to use. Discover if the URL has a valid
        // driver scheme for a Drupal 8 style custom driver.
        // @todo Remove this in Drupal 10.
-@@ -570,13 +589,58 @@ public static function convertDbUrlToConnectionInfo($url, $root, ?bool $include_
+-      $connection_class = "Drupal\\Driver\\Database\\{$driver}\\Connection";
++      $connection_class = "Drupal\\Driver\\Database\\{$driverName}\\Connection";
+     }
+ 
+     if (!class_exists($connection_class)) {
+@@ -570,8 +594,11 @@ public static function convertDbUrlToConnectionInfo($url, $root, ?bool $include_
      // If the driver is provided by a module add the necessary information to
      // autoload the code.
      // @see \Drupal\Core\Site\Settings::initialize()
 -    if (isset($psr4_base_directory)) {
 -      $options['autoload'] = $psr4_base_directory;
 +    if (isset($autoloadInfo)) {
-+      $options['autoload'] = $autoloadInfo['autoload'];
++      $options['autoload'] = $driver->getPath();
 +      if (isset($autoloadInfo['dependencies'])) {
 +        $options['dependencies'] = $autoloadInfo['dependencies'];
 +      }
      }
  
      return $options;
-   }
- 
-+  /**
-+   * Returns information to allow PHP classes autoloading of a database driver.
-+   *
-+   * @param string $root
-+   *   The root directory of the Drupal installation.
-+   * @param string $module
-+   *   The database driver's module name.
-+   * @param string $driver
-+   *   The driver name.
-+   * @param bool|null $includeTestDrivers
-+   *   (optional) Whether to include test extensions. If FALSE, all 'tests'
-+   *   directories are excluded in the search. When NULL will be determined by
-+   *   the extension_discovery_scan_tests setting.
-+   *
-+   * @return array
-+   *   An array with a 'namespace' and a 'autoload' definition for the driver.
-+   *   When the driver's module has dependencies, a 'dependencies' key that
-+   *   itself is an array of autoload/namespace pairs is also present.
-+   *
-+   * @throws \RuntimeException
-+   *   Exception thrown when a module or a driver do not exist.
-+   * @throws \Drupal\Core\Extension\InfoParserException
-+   *   Thrown when a module.info.yml fails parsing.
-+   */
-+  public static function getDriverAutoloadInfo(string $root, string $module, string $driver, ?bool $includeTestDrivers = NULL): array {
-+    $data = \Drupal::service('extension.list.database_driver')->getList($includeTestDrivers);
-+
-+    if (!isset($data[$module . '\\' . $driver])) {
-+      throw new \RuntimeException(sprintf("Cannot find the database driver '%s' in the module '%s'", $driver, $module));
-+    }
-+
-+    $driver = $data[$module . '\\' . $driver];
-+    $info = [
-+      'namespace' => $driver->getNamespace(),
-+      'autoload' => $driver->getPath(),
-+    ];
-+    if ($dependencies = $driver->getDependencies()) {
-+      $info['dependencies'] = $dependencies;
-+    }
-+    return $info;
-+  }
-+
-   /**
-    * Finds the directory to add to the autoloader for the driver's namespace.
-    *
-@@ -631,8 +695,14 @@ public static function convertDbUrlToConnectionInfo($url, $root, ?bool $include_
+@@ -631,8 +658,14 @@ public static function convertDbUrlToConnectionInfo($url, $root, ?bool $include_
     *
     * @throws \RuntimeException
     *   Exception thrown when a module provided database driver does not exist.
@@ -264,7 +240,7 @@ index 9b5364942b..d963821138 100644
      // As explained by this method's documentation, return FALSE if the
      // namespace is not a sub-namespace of a Drupal module.
      if (!static::isWithinModuleNamespace($namespace)) {
-@@ -703,9 +773,9 @@ public static function getConnectionInfoAsUrl($key = 'default') {
+@@ -703,9 +736,9 @@ public static function getConnectionInfoAsUrl($key = 'default') {
     *   TRUE if the passed in namespace is a sub-namespace of a Drupal module's
     *   namespace.
     *
@@ -279,10 +255,10 @@ index 9b5364942b..d963821138 100644
      [$first, $second] = explode('\\', $namespace, 3);
 diff --git a/core/lib/Drupal/Core/Extension/DatabaseDriver.php b/core/lib/Drupal/Core/Extension/DatabaseDriver.php
 new file mode 100644
-index 0000000000..19dcee4382
+index 0000000000..5d838d186f
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Extension/DatabaseDriver.php
-@@ -0,0 +1,117 @@
+@@ -0,0 +1,116 @@
 +<?php
 +
 +namespace Drupal\Core\Extension;
@@ -299,14 +275,13 @@ index 0000000000..19dcee4382
 +   *   The app root.
 +   * @param Extension $module
 +   *   The module containing the database driver.
-+   * @param string $getDriverName
++   * @param string $driverName
 +   *   The database driver name.
 +   */
 +  public function __construct(
 +    string $root,
 +    private Extension $module,
-+    private string $driverName)
-+  {
++    private string $driverName) {
 +    $this->root = $root;
 +    $this->type = 'database_driver';
 +  }
@@ -347,7 +322,7 @@ index 0000000000..19dcee4382
 +   * {@inheritdoc}
 +   */
 +  public function getPath() {
-+    return $this->getModule()->getPath() . DIRECTORY_SEPARATOR . 'src'  . DIRECTORY_SEPARATOR . 'Driver'  . DIRECTORY_SEPARATOR . 'Database' . DIRECTORY_SEPARATOR . $this->getName();
++    return $this->getModule()->getPath() . DIRECTORY_SEPARATOR . 'src' . DIRECTORY_SEPARATOR . 'Driver' . DIRECTORY_SEPARATOR . 'Database' . DIRECTORY_SEPARATOR . $this->getName();
 +  }
 +
 +  /**
@@ -402,10 +377,10 @@ index 0000000000..19dcee4382
 +}
 diff --git a/core/lib/Drupal/Core/Extension/DatabaseDriverList.php b/core/lib/Drupal/Core/Extension/DatabaseDriverList.php
 new file mode 100644
-index 0000000000..fd2a41f369
+index 0000000000..47e85889c4
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Extension/DatabaseDriverList.php
-@@ -0,0 +1,147 @@
+@@ -0,0 +1,109 @@
 +<?php
 +
 +namespace Drupal\Core\Extension;
@@ -441,7 +416,7 @@ index 0000000000..fd2a41f369
 +   * {@inheritdoc}
 +   */
 +  protected function getInstalledExtensionNames() {
-+    return [$this->installProfile];
++    return [];
 +  }
 +
 +  /**
@@ -467,11 +442,6 @@ index 0000000000..fd2a41f369
 +   * This method returns an array with the driver's namespace and autoload
 +   * directory that must be added to the autoloader, as well as those of any
 +   * dependency specified in the driver's module.info.yml file.
-+   *
-+   * @param bool|null $includeTestDrivers
-+   *   (optional) Whether to include test extensions. If FALSE, all 'tests'
-+   *   directories are excluded in the search. When NULL will be determined by
-+   *   the extension_discovery_scan_tests setting.
 +   *
 +   * @return array
 +   *   An associative array in the format
@@ -504,51 +474,18 @@ index 0000000000..fd2a41f369
 +    // driver.
 +    $extensions = [];
 +    foreach ($modules as $module) {
-+      $moduleDriverDirectory = $this->root . DIRECTORY_SEPARATOR . $module->getPath() . DIRECTORY_SEPARATOR . 'src'  . DIRECTORY_SEPARATOR . 'Driver'  . DIRECTORY_SEPARATOR . 'Database';
++      $moduleDriverDirectory = $this->root . DIRECTORY_SEPARATOR . $module->getPath() . DIRECTORY_SEPARATOR . 'src' . DIRECTORY_SEPARATOR . 'Driver' . DIRECTORY_SEPARATOR . 'Database';
 +      if (is_dir($moduleDriverDirectory)) {
 +        // Use directory iterator to avoid services.
 +        $directoryIterator = new \DirectoryIterator($moduleDriverDirectory);
 +        foreach ($directoryIterator as $fileInfo) {
-+          if ($fileInfo->isDir() && !$fileInfo->isDot() && file_exists($moduleDriverDirectory . DIRECTORY_SEPARATOR . $fileInfo->getFilename() . DIRECTORY_SEPARATOR . 'Install'  . DIRECTORY_SEPARATOR . 'Tasks.php')) {
++          if ($fileInfo->isDir() && !$fileInfo->isDot() && file_exists($moduleDriverDirectory . DIRECTORY_SEPARATOR . $fileInfo->getFilename() . DIRECTORY_SEPARATOR . 'Install' . DIRECTORY_SEPARATOR . 'Tasks.php')) {
 +            $extensions[$module->getName() . '\\' . $fileInfo->getFilename()] = new DatabaseDriver($this->root, $module, $fileInfo->getFilename());
 +          }
 +        }
 +      }
 +    }
 +
-+    // Determine the autoloading information for the drivers and their
-+    // dependencies.
-+/*    $autoloadInfo = [];
-+    foreach ($extensions as $module => $drivers) {
-+      // When the module has dependencies, collect them.
-+      $moduleInfo = (new InfoParser($this->root))->parse($this->root . DIRECTORY_SEPARATOR . $modules[$module]->getPathname());
-+      $moduleDependencies = [];
-+      if (isset($moduleInfo['dependencies']) && is_array($moduleInfo['dependencies'])) {
-+        foreach ($moduleInfo['dependencies'] as $dependency) {
-+          $dependencyData = Dependency::createFromString($dependency);
-+          $dependencyNamespace = "Drupal\\{$dependencyData->getName()}";
-+          if (!isset($modules[$dependencyData->getName()])) {
-+            throw new \RuntimeException(sprintf("Cannot find the module '%s' that is required by module '%s'", $dependencyData->getName(), $module));
-+          }
-+          $dependencyAutoload = $modules[$dependencyData->getName()]->getPath() . '/src/';
-+          $moduleDependencies[$dependencyData->getName()] = [
-+            'namespace' => $dependencyNamespace,
-+            'autoload' => $dependencyAutoload,
-+          ];
-+        }
-+      }
-+
-+      // Determine namespace and path of the driver, associating dependencies
-+      // where relevant.
-+      foreach ($drivers as $driver) {
-+        $autoloadInfo[$module][$driver]['autoload'] = $modules[$module]->getPath() . DIRECTORY_SEPARATOR . 'src/Driver/Database' . DIRECTORY_SEPARATOR . $driver . DIRECTORY_SEPARATOR;
-+        $autoloadInfo[$module][$driver]['namespace'] = "Drupal\\$module\\Driver\\Database\\$driver";
-+        if ($moduleDependencies !== []) {
-+          $autoloadInfo[$module][$driver]['dependencies'] = $moduleDependencies;
-+        }
-+      }
-+    }
-+*/
 +    return $extensions;
 +  }
 +
@@ -569,23 +506,28 @@ index 0ac671965b..1c052fd713 100644
     * @var string
     */
 diff --git a/core/lib/Drupal/Core/Installer/Form/SiteSettingsForm.php b/core/lib/Drupal/Core/Installer/Form/SiteSettingsForm.php
-index dc26547122..af730c1161 100644
+index dc26547122..02f2138778 100644
 --- a/core/lib/Drupal/Core/Installer/Form/SiteSettingsForm.php
 +++ b/core/lib/Drupal/Core/Installer/Form/SiteSettingsForm.php
-@@ -159,13 +159,11 @@ public function validateForm(array &$form, FormStateInterface $form_state) {
+@@ -159,13 +159,15 @@ public function validateForm(array &$form, FormStateInterface $form_state) {
      $drivers = drupal_get_database_types();
      $reflection = new \ReflectionClass($drivers[$driver]);
      $install_namespace = $reflection->getNamespaceName();
 -    // Cut the trailing \Install from namespace.
 -    $database['namespace'] = substr($install_namespace, 0, strrpos($install_namespace, '\\'));
-+    [, $module] = explode('\\', $install_namespace);
-+
-     $database['driver'] = $driver;
+-    $database['driver'] = $driver;
 -    // See default.settings.php for an explanation of the 'autoload' key.
 -    if ($autoload = Database::findDriverAutoloadDirectory($database['namespace'], DRUPAL_ROOT)) {
 -      $database['autoload'] = $autoload;
 -    }
-+    $autoloading = Database::getDriverAutoloadInfo(DRUPAL_ROOT, $module, $driver);
++    [, $module] = explode('\\', $install_namespace);
++
++    $database['driver'] = $driverName;
++    $druver = \Drupal::service('extension.list.database_driver')->get($module . '\\' . $driverName);
++    $autoloading = [
++      'namespace' => $driver->getNamespace(),
++      'autoload' => $driver->getPath(),
++    ];
 +    $database = array_merge($database, $autoloading);
  
      $form_state->set('database', $database);
@@ -949,15 +891,15 @@ index bf61c2467c..dd25bdb17b 100644
      Database::findDriverAutoloadDirectory($namespace, $this->root, $include_tests);
 diff --git a/core/tests/Drupal/Tests/Core/Database/DriverModuleMissingDependenciesTest.php b/core/tests/Drupal/Tests/Core/Database/DriverModuleMissingDependenciesTest.php
 new file mode 100644
-index 0000000000..4bef826cef
+index 0000000000..66ad63b860
 --- /dev/null
 +++ b/core/tests/Drupal/Tests/Core/Database/DriverModuleMissingDependenciesTest.php
-@@ -0,0 +1,52 @@
+@@ -0,0 +1,56 @@
 +<?php
 +
 +namespace Drupal\Tests\Core\Database;
 +
-+use Drupal\Core\Database\Database;
++use Drupal\Core\Extension\DatabaseDriverList;
 +use Drupal\Core\Site\Settings;
 +use Drupal\Tests\UnitTestCase;
 +use Symfony\Component\DependencyInjection\ContainerInterface;
@@ -993,6 +935,10 @@ index 0000000000..4bef826cef
 +      ->method('getParameter')
 +      ->with('site.path')
 +      ->willReturn('');
++    $container->expects($this->any())
++      ->method('get')
++      ->with('extension.list.database_driver')
++      ->willReturn($this->createMock(DatabaseDriverList::class));
 +    \Drupal::setContainer($container);
 +
 +    new Settings(['extension_discovery_scan_tests' => TRUE]);
@@ -1001,7 +947,7 @@ index 0000000000..4bef826cef
 +
 +    $this->expectException(\RuntimeException::class);
 +    $this->expectExceptionMessage("Cannot find the module 'a_really_missing_module' that is required by module 'driver_missing_dependency_test'");
-+    Database::discoverDriversAutoloadInfo($root);
++    $container->get('extension.list.database_driver')->getList();
 +  }
 +
 +}
