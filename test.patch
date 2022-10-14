@@ -44,6 +44,59 @@ index 6b972c88d4..25758f63af 100644
    extension.path.resolver:
      class: Drupal\Core\Extension\ExtensionPathResolver
      arguments: ['@extension.list.module', '@extension.list.profile', '@extension.list.theme', '@extension.list.theme_engine']
+diff --git a/core/includes/install.core.inc b/core/includes/install.core.inc
+index b18c9e57a3..a02e85808b 100644
+--- a/core/includes/install.core.inc
++++ b/core/includes/install.core.inc
+@@ -15,6 +15,7 @@
+ use Drupal\Core\DrupalKernel;
+ use Drupal\Core\Database\Database;
+ use Drupal\Core\Database\DatabaseExceptionWrapper;
++use Drupal\Core\Extension\Exception\UnknownExtensionException;
+ use Drupal\Core\File\FileSystemInterface;
+ use Drupal\Core\Form\FormState;
+ use Drupal\Core\Installer\Exception\AlreadyInstalledException;
+@@ -370,7 +371,7 @@ function install_begin_request($class_loader, &$install_state) {
+ 
+   // Register the class loader so contrib and custom database drivers can be
+   // autoloaded.
+-  // @see drupal_get_database_types()
++  // @see \Drupal\Core\Extension\DatabaseDriverList
+   $container->set('class_loader', $class_loader);
+ 
+   \Drupal::setContainer($container);
+@@ -1192,15 +1193,10 @@ function install_verify_database_ready() {
+ function install_database_errors($database, $settings_file) {
+   $errors = [];
+ 
+-  // Check database type.
+-  $database_types = drupal_get_database_types();
+-  $driver = $database['driver'];
+-  if (!isset($database_types[$driver])) {
+-    $errors['driver'] = t("In your %settings_file file you have configured @drupal to use a %driver server, however your PHP installation currently does not support this database type.", ['%settings_file' => $settings_file, '@drupal' => drupal_install_profile_distribution_name(), '%driver' => $driver]);
+-  }
+-  else {
++  try {
++    $driver = Database::getDriverList()->get($database['driver']);
+     // Run driver specific validation
+-    $errors += $database_types[$driver]->validateDatabaseSettings($database);
++    $errors = $driver->getInstallTasks()->validateDatabaseSettings($database);
+     if (!empty($errors)) {
+       // No point to try further.
+       return $errors;
+@@ -1208,8 +1204,10 @@ function install_database_errors($database, $settings_file) {
+     // Run tasks associated with the database type. Any errors are caught in the
+     // calling function.
+     Database::addConnectionInfo('default', 'default', $database);
+-    $installer_class = $database['namespace'] . "\\Install\\Tasks";
+-    $errors = (new $installer_class())->runTasks();
++    $errors = $driver->getInstallTasks()->->runTasks();
++  }
++  catch (UnknownExtensionException $e) {
++    $errors['driver'] = t("In your %settings_file file you have configured @drupal to use a %driver server, however your PHP installation currently does not support this database type.", ['%settings_file' => $settings_file, '@drupal' => drupal_install_profile_distribution_name(), '%driver' => $driver]);
+   }
+   return $errors;
+ }
 diff --git a/core/includes/install.inc b/core/includes/install.inc
 index 63b5ee5589..fd7d3d950c 100644
 --- a/core/includes/install.inc
@@ -304,10 +357,10 @@ index 9b5364942b..633ae9048d 100644
      [$first, $second] = explode('\\', $namespace, 3);
 diff --git a/core/lib/Drupal/Core/Extension/DatabaseDriver.php b/core/lib/Drupal/Core/Extension/DatabaseDriver.php
 new file mode 100644
-index 0000000000..41f0d61cbf
+index 0000000000..4d5bc2bb1d
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Extension/DatabaseDriver.php
-@@ -0,0 +1,221 @@
+@@ -0,0 +1,222 @@
 +<?php
 +
 +namespace Drupal\Core\Extension;
@@ -389,6 +442,7 @@ index 0000000000..41f0d61cbf
 +        $this->classLoader->addPsr4($dependency['namespace'] . '\\', $dependency['autoload']);
 +      }
 +    }
++    return TRUE;
 +  }
 +
 +  /**
@@ -400,7 +454,7 @@ index 0000000000..41f0d61cbf
 +      $installTasksClass = $this->getNamespace() . "\\Install\\Tasks";
 +      $this->installTasks = new $installTasksClass();
 +    }
-+    return new $this->installTasks;
++    return $this->installTasks;
 +  }
 +
 +  // phpcs:disable
@@ -829,6 +883,32 @@ index dc26547122..ffc4e8001f 100644
 +
      foreach ($this->getDatabaseErrors($database, $form_state->getValue('settings_file')) as $name => $message) {
        $form_state->setErrorByName($name, $message);
+     }
+diff --git a/core/lib/Drupal/Core/Test/FunctionalTestSetupTrait.php b/core/lib/Drupal/Core/Test/FunctionalTestSetupTrait.php
+index 57e68e2ad3..f15aa5f01d 100644
+--- a/core/lib/Drupal/Core/Test/FunctionalTestSetupTrait.php
++++ b/core/lib/Drupal/Core/Test/FunctionalTestSetupTrait.php
+@@ -695,7 +695,8 @@ protected function prepareEnvironment() {
+   /**
+    * Returns all supported database driver installer objects.
+    *
+-   * This wraps drupal_get_database_types() for use without a current container.
++   * This wraps DatabaseDriverList::getInstallableList() for use without a
++   * current container.
+    *
+    * @return \Drupal\Core\Database\Install\Tasks[]
+    *   An array of available database driver installer objects.
+@@ -704,7 +705,10 @@ protected function getDatabaseTypes() {
+     if (isset($this->originalContainer) && $this->originalContainer) {
+       \Drupal::setContainer($this->originalContainer);
+     }
+-    $database_types = drupal_get_database_types();
++    $database_types = [];
++    foreach (Database::getDriverList()->getInstallableList() as $name => $driver) {
++      $database_types[$name] = $driver->getInstallTasks();
++    }
+     if (isset($this->originalContainer) && $this->originalContainer) {
+       \Drupal::unsetContainer();
      }
 diff --git a/core/modules/system/system.install b/core/modules/system/system.install
 index 41d0b4fe30..2eb6e8dc4e 100644
