@@ -1,1686 +1,566 @@
-diff --git a/core/assets/scaffold/files/default.settings.php b/core/assets/scaffold/files/default.settings.php
-index ee3b49c0a8..02f3e5e7a8 100644
---- a/core/assets/scaffold/files/default.settings.php
-+++ b/core/assets/scaffold/files/default.settings.php
-@@ -222,6 +222,27 @@
-  *     'prefix' => '',
-  *   ];
-  * @endcode
-+ *
-+ * Sample Database configuration format for a driver that is extending another
-+ * database driver.
-+ * @code
-+ *   $databases['default']['default'] = [
-+ *     'driver' => 'my_driver',
-+ *     'namespace' => 'Drupal\my_module\Driver\Database\my_driver',
-+ *     'autoload' => 'modules/my_module/src/Driver/Database/my_driver/',
-+ *     'database' => 'databasename',
-+ *     'username' => 'sqlusername',
-+ *     'password' => 'sqlpassword',
-+ *     'host' => 'localhost',
-+ *     'prefix' => '',
-+ *     'dependencies' => [
-+ *       'parent_module' => [
-+ *         'namespace' => 'Drupal\parent_module',
-+ *         'autoload' => 'core/modules/parent_module/src/',
-+ *       ],
-+ *     ],
-+ *   ];
-+ * @endcode
-  */
- 
- /**
-diff --git a/core/core.services.yml b/core/core.services.yml
-index 6b972c88d4..25758f63af 100644
---- a/core/core.services.yml
-+++ b/core/core.services.yml
-@@ -550,6 +550,9 @@ services:
-   extension.list.theme_engine:
-     class: Drupal\Core\Extension\ThemeEngineExtensionList
-     arguments: ['%app.root%', 'theme_engine', '@cache.default', '@info_parser', '@module_handler', '@state', '%install_profile%']
-+  extension.list.database_driver:
-+    class: Drupal\Core\Extension\DatabaseDriverList
-+    arguments: ['%app.root%', 'database_driver', '@cache.default']
-   extension.path.resolver:
-     class: Drupal\Core\Extension\ExtensionPathResolver
-     arguments: ['@extension.list.module', '@extension.list.profile', '@extension.list.theme', '@extension.list.theme_engine']
-diff --git a/core/includes/install.core.inc b/core/includes/install.core.inc
-index b18c9e57a3..e349569b05 100644
---- a/core/includes/install.core.inc
-+++ b/core/includes/install.core.inc
-@@ -7,6 +7,7 @@
- 
- use Drupal\Component\Utility\UrlHelper;
- use Drupal\Core\Batch\BatchBuilder;
-+use Drupal\Core\Cache\NullBackend;
- use Drupal\Core\Config\ConfigImporter;
- use Drupal\Core\Config\ConfigImporterException;
- use Drupal\Core\Config\Importer\ConfigImporterBatch;
-@@ -15,6 +16,7 @@
- use Drupal\Core\DrupalKernel;
- use Drupal\Core\Database\Database;
- use Drupal\Core\Database\DatabaseExceptionWrapper;
-+use Drupal\Core\Extension\Exception\UnknownExtensionException;
- use Drupal\Core\File\FileSystemInterface;
- use Drupal\Core\Form\FormState;
- use Drupal\Core\Installer\Exception\AlreadyInstalledException;
-@@ -368,9 +370,16 @@ function install_begin_request($class_loader, &$install_state) {
-     ->addArgument(Settings::getInstance())
-     ->addArgument((new LoggerChannelFactory())->get('file'));
- 
-+  // Register the database driver extension list provider.
-+  $container
-+    ->register('extension.list.database_driver', 'Drupal\Core\Extension\DatabaseDriverList')
-+    ->addArgument(dirname(__DIR__, 2))
-+    ->addArgument('database_driver')
-+    ->addArgument(new NullBackend('database_driver'));
-+
-   // Register the class loader so contrib and custom database drivers can be
-   // autoloaded.
--  // @see drupal_get_database_types()
-+  // @see \Drupal\Core\Extension\DatabaseDriverList
-   $container->set('class_loader', $class_loader);
- 
-   \Drupal::setContainer($container);
-@@ -1192,15 +1201,10 @@ function install_verify_database_ready() {
- function install_database_errors($database, $settings_file) {
-   $errors = [];
- 
--  // Check database type.
--  $database_types = drupal_get_database_types();
--  $driver = $database['driver'];
--  if (!isset($database_types[$driver])) {
--    $errors['driver'] = t("In your %settings_file file you have configured @drupal to use a %driver server, however your PHP installation currently does not support this database type.", ['%settings_file' => $settings_file, '@drupal' => drupal_install_profile_distribution_name(), '%driver' => $driver]);
--  }
--  else {
-+  try {
-+    $driver = Database::getDriverList()->get($database['driver']);
-     // Run driver specific validation
--    $errors += $database_types[$driver]->validateDatabaseSettings($database);
-+    $errors = $driver->getInstallTasks()->validateDatabaseSettings($database);
-     if (!empty($errors)) {
-       // No point to try further.
-       return $errors;
-@@ -1208,8 +1212,10 @@ function install_database_errors($database, $settings_file) {
-     // Run tasks associated with the database type. Any errors are caught in the
-     // calling function.
-     Database::addConnectionInfo('default', 'default', $database);
--    $installer_class = $database['namespace'] . "\\Install\\Tasks";
--    $errors = (new $installer_class())->runTasks();
-+    $errors = $driver->getInstallTasks()->runTasks();
-+  }
-+  catch (UnknownExtensionException $e) {
-+    $errors['driver'] = t("In your %settings_file file you have configured @drupal to use a %driver server, however your PHP installation currently does not support this database type.", ['%settings_file' => $settings_file, '@drupal' => drupal_install_profile_distribution_name(), '%driver' => $database['driver']]);
-   }
-   return $errors;
- }
-diff --git a/core/includes/install.inc b/core/includes/install.inc
-index 63b5ee5589..975dfd9eb1 100644
---- a/core/includes/install.inc
-+++ b/core/includes/install.inc
-@@ -147,8 +147,14 @@ function drupal_install_profile_distribution_version() {
-  *
-  * @return array
-  *   An array of database types compiled into PHP.
-+ *
-+ * @deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. Use
-+ *   DatabaseDriverList::getList() instead.
-+ *
-+ * @see https://www.drupal.org/node/3258175
-  */
- function drupal_detect_database_types() {
-+  @trigger_error('drupal_detect_database_types() is deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. Use DatabaseDriverList::getList() instead. See https://www.drupal.org/node/3258175', E_USER_DEPRECATED);
-   $databases = drupal_get_database_types();
- 
-   foreach ($databases as $driver => $installer) {
-@@ -163,8 +169,14 @@ function drupal_detect_database_types() {
-  *
-  * @return \Drupal\Core\Database\Install\Tasks[]
-  *   An array of available database driver installer objects.
-+ *
-+ * @deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. Use
-+ *   DatabaseDriverList::getList() instead.
-+ *
-+ * @see https://www.drupal.org/node/3258175
-  */
- function drupal_get_database_types() {
-+  @trigger_error('drupal_get_database_types() is deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. Use DatabaseDriverList::getList() instead. See https://www.drupal.org/node/3258175', E_USER_DEPRECATED);
-   $databases = [];
-   $drivers = [];
- 
-diff --git a/core/lib/Drupal/Core/Database/Database.php b/core/lib/Drupal/Core/Database/Database.php
-index 9b5364942b..07cee0b2f6 100644
---- a/core/lib/Drupal/Core/Database/Database.php
-+++ b/core/lib/Drupal/Core/Database/Database.php
-@@ -3,7 +3,9 @@
- namespace Drupal\Core\Database;
- 
- use Composer\Autoload\ClassLoader;
-+use Drupal\Core\Extension\DatabaseDriverList;
- use Drupal\Core\Extension\ExtensionDiscovery;
-+use Drupal\Core\Cache\NullBackend;
- 
- /**
-  * Primary front-controller for the database system.
-@@ -320,6 +322,18 @@ abstract class Database {
-       // for the driver.
-       if (isset($info['autoload']) && $class_loader && $app_root) {
-         $class_loader->addPsr4($info['namespace'] . '\\', $app_root . '/' . $info['autoload']);
-+
-+        // When the database driver is extending from other database drivers,
-+        // then add autoload directory for the parent database driver modules
-+        // as well.
-+        if (!empty($info['dependencies'])) {
-+          assert(is_array($info['dependencies']));
-+          foreach ($info['dependencies'] as $dependency) {
-+            if (isset($dependency['namespace']) && isset($dependency['autoload'])) {
-+              $class_loader->addPsr4($dependency['namespace'] . '\\', $app_root . '/' . $dependency['autoload']);
-+            }
-+          }
-+        }
-       }
-     }
-   }
-@@ -524,12 +538,11 @@ public static function convertDbUrlToConnectionInfo($url, $root, ?bool $include_
-     if (preg_match('/^(.*):\/\//', $url, $matches) !== 1) {
-       throw new \InvalidArgumentException("Missing scheme in URL '$url'");
-     }
--    $driver = $matches[1];
-+    $driverName = $matches[1];
- 
-     // Determine if the database driver is provided by a module.
-     // @todo https://www.drupal.org/project/drupal/issues/3250999. Refactor when
-     // all database drivers are provided by modules.
--    $module = NULL;
-     $connection_class = NULL;
-     $url_components = parse_url($url);
-     $url_component_query = $url_components['query'] ?? '';
-@@ -537,28 +550,37 @@ public static function convertDbUrlToConnectionInfo($url, $root, ?bool $include_
- 
-     // Add the module key for core database drivers when the module key is not
-     // set.
--    if (!isset($query['module']) && in_array($driver, ['mysql', 'pgsql', 'sqlite'], TRUE)) {
--      $query['module'] = $driver;
-+    if (!isset($query['module']) && in_array($driverName, ['mysql', 'pgsql', 'sqlite'], TRUE)) {
-+      $query['module'] = $driverName;
-     }
- 
-     if (isset($query['module']) && $query['module']) {
--      $module = $query['module'];
-+      $driver = self::getDriverList()->includeTestDrivers($include_test_drivers)->get($driverName);
-+
-       // Set up an additional autoloader. We don't use the main autoloader as
-       // this method can be called before Drupal is installed and is never
-       // called during regular runtime.
--      $namespace = "Drupal\\$module\\Driver\\Database\\$driver";
--      $psr4_base_directory = Database::findDriverAutoloadDirectory($namespace, $root, $include_test_drivers);
-       $additional_class_loader = new ClassLoader();
--      $additional_class_loader->addPsr4($namespace . '\\', $psr4_base_directory);
-+      $additional_class_loader->addPsr4($driver->getNamespace() . '\\', $driver->getPath());
-+      $connection_class = $driver->getNamespace() . '\\Connection';
-+
-+      // When the database driver is extending another database driver, then
-+      // add autoload info for the parent database driver as well.
-+      $autoloadInfo = $driver->getAutoloadInfo();
-+      if (isset($autoloadInfo['dependencies'])) {
-+        foreach ($autoloadInfo['dependencies'] as $dependency) {
-+          $additional_class_loader->addPsr4($dependency['namespace'] . '\\', $dependency['autoload']);
-+        }
-+      }
-+
-       $additional_class_loader->register(TRUE);
--      $connection_class = $namespace . '\\Connection';
-     }
- 
--    if (!$module) {
-+    if (!isset($query['module'])) {
-       // Determine the connection class to use. Discover if the URL has a valid
-       // driver scheme for a Drupal 8 style custom driver.
-       // @todo Remove this in Drupal 10.
--      $connection_class = "Drupal\\Driver\\Database\\{$driver}\\Connection";
-+      $connection_class = "Drupal\\Driver\\Database\\{$driverName}\\Connection";
-     }
- 
-     if (!class_exists($connection_class)) {
-@@ -570,13 +592,31 @@ public static function convertDbUrlToConnectionInfo($url, $root, ?bool $include_
-     // If the driver is provided by a module add the necessary information to
-     // autoload the code.
-     // @see \Drupal\Core\Site\Settings::initialize()
--    if (isset($psr4_base_directory)) {
--      $options['autoload'] = $psr4_base_directory;
-+    if (isset($autoloadInfo)) {
-+      $options['autoload'] = $driver->getPath() . DIRECTORY_SEPARATOR;
-+      if (isset($autoloadInfo['dependencies'])) {
-+        $options['dependencies'] = $autoloadInfo['dependencies'];
-+      }
-     }
- 
-     return $options;
-   }
- 
-+  /**
-+   * Returns the list provider for available database drivers.
-+   *
-+   * @return \Drupal\Core\Extension\DatabaseDriverList
-+   *   The list provider for available database drivers.
-+   */
-+  public static function getDriverList(): DatabaseDriverList {
-+    if (\Drupal::hasContainer() && \Drupal::hasService('extension.list.database_driver')) {
-+      return \Drupal::service('extension.list.database_driver');
-+    }
-+    else {
-+      return new DatabaseDriverList(DRUPAL_ROOT, 'database_driver', new NullBackend('database_driver'));
-+    }
-+  }
-+
-   /**
-    * Finds the directory to add to the autoloader for the driver's namespace.
-    *
-@@ -631,8 +671,14 @@ public static function convertDbUrlToConnectionInfo($url, $root, ?bool $include_
-    *
-    * @throws \RuntimeException
-    *   Exception thrown when a module provided database driver does not exist.
-+   *
-+   * @deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. Use
-+   *   DatabaseDriverList::getList() instead.
-+   *
-+   * @see https://www.drupal.org/node/3258175
-    */
-   public static function findDriverAutoloadDirectory($namespace, $root, ?bool $include_test_drivers = NULL) {
-+    @trigger_error(__METHOD__ . '() is deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. Use DatabaseDriverList::getList() instead. See https://www.drupal.org/node/3258175', E_USER_DEPRECATED);
-     // As explained by this method's documentation, return FALSE if the
-     // namespace is not a sub-namespace of a Drupal module.
-     if (!static::isWithinModuleNamespace($namespace)) {
-@@ -703,9 +749,9 @@ public static function getConnectionInfoAsUrl($key = 'default') {
-    *   TRUE if the passed in namespace is a sub-namespace of a Drupal module's
-    *   namespace.
-    *
--   * @todo https://www.drupal.org/project/drupal/issues/3125476 Remove if we
--   *   add this to the extension API or if
--   *   \Drupal\Core\Database\Database::getConnectionInfoAsUrl() is removed.
-+   * @todo remove in Drupal 11.
-+   *
-+   * @see https://www.drupal.org/node/3256524
-    */
-   private static function isWithinModuleNamespace(string $namespace) {
-     [$first, $second] = explode('\\', $namespace, 3);
-diff --git a/core/lib/Drupal/Core/Extension/DatabaseDriver.php b/core/lib/Drupal/Core/Extension/DatabaseDriver.php
+diff --git a/core/modules/mysql/tests/src/Kernel/mysql/Cache/EndOfTransactionQueriesTest.php b/core/modules/mysql/tests/src/Kernel/mysql/Cache/EndOfTransactionQueriesTest.php
 new file mode 100644
-index 0000000000..af6954f4e4
+index 0000000000..51067a2922
 --- /dev/null
-+++ b/core/lib/Drupal/Core/Extension/DatabaseDriver.php
-@@ -0,0 +1,225 @@
++++ b/core/modules/mysql/tests/src/Kernel/mysql/Cache/EndOfTransactionQueriesTest.php
+@@ -0,0 +1,28 @@
 +<?php
 +
-+namespace Drupal\Core\Extension;
++namespace Drupal\Tests\mysql\Kernel\mysql\Cache;
 +
-+use Composer\Autoload\ClassLoader;
-+use Drupal\Core\Database\Install\Tasks;
++use Drupal\KernelTests\Core\Cache\DriverSpecificEndOfTransactionQueriesTestBase;
 +
 +/**
-+ * Defines a database driver extension object.
++ * Tests that cache tag invalidation queries are delayed to the end of transactions.
++ *
++ * @group Cache
 + */
-+class DatabaseDriver extends Extension {
-+
-+  private ClassLoader $classLoader;
-+  private Tasks $installTasks;
-+
-+  /**
-+   * Constructs a new DatabaseDriver object.
-+   *
-+   * @param string $root
-+   *   The app root.
-+   * @param \Drupal\Core\Extension\Extension $module
-+   *   The module containing the database driver.
-+   * @param string $driverName
-+   *   The database driver name.
-+   * @param \Drupal\Core\Extension\Extension[] $discoveredModules
-+   *   The modules discovered in the installation.
-+   */
-+  public function __construct(
-+    string $root,
-+    protected Extension $module,
-+    protected string $driverName,
-+    protected array $discoveredModules) {
-+    $this->root = $root;
-+    $this->type = 'database_driver';
-+  }
-+
-+  /**
-+   * Returns the Extension object of the module containing the database driver.
-+   *
-+   * @return \Drupal\Core\Extension\Extension
-+   *   The Extension object of the module containing the database driver.
-+   */
-+  public function getModule(): Extension {
-+    return $this->module;
-+  }
-+
-+  /**
-+   * Returns the PHP namespace of the database driver.
-+   *
-+   * @return string
-+   *   The PHP namespace of the database driver.
-+   */
-+  public function getNamespace(): string {
-+    return "Drupal\\" . $this->getModule()->getName() . "\\Driver\\Database\\" . $this->getName();
-+  }
++class EndOfTransactionQueriesTest extends DriverSpecificEndOfTransactionQueriesTestBase {
 +
 +  /**
 +   * {@inheritdoc}
 +   */
-+  public function getName() {
-+    return $this->driverName;
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function getPath() {
-+    return $this->getModule()->getPath() . DIRECTORY_SEPARATOR . 'src' . DIRECTORY_SEPARATOR . 'Driver' . DIRECTORY_SEPARATOR . 'Database' . DIRECTORY_SEPARATOR . $this->getName();
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function load() {
-+    if (!isset($this->classLoader)) {
-+      $this->classLoader = \Drupal::service('class_loader');
-+      $this->classLoader->addPsr4($this->getNamespace() . '\\', $this->getPath());
-+      foreach (($this->getAutoloadInfo()['dependencies'] ?? []) as $dependency) {
-+        $this->classLoader->addPsr4($dependency['namespace'] . '\\', $dependency['autoload']);
-+      }
-+    }
-+    return TRUE;
-+  }
-+
-+  /**
-+   * Returns the install tasks object instance of this database driver.
-+   *
-+   * @return \Drupal\Core\Database\Install\Tasks
-+   *   The install tasks object instance.
-+   */
-+  public function getInstallTasks(): Tasks {
-+    if (!isset($this->installTasks)) {
-+      $this->load();
-+      $installTasksClass = $this->getNamespace() . "\\Install\\Tasks";
-+      $this->installTasks = new $installTasksClass();
-+    }
-+    return $this->installTasks;
-+  }
-+
-+  // phpcs:disable
-+  /**
-+   * Returns an array with the driver's autoload information.
-+   *
-+   * The module that provides the database driver should add the driver's
-+   * namespace to Composer's autoloader. However, since the database connection
-+   * must be established before Drupal adds the module's entire namespace to the
-+   * autoloader, the database connection info array includes an "autoload" key
-+   * containing the autoload directory for the driver's namespace. For requests
-+   * that connect to the database via a connection info array, the value of the
-+   * "autoload" key is automatically added to the autoloader.
-+   *
-+   * This method can be called to find the default value of that key when the
-+   * database connection info array isn't available. This includes:
-+   * - Console commands and test runners that connect to a database specified
-+   *   by a database URL rather than a connection info array.
-+   * - During installation, prior to the connection info array being written to
-+   *   settings.php.
-+   *
-+   * This method returns an array with the driver's namespace and autoload
-+   * directory that must be added to the autoloader, as well as those of any
-+   * dependency specified in the driver's module.info.yml file, in the format
-+   * @code
-+   * [
-+   *   'autoload' => 'path_to_modules/module_a/src/Driver/Database/driver_1/',
-+   *   'namespace' => 'Drupal\\module_a\\Driver\\Database\\driver_1',
-+   *   'dependencies' => [
-+   *     'module_x' => [
-+   *       'autoload' => 'path_to_modules/module_x/src/',
-+   *       'namespace' => 'Drupal\\module_x',
-+   *     ],
-+   *   ],
-+   * ]
-+   * @endcode
-+   *
-+   * @return array{
-+   *     'autoload': string,
-+   *     'namespace': string,
-+   *     'dependencies': array<string, array{'autoload': string, 'namespace': string}>,
-+   *   }
-+   */
-+  // phpcs:enable
-+  public function getAutoloadInfo(): array {
-+    $this->getModuleInfo();
-+
-+    $autoloadInfo = [
-+      'namespace' => $this->getNamespace(),
-+      'autoload' => $this->getPath() . DIRECTORY_SEPARATOR,
-+    ];
-+
-+    foreach (($this->info['dependencies'] ?? []) as $dependency) {
-+      $dependencyData = Dependency::createFromString($dependency);
-+      $dependencyName = $dependencyData->getName();
-+      if (empty($this->discoveredModules[$dependencyName])) {
-+        throw new \RuntimeException(sprintf("Cannot find the module '%s' that is required by module '%s'", $dependencyName, $this->getModule()->getName()));
-+      }
-+      $autoloadInfo['dependencies'][$dependencyName] = [
-+        'namespace' => "Drupal\\{$dependencyName}",
-+        'autoload' => $this->discoveredModules[$dependencyName]->getPath() . '/src/',
-+      ];
-+    }
-+
-+    return $autoloadInfo;
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function isExperimental(): bool {
-+    $this->getModuleInfo();
-+    return parent::isExperimental();
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function isObsolete(): bool {
-+    $this->getModuleInfo();
-+    return parent::isObsolete();
-+  }
-+
-+  /**
-+   * Gets the content of the info.yml file of the driver's module, as an array.
-+   *
-+   * The info array is saved in the $info property.
-+   *
-+   * @throws \Drupal\Core\Extension\InfoParserException
-+   *   Exception thrown if there is a parsing error or the .info.yml file does
-+   *   not contain a required key.
-+   */
-+  private function getModuleInfo(): void {
-+    if (!isset($this->info)) {
-+      $infoParser = new InfoParser($this->root);
-+      $this->info = $infoParser->parse($this->root . DIRECTORY_SEPARATOR . $this->getModule()->getPathname());
-+    }
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function getPathname() {
-+    throw new \LogicException(__METHOD__ . '() is not implemented');
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function getFilename() {
-+    throw new \LogicException(__METHOD__ . '() is not implemented');
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function getExtensionPathname() {
-+    throw new \LogicException(__METHOD__ . '() is not implemented');
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function getExtensionFilename() {
-+    throw new \LogicException(__METHOD__ . '() is not implemented');
++  protected function getDatabaseConnectionInfo() {
++    $info = parent::getDatabaseConnectionInfo();
++    // Override default database driver to one that does logging. Third-party
++    // (non-core) database drivers can achieve the same test coverage by
++    // subclassing this test class and overriding only this method.
++    // @see \Drupal\database_statement_monitoring_test\LoggedStatementsTrait
++    // @see \Drupal\database_statement_monitoring_test\mysql\Connection
++    $info['default']['namespace'] = '\Drupal\database_statement_monitoring_test\mysql';
++    return $info;
 +  }
 +
 +}
-diff --git a/core/lib/Drupal/Core/Extension/DatabaseDriverList.php b/core/lib/Drupal/Core/Extension/DatabaseDriverList.php
-new file mode 100644
-index 0000000000..5124e646eb
---- /dev/null
-+++ b/core/lib/Drupal/Core/Extension/DatabaseDriverList.php
-@@ -0,0 +1,214 @@
-+<?php
-+
-+namespace Drupal\Core\Extension;
-+
-+use Drupal\Core\Cache\CacheBackendInterface;
-+
-+/**
-+ * Provides a list of available database drivers.
-+ *
-+ * @internal
-+ *   This class is not yet stable and therefore there are no guarantees that the
-+ *   internal implementations including constructor signature and protected
-+ *   properties / methods will not change over time. This will be reviewed after
-+ *   https://www.drupal.org/project/drupal/issues/2940481
-+ */
-+class DatabaseDriverList extends ExtensionList {
-+
-+  /**
-+   * Determines whether test drivers shall be included in the discovery.
-+   */
-+  private ?bool $includeTestDrivers = NULL;
-+
-+  /**
-+   * Constructs a new instance.
-+   *
-+   * @param string $root
-+   *   The app root.
-+   * @param string $type
-+   *   The extension type.
-+   * @param \Drupal\Core\Cache\CacheBackendInterface $cache
-+   *   The cache.
-+   */
-+  public function __construct($root, $type, CacheBackendInterface $cache) {
-+    $this->root = $root;
-+    $this->type = $type;
-+    $this->cache = $cache;
-+  }
-+
-+  /**
-+   * Determines whether test drivers shall be included in the discovery.
-+   *
-+   * @param bool|null $includeTestDrivers
-+   *   (Optional) whether test drivers shall be included in the discovery.
-+   *
-+   * @return $this
-+   */
-+  public function includeTestDrivers(?bool $includeTestDrivers): self {
-+    $this->includeTestDrivers = $includeTestDrivers;
-+    return $this;
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  protected function getExtensionDiscovery() {
-+    return new ExtensionDiscovery($this->root, FALSE);
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  protected function doScanExtensions() {
-+    return $this->getExtensionDiscovery()->scan('module', $this->includeTestDrivers);
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  protected function doList(): array {
-+    // Determine the modules that contain at least one installable database
-+    // driver.
-+    $discoveredModules = $this->doScanExtensions();
-+    $drivers = [];
-+    foreach ($discoveredModules as $module) {
-+      $moduleDriverDirectory = $this->root . DIRECTORY_SEPARATOR . $module->getPath() . DIRECTORY_SEPARATOR . 'src' . DIRECTORY_SEPARATOR . 'Driver' . DIRECTORY_SEPARATOR . 'Database';
-+      if (is_dir($moduleDriverDirectory)) {
-+        // Use directory iterator to avoid services.
-+        $directoryIterator = new \DirectoryIterator($moduleDriverDirectory);
-+        foreach ($directoryIterator as $fileInfo) {
-+          if ($fileInfo->isDir() && !$fileInfo->isDot() && file_exists($moduleDriverDirectory . DIRECTORY_SEPARATOR . $fileInfo->getFilename() . DIRECTORY_SEPARATOR . 'Install' . DIRECTORY_SEPARATOR . 'Tasks.php')) {
-+            // @todo there's a risk of name collision here, if different modules
-+            //   have a driver with the same name. It's a legacy we can't solve
-+            //   at the moment; we might consider identifying database drivers
-+            //   as 'module\driver' combinations, but it would impact external
-+            //   scripts.
-+            $drivers[$fileInfo->getFilename()] = new DatabaseDriver($this->root, $module, $fileInfo->getFilename(), $discoveredModules);
-+          }
-+        }
-+      }
-+    }
-+    return $drivers;
-+  }
-+
-+  /**
-+   * Returns the list of installable database drivers.
-+   *
-+   * @return \Drupal\Core\Extension\DatabaseDriver[]
-+   *   An array of installable database driver extension objects.
-+   */
-+  public function getInstallableList(): array {
-+    $installableDrivers = [];
-+    foreach ($this->getList() as $name => $driver) {
-+      if ($driver->getInstallTasks()->installable()) {
-+        $installableDrivers[$name] = $driver;
-+      }
-+    }
-+    // Usability: unconditionally put the MySQL driver on top.
-+    if (isset($installableDrivers['mysql'])) {
-+      $mysqlDriver = $installableDrivers['mysql'];
-+      unset($installableDrivers['mysql']);
-+      $installableDrivers = ['mysql' => $mysqlDriver] + $installableDrivers;
-+    }
-+    return $installableDrivers;
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function getName($extension_name) {
-+    throw new \LogicException(__METHOD__ . '() is not implemented');
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function getExtensionInfo($extension_name) {
-+    throw new \LogicException(__METHOD__ . '() is not implemented');
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function getAllAvailableInfo() {
-+    throw new \LogicException(__METHOD__ . '() is not implemented');
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  protected function getInstalledExtensionNames() {
-+    throw new \LogicException(__METHOD__ . '() is not implemented');
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function getAllInstalledInfo() {
-+    throw new \LogicException(__METHOD__ . '() is not implemented');
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  protected function recalculateInfo() {
-+    throw new \LogicException(__METHOD__ . '() is not implemented');
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function getPathnames() {
-+    throw new \LogicException(__METHOD__ . '() is not implemented');
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  protected function recalculatePathnames() {
-+    throw new \LogicException(__METHOD__ . '() is not implemented');
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function setPathname($extension_name, $pathname) {
-+    throw new \LogicException(__METHOD__ . '() is not implemented');
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function getPathname($extension_name) {
-+    throw new \LogicException(__METHOD__ . '() is not implemented');
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function getPath($extension_name) {
-+    throw new \LogicException(__METHOD__ . '() is not implemented');
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  protected function createExtensionInfo(Extension $extension) {
-+    throw new \LogicException(__METHOD__ . '() is not implemented');
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function checkIncompatibility($name) {
-+    throw new \LogicException(__METHOD__ . '() is not implemented');
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public static function sortByName(Extension $a, Extension $b): int {
-+    throw new \LogicException(__METHOD__ . '() is not implemented');
-+  }
-+
-+}
-diff --git a/core/lib/Drupal/Core/Extension/ExtensionDiscovery.php b/core/lib/Drupal/Core/Extension/ExtensionDiscovery.php
-index ce6ecbddfa..64c995ae35 100644
---- a/core/lib/Drupal/Core/Extension/ExtensionDiscovery.php
-+++ b/core/lib/Drupal/Core/Extension/ExtensionDiscovery.php
-@@ -228,6 +228,9 @@ public function scan($type, $include_tests = NULL) {
-    */
-   public function setProfileDirectoriesFromSettings() {
-     $this->profileDirectories = [];
-+    if (!\Drupal::hasContainer() || !\Drupal::getContainer()->hasParameter('install_profile')) {
-+      return $this;
-+    }
-     if ($profile = \Drupal::installProfile()) {
-       $this->profileDirectories[] = \Drupal::service('extension.list.profile')->getPath($profile);
-     }
-diff --git a/core/lib/Drupal/Core/Extension/ExtensionList.php b/core/lib/Drupal/Core/Extension/ExtensionList.php
-index 0ac671965b..1c052fd713 100644
---- a/core/lib/Drupal/Core/Extension/ExtensionList.php
-+++ b/core/lib/Drupal/Core/Extension/ExtensionList.php
-@@ -21,7 +21,9 @@
- abstract class ExtensionList {
- 
-   /**
--   * The type of the extension: "module", "theme" or "profile".
-+   * The type of the extension.
-+   *
-+   * Possible values: "module", "theme", "profile" or "database_driver".
-    *
-    * @var string
-    */
-diff --git a/core/lib/Drupal/Core/Installer/Form/SiteSettingsForm.php b/core/lib/Drupal/Core/Installer/Form/SiteSettingsForm.php
-index dc26547122..8adec9c6c9 100644
---- a/core/lib/Drupal/Core/Installer/Form/SiteSettingsForm.php
-+++ b/core/lib/Drupal/Core/Installer/Form/SiteSettingsForm.php
-@@ -4,6 +4,7 @@
- 
- use Drupal\Component\Utility\Crypt;
- use Drupal\Core\Database\Database;
-+use Drupal\Core\Extension\DatabaseDriverList;
- use Drupal\Core\File\FileSystemInterface;
- use Drupal\Core\Form\FormBase;
- use Drupal\Core\Form\FormStateInterface;
-@@ -18,31 +19,20 @@
-  */
- class SiteSettingsForm extends FormBase {
- 
--  /**
--   * The site path.
--   *
--   * @var string
--   */
--  protected $sitePath;
--
--  /**
--   * The renderer.
--   *
--   * @var \Drupal\Core\Render\RendererInterface
--   */
--  protected $renderer;
--
-   /**
-    * Constructs a new SiteSettingsForm.
-    *
--   * @param string $site_path
-+   * @param string $sitePath
-    *   The site path.
-    * @param \Drupal\Core\Render\RendererInterface $renderer
-    *   The renderer.
-+   * @param \Drupal\Core\Extension\DatabaseDriverList $databaseDriverList
-+   *   The list provider of database drivers.
-    */
--  public function __construct($site_path, RendererInterface $renderer) {
--    $this->sitePath = $site_path;
--    $this->renderer = $renderer;
-+  public function __construct(
-+    protected string $sitePath,
-+    protected RendererInterface $renderer,
-+    protected DatabaseDriverList $databaseDriverList) {
+diff --git a/core/modules/mysql/tests/src/Kernel/mysql/SchemaTest.php b/core/modules/mysql/tests/src/Kernel/mysql/SchemaTest.php
+index f08a04df89..f219b37328 100644
+--- a/core/modules/mysql/tests/src/Kernel/mysql/SchemaTest.php
++++ b/core/modules/mysql/tests/src/Kernel/mysql/SchemaTest.php
+@@ -43,6 +43,24 @@ protected function assertCollation(): void {
+     $this->assertSame('ascii_general_ci', $string_ascii_check, 'test_field_string_ascii should have a ascii_general_ci collation, but it has not.');
    }
  
-   /**
-@@ -51,7 +41,8 @@ public function __construct($site_path, RendererInterface $renderer) {
-   public static function create(ContainerInterface $container) {
-     return new static(
-       $container->getParameter('site.path'),
--      $container->get('renderer')
-+      $container->get('renderer'),
-+      $container->get('extension.list.database_driver')
-     );
-   }
- 
-@@ -70,7 +61,7 @@ public function buildForm(array $form, FormStateInterface $form_state) {
- 
-     $form['#title'] = $this->t('Database configuration');
- 
--    $drivers = drupal_get_database_types();
-+    $drivers = $this->databaseDriverList->getInstallableList();
-     $drivers_keys = array_keys($drivers);
- 
-     // Unless there is input for this form (for a non-interactive installation,
-@@ -118,10 +109,9 @@ public function buildForm(array $form, FormStateInterface $form_state) {
- 
-     // Add driver specific configuration options.
-     foreach ($drivers as $key => $driver) {
--      $form['driver']['#options'][$key] = $driver->name();
--
--      $form['settings'][$key] = $driver->getFormOptions($default_options);
--      $form['settings'][$key]['#prefix'] = '<h2 class="js-hide">' . $this->t('@driver_name settings', ['@driver_name' => $driver->name()]) . '</h2>';
-+      $form['driver']['#options'][$key] = $driver->getInstallTasks()->name();
-+      $form['settings'][$key] = $driver->getInstallTasks()->getFormOptions($default_options);
-+      $form['settings'][$key]['#prefix'] = '<h2 class="js-hide">' . $this->t('@driver_name settings', ['@driver_name' => $driver->getInstallTasks()->name()]) . '</h2>';
-       $form['settings'][$key]['#type'] = 'container';
-       $form['settings'][$key]['#tree'] = TRUE;
-       $form['settings'][$key]['advanced_options']['#parents'] = [$key];
-@@ -156,18 +146,12 @@ public function buildForm(array $form, FormStateInterface $form_state) {
-   public function validateForm(array &$form, FormStateInterface $form_state) {
-     $driver = $form_state->getValue('driver');
-     $database = $form_state->getValue($driver);
--    $drivers = drupal_get_database_types();
--    $reflection = new \ReflectionClass($drivers[$driver]);
--    $install_namespace = $reflection->getNamespaceName();
--    // Cut the trailing \Install from namespace.
--    $database['namespace'] = substr($install_namespace, 0, strrpos($install_namespace, '\\'));
-+
-     $database['driver'] = $driver;
--    // See default.settings.php for an explanation of the 'autoload' key.
--    if ($autoload = Database::findDriverAutoloadDirectory($database['namespace'], DRUPAL_ROOT)) {
--      $database['autoload'] = $autoload;
--    }
-+    $database = array_merge($database, $this->databaseDriverList->get($driver)->getAutoloadInfo());
- 
-     $form_state->set('database', $database);
-+
-     foreach ($this->getDatabaseErrors($database, $form_state->getValue('settings_file')) as $name => $message) {
-       $form_state->setErrorByName($name, $message);
-     }
-diff --git a/core/lib/Drupal/Core/Test/FunctionalTestSetupTrait.php b/core/lib/Drupal/Core/Test/FunctionalTestSetupTrait.php
-index 57e68e2ad3..38c7a799ba 100644
---- a/core/lib/Drupal/Core/Test/FunctionalTestSetupTrait.php
-+++ b/core/lib/Drupal/Core/Test/FunctionalTestSetupTrait.php
-@@ -558,7 +558,6 @@ protected function installParameters() {
-     ];
- 
-     // If we only have one db driver available, we cannot set the driver.
--    include_once DRUPAL_ROOT . '/core/includes/install.inc';
-     if (count($this->getDatabaseTypes()) == 1) {
-       unset($parameters['forms']['install_settings_form']['driver']);
-     }
-@@ -695,7 +694,8 @@ protected function prepareEnvironment() {
-   /**
-    * Returns all supported database driver installer objects.
-    *
--   * This wraps drupal_get_database_types() for use without a current container.
-+   * This wraps DatabaseDriverList::getInstallableList() for use without a
-+   * current container.
-    *
-    * @return \Drupal\Core\Database\Install\Tasks[]
-    *   An array of available database driver installer objects.
-@@ -704,7 +704,10 @@ protected function getDatabaseTypes() {
-     if (isset($this->originalContainer) && $this->originalContainer) {
-       \Drupal::setContainer($this->originalContainer);
-     }
--    $database_types = drupal_get_database_types();
-+    $database_types = [];
-+    foreach (Database::getDriverList()->getInstallableList() as $name => $driver) {
-+      $database_types[$name] = $driver->getInstallTasks();
-+    }
-     if (isset($this->originalContainer) && $this->originalContainer) {
-       \Drupal::unsetContainer();
-     }
-diff --git a/core/modules/migrate_drupal_ui/src/Form/CredentialForm.php b/core/modules/migrate_drupal_ui/src/Form/CredentialForm.php
-index 87e57604bb..d3d4475845 100644
---- a/core/modules/migrate_drupal_ui/src/Form/CredentialForm.php
-+++ b/core/modules/migrate_drupal_ui/src/Form/CredentialForm.php
-@@ -395,7 +395,11 @@ public function getConfirmText() {
-   protected function getDatabaseTypes() {
-     // Make sure the install API is available.
-     include_once DRUPAL_ROOT . '/core/includes/install.inc';
--    return drupal_get_database_types();
-+    $database_types = [];
-+    foreach (Database::getDriverList()->getInstallableList() as $name => $driver) {
-+      $database_types[$name] = $driver->getInstallTasks();
-+    }
-+    return $database_types;
-   }
- 
-   /**
-diff --git a/core/modules/migrate_drupal_ui/tests/src/Functional/MigrateUpgradeTestBase.php b/core/modules/migrate_drupal_ui/tests/src/Functional/MigrateUpgradeTestBase.php
-index df5f4230ed..6de637e29a 100644
---- a/core/modules/migrate_drupal_ui/tests/src/Functional/MigrateUpgradeTestBase.php
-+++ b/core/modules/migrate_drupal_ui/tests/src/Functional/MigrateUpgradeTestBase.php
-@@ -298,8 +298,8 @@ protected function getCredentials() {
- 
-     // Use the driver connection form to get the correct options out of the
-     // database settings. This supports all of the databases we test against.
--    $drivers = drupal_get_database_types();
--    $form = $drivers[$driver]->getFormOptions($connection_options);
-+    $drivers = Database::getDriverList()->getInstallableList();
-+    $form = $drivers[$driver]->getInstallTasks()->getFormOptions($connection_options);
-     $connection_options = array_intersect_key($connection_options, $form + $form['advanced_options']);
-     $edit = [
-       $driver => $connection_options,
-diff --git a/core/modules/migrate_drupal_ui/tests/src/Functional/d7/FilePathTest.php b/core/modules/migrate_drupal_ui/tests/src/Functional/d7/FilePathTest.php
-index 6ccb1f97ff..80c2ed9252 100644
---- a/core/modules/migrate_drupal_ui/tests/src/Functional/d7/FilePathTest.php
-+++ b/core/modules/migrate_drupal_ui/tests/src/Functional/d7/FilePathTest.php
-@@ -2,6 +2,7 @@
- 
- namespace Drupal\Tests\migrate_drupal_ui\Functional\d7;
- 
-+use Drupal\Core\Database\Database;
- use Drupal\Core\File\FileSystemInterface;
- use Drupal\Tests\ExtensionListTestTrait;
- use Drupal\Tests\migrate_drupal_ui\Functional\MigrateUpgradeTestBase;
-@@ -124,8 +125,8 @@ public function testFilePath(string $file_private_path, string $file_public_path
- 
-     // Use the driver connection form to get the correct options out of the
-     // database settings. This supports all of the databases we test against.
--    $drivers = drupal_get_database_types();
--    $form = $drivers[$driver]->getFormOptions($connection_options);
-+    $drivers = Database::getDriverList()->getInstallableList();
-+    $form = $drivers[$driver]->getInstallTasks()->getFormOptions($connection_options);
-     $connection_options = array_intersect_key($connection_options, $form + $form['advanced_options']);
-     $edit = [
-       $driver => $connection_options,
-diff --git a/core/modules/system/system.install b/core/modules/system/system.install
-index 41d0b4fe30..2eb6e8dc4e 100644
---- a/core/modules/system/system.install
-+++ b/core/modules/system/system.install
-@@ -492,8 +492,7 @@ function system_requirements($phase) {
-     }
-     else {
-       // Make sure at least one supported database driver exists.
--      $drivers = drupal_detect_database_types();
--      if (empty($drivers)) {
-+      if (empty(Database::getDriverList()->getInstallableList())) {
-         $database_ok = FALSE;
-         $pdo_message = t('Your web server does not appear to support any common PDO database extensions. Check with your hosting provider to see if they support PDO (PHP Data Objects) and offer any databases that <a href=":drupal-databases">Drupal supports</a>.', [
-           ':drupal-databases' => 'https://www.drupal.org/docs/system-requirements/database-server-requirements',
-diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Connection.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Connection.php
-index a87a0d3869..9de6eda72c 100644
---- a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Connection.php
-+++ b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Connection.php
-@@ -2,8 +2,6 @@
- 
- namespace Drupal\driver_test\Driver\Database\DrivertestMysql;
- 
--include_once dirname(__DIR__, 8) . '/mysql/src/Driver/Database/mysql/Connection.php';
--
- use Drupal\mysql\Driver\Database\mysql\Connection as CoreConnection;
- 
- /**
-diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Insert.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Insert.php
-index 8c15b608fe..5c253174bc 100644
---- a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Insert.php
-+++ b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Insert.php
-@@ -2,8 +2,6 @@
- 
- namespace Drupal\driver_test\Driver\Database\DrivertestMysql;
- 
--include_once dirname(__DIR__, 8) . '/mysql/src/Driver/Database/mysql/Insert.php';
--
- use Drupal\mysql\Driver\Database\mysql\Insert as CoreInsert;
- 
- /**
-diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Install/Tasks.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Install/Tasks.php
-index 2b20ba147f..4a6f247bb9 100644
---- a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Install/Tasks.php
-+++ b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Install/Tasks.php
-@@ -2,8 +2,6 @@
- 
- namespace Drupal\driver_test\Driver\Database\DrivertestMysql\Install;
- 
--include_once dirname(__DIR__, 9) . '/mysql/src/Driver/Database/mysql/Install/Tasks.php';
--
- use Drupal\mysql\Driver\Database\mysql\Install\Tasks as CoreTasks;
- 
- /**
-diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Schema.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Schema.php
-index b3a2dc01fe..bc1bf9eec2 100644
---- a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Schema.php
-+++ b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Schema.php
-@@ -2,8 +2,6 @@
- 
- namespace Drupal\driver_test\Driver\Database\DrivertestMysql;
- 
--include_once dirname(__DIR__, 8) . '/mysql/src/Driver/Database/mysql/Schema.php';
--
- use Drupal\mysql\Driver\Database\mysql\Schema as CoreSchema;
- 
- /**
-diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Upsert.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Upsert.php
-index dd2d71af8c..d2bd76e6ea 100644
---- a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Upsert.php
-+++ b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Upsert.php
-@@ -2,8 +2,6 @@
- 
- namespace Drupal\driver_test\Driver\Database\DrivertestMysql;
- 
--include_once dirname(__DIR__, 8) . '/mysql/src/Driver/Database/mysql/Upsert.php';
--
- use Drupal\mysql\Driver\Database\mysql\Upsert as CoreUpsert;
- 
- /**
-diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Connection.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Connection.php
-index 6ef463cb15..447c3acd48 100644
---- a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Connection.php
-+++ b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Connection.php
-@@ -2,8 +2,6 @@
- 
- namespace Drupal\driver_test\Driver\Database\DrivertestMysqlDeprecatedVersion;
- 
--include_once dirname(__DIR__, 8) . '/mysql/src/Driver/Database/mysql/Connection.php';
--
- use Drupal\mysql\Driver\Database\mysql\Connection as CoreConnection;
- 
- /**
-diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Insert.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Insert.php
-index f1a54e3cac..f29049d5af 100644
---- a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Insert.php
-+++ b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Insert.php
-@@ -2,8 +2,6 @@
- 
- namespace Drupal\driver_test\Driver\Database\DrivertestMysqlDeprecatedVersion;
- 
--include_once dirname(__DIR__, 8) . '/mysql/src/Driver/Database/mysql/Insert.php';
--
- use Drupal\mysql\Driver\Database\mysql\Insert as CoreInsert;
- 
- /**
-diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Install/Tasks.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Install/Tasks.php
-index 647268c7b8..42a7c52d7e 100644
---- a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Install/Tasks.php
-+++ b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Install/Tasks.php
-@@ -2,8 +2,6 @@
- 
- namespace Drupal\driver_test\Driver\Database\DrivertestMysqlDeprecatedVersion\Install;
- 
--include_once dirname(__DIR__, 9) . '/mysql/src/Driver/Database/mysql/Install/Tasks.php';
--
- use Drupal\mysql\Driver\Database\mysql\Install\Tasks as CoreTasks;
- 
- /**
-diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Schema.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Schema.php
-index 4e73921584..0b608b4baf 100644
---- a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Schema.php
-+++ b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Schema.php
-@@ -2,8 +2,6 @@
- 
- namespace Drupal\driver_test\Driver\Database\DrivertestMysqlDeprecatedVersion;
- 
--include_once dirname(__DIR__, 8) . '/mysql/src/Driver/Database/mysql/Schema.php';
--
- use Drupal\mysql\Driver\Database\mysql\Schema as CoreSchema;
- 
- /**
-diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Upsert.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Upsert.php
-index 2513c7357b..58a792b644 100644
---- a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Upsert.php
-+++ b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Upsert.php
-@@ -2,8 +2,6 @@
- 
- namespace Drupal\driver_test\Driver\Database\DrivertestMysqlDeprecatedVersion;
- 
--include_once dirname(__DIR__, 8) . '/mysql/src/Driver/Database/mysql/Upsert.php';
--
- use Drupal\mysql\Driver\Database\mysql\Upsert as CoreUpsert;
- 
- /**
-diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Connection.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Connection.php
-index e45d48ade9..f9f15f091d 100644
---- a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Connection.php
-+++ b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Connection.php
-@@ -2,8 +2,6 @@
- 
- namespace Drupal\driver_test\Driver\Database\DrivertestPgsql;
- 
--include_once dirname(__DIR__, 8) . '/pgsql/src/Driver/Database/pgsql/Connection.php';
--
- use Drupal\pgsql\Driver\Database\pgsql\Connection as CoreConnection;
- 
- /**
-diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Delete.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Delete.php
-index 92081533cb..29840d0dfa 100644
---- a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Delete.php
-+++ b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Delete.php
-@@ -2,8 +2,6 @@
- 
- namespace Drupal\driver_test\Driver\Database\DrivertestPgsql;
- 
--include_once dirname(__DIR__, 8) . '/pgsql/src/Driver/Database/pgsql/Delete.php';
--
- use Drupal\pgsql\Driver\Database\pgsql\Delete as CoreDelete;
- 
- /**
-diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Insert.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Insert.php
-index 957373ffc3..a35e74d445 100644
---- a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Insert.php
-+++ b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Insert.php
-@@ -2,8 +2,6 @@
- 
- namespace Drupal\driver_test\Driver\Database\DrivertestPgsql;
- 
--include_once dirname(__DIR__, 8) . '/pgsql/src/Driver/Database/pgsql/Insert.php';
--
- use Drupal\pgsql\Driver\Database\pgsql\Insert as CoreInsert;
- 
- /**
-diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Install/Tasks.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Install/Tasks.php
-index a8c096438f..51fcd27967 100644
---- a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Install/Tasks.php
-+++ b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Install/Tasks.php
-@@ -2,8 +2,6 @@
- 
- namespace Drupal\driver_test\Driver\Database\DrivertestPgsql\Install;
- 
--include_once dirname(__DIR__, 9) . '/pgsql/src/Driver/Database/pgsql/Install/Tasks.php';
--
- use Drupal\pgsql\Driver\Database\pgsql\Install\Tasks as CoreTasks;
- 
- /**
-diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Schema.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Schema.php
-index df0c45c222..522311cdc2 100644
---- a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Schema.php
-+++ b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Schema.php
-@@ -2,8 +2,6 @@
- 
- namespace Drupal\driver_test\Driver\Database\DrivertestPgsql;
- 
--include_once dirname(__DIR__, 8) . '/pgsql/src/Driver/Database/pgsql/Schema.php';
--
- use Drupal\pgsql\Driver\Database\pgsql\Schema as CoreSchema;
- 
- /**
-diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Select.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Select.php
-index b11fbefe11..12fe909b2e 100644
---- a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Select.php
-+++ b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Select.php
-@@ -2,8 +2,6 @@
- 
- namespace Drupal\driver_test\Driver\Database\DrivertestPgsql;
- 
--include_once dirname(__DIR__, 8) . '/pgsql/src/Driver/Database/pgsql/Select.php';
--
- use Drupal\pgsql\Driver\Database\pgsql\Select as CoreSelect;
- 
- /**
-diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Truncate.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Truncate.php
-index 61b58711ff..416c082563 100644
---- a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Truncate.php
-+++ b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Truncate.php
-@@ -2,8 +2,6 @@
- 
- namespace Drupal\driver_test\Driver\Database\DrivertestPgsql;
- 
--include_once dirname(__DIR__, 8) . '/pgsql/src/Driver/Database/pgsql/Truncate.php';
--
- use Drupal\pgsql\Driver\Database\pgsql\Truncate as CoreTruncate;
- 
- /**
-diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Update.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Update.php
-index e30ace4bc8..48d3f0380e 100644
---- a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Update.php
-+++ b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Update.php
-@@ -2,8 +2,6 @@
- 
- namespace Drupal\driver_test\Driver\Database\DrivertestPgsql;
- 
--include_once dirname(__DIR__, 8) . '/pgsql/src/Driver/Database/pgsql/Update.php';
--
- use Drupal\pgsql\Driver\Database\pgsql\Update as CoreUpdate;
- 
- /**
-diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Upsert.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Upsert.php
-index b36b039bf9..93e51d1ae0 100644
---- a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Upsert.php
-+++ b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Upsert.php
-@@ -2,8 +2,6 @@
- 
- namespace Drupal\driver_test\Driver\Database\DrivertestPgsql;
- 
--include_once dirname(__DIR__, 8) . '/pgsql/src/Driver/Database/pgsql/Upsert.php';
--
- use Drupal\pgsql\Driver\Database\pgsql\Upsert as CoreUpsert;
- 
- /**
-diff --git a/core/modules/system/tests/src/Functional/System/DatabaseDriverProvidedByModuleTest.php b/core/modules/system/tests/src/Functional/System/DatabaseDriverProvidedByModuleTest.php
-index e81ced70d3..450651c171 100644
---- a/core/modules/system/tests/src/Functional/System/DatabaseDriverProvidedByModuleTest.php
-+++ b/core/modules/system/tests/src/Functional/System/DatabaseDriverProvidedByModuleTest.php
-@@ -50,6 +50,12 @@ public function testDatabaseDriverIsProvidedByModuleButTheModuleIsNotEnabled():
-       'driver' => 'Drivertest' . ucfirst($driver),
-       'namespace' => 'Drupal\\driver_test\\Driver\\Database\\Drivertest' . ucfirst($driver),
-       'autoload' => 'core/modules/system/tests/modules/driver_test/src/Driver/Database/Drivertest' . ucfirst($driver),
-+      'dependencies' => [
-+        $driver => [
-+          'namespace' => "Drupal\\{$driver}",
-+          'autoload' => "core/modules/$driver/src/",
++  /**
++   * {@inheritdoc}
++   */
++  public function testTableWithSpecificDataType(): void {
++    $table_specification = [
++      'description' => 'Schema table description.',
++      'fields' => [
++        'timestamp'  => [
++          'mysql_type' => 'timestamp',
++          'not null' => FALSE,
++          'default' => NULL,
 +        ],
 +      ],
-     ];
-     if (isset($connection_info['default']['port'])) {
-       $database['port'] = $connection_info['default']['port'];
-diff --git a/core/modules/system/tests/src/Functional/Update/DatabaseVersionCheckUpdateTest.php b/core/modules/system/tests/src/Functional/Update/DatabaseVersionCheckUpdateTest.php
-index 2202dc000b..55fb6ac5b8 100644
---- a/core/modules/system/tests/src/Functional/Update/DatabaseVersionCheckUpdateTest.php
-+++ b/core/modules/system/tests/src/Functional/Update/DatabaseVersionCheckUpdateTest.php
-@@ -39,7 +39,7 @@ public function testUpdate() {
-     // Use a database driver that reports a fake database version that does
-     // not meet requirements. Only change the necessary settings in the database
-     // settings array so that run-tests.sh continues to work.
--    $autoload = Database::findDriverAutoloadDirectory('Drupal\driver_test\Driver\Database\DrivertestMysqlDeprecatedVersion', \Drupal::root());
-+    $autoloading = \Drupal::service('extension.list.database_driver')->get('DrivertestMysqlDeprecatedVersion')->getAutoloadInfo();
-     $settings['databases']['default']['default']['driver'] = (object) [
-       'value' => 'DrivertestMysqlDeprecatedVersion',
-       'required' => TRUE,
-@@ -49,7 +49,11 @@ public function testUpdate() {
-       'required' => TRUE,
-     ];
-     $settings['databases']['default']['default']['autoload'] = (object) [
--      'value' => $autoload,
-+      'value' => $autoloading['autoload'],
-+      'required' => TRUE,
 +    ];
-+    $settings['databases']['default']['default']['dependencies'] = (object) [
-+      'value' => $autoloading['dependencies'],
-       'required' => TRUE,
-     ];
-     $settings['settings'] = [
-diff --git a/core/tests/Drupal/FunctionalTests/Installer/InstallerExistingBrokenDatabaseSettingsTest.php b/core/tests/Drupal/FunctionalTests/Installer/InstallerExistingBrokenDatabaseSettingsTest.php
-index 3a42b319c1..6955829ae0 100644
---- a/core/tests/Drupal/FunctionalTests/Installer/InstallerExistingBrokenDatabaseSettingsTest.php
-+++ b/core/tests/Drupal/FunctionalTests/Installer/InstallerExistingBrokenDatabaseSettingsTest.php
-@@ -35,7 +35,8 @@ protected function prepareEnvironment() {
-     $connection_info['default']['driver'] = 'DrivertestMysqlDeprecatedVersion';
-     $namespace = 'Drupal\\driver_test\\Driver\\Database\\DrivertestMysqlDeprecatedVersion';
-     $connection_info['default']['namespace'] = $namespace;
--    $connection_info['default']['autoload'] = Database::findDriverAutoloadDirectory($namespace, \Drupal::root());
-+    $autoloading = \Drupal::service('extension.list.database_driver')->get('DrivertestMysqlDeprecatedVersion')->getAutoloadInfo();
-+    $connection_info['default']['autoload'] = $autoloading['autoload'];
- 
-     $this->settings['databases']['default'] = (object) [
-       'value' => $connection_info,
-diff --git a/core/tests/Drupal/FunctionalTests/Installer/InstallerNonDefaultDatabaseDriverTest.php b/core/tests/Drupal/FunctionalTests/Installer/InstallerNonDefaultDatabaseDriverTest.php
-index c7e4dff8b8..406e992bb0 100644
---- a/core/tests/Drupal/FunctionalTests/Installer/InstallerNonDefaultDatabaseDriverTest.php
-+++ b/core/tests/Drupal/FunctionalTests/Installer/InstallerNonDefaultDatabaseDriverTest.php
-@@ -61,6 +61,21 @@ public function testInstalled() {
-     $this->assertStringContainsString("'driver' => '{$this->testDriverName}',", $contents);
-     $this->assertStringContainsString("'autoload' => 'core/modules/system/tests/modules/driver_test/src/Driver/Database/{$this->testDriverName}/',", $contents);
- 
-+    $dependencies = "'dependencies' => " . PHP_EOL .
-+      "  array (" . PHP_EOL .
-+      "    'mysql' => " . PHP_EOL .
-+      "    array (" . PHP_EOL .
-+      "      'namespace' => 'Drupal\\\\mysql'," . PHP_EOL .
-+      "      'autoload' => 'core/modules/mysql/src/'," . PHP_EOL .
-+      "    )," . PHP_EOL .
-+      "    'pgsql' => " . PHP_EOL .
-+      "    array (" . PHP_EOL .
-+      "      'namespace' => 'Drupal\\\\pgsql'," . PHP_EOL .
-+      "      'autoload' => 'core/modules/pgsql/src/'," . PHP_EOL .
-+      "    )," . PHP_EOL .
-+      "  )," . PHP_EOL;
-+    $this->assertStringContainsString($dependencies, $contents);
++    $this->schema->createTable('test_timestamp', $table_specification);
++    $this->assertTrue($this->schema->tableExists('test_timestamp'));
++  }
 +
-     // Assert that the module "driver_test" has been installed.
-     $this->assertEquals(\Drupal::service('module_handler')->getModule('driver_test'), new Extension($this->root, 'module', 'core/modules/system/tests/modules/driver_test/driver_test.info.yml'));
- 
-diff --git a/core/tests/Drupal/KernelTests/Core/Database/DatabaseLegacyTest.php b/core/tests/Drupal/KernelTests/Core/Database/DatabaseLegacyTest.php
+   /**
+    * Tests that indexes on string fields are limited to 191 characters on MySQL.
+    *
+diff --git a/core/modules/mysql/tests/src/Kernel/mysql/SyntaxTest.php b/core/modules/mysql/tests/src/Kernel/mysql/SyntaxTest.php
 new file mode 100644
-index 0000000000..1ffd8c8347
+index 0000000000..b5ad81267a
 --- /dev/null
-+++ b/core/tests/Drupal/KernelTests/Core/Database/DatabaseLegacyTest.php
-@@ -0,0 +1,29 @@
++++ b/core/modules/mysql/tests/src/Kernel/mysql/SyntaxTest.php
+@@ -0,0 +1,13 @@
++<?php
++
++namespace Drupal\Tests\mysql\Kernel\mysql;
++
++use Drupal\KernelTests\Core\Database\DriverSpecificSyntaxTestBase;
++
++/**
++ * Tests MySql syntax interpretation.
++ *
++ * @group Database
++ */
++class SyntaxTest extends DriverSpecificSyntaxTestBase {
++}
+diff --git a/core/modules/mysql/tests/src/Kernel/mysql/TransactionTest.php b/core/modules/mysql/tests/src/Kernel/mysql/TransactionTest.php
+new file mode 100644
+index 0000000000..d9d5dd513c
+--- /dev/null
++++ b/core/modules/mysql/tests/src/Kernel/mysql/TransactionTest.php
+@@ -0,0 +1,13 @@
++<?php
++
++namespace Drupal\Tests\mysql\Kernel\mysql;
++
++use Drupal\KernelTests\Core\Database\DriverSpecificTransactionTestBase;
++
++/**
++ * Tests transaction for the MySQL driver.
++ *
++ * @group Database
++ */
++class TransactionTest extends DriverSpecificTransactionTestBase {
++}
+diff --git a/core/modules/pgsql/tests/src/Kernel/pgsql/Cache/EndOfTransactionQueriesTest.php b/core/modules/pgsql/tests/src/Kernel/pgsql/Cache/EndOfTransactionQueriesTest.php
+new file mode 100644
+index 0000000000..3c0882900f
+--- /dev/null
++++ b/core/modules/pgsql/tests/src/Kernel/pgsql/Cache/EndOfTransactionQueriesTest.php
+@@ -0,0 +1,28 @@
++<?php
++
++namespace Drupal\Tests\pgsql\Kernel\pgsql\Cache;
++
++use Drupal\KernelTests\Core\Cache\DriverSpecificEndOfTransactionQueriesTestBase;
++
++/**
++ * Tests that cache tag invalidation queries are delayed to the end of transactions.
++ *
++ * @group Cache
++ */
++class EndOfTransactionQueriesTest extends DriverSpecificEndOfTransactionQueriesTestBase {
++
++  /**
++   * {@inheritdoc}
++   */
++  protected function getDatabaseConnectionInfo() {
++    $info = parent::getDatabaseConnectionInfo();
++    // Override default database driver to one that does logging. Third-party
++    // (non-core) database drivers can achieve the same test coverage by
++    // subclassing this test class and overriding only this method.
++    // @see \Drupal\database_statement_monitoring_test\LoggedStatementsTrait
++    // @see \Drupal\database_statement_monitoring_test\pgsql\Connection
++    $info['default']['namespace'] = '\Drupal\database_statement_monitoring_test\pgsql';
++    return $info;
++  }
++
++}
+diff --git a/core/modules/pgsql/tests/src/Kernel/pgsql/SchemaTest.php b/core/modules/pgsql/tests/src/Kernel/pgsql/SchemaTest.php
+index 0c252ec529..9f39c75c07 100644
+--- a/core/modules/pgsql/tests/src/Kernel/pgsql/SchemaTest.php
++++ b/core/modules/pgsql/tests/src/Kernel/pgsql/SchemaTest.php
+@@ -39,6 +39,24 @@ protected function checkSequenceRenaming(string $tableName): void {
+     $this->assertTrue($sequenceExists, 'Sequence was renamed.');
+   }
+ 
++  /**
++   * {@inheritdoc}
++   */
++  public function testTableWithSpecificDataType(): void {
++    $table_specification = [
++      'description' => 'Schema table description.',
++      'fields' => [
++        'timestamp'  => [
++          'pgsql_type' => 'timestamp',
++          'not null' => FALSE,
++          'default' => NULL,
++        ],
++      ],
++    ];
++    $this->schema->createTable('test_timestamp', $table_specification);
++    $this->assertTrue($this->schema->tableExists('test_timestamp'));
++  }
++
+   /**
+    * @covers \Drupal\pgsql\Driver\Database\pgsql\Schema::introspectIndexSchema
+    */
+diff --git a/core/modules/pgsql/tests/src/Kernel/pgsql/SyntaxTest.php b/core/modules/pgsql/tests/src/Kernel/pgsql/SyntaxTest.php
+new file mode 100644
+index 0000000000..2da93a315c
+--- /dev/null
++++ b/core/modules/pgsql/tests/src/Kernel/pgsql/SyntaxTest.php
+@@ -0,0 +1,13 @@
++<?php
++
++namespace Drupal\Tests\pgsql\Kernel\pgsql;
++
++use Drupal\KernelTests\Core\Database\DriverSpecificSyntaxTestBase;
++
++/**
++ * Tests PostgreSQL syntax interpretation.
++ *
++ * @group Database
++ */
++class SyntaxTest extends DriverSpecificSyntaxTestBase {
++}
+diff --git a/core/modules/pgsql/tests/src/Kernel/pgsql/TransactionTest.php b/core/modules/pgsql/tests/src/Kernel/pgsql/TransactionTest.php
+new file mode 100644
+index 0000000000..f9d7d0ed73
+--- /dev/null
++++ b/core/modules/pgsql/tests/src/Kernel/pgsql/TransactionTest.php
+@@ -0,0 +1,13 @@
++<?php
++
++namespace Drupal\Tests\pgsql\Kernel\pgsql;
++
++use Drupal\KernelTests\Core\Database\DriverSpecificTransactionTestBase;
++
++/**
++ * Tests transaction for the PostgreSQL driver.
++ *
++ * @group Database
++ */
++class TransactionTest extends DriverSpecificTransactionTestBase {
++}
+diff --git a/core/modules/sqlite/tests/src/Kernel/sqlite/Cache/EndOfTransactionQueriesTest.php b/core/modules/sqlite/tests/src/Kernel/sqlite/Cache/EndOfTransactionQueriesTest.php
+new file mode 100644
+index 0000000000..08d02c32e4
+--- /dev/null
++++ b/core/modules/sqlite/tests/src/Kernel/sqlite/Cache/EndOfTransactionQueriesTest.php
+@@ -0,0 +1,28 @@
++<?php
++
++namespace Drupal\Tests\sqlite\Kernel\sqlite\Cache;
++
++use Drupal\KernelTests\Core\Cache\DriverSpecificEndOfTransactionQueriesTestBase;
++
++/**
++ * Tests that cache tag invalidation queries are delayed to the end of transactions.
++ *
++ * @group Cache
++ */
++class EndOfTransactionQueriesTest extends DriverSpecificEndOfTransactionQueriesTestBase {
++
++  /**
++   * {@inheritdoc}
++   */
++  protected function getDatabaseConnectionInfo() {
++    $info = parent::getDatabaseConnectionInfo();
++    // Override default database driver to one that does logging. Third-party
++    // (non-core) database drivers can achieve the same test coverage by
++    // subclassing this test class and overriding only this method.
++    // @see \Drupal\database_statement_monitoring_test\LoggedStatementsTrait
++    // @see \Drupal\database_statement_monitoring_test\sqlite\Connection
++    $info['default']['namespace'] = '\Drupal\database_statement_monitoring_test\sqlite';
++    return $info;
++  }
++
++}
+diff --git a/core/modules/sqlite/tests/src/Kernel/sqlite/SchemaTest.php b/core/modules/sqlite/tests/src/Kernel/sqlite/SchemaTest.php
+index 07b6624196..a3aec37553 100644
+--- a/core/modules/sqlite/tests/src/Kernel/sqlite/SchemaTest.php
++++ b/core/modules/sqlite/tests/src/Kernel/sqlite/SchemaTest.php
+@@ -5,7 +5,7 @@
+ use Drupal\KernelTests\Core\Database\DriverSpecificSchemaTestBase;
+ 
+ /**
+- * Tests schema API for the PostgreSQL driver.
++ * Tests schema API for the SQLite driver.
+  *
+  * @group Database
+  */
+@@ -26,6 +26,24 @@ protected function tryInsertExpectsIntegrityConstraintViolationException(string
+     // Sqlite does not throw an IntegrityConstraintViolationException here.
+   }
+ 
++  /**
++   * {@inheritdoc}
++   */
++  public function testTableWithSpecificDataType(): void {
++    $table_specification = [
++      'description' => 'Schema table description.',
++      'fields' => [
++        'timestamp'  => [
++          'sqlite_type' => 'datetime',
++          'not null' => FALSE,
++          'default' => NULL,
++        ],
++      ],
++    ];
++    $this->schema->createTable('test_timestamp', $table_specification);
++    $this->assertTrue($this->schema->tableExists('test_timestamp'));
++  }
++
+   /**
+    * @covers \Drupal\sqlite\Driver\Database\sqlite\Schema::introspectIndexSchema
+    */
+diff --git a/core/modules/sqlite/tests/src/Kernel/sqlite/SyntaxTest.php b/core/modules/sqlite/tests/src/Kernel/sqlite/SyntaxTest.php
+new file mode 100644
+index 0000000000..fd495ffefe
+--- /dev/null
++++ b/core/modules/sqlite/tests/src/Kernel/sqlite/SyntaxTest.php
+@@ -0,0 +1,13 @@
++<?php
++
++namespace Drupal\Tests\sqlite\Kernel\sqlite;
++
++use Drupal\KernelTests\Core\Database\DriverSpecificSyntaxTestBase;
++
++/**
++ * Tests SQLite syntax interpretation.
++ *
++ * @group Database
++ */
++class SyntaxTest extends DriverSpecificSyntaxTestBase {
++}
+diff --git a/core/modules/sqlite/tests/src/Kernel/sqlite/TransactionTest.php b/core/modules/sqlite/tests/src/Kernel/sqlite/TransactionTest.php
+new file mode 100644
+index 0000000000..1c69ab1592
+--- /dev/null
++++ b/core/modules/sqlite/tests/src/Kernel/sqlite/TransactionTest.php
+@@ -0,0 +1,13 @@
++<?php
++
++namespace Drupal\Tests\sqlite\Kernel\sqlite;
++
++use Drupal\KernelTests\Core\Database\DriverSpecificTransactionTestBase;
++
++/**
++ * Tests transaction for the SQLite driver.
++ *
++ * @group Database
++ */
++class TransactionTest extends DriverSpecificTransactionTestBase {
++}
+diff --git a/core/tests/Drupal/KernelTests/Core/Cache/EndOfTransactionQueriesTest.php b/core/tests/Drupal/KernelTests/Core/Cache/DriverSpecificEndOfTransactionQueriesTestBase.php
+similarity index 88%
+rename from core/tests/Drupal/KernelTests/Core/Cache/EndOfTransactionQueriesTest.php
+rename to core/tests/Drupal/KernelTests/Core/Cache/DriverSpecificEndOfTransactionQueriesTestBase.php
+index 1d735d511d..8a77361b8f 100644
+--- a/core/tests/Drupal/KernelTests/Core/Cache/EndOfTransactionQueriesTest.php
++++ b/core/tests/Drupal/KernelTests/Core/Cache/DriverSpecificEndOfTransactionQueriesTestBase.php
+@@ -6,16 +6,14 @@
+ use Drupal\Core\Cache\DatabaseBackendFactory;
+ use Drupal\Core\DependencyInjection\ContainerBuilder;
+ use Drupal\entity_test\Entity\EntityTest;
+-use Drupal\KernelTests\KernelTestBase;
++use Drupal\KernelTests\Core\Database\DriverSpecificKernelTestBase;
+ use Drupal\user\Entity\User;
+ use Symfony\Component\DependencyInjection\Reference;
+ 
+ /**
+  * Tests that cache tag invalidation queries are delayed to the end of transactions.
+- *
+- * @group Cache
+  */
+-class EndOfTransactionQueriesTest extends KernelTestBase {
++class DriverSpecificEndOfTransactionQueriesTestBase extends DriverSpecificKernelTestBase {
+ 
+   /**
+    * {@inheritdoc}
+@@ -64,6 +62,7 @@ public function register(ContainerBuilder $container) {
+    * {@inheritdoc}
+    */
+   public function testEntitySave() {
++$statementLog = Database::startLog('testEntitySave');
+     \Drupal::cache()->set('test_cache_pretransaction_foobar', 'something', Cache::PERMANENT, ['foobar']);
+     \Drupal::cache()->set('test_cache_pretransaction_entity_test_list', 'something', Cache::PERMANENT, ['entity_test_list']);
+ 
+@@ -71,8 +70,10 @@ public function testEntitySave() {
+     \Drupal::database()->resetLoggedStatements();
+ 
+     $entity->save();
++$loggedStatements = Database::getLog('testEntitySave');
+ 
+     $executed_statements = \Drupal::database()->getLoggedStatements();
++dump(['$executed_statements', $executed_statements, $loggedStatements]);
+     $last_statement_index = max(array_keys($executed_statements));
+ 
+     $cachetag_statements = array_keys($this->getStatementsForTable(\Drupal::database()->getLoggedStatements(), 'cachetags'));
+@@ -172,20 +173,4 @@ protected static function statementToTableName($statement) {
+     }
+   }
+ 
+-  /**
+-   * {@inheritdoc}
+-   */
+-  protected function getDatabaseConnectionInfo() {
+-    $info = parent::getDatabaseConnectionInfo();
+-    // Override default database driver to one that does logging. Third-party
+-    // (non-core) database drivers can achieve the same test coverage by
+-    // subclassing this test class and overriding only this method.
+-    // @see \Drupal\database_statement_monitoring_test\LoggedStatementsTrait
+-    // @see \Drupal\database_statement_monitoring_test\mysql\Connection
+-    // @see \Drupal\database_statement_monitoring_test\pgsql\Connection
+-    // @see \Drupal\database_statement_monitoring_test\sqlite\Connection
+-    $info['default']['namespace'] = '\Drupal\database_statement_monitoring_test\\' . $info['default']['driver'];
+-    return $info;
+-  }
+-
+ }
+diff --git a/core/tests/Drupal/KernelTests/Core/Database/BasicSyntaxTest.php b/core/tests/Drupal/KernelTests/Core/Database/BasicSyntaxTest.php
+index 773ec6a99b..b1b3bb7a45 100644
+--- a/core/tests/Drupal/KernelTests/Core/Database/BasicSyntaxTest.php
++++ b/core/tests/Drupal/KernelTests/Core/Database/BasicSyntaxTest.php
+@@ -141,33 +141,4 @@ public function testGetFullQualifiedTableName() {
+     $this->assertSame('4', $num_matches, 'Found 4 records.');
+   }
+ 
+-  /**
+-   * Tests allowing square brackets in queries.
+-   *
+-   * @see \Drupal\Core\Database\Connection::prepareQuery()
+-   */
+-  public function testAllowSquareBrackets() {
+-    $this->connection->insert('test')
+-      ->fields(['name'])
+-      ->values([
+-        'name' => '[square]',
+-      ])
+-      ->execute();
+-
+-    // Note that this is a very bad example query because arguments should be
+-    // passed in via the $args parameter.
+-    $result = $this->connection->query("select name from {test} where name = '[square]'", [], ['allow_square_brackets' => TRUE]);
+-    $this->assertSame('[square]', $result->fetchField());
+-
+-    // Test that allow_square_brackets has no effect on arguments.
+-    $result = $this->connection->query("select [name] from {test} where [name] = :value", [':value' => '[square]']);
+-    $this->assertSame('[square]', $result->fetchField());
+-    $result = $this->connection->query("select name from {test} where name = :value", [':value' => '[square]'], ['allow_square_brackets' => TRUE]);
+-    $this->assertSame('[square]', $result->fetchField());
+-
+-    // Test square brackets using the query builder.
+-    $result = $this->connection->select('test')->fields('test', ['name'])->condition('name', '[square]')->execute();
+-    $this->assertSame('[square]', $result->fetchField());
+-  }
+-
+ }
+diff --git a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificKernelTestBase.php b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificKernelTestBase.php
+index a84046e7d9..eb459eb3a1 100644
+--- a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificKernelTestBase.php
++++ b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificKernelTestBase.php
+@@ -27,11 +27,11 @@ abstract class DriverSpecificKernelTestBase extends KernelTestBase {
+    * @inheritdoc
+    */
+   protected function setUp(): void {
+-    parent::setUp();
+-    $this->connection = Database::getConnection();
+-
+-    $running_provider = $this->connection->getProvider();
+-    $running_driver = $this->connection->driver();
++    // Find the current SUT database driver from the connection info. If that
++    // is not the one the test requires, skip before test database
++    // initialization so to save cycles.
++    $this->root = static::getDrupalRoot();
++    $connectionInfo = $this->getDatabaseConnectionInfo();
+     $test_class_parts = explode('\\', get_class($this));
+     $expected_provider = $test_class_parts[2] ?? '';
+     for ($i = 3; $i < count($test_class_parts); $i++) {
+@@ -40,6 +40,17 @@ protected function setUp(): void {
+         break;
+       }
+     }
++    if ($connectionInfo['default']['driver'] !== $expected_driver) {
++      $this->markTestSkipped("This test only runs for the database driver '$expected_driver'. Current database driver is '{$connectionInfo['default']['driver']}'.");
++    }
++
++    parent::setUp();
++    $this->connection = Database::getConnection();
++
++    // After database initialization, the database driver may be not provided
++    // by the expected module; skip test in that case.
++    $running_provider = $this->connection->getProvider();
++    $running_driver = $this->connection->driver();
+     if ($running_provider !== $expected_provider || $running_driver !== $expected_driver) {
+       $this->markTestSkipped("This test only runs for the database driver '$expected_driver' provided by the '$expected_provider' module. Connected database driver is '$running_driver' provided by '$running_provider'.");
+     }
+diff --git a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificSchemaTestBase.php b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificSchemaTestBase.php
+index d950fc24c4..9098e244f9 100644
+--- a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificSchemaTestBase.php
++++ b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificSchemaTestBase.php
+@@ -308,28 +308,13 @@ public function testSchema(): void {
+ 
+     // Check that the ID sequence gets renamed when the table is renamed.
+     $this->checkSequenceRenaming($new_table_name);
+-
+-    // Use database specific data type and ensure that table is created.
+-    $table_specification = [
+-      'description' => 'Schema table description.',
+-      'fields' => [
+-        'timestamp'  => [
+-          'mysql_type' => 'timestamp',
+-          'pgsql_type' => 'timestamp',
+-          'sqlite_type' => 'datetime',
+-          'not null' => FALSE,
+-          'default' => NULL,
+-        ],
+-      ],
+-    ];
+-    try {
+-      $this->schema->createTable('test_timestamp', $table_specification);
+-    }
+-    catch (\Exception $e) {
+-    }
+-    $this->assertTrue($this->schema->tableExists('test_timestamp'), 'Table with database specific datatype was created.');
+   }
+ 
++  /**
++   * Tests creating a table with database specific data type.
++   */
++  abstract public function testTableWithSpecificDataType(): void;
++
+   /**
+    * Tests creating unsigned columns and data integrity thereof.
+    */
+diff --git a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificSyntaxTestBase.php b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificSyntaxTestBase.php
+new file mode 100644
+index 0000000000..b40d8786e3
+--- /dev/null
++++ b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificSyntaxTestBase.php
+@@ -0,0 +1,44 @@
 +<?php
 +
 +namespace Drupal\KernelTests\Core\Database;
 +
-+use Drupal\Core\Database\Database;
-+
 +/**
-+ * Legacy database tests.
-+ *
-+ * @group Database
-+ * @group legacy
++ * Tests driver specific SQL syntax interpretation.
 + */
-+class DatabaseLegacyTest extends DatabaseTestBase {
++abstract class DriverSpecificSyntaxTestBase extends DriverSpecificDatabaseTestBase {
 +
 +  /**
-+   * Tests deprecation of install.inc database driver functions.
++   * Tests allowing square brackets in queries.
++   *
++   * This method should be overridden if the SQL syntax of the test queries is
++   * not compatible with a non-core database driver. For example, the unquoted
++   * 'name' identifier in Oracle is a reserved keyword that would let the test
++   * query fail.
++   *
++   * @see \Drupal\Core\Database\Connection::prepareQuery()
 +   */
-+  public function testDeprecatedInstallFunctions() {
-+    include_once $this->root . '/core/includes/install.inc';
-+    $this->expectDeprecation('drupal_detect_database_types() is deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. Use DatabaseDriverList::getList() instead. See https://www.drupal.org/node/3258175');
-+    $this->expectDeprecation('drupal_get_database_types() is deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. Use DatabaseDriverList::getList() instead. See https://www.drupal.org/node/3258175');
-+    $installableDriverNames = [];
-+    foreach(Database::getDriverList()->getInstallableList() as $driver => $driverExtension) {
-+      $installableDriverNames[$driver] = $driverExtension->getInstallTasks()->name();
-+    }
-+    $this->assertEquals($installableDriverNames, drupal_detect_database_types());
++  public function testAllowSquareBrackets() {
++    $this->connection->insert('test')
++      ->fields(['name'])
++      ->values([
++        'name' => '[square]',
++      ])
++      ->execute();
++
++    // Note that this is a very bad example query because arguments should be
++    // passed in via the $args parameter.
++    $result = $this->connection->query("select name from {test} where name = '[square]'", [], ['allow_square_brackets' => TRUE]);
++    $this->assertSame('[square]', $result->fetchField());
++
++    // Test that allow_square_brackets has no effect on arguments.
++    $result = $this->connection->query("select [name] from {test} where [name] = :value", [':value' => '[square]']);
++    $this->assertSame('[square]', $result->fetchField());
++    $result = $this->connection->query("select name from {test} where name = :value", [':value' => '[square]'], ['allow_square_brackets' => TRUE]);
++    $this->assertSame('[square]', $result->fetchField());
++
++    // Test square brackets using the query builder.
++    $result = $this->connection->select('test')->fields('test', ['name'])->condition('name', '[square]')->execute();
++    $this->assertSame('[square]', $result->fetchField());
 +  }
 +
 +}
-diff --git a/core/tests/Drupal/Tests/Core/Database/DatabaseTest.php b/core/tests/Drupal/Tests/Core/Database/DatabaseTest.php
-index bf61c2467c..f8998a7249 100644
---- a/core/tests/Drupal/Tests/Core/Database/DatabaseTest.php
-+++ b/core/tests/Drupal/Tests/Core/Database/DatabaseTest.php
-@@ -55,8 +55,11 @@ protected function setUp(): void {
-   /**
-    * @covers ::findDriverAutoloadDirectory
-    * @dataProvider providerFindDriverAutoloadDirectory
-+   * @group legacy
-    */
-   public function testFindDriverAutoloadDirectory($expected, $namespace, $include_test_drivers) {
-+    $this->expectDeprecation('Drupal\Core\Database\Database::findDriverAutoloadDirectory() is deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. Use DatabaseDriverList::getList() instead. See https://www.drupal.org/node/3258175');
-+    // The only module that provides a driver in core is a test module.
-     $this->assertSame($expected, Database::findDriverAutoloadDirectory($namespace, $this->root, $include_test_drivers));
-   }
- 
-@@ -76,8 +79,10 @@ public function providerFindDriverAutoloadDirectory() {
-   /**
-    * @covers ::findDriverAutoloadDirectory
-    * @dataProvider providerFindDriverAutoloadDirectoryException
-+   * @group legacy
-    */
-   public function testFindDriverAutoloadDirectoryException($expected_message, $namespace, $include_tests) {
-+    $this->expectDeprecation('Drupal\Core\Database\Database::findDriverAutoloadDirectory() is deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. Use DatabaseDriverList::getList() instead. See https://www.drupal.org/node/3258175');
-     $this->expectException(\RuntimeException::class);
-     $this->expectExceptionMessage($expected_message);
-     Database::findDriverAutoloadDirectory($namespace, $this->root, $include_tests);
-diff --git a/core/tests/Drupal/Tests/Core/Database/DriverModuleMissingDependenciesTest.php b/core/tests/Drupal/Tests/Core/Database/DriverModuleMissingDependenciesTest.php
-new file mode 100644
-index 0000000000..894e899439
---- /dev/null
-+++ b/core/tests/Drupal/Tests/Core/Database/DriverModuleMissingDependenciesTest.php
-@@ -0,0 +1,60 @@
-+<?php
-+
-+namespace Drupal\Tests\Core\Database;
-+
-+use Drupal\Core\Cache\NullBackend;
-+use Drupal\Core\Extension\DatabaseDriverList;
-+use Drupal\Tests\UnitTestCase;
-+use Symfony\Component\DependencyInjection\ContainerInterface;
-+
-+/**
-+ * Tests for database driver module with missing dependency.
-+ *
-+ * These tests run in isolation since we don't want the database static to
-+ * affect other tests. We also use a fake root directory to avoid the failing
-+ * module to get into normal extensions discovery.
-+ *
-+ * @coversDefaultClass \Drupal\Core\Database\Database
-+ *
-+ * @runTestsInSeparateProcesses
-+ * @preserveGlobalState disabled
-+ *
-+ * @group Database
-+ */
-+class DriverModuleMissingDependenciesTest extends UnitTestCase {
-+
-+  /**
-+   * @covers ::discoverDriversAutoloadInfo
-+   */
-+  public function testDetermineDriversAutoloadingFailingOnMissingDependency(): void {
-+    $root = realpath(dirname(__FILE__) . '/fixtures');
-+
-+    // Mock the container so we don't need to mock drupal_valid_test_ua().
-+    // @see \Drupal\Core\Extension\ExtensionDiscovery::scan()
-+    $container = $this->createMock(ContainerInterface::class);
-+    $container->expects($this->any())
-+      ->method('has')
-+      ->with('kernel')
-+      ->willReturn(TRUE);
-+    $container->expects($this->any())
-+      ->method('getParameter')
-+      ->with()
-+      ->willReturnMap([
-+          ['install_profile', ''],
-+          ['site.path', ''],
-+      ]);
-+    $container->expects($this->any())
-+      ->method('get')
-+      ->with('extension.list.database_driver')
-+      ->willReturn(new DatabaseDriverList($root, 'database_driver', new NullBackend('database_driver')));
-+    \Drupal::setContainer($container);
-+
-+    $this->expectException(\RuntimeException::class);
-+    $this->expectExceptionMessage("Cannot find the module 'a_really_missing_module' that is required by module 'driver_missing_dependency_test'");
-+    $container->get('extension.list.database_driver')
-+      ->includeTestDrivers(TRUE)
-+      ->get('MissingDependency')
-+      ->getAutoloadInfo();
-+  }
-+
-+}
-diff --git a/core/tests/Drupal/Tests/Core/Database/UrlConversionTest.php b/core/tests/Drupal/Tests/Core/Database/UrlConversionTest.php
-index 2e836da87c..406c1dd4a6 100644
---- a/core/tests/Drupal/Tests/Core/Database/UrlConversionTest.php
-+++ b/core/tests/Drupal/Tests/Core/Database/UrlConversionTest.php
-@@ -3,6 +3,7 @@
- namespace Drupal\Tests\Core\Database;
- 
- use Drupal\Core\Database\Database;
-+use Drupal\Core\Extension\Exception\UnknownExtensionException;
- use Drupal\Tests\UnitTestCase;
- 
- /**
-@@ -26,18 +27,6 @@ class UrlConversionTest extends UnitTestCase {
-   protected function setUp(): void {
-     parent::setUp();
-     $this->root = dirname(__FILE__, 7);
--    // Mock the container so we don't need to mock drupal_valid_test_ua().
--    // @see \Drupal\Core\Extension\ExtensionDiscovery::scan()
--    $container = $this->createMock('Symfony\Component\DependencyInjection\ContainerInterface');
--    $container->expects($this->any())
--      ->method('has')
--      ->with('kernel')
--      ->willReturn(TRUE);
--    $container->expects($this->any())
--      ->method('getParameter')
--      ->with('site.path')
--      ->willReturn('');
--    \Drupal::setContainer($container);
-   }
- 
-   /**
-@@ -135,6 +124,16 @@ public function providerConvertDbUrlToConnectionInfo() {
-           'port' => 3306,
-           'namespace' => 'Drupal\driver_test\Driver\Database\DrivertestMysql',
-           'autoload' => 'core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/',
-+          'dependencies' => [
-+            'mysql' => [
-+              'namespace' => 'Drupal\mysql',
-+              'autoload' => 'core/modules/mysql/src/',
-+            ],
-+            'pgsql' => [
-+              'namespace' => 'Drupal\pgsql',
-+              'autoload' => 'core/modules/pgsql/src/',
-+            ],
-+          ],
-         ],
-         TRUE,
-       ],
-@@ -150,6 +149,16 @@ public function providerConvertDbUrlToConnectionInfo() {
-           'port' => 3306,
-           'namespace' => 'Drupal\driver_test\Driver\Database\DrivertestMysql',
-           'autoload' => 'core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/',
-+          'dependencies' => [
-+            'mysql' => [
-+              'namespace' => 'Drupal\mysql',
-+              'autoload' => 'core/modules/mysql/src/',
-+            ],
-+            'pgsql' => [
-+              'namespace' => 'Drupal\pgsql',
-+              'autoload' => 'core/modules/pgsql/src/',
-+            ],
-+          ],
-         ],
-         TRUE,
-       ],
-@@ -164,6 +173,16 @@ public function providerConvertDbUrlToConnectionInfo() {
-           'port' => 5432,
-           'namespace' => 'Drupal\driver_test\Driver\Database\DrivertestPgsql',
-           'autoload' => 'core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/',
-+          'dependencies' => [
-+            'mysql' => [
-+              'namespace' => 'Drupal\mysql',
-+              'autoload' => 'core/modules/mysql/src/',
-+            ],
-+            'pgsql' => [
-+              'namespace' => 'Drupal\pgsql',
-+              'autoload' => 'core/modules/pgsql/src/',
-+            ],
-+          ],
-         ],
-         TRUE,
-       ],
-@@ -179,6 +198,16 @@ public function providerConvertDbUrlToConnectionInfo() {
-           'port' => 5432,
-           'namespace' => 'Drupal\driver_test\Driver\Database\DrivertestPgsql',
-           'autoload' => 'core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/',
-+          'dependencies' => [
-+            'mysql' => [
-+              'namespace' => 'Drupal\mysql',
-+              'autoload' => 'core/modules/mysql/src/',
-+            ],
-+            'pgsql' => [
-+              'namespace' => 'Drupal\pgsql',
-+              'autoload' => 'core/modules/pgsql/src/',
-+            ],
-+          ],
-         ],
-         TRUE,
-       ],
-@@ -390,6 +419,29 @@ public function providerGetConnectionInfoAsUrl() {
-     ];
-     $expected_url8 = 'DrivertestPgsql://test_user:test_pass@test_host:5432/test_database?module=driver_test#pre';
- 
-+    $info9 = [
-+      'database' => 'test_database',
-+      'username' => 'test_user',
-+      'password' => 'test_pass',
-+      'prefix' => '',
-+      'host' => 'test_host',
-+      'port' => '3306',
-+      'driver' => 'DrivertestMysql',
-+      'namespace' => 'Drupal\\driver_test\\Driver\\Database\\DrivertestMysql',
-+      'autoload' => 'core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/',
-+      'dependencies' => [
-+        'mysql' => [
-+          'namespace' => 'Drupal\mysql',
-+          'autoload' => 'core/modules/mysql/src/',
-+        ],
-+        'pgsql' => [
-+          'namespace' => 'Drupal\pgsql',
-+          'autoload' => 'core/modules/pgsql/src/',
-+        ],
-+      ],
-+    ];
-+    $expected_url9 = 'DrivertestMysql://test_user:test_pass@test_host:3306/test_database?module=driver_test';
-+
-     return [
-       [$info1, $expected_url1],
-       [$info2, $expected_url2],
-@@ -399,6 +451,7 @@ public function providerGetConnectionInfoAsUrl() {
-       [$info6, $expected_url6],
-       [$info7, $expected_url7],
-       [$info8, $expected_url8],
-+      [$info9, $expected_url9],
-     ];
-   }
- 
-@@ -447,9 +500,9 @@ public function providerInvalidArgumentGetConnectionInfoAsUrl() {
-    * @covers ::convertDbUrlToConnectionInfo
-    */
-   public function testDriverModuleDoesNotExist() {
--    $url = 'mysql://test_user:test_pass@test_host:3306/test_database?module=does_not_exist';
--    $this->expectException(\RuntimeException::class);
--    $this->expectExceptionMessage("Cannot find the module 'does_not_exist' for the database driver namespace 'Drupal\does_not_exist\Driver\Database\mysql'");
-+    $url = 'foo_bar_mysql://test_user:test_pass@test_host:3306/test_database?module=foo_bar';
-+    $this->expectException(UnknownExtensionException::class);
-+    $this->expectExceptionMessage("The database_driver foo_bar_mysql does not exist.");
-     Database::convertDbUrlToConnectionInfo($url, $this->root, TRUE);
-   }
- 
-@@ -457,9 +510,9 @@ public function testDriverModuleDoesNotExist() {
-    * @covers ::convertDbUrlToConnectionInfo
-    */
-   public function testModuleDriverDoesNotExist() {
--    $url = 'mysql://test_user:test_pass@test_host:3306/test_database?module=driver_test';
--    $this->expectException(\RuntimeException::class);
--    $this->expectExceptionMessage("Cannot find the database driver namespace 'Drupal\driver_test\Driver\Database\mysql' in module 'driver_test'");
-+    $url = 'driver_test_mysql://test_user:test_pass@test_host:3306/test_database?module=driver_test';
-+    $this->expectException(UnknownExtensionException::class);
-+    $this->expectExceptionMessage("The database_driver driver_test_mysql does not exist.");
-     Database::convertDbUrlToConnectionInfo($url, $this->root, TRUE);
-   }
- 
-diff --git a/core/tests/Drupal/Tests/Core/Database/fixtures/core/modules/driver_missing_dependency_test/driver_missing_dependency_test.info.yml b/core/tests/Drupal/Tests/Core/Database/fixtures/core/modules/driver_missing_dependency_test/driver_missing_dependency_test.info.yml
-new file mode 100644
-index 0000000000..165db40f36
---- /dev/null
-+++ b/core/tests/Drupal/Tests/Core/Database/fixtures/core/modules/driver_missing_dependency_test/driver_missing_dependency_test.info.yml
-@@ -0,0 +1,7 @@
-+name: 'Contrib database driver test with a missing dependency'
-+type: module
-+description: 'Support database contrib driver testing.'
-+package: Testing
-+version: VERSION
-+dependencies:
-+  - drupal:a_really_missing_module
-diff --git a/core/tests/Drupal/Tests/Core/Database/fixtures/core/modules/driver_missing_dependency_test/src/Driver/Database/MissingDependency/Install/Tasks.php b/core/tests/Drupal/Tests/Core/Database/fixtures/core/modules/driver_missing_dependency_test/src/Driver/Database/MissingDependency/Install/Tasks.php
-new file mode 100644
-index 0000000000..43eeee5fa4
---- /dev/null
-+++ b/core/tests/Drupal/Tests/Core/Database/fixtures/core/modules/driver_missing_dependency_test/src/Driver/Database/MissingDependency/Install/Tasks.php
-@@ -0,0 +1,19 @@
-+<?php
-+
-+namespace Drupal\driver_missing_dependency_test\Driver\Database\MissingDependency\Install;
-+
-+use Drupal\Core\Database\Install\Tasks as CoreTasks;
-+
-+/**
-+ * Specifies fake installation tasks for test.
-+ */
-+class Tasks extends CoreTasks {
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function name() {
-+    return t('Fake driver by the driver_missing_dependency_test module');
-+  }
-+
-+}
-diff --git a/sites/default/default.settings.php b/sites/default/default.settings.php
-index ee3b49c0a8..02f3e5e7a8 100644
---- a/sites/default/default.settings.php
-+++ b/sites/default/default.settings.php
-@@ -222,6 +222,27 @@
-  *     'prefix' => '',
-  *   ];
-  * @endcode
-+ *
-+ * Sample Database configuration format for a driver that is extending another
-+ * database driver.
-+ * @code
-+ *   $databases['default']['default'] = [
-+ *     'driver' => 'my_driver',
-+ *     'namespace' => 'Drupal\my_module\Driver\Database\my_driver',
-+ *     'autoload' => 'modules/my_module/src/Driver/Database/my_driver/',
-+ *     'database' => 'databasename',
-+ *     'username' => 'sqlusername',
-+ *     'password' => 'sqlpassword',
-+ *     'host' => 'localhost',
-+ *     'prefix' => '',
-+ *     'dependencies' => [
-+ *       'parent_module' => [
-+ *         'namespace' => 'Drupal\parent_module',
-+ *         'autoload' => 'core/modules/parent_module/src/',
-+ *       ],
-+ *     ],
-+ *   ];
-+ * @endcode
+diff --git a/core/tests/Drupal/KernelTests/Core/Database/TransactionTest.php b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
+similarity index 98%
+rename from core/tests/Drupal/KernelTests/Core/Database/TransactionTest.php
+rename to core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
+index 8adc584063..ebbf60826a 100644
+--- a/core/tests/Drupal/KernelTests/Core/Database/TransactionTest.php
++++ b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
+@@ -26,9 +26,13 @@
+  *     Do more stuff
+  *     Should still be in transaction A
+  *
+- * @group Database
++ * These method can be overridden by non-core database driver if their
++ * transaction behavior is different from core. For example, both oci8 (Oracle)
++ * and mysqli (MySql) clients do not have a solution to check if a transaction
++ * is active, and mysqli does not fail when rolling back and no transaction
++ * active.
   */
+-class TransactionTest extends DatabaseTestBase {
++class DriverSpecificTransactionTestBase extends DriverSpecificDatabaseTestBase {
  
- /**
+   /**
+    * Encapsulates a transaction's "inner layer" with an "outer layer".
