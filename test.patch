@@ -1,5 +1,5 @@
 diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
-index 142e452ceb..73733197a2 100644
+index 142e452ceb..a43668e04e 100644
 --- a/core/lib/Drupal/Core/Database/Connection.php
 +++ b/core/lib/Drupal/Core/Database/Connection.php
 @@ -3,6 +3,7 @@
@@ -10,7 +10,19 @@ index 142e452ceb..73733197a2 100644
  use Drupal\Core\Database\Query\Condition;
  use Drupal\Core\Database\Query\Delete;
  use Drupal\Core\Database\Query\Insert;
-@@ -1865,4 +1866,98 @@ public function hasJson(): bool {
+@@ -216,6 +217,11 @@ abstract class Connection {
+    */
+   protected $identifierQuotes;
+ 
++  /**
++   * @todo
++   */
++  protected bool $statementEventsEnabled = FALSE;
++
+   /**
+    * Constructs a Connection object.
+    *
+@@ -1865,4 +1871,106 @@ public function hasJson(): bool {
      }
    }
  
@@ -18,7 +30,15 @@ index 142e452ceb..73733197a2 100644
 +   * @todo
 +   */
 +  public function areStatementEventsEnabled(): bool {
-+    return TRUE;
++    return $this->statementEventsEnabled;
++  }
++
++  /**
++   * @todo
++   */
++  public function enableStatementEvents($bool $toggle): static {
++    $this->statementEventsEnabled = $toggle;
++    return $this;
 +  }
 +
 +  /**
@@ -109,6 +129,26 @@ index 142e452ceb..73733197a2 100644
 +  }
 +
  }
+diff --git a/core/lib/Drupal/Core/Database/Database.php b/core/lib/Drupal/Core/Database/Database.php
+index 9b5364942b..039960f38c 100644
+--- a/core/lib/Drupal/Core/Database/Database.php
++++ b/core/lib/Drupal/Core/Database/Database.php
+@@ -122,6 +122,7 @@ abstract class Database {
+       // logging object associated with it.
+       if (!empty(self::$connections[$key])) {
+         foreach (self::$connections[$key] as $connection) {
++          $connection->enableStatementEvents(TRUE);
+           $connection->setLogger(self::$logs[$key]);
+         }
+       }
+@@ -450,6 +451,7 @@ abstract class Database {
+     // If we have any active logging objects for this connection key, we need
+     // to associate them with the connection we just opened.
+     if (!empty(self::$logs[$key])) {
++      $new_connection->enableStatementEvents(TRUE);
+       $new_connection->setLogger(self::$logs[$key]);
+     }
+ 
 diff --git a/core/lib/Drupal/Core/Database/DatabaseEvents.php b/core/lib/Drupal/Core/Database/DatabaseEvents.php
 new file mode 100644
 index 0000000000..95fdf6893f
@@ -145,16 +185,15 @@ index 0000000000..95fdf6893f
 +}
 diff --git a/core/lib/Drupal/Core/Database/Event/StatementExecutionEvent.php b/core/lib/Drupal/Core/Database/Event/StatementExecutionEvent.php
 new file mode 100644
-index 0000000000..33175df3ee
+index 0000000000..ab6ebf3713
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/Event/StatementExecutionEvent.php
-@@ -0,0 +1,36 @@
+@@ -0,0 +1,47 @@
 +<?php
 +
 +namespace Drupal\Core\Database\Event;
 +
 +use Drupal\Component\EventDispatcher\Event;
-+use Drupal\Core\Database\StatementInterface;
 +
 +/**
 + * Represents a statement execution as an event.
@@ -162,10 +201,22 @@ index 0000000000..33175df3ee
 +class StatementExecutionEvent extends Event {
 +
 +  /**
++   * The time of the statement execution start.
++   */
++  protected float $startTime;
++
++  /**
++   * The time of the statement execution end.
++   */
++  protected float $endTime;
++
++  /**
 +   * Constructs a StatementExecutionEvent object.
 +   */
 +  public function __construct(
-+    public readonly StatementInterface $statement,
++    public readonly string $key,
++    public readonly string $target,
++    public readonly string $queryString,
 +    public readonly array $args,
 +    public readonly array $caller,
 +  ) {}
@@ -185,8 +236,44 @@ index 0000000000..33175df3ee
 +  }
 +
 +}
+diff --git a/core/lib/Drupal/Core/Database/Log.php b/core/lib/Drupal/Core/Database/Log.php
+index b310d17284..71e7f5f3fd 100644
+--- a/core/lib/Drupal/Core/Database/Log.php
++++ b/core/lib/Drupal/Core/Database/Log.php
+@@ -115,6 +115,7 @@ public function end($logging_key) {
+    *   with microsecond precision).
+    */
+   public function log(StatementInterface $statement, $args, $time, float $start = NULL) {
++    @trigger_error(__METHOD__ . '() is deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. Use ::logFromEvent(). See https://www.drupal.org/node/7654321', E_USER_DEPRECATED);
+     foreach (array_keys($this->queryLog) as $key) {
+       $this->queryLog[$key][] = [
+         'query' => $statement->getQueryString(),
+@@ -149,6 +150,7 @@ public function log(StatementInterface $statement, $args, $time, float $start =
+    *   database call itself.
+    */
+   public function findCaller() {
++    @trigger_error(__METHOD__ . '() is deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. Use Connection::findCaller(). See https://www.drupal.org/node/7654321', E_USER_DEPRECATED);
+     $driver_namespace = Database::getConnectionInfo($this->connectionKey)['default']['namespace'];
+     $stack = static::removeDatabaseEntries($this->getDebugBacktrace(), $driver_namespace);
+ 
+@@ -180,6 +182,7 @@ public function findCaller() {
+    *   The cleaned backtrace array.
+    */
+   public static function removeDatabaseEntries(array $backtrace, string $driver_namespace): array {
++    @trigger_error(__METHOD__ . '() is deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. Use Connection::removeDatabaseEntries(). See https://www.drupal.org/node/7654321', E_USER_DEPRECATED);
+     // Starting from the very first entry processed during the request, find
+     // the first function call that can be identified as a call to a
+     // method/function in the database layer.
+@@ -205,6 +208,7 @@ public static function removeDatabaseEntries(array $backtrace, string $driver_na
+    *   The debug backtrace.
+    */
+   protected function getDebugBacktrace() {
++    @trigger_error(__METHOD__ . '() is deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. There is no replacement. See https://www.drupal.org/node/7654321', E_USER_DEPRECATED);
+     return debug_backtrace();
+   }
+ 
 diff --git a/core/lib/Drupal/Core/Database/StatementPrefetch.php b/core/lib/Drupal/Core/Database/StatementPrefetch.php
-index 0702bd1de4..41dee2e713 100644
+index 0702bd1de4..90ad57c52f 100644
 --- a/core/lib/Drupal/Core/Database/StatementPrefetch.php
 +++ b/core/lib/Drupal/Core/Database/StatementPrefetch.php
 @@ -2,6 +2,8 @@
@@ -198,7 +285,7 @@ index 0702bd1de4..41dee2e713 100644
  /**
   * An implementation of StatementInterface that prefetches all data.
   *
-@@ -172,9 +174,10 @@ public function execute($args = [], $options = []) {
+@@ -172,9 +174,16 @@ public function execute($args = [], $options = []) {
        }
      }
  
@@ -206,13 +293,19 @@ index 0702bd1de4..41dee2e713 100644
 -    if (!empty($logger)) {
 -      $query_start = microtime(TRUE);
 +    if ($this->connection->areStatementEventsEnabled()) {
-+      $event = new StatementExecutionEvent($this, $args ?? [], $this->connection->findCaller());
++      $event = new StatementExecutionEvent(
++        $this->connection->getKey(),
++        $this->connection->getTarget(),
++        $this->getQueryString(),
++        $args ?? [],
++        $this->connection->findCaller()
++      );
 +      $event->setStartTime(microtime(TRUE));
 +      $this->connection->dispatchEvent($event, DatabaseEvents::STATEMENT_EXECUTION_START);
      }
  
      // Prepare the query.
-@@ -207,9 +210,9 @@ public function execute($args = [], $options = []) {
+@@ -207,9 +216,9 @@ public function execute($args = [], $options = []) {
        $this->columnNames = [];
      }
  
@@ -226,7 +319,7 @@ index 0702bd1de4..41dee2e713 100644
  
      // Initialize the first row in $this->currentRow.
 diff --git a/core/lib/Drupal/Core/Database/StatementWrapper.php b/core/lib/Drupal/Core/Database/StatementWrapper.php
-index 8a3bc208c5..5ecdd7990f 100644
+index 8a3bc208c5..37e089592b 100644
 --- a/core/lib/Drupal/Core/Database/StatementWrapper.php
 +++ b/core/lib/Drupal/Core/Database/StatementWrapper.php
 @@ -2,6 +2,8 @@
@@ -238,7 +331,7 @@ index 8a3bc208c5..5ecdd7990f 100644
  // cSpell:ignore maxlen driverdata INOUT
  
  /**
-@@ -87,16 +89,17 @@ public function execute($args = [], $options = []) {
+@@ -87,16 +89,23 @@ public function execute($args = [], $options = []) {
        }
      }
  
@@ -246,7 +339,13 @@ index 8a3bc208c5..5ecdd7990f 100644
 -    if (!empty($logger)) {
 -      $query_start = microtime(TRUE);
 +    if ($this->connection->areStatementEventsEnabled()) {
-+      $event = new StatementExecutionEvent($this, $args ?? [], $this->connection->findCaller());
++      $event = new StatementExecutionEvent(
++        $this->connection->getKey(),
++        $this->connection->getTarget(),
++        $this->getQueryString(),
++        $args ?? [],
++        $this->connection->findCaller()
++      );
 +      $event->setStartTime(microtime(TRUE));
 +      $this->connection->dispatchEvent($event, DatabaseEvents::STATEMENT_EXECUTION_START);
      }
@@ -262,3 +361,24 @@ index 8a3bc208c5..5ecdd7990f 100644
      }
  
      return $return;
+diff --git a/core/phpstan-baseline.neon b/core/phpstan-baseline.neon
+index cf84abce27..e9f0f726b9 100644
+--- a/core/phpstan-baseline.neon
++++ b/core/phpstan-baseline.neon
+@@ -330,16 +330,6 @@ parameters:
+ 			count: 1
+ 			path: lib/Drupal/Core/Database/Query/Upsert.php
+ 
+-		-
+-			message: "#^Variable \\$query_start might not be defined\\.$#"
+-			count: 2
+-			path: lib/Drupal/Core/Database/StatementPrefetch.php
+-
+-		-
+-			message: "#^Variable \\$query_start might not be defined\\.$#"
+-			count: 2
+-			path: lib/Drupal/Core/Database/StatementWrapper.php
+-
+ 		-
+ 			message: "#^Call to deprecated constant REQUEST_TIME\\: Deprecated in drupal\\:8\\.3\\.0 and is removed from drupal\\:10\\.0\\.0\\. Use \\\\Drupal\\:\\:time\\(\\)\\-\\>getRequestTime\\(\\); $#"
+ 			count: 2
