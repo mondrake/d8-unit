@@ -579,64 +579,25 @@ index cf84abce27..e9f0f726b9 100644
  			message: "#^Call to deprecated constant REQUEST_TIME\\: Deprecated in drupal\\:8\\.3\\.0 and is removed from drupal\\:10\\.0\\.0\\. Use \\\\Drupal\\:\\:time\\(\\)\\-\\>getRequestTime\\(\\); $#"
  			count: 2
 diff --git a/core/tests/Drupal/KernelTests/Core/Database/LoggingTest.php b/core/tests/Drupal/KernelTests/Core/Database/LoggingTest.php
-index 7858169af1..976d2f7d91 100644
+index 7858169af1..27e2ac2aad 100644
 --- a/core/tests/Drupal/KernelTests/Core/Database/LoggingTest.php
 +++ b/core/tests/Drupal/KernelTests/Core/Database/LoggingTest.php
-@@ -146,7 +146,7 @@ public function testGetLoggingWrongKey() {
-    *
-    * @param string $driver_namespace
-    *   The driver namespace to be tested.
--   * @param string $stack
-+   * @param array $stack
-    *   A test debug_backtrace stack.
-    * @param array $expected_entry
-    *   The expected stack entry.
-@@ -154,8 +154,42 @@ public function testGetLoggingWrongKey() {
+@@ -154,8 +154,13 @@ public function testGetLoggingWrongKey() {
     * @covers ::findCaller
     *
     * @dataProvider providerContribDriverLog
 +   *
 +   * @group legacy
-+   */
-+  public function testLegacyContribDriverLog($driver_namespace, $stack, array $expected_entry) {
+    */
+   public function testContribDriverLog($driver_namespace, $stack, array $expected_entry) {
 +    $this->expectDeprecation('Drupal\Core\Database\Log::findCaller() is deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. Use Connection::findCallerFromDebugBacktrace(). See https://www.drupal.org/node/3328053');
 +    $this->expectDeprecation('Drupal\Core\Database\Log::removeDatabaseEntries() is deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. Use Connection::removeDatabaseEntriesFromDebugBacktrace(). See https://www.drupal.org/node/3328053');
 +
-+    $mock_builder = $this->getMockBuilder(Log::class);
-+    $log = $mock_builder
-+      ->onlyMethods(['getDebugBacktrace'])
-+      ->setConstructorArgs(['test'])
-+      ->getMock();
-+    $log->expects($this->once())
-+      ->method('getDebugBacktrace')
-+      ->willReturn($stack);
-+    Database::addConnectionInfo('test', 'default', ['driver' => 'mysql', 'namespace' => $driver_namespace]);
-+
-+    $result = $log->findCaller($stack);
-+    $this->assertEquals($expected_entry, $result);
-+  }
-+
-+  /**
-+   * Tests that a log called by a custom database driver returns proper caller.
-+   *
-+   * @param string $driver_namespace
-+   *   The driver namespace to be tested.
-+   * @param array $stack
-+   *   A test debug_backtrace stack.
-+   * @param array $expected_entry
-+   *   The expected stack entry.
-+   *
-+   * @covers ::logFromEvent
-+   *
-+   * @dataProvider providerContribDriverLog
-    */
--  public function testContribDriverLog($driver_namespace, $stack, array $expected_entry) {
-+  public function testContribDriverLog(string $driver_namespace, array $stack, array $expected_entry): void {
      $mock_builder = $this->getMockBuilder(Log::class);
      $log = $mock_builder
        ->onlyMethods(['getDebugBacktrace'])
 diff --git a/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php b/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
-index e46a01d8e7..a0979a63ff 100644
+index e46a01d8e7..c5689db7c8 100644
 --- a/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
 +++ b/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
 @@ -3,6 +3,7 @@
@@ -647,7 +608,7 @@ index e46a01d8e7..a0979a63ff 100644
  use Drupal\Tests\Core\Database\Stub\StubConnection;
  use Drupal\Tests\Core\Database\Stub\StubPDO;
  use Drupal\Tests\UnitTestCase;
-@@ -645,4 +646,28 @@ public function provideQueriesToTrim() {
+@@ -645,4 +646,219 @@ public function provideQueriesToTrim() {
      ];
    }
  
@@ -667,12 +628,203 @@ index e46a01d8e7..a0979a63ff 100644
 +    $result = $connection->findCallerFromDebugBacktrace();
 +    $this->assertSame([
 +      'file' => __FILE__,
-+      'line' => 661,
++      'line' => 662,
 +      'function' => 'testFindCallerFromDebugBacktrace',
 +      'class' => 'Drupal\Tests\Core\Database\ConnectionTest',
 +      'type' => '->',
 +      'args' => [],
 +    ], $result);
++  }
++
++  /**
++   * Tests that a log called by a custom database driver returns proper caller.
++   *
++   * @param string $driver_namespace
++   *   The driver namespace to be tested.
++   * @param array $stack
++   *   A test debug_backtrace stack.
++   * @param array $expected_entry
++   *   The expected stack entry.
++   *
++   * @covers ::findCallerFromDebugBacktrace
++   * @covers ::removeDatabaseEntriesFromDebugBacktrace
++   *
++   * @dataProvider providerContribDriverLog
++   *
++   * @group legacy
++   */
++  public function testContribDriverLog(string $driver_namespace, array $stack, array $expected_entry): void {
++    $mock_builder = $this->getMockBuilder(StubConnection::class);
++    $log = $mock_builder
++      ->onlyMethods(['getDebugBacktrace'])
++      ->setConstructorArgs(['test'])
++      ->getMock();
++    $log->expects($this->once())
++      ->method('getDebugBacktrace')
++      ->willReturn($stack);
++    Database::addConnectionInfo('test', 'default', ['driver' => 'mysql', 'namespace' => $driver_namespace]);
++
++    $result = $log->findCaller($stack);
++    $this->assertEquals($expected_entry, $result);
++  }
++
++  /**
++   * Provides data for the testContribDriverLog test.
++   *
++   * @return array[]
++   *   A associative array of simple arrays, each having the following elements:
++   *   - the contrib driver PHP namespace
++   *   - a test debug_backtrace stack
++   *   - the stack entry expected to be returned.
++   *
++   * @see ::testContribDriverLog()
++   */
++  public function providerContribDriverLog(): array {
++    $stack = [
++      [
++        'file' => '/var/www/core/lib/Drupal/Core/Database/Log.php',
++        'line' => 125,
++        'function' => 'findCaller',
++        'class' => 'Drupal\\Core\\Database\\Log',
++        'object' => 'test',
++        'type' => '->',
++        'args' => [
++          0 => 'test',
++        ],
++      ],
++      [
++        'file' => '/var/www/libraries/drudbal/lib/Statement.php',
++        'line' => 264,
++        'function' => 'log',
++        'class' => 'Drupal\\Core\\Database\\Log',
++        'object' => 'test',
++        'type' => '->',
++        'args' => [
++          0 => 'test',
++        ],
++      ],
++      [
++        'file' => '/var/www/libraries/drudbal/lib/Connection.php',
++        'line' => 213,
++        'function' => 'execute',
++        'class' => 'Drupal\\Driver\\Database\\dbal\\Statement',
++        'object' => 'test',
++        'type' => '->',
++        'args' => [
++          0 => 'test',
++        ],
++      ],
++      [
++        'file' => '/var/www/core/tests/Drupal/KernelTests/Core/Database/LoggingTest.php',
++        'line' => 23,
++        'function' => 'query',
++        'class' => 'Drupal\\Driver\\Database\\dbal\\Connection',
++        'object' => 'test',
++        'type' => '->',
++        'args' => [
++          0 => 'test',
++        ],
++      ],
++      [
++        'file' => '/var/www/vendor/phpunit/phpunit/src/Framework/TestCase.php',
++        'line' => 1154,
++        'function' => 'testEnableLogging',
++        'class' => 'Drupal\\KernelTests\\Core\\Database\\LoggingTest',
++        'object' => 'test',
++        'type' => '->',
++        'args' => [
++          0 => 'test',
++        ],
++      ],
++      [
++        'file' => '/var/www/vendor/phpunit/phpunit/src/Framework/TestCase.php',
++        'line' => 842,
++        'function' => 'runTest',
++        'class' => 'PHPUnit\\Framework\\TestCase',
++        'object' => 'test',
++        'type' => '->',
++        'args' => [
++          0 => 'test',
++        ],
++      ],
++      [
++        'file' => '/var/www/vendor/phpunit/phpunit/src/Framework/TestResult.php',
++        'line' => 693,
++        'function' => 'runBare',
++        'class' => 'PHPUnit\\Framework\\TestCase',
++        'object' => 'test',
++        'type' => '->',
++        'args' => [
++          0 => 'test',
++        ],
++      ],
++      [
++        'file' => '/var/www/vendor/phpunit/phpunit/src/Framework/TestCase.php',
++        'line' => 796,
++        'function' => 'run',
++        'class' => 'PHPUnit\\Framework\\TestResult',
++        'object' => 'test',
++        'type' => '->',
++        'args' => [
++          0 => 'test',
++        ],
++      ],
++      [
++        'file' => 'Standard input code',
++        'line' => 57,
++        'function' => 'run',
++        'class' => 'PHPUnit\\Framework\\TestCase',
++        'object' => 'test',
++        'type' => '->',
++        'args' => [
++          0 => 'test',
++        ],
++      ],
++      [
++        'file' => 'Standard input code',
++        'line' => 111,
++        'function' => '__phpunit_run_isolated_test',
++        'args' => [
++          0 => 'test',
++        ],
++      ],
++    ];
++
++    return [
++      // Test that if the driver namespace is in the stack trace, the first
++      // non-database entry is returned.
++      'contrib driver namespace' => [
++        'Drupal\\Driver\\Database\\dbal',
++        $stack,
++        [
++          'class' => 'Drupal\\KernelTests\\Core\\Database\\LoggingTest',
++          'function' => 'testEnableLogging',
++          'file' => '/var/www/core/tests/Drupal/KernelTests/Core/Database/LoggingTest.php',
++          'line' => 23,
++          'type' => '->',
++          'args' => [
++            0 => 'test',
++          ],
++        ],
++      ],
++      // Extreme case, should not happen at normal runtime - if the driver
++      // namespace is not in the stack trace, the first entry to a method
++      // in core database namespace is returned.
++      'missing driver namespace' => [
++        'Drupal\\Driver\\Database\\fake',
++        $stack,
++        [
++          'class' => 'Drupal\\Driver\\Database\\dbal\\Statement',
++          'function' => 'execute',
++          'file' => '/var/www/libraries/drudbal/lib/Statement.php',
++          'line' => 264,
++          'type' => '->',
++          'args' => [
++            0 => 'test',
++          ],
++        ],
++      ],
++    ];
 +  }
 +
  }
