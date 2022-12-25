@@ -46,7 +46,7 @@ index 6655001af1..afb144e748 100644
      class: Drupal\Core\Extension\ExtensionPathResolver
      arguments: ['@extension.list.module', '@extension.list.profile', '@extension.list.theme', '@extension.list.theme_engine']
 diff --git a/core/includes/install.core.inc b/core/includes/install.core.inc
-index 8f8ba759f4..560d92823d 100644
+index 8f8ba759f4..c1917e6563 100644
 --- a/core/includes/install.core.inc
 +++ b/core/includes/install.core.inc
 @@ -7,6 +7,7 @@
@@ -83,26 +83,25 @@ index 8f8ba759f4..560d92823d 100644
    $container->set('class_loader', $class_loader);
  
    \Drupal::setContainer($container);
-@@ -960,7 +969,17 @@ function install_get_form($form_id, array &$install_state) {
+@@ -960,7 +969,16 @@ function install_get_form($form_id, array &$install_state) {
      // values taken from the installation state.
      $install_form_id = $form_builder->getFormId($form_id, $form_state);
      if (!empty($install_state['forms'][$install_form_id])) {
 -      $form_state->setValues($install_state['forms'][$install_form_id]);
 +      $values = $install_state['forms'][$install_form_id];
 +      if ($install_form_id === 'install_settings_form' && !str_contains($values['driver'], "\\")) {
-+          @trigger_error('Invalid driver passed to' . __FUNCTION__, E_USER_DEPRECATED);
-+          $tmp = $values;
-+          $tmp['driver'] = $values['driver'] . "\\" . $values['driver'];
-+          unset($tmp[$values['driver']]);
-+          $tmp[$tmp['driver']] = $values[$values['driver']];
-+          $values = $tmp;
++        @trigger_error("Invalid driver '{$values['driver']}' passed to " . __FUNCTION__, E_USER_DEPRECATED);
++        $tmp = $values;
++        $tmp['driver'] = $values['driver'] . "\\" . $values['driver'];
++        unset($tmp[$values['driver']]);
++        $tmp[$tmp['driver']] = $values[$values['driver']];
++        $values = $tmp;
 +      }
-+dump($install_form_id, $install_state['forms'], $values);
 +      $form_state->setValues($values);
      }
      $form_builder->submitForm($form_id, $form_state);
  
-@@ -1192,15 +1211,10 @@ function install_verify_database_ready() {
+@@ -1192,15 +1210,10 @@ function install_verify_database_ready() {
  function install_database_errors($database, $settings_file) {
    $errors = [];
  
@@ -121,7 +120,7 @@ index 8f8ba759f4..560d92823d 100644
      if (!empty($errors)) {
        // No point to try further.
        return $errors;
-@@ -1208,8 +1222,10 @@ function install_database_errors($database, $settings_file) {
+@@ -1208,8 +1221,10 @@ function install_database_errors($database, $settings_file) {
      // Run tasks associated with the database type. Any errors are caught in the
      // calling function.
      Database::addConnectionInfo('default', 'default', $database);
@@ -568,7 +567,7 @@ index 0000000000..471524991d
 +}
 diff --git a/core/lib/Drupal/Core/Extension/DatabaseDriverList.php b/core/lib/Drupal/Core/Extension/DatabaseDriverList.php
 new file mode 100644
-index 0000000000..1c9ec0fac0
+index 0000000000..6e194a28a6
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Extension/DatabaseDriverList.php
 @@ -0,0 +1,221 @@
@@ -695,7 +694,7 @@ index 0000000000..1c9ec0fac0
 +   */
 +  public function get($extension_name) {
 +    if (!str_contains($extension_name, "\\")) {
-+      @trigger_error('Invalid driver passed to' . __METHOD__, E_USER_DEPRECATED);
++      @trigger_error("Invalid driver '{$extension_name}' passed to " . __METHOD__, E_USER_DEPRECATED);
 +      $extension_name .= "\\" . $extension_name;
 +    }
 +    return parent::get($extension_name);
@@ -823,7 +822,7 @@ index 6f9e95bbbe..f12c9a61f8 100644
     * @var string
     */
 diff --git a/core/lib/Drupal/Core/Installer/Form/SiteSettingsForm.php b/core/lib/Drupal/Core/Installer/Form/SiteSettingsForm.php
-index dc26547122..4a71754056 100644
+index dc26547122..17bfebc1e9 100644
 --- a/core/lib/Drupal/Core/Installer/Form/SiteSettingsForm.php
 +++ b/core/lib/Drupal/Core/Installer/Form/SiteSettingsForm.php
 @@ -4,6 +4,7 @@
@@ -897,21 +896,13 @@ index dc26547122..4a71754056 100644
      if (isset($input['driver'])) {
        $default_driver = $input['driver'];
 +      if (!str_contains($default_driver, "\\")) {
-+        @trigger_error('Invalid driver passed to' . __METHOD__, E_USER_DEPRECATED);
++        @trigger_error("Invalid driver '{$default_driver}' passed to " . __METHOD__, E_USER_DEPRECATED);
 +        $default_driver .= "\\" . $default_driver;
 +      }
        // In case of database connection info from settings.php, as well as for a
        // programmed form submission (non-interactive installer), the table prefix
        // information is usually normalized into an array already, but the form
-@@ -111,6 +106,7 @@ public function buildForm(array $form, FormStateInterface $form_state) {
-       '#title' => $this->t('Database type'),
-       '#required' => TRUE,
-       '#default_value' => $default_driver,
-+      '#element_validate' => [[static::class, 'validateDriver']],
-     ];
-     if (count($drivers) == 1) {
-       $form['driver']['#disabled'] = TRUE;
-@@ -118,10 +114,9 @@ public function buildForm(array $form, FormStateInterface $form_state) {
+@@ -118,10 +113,9 @@ public function buildForm(array $form, FormStateInterface $form_state) {
  
      // Add driver specific configuration options.
      foreach ($drivers as $key => $driver) {
@@ -925,30 +916,7 @@ index dc26547122..4a71754056 100644
        $form['settings'][$key]['#type'] = 'container';
        $form['settings'][$key]['#tree'] = TRUE;
        $form['settings'][$key]['advanced_options']['#parents'] = [$key];
-@@ -150,24 +145,35 @@ public function buildForm(array $form, FormStateInterface $form_state) {
-     return $form;
-   }
- 
-+  /**
-+   * @todo
-+   *
-+   * @param array $element
-+   *   The element being processed.
-+   * @param \Drupal\Core\Form\FormStateInterface $form_state
-+   *   The current state of the form.
-+   * @param array $complete_form
-+   *   The complete form structure.
-+   */
-+  public static function validateDriver(&$element, FormStateInterface $form_state, &$complete_form) {
-+    if (!str_contains($element['#value'], "\\")) {
-+      @trigger_error('Invalid driver passed to' . __METHOD__, E_USER_DEPRECATED);
-+      $element['#value'] .= "\\" . $element['#value'];
-+    }
-+  }
-+
-   /**
-    * {@inheritdoc}
-    */
+@@ -156,18 +150,12 @@ public function buildForm(array $form, FormStateInterface $form_state) {
    public function validateForm(array &$form, FormStateInterface $form_state) {
      $driver = $form_state->getValue('driver');
      $database = $form_state->getValue($driver);
