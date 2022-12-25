@@ -168,7 +168,7 @@ index c8dd224cab..3c800061f2 100644
    $drivers = [];
  
 diff --git a/core/lib/Drupal/Core/Database/Database.php b/core/lib/Drupal/Core/Database/Database.php
-index 9b5364942b..0d419ae1e4 100644
+index 9b5364942b..ed0a4c4429 100644
 --- a/core/lib/Drupal/Core/Database/Database.php
 +++ b/core/lib/Drupal/Core/Database/Database.php
 @@ -3,7 +3,9 @@
@@ -214,7 +214,7 @@ index 9b5364942b..0d419ae1e4 100644
      $connection_class = NULL;
      $url_components = parse_url($url);
      $url_component_query = $url_components['query'] ?? '';
-@@ -537,28 +550,38 @@ public static function convertDbUrlToConnectionInfo($url, $root, ?bool $include_
+@@ -537,28 +550,33 @@ public static function convertDbUrlToConnectionInfo($url, $root, ?bool $include_
  
      // Add the module key for core database drivers when the module key is not
      // set.
@@ -227,7 +227,9 @@ index 9b5364942b..0d419ae1e4 100644
      if (isset($query['module']) && $query['module']) {
 -      $module = $query['module'];
 +      /** @var \Drupal\Core\Extension\DatabaseDriver $driver */
-+      $driver = self::getDriverList()->includeTestDrivers($include_test_drivers)->get($driverName);
++      $driver = self::getDriverList()
++        ->includeTestDrivers($include_test_drivers)
++        ->get($query['module'] . "\\" . $driverName);
 +
        // Set up an additional autoloader. We don't use the main autoloader as
        // this method can be called before Drupal is installed and is never
@@ -236,6 +238,9 @@ index 9b5364942b..0d419ae1e4 100644
 -      $psr4_base_directory = Database::findDriverAutoloadDirectory($namespace, $root, $include_test_drivers);
        $additional_class_loader = new ClassLoader();
 -      $additional_class_loader->addPsr4($namespace . '\\', $psr4_base_directory);
+-      $additional_class_loader->register(TRUE);
+-      $connection_class = $namespace . '\\Connection';
+-    }
 +      $additional_class_loader->addPsr4($driver->getNamespace() . '\\', $driver->getPath());
 +      $connection_class = $driver->getNamespace() . '\\Connection';
 +
@@ -247,22 +252,17 @@ index 9b5364942b..0d419ae1e4 100644
 +          $additional_class_loader->addPsr4($dependency['namespace'] . '\\', $dependency['autoload']);
 +        }
 +      }
-+
-       $additional_class_loader->register(TRUE);
--      $connection_class = $namespace . '\\Connection';
-     }
  
 -    if (!$module) {
-+    if (!isset($query['module'])) {
-       // Determine the connection class to use. Discover if the URL has a valid
-       // driver scheme for a Drupal 8 style custom driver.
-       // @todo Remove this in Drupal 10.
+-      // Determine the connection class to use. Discover if the URL has a valid
+-      // driver scheme for a Drupal 8 style custom driver.
+-      // @todo Remove this in Drupal 10.
 -      $connection_class = "Drupal\\Driver\\Database\\{$driver}\\Connection";
-+      $connection_class = "Drupal\\Driver\\Database\\{$driverName}\\Connection";
++      $additional_class_loader->register(TRUE);
      }
  
      if (!class_exists($connection_class)) {
-@@ -570,13 +593,31 @@ public static function convertDbUrlToConnectionInfo($url, $root, ?bool $include_
+@@ -570,13 +588,31 @@ public static function convertDbUrlToConnectionInfo($url, $root, ?bool $include_
      // If the driver is provided by a module add the necessary information to
      // autoload the code.
      // @see \Drupal\Core\Site\Settings::initialize()
@@ -296,7 +296,7 @@ index 9b5364942b..0d419ae1e4 100644
    /**
     * Finds the directory to add to the autoloader for the driver's namespace.
     *
-@@ -631,8 +672,14 @@ public static function convertDbUrlToConnectionInfo($url, $root, ?bool $include_
+@@ -631,8 +667,14 @@ public static function convertDbUrlToConnectionInfo($url, $root, ?bool $include_
     *
     * @throws \RuntimeException
     *   Exception thrown when a module provided database driver does not exist.
@@ -311,7 +311,7 @@ index 9b5364942b..0d419ae1e4 100644
      // As explained by this method's documentation, return FALSE if the
      // namespace is not a sub-namespace of a Drupal module.
      if (!static::isWithinModuleNamespace($namespace)) {
-@@ -703,9 +750,9 @@ public static function getConnectionInfoAsUrl($key = 'default') {
+@@ -703,9 +745,9 @@ public static function getConnectionInfoAsUrl($key = 'default') {
     *   TRUE if the passed in namespace is a sub-namespace of a Drupal module's
     *   namespace.
     *
@@ -1435,16 +1435,17 @@ index bf61c2467c..f8998a7249 100644
      Database::findDriverAutoloadDirectory($namespace, $this->root, $include_tests);
 diff --git a/core/tests/Drupal/Tests/Core/Database/DriverModuleMissingDependenciesTest.php b/core/tests/Drupal/Tests/Core/Database/DriverModuleMissingDependenciesTest.php
 new file mode 100644
-index 0000000000..894e899439
+index 0000000000..7297f65234
 --- /dev/null
 +++ b/core/tests/Drupal/Tests/Core/Database/DriverModuleMissingDependenciesTest.php
-@@ -0,0 +1,60 @@
+@@ -0,0 +1,61 @@
 +<?php
 +
 +namespace Drupal\Tests\Core\Database;
 +
 +use Drupal\Core\Cache\NullBackend;
 +use Drupal\Core\Extension\DatabaseDriverList;
++use Drupal\Core\Extension\Exception\UnknownExtensionException;
 +use Drupal\Tests\UnitTestCase;
 +use Symfony\Component\DependencyInjection\ContainerInterface;
 +
@@ -1490,11 +1491,11 @@ index 0000000000..894e899439
 +      ->willReturn(new DatabaseDriverList($root, 'database_driver', new NullBackend('database_driver')));
 +    \Drupal::setContainer($container);
 +
-+    $this->expectException(\RuntimeException::class);
-+    $this->expectExceptionMessage("Cannot find the module 'a_really_missing_module' that is required by module 'driver_missing_dependency_test'");
++    $this->expectException(UnknownExtensionException::class);
++    $this->expectExceptionMessage("The database_driver a_really_missing_module\dependent_driver does not exist.'");
 +    $container->get('extension.list.database_driver')
 +      ->includeTestDrivers(TRUE)
-+      ->get('MissingDependency')
++      ->get('a_really_missing_module\\dependent_driver')
 +      ->getAutoloadInfo();
 +  }
 +
