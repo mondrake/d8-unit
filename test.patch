@@ -46,7 +46,7 @@ index 6655001af1..afb144e748 100644
      class: Drupal\Core\Extension\ExtensionPathResolver
      arguments: ['@extension.list.module', '@extension.list.profile', '@extension.list.theme', '@extension.list.theme_engine']
 diff --git a/core/includes/install.core.inc b/core/includes/install.core.inc
-index 8f8ba759f4..e9c44bddde 100644
+index 8f8ba759f4..fbfd319afc 100644
 --- a/core/includes/install.core.inc
 +++ b/core/includes/install.core.inc
 @@ -7,6 +7,7 @@
@@ -83,27 +83,26 @@ index 8f8ba759f4..e9c44bddde 100644
    $container->set('class_loader', $class_loader);
  
    \Drupal::setContainer($container);
-@@ -960,7 +969,18 @@ function install_get_form($form_id, array &$install_state) {
+@@ -960,7 +969,17 @@ function install_get_form($form_id, array &$install_state) {
      // values taken from the installation state.
      $install_form_id = $form_builder->getFormId($form_id, $form_state);
      if (!empty($install_state['forms'][$install_form_id])) {
 -      $form_state->setValues($install_state['forms'][$install_form_id]);
 +      $values = $install_state['forms'][$install_form_id];
 +      if ($install_form_id === 'install_settings_form' && !str_contains($values['driver'], "\\")) {
-+global $xxx;
-+if ($xxx) throw new \Exception("Invalid driver '{$values['driver']}' passed to " . __FUNCTION__);
-+        @trigger_error("Invalid driver '{$values['driver']}' passed to " . __FUNCTION__, E_USER_DEPRECATED);
-+        $tmp = $values;
-+        $tmp['driver'] = $values['driver'] . "\\" . $values['driver'];
-+        unset($tmp[$values['driver']]);
-+        $tmp[$tmp['driver']] = $values[$values['driver']];
++        @trigger_error("Passing a database driver name '{$extension_name}' to " .  __FUNCTION__ . '() is deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. Pass a database driver extension name in the format \'module\\driver\' instead. See https://www.drupal.org/node/3258175', E_USER_DEPRECATED);
++        $databaseDriverList = \Drupal::service('extension.list.database_driver');
++        $driverExtension = $databaseDriverList->getFromDriverName($values['driver']);
++        $tmp = [];
++        $tmp['driver'] = $driverExtension->getName();
++        $tmp[$driverExtension->getName()] = $values[$values['driver']];
 +        $values = $tmp;
 +      }
 +      $form_state->setValues($values);
      }
      $form_builder->submitForm($form_id, $form_state);
  
-@@ -1192,15 +1212,10 @@ function install_verify_database_ready() {
+@@ -1192,15 +1211,10 @@ function install_verify_database_ready() {
  function install_database_errors($database, $settings_file) {
    $errors = [];
  
@@ -122,7 +121,7 @@ index 8f8ba759f4..e9c44bddde 100644
      if (!empty($errors)) {
        // No point to try further.
        return $errors;
-@@ -1208,8 +1223,10 @@ function install_database_errors($database, $settings_file) {
+@@ -1208,8 +1222,10 @@ function install_database_errors($database, $settings_file) {
      // Run tasks associated with the database type. Any errors are caught in the
      // calling function.
      Database::addConnectionInfo('default', 'default', $database);
@@ -578,15 +577,16 @@ index 0000000000..471524991d
 +}
 diff --git a/core/lib/Drupal/Core/Extension/DatabaseDriverList.php b/core/lib/Drupal/Core/Extension/DatabaseDriverList.php
 new file mode 100644
-index 0000000000..6e194a28a6
+index 0000000000..b0ec92d715
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Extension/DatabaseDriverList.php
-@@ -0,0 +1,221 @@
+@@ -0,0 +1,236 @@
 +<?php
 +
 +namespace Drupal\Core\Extension;
 +
 +use Drupal\Core\Cache\CacheBackendInterface;
++use Drupal\Core\Extension\Exception\UnknownExtensionException;
 +
 +/**
 + * Provides a list of available database drivers.
@@ -705,10 +705,24 @@ index 0000000000..6e194a28a6
 +   */
 +  public function get($extension_name) {
 +    if (!str_contains($extension_name, "\\")) {
-+      @trigger_error("Invalid driver '{$extension_name}' passed to " . __METHOD__, E_USER_DEPRECATED);
-+      $extension_name .= "\\" . $extension_name;
++      @trigger_error("Passing a database driver name '{$extension_name}' to " . __METHOD__ . '() is deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. Pass a database driver extension name in the format \'module\\driver\' instead. See https://www.drupal.org/node/3258175', E_USER_DEPRECATED);
++      return $this->getFromDriverName($extension_name);
 +    }
 +    return parent::get($extension_name);
++  }
++
++  /**
++   * @todo
++   */
++  public function getFromDriverName(string $driverName): static {
++    @trigger_error(__METHOD__ . '() is deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. Use DatabaseDriverList::get() instead, passing a database driver extension name in the format \'module\\driver\'. See https://www.drupal.org/node/3258175', E_USER_DEPRECATED);
++    foreach ($this->getList() as $extensionName => $driver) {
++      [, $extensionDriverName] = explode('\\', $extensionName);
++      if ($extensionDriverName === $driverName) {
++        return parent::get($extensionName);
++      }
++    }
++    throw new UnknownExtensionException("Could not find a database driver named {$driverName} in any module");
 +  }
 +
 +  /**
@@ -950,10 +964,45 @@ index dc26547122..f5b622992a 100644
        $form_state->setErrorByName($name, $message);
      }
 diff --git a/core/lib/Drupal/Core/Test/FunctionalTestSetupTrait.php b/core/lib/Drupal/Core/Test/FunctionalTestSetupTrait.php
-index 5d37d5c8ad..a124c01a39 100644
+index 5d37d5c8ad..5dd0d6ac42 100644
 --- a/core/lib/Drupal/Core/Test/FunctionalTestSetupTrait.php
 +++ b/core/lib/Drupal/Core/Test/FunctionalTestSetupTrait.php
-@@ -558,7 +558,6 @@ protected function installParameters() {
+@@ -514,18 +514,22 @@ protected function rebuildAll() {
+   protected function installParameters() {
+     $connection_info = Database::getConnectionInfo();
+     $driver = $connection_info['default']['driver'];
++    [, $module] = explode('\\', $connection_info['default']['namespace'], 3);
++    $driverExtensionName = $module . "\\" . $driver;
++
+     unset($connection_info['default']['driver']);
+     unset($connection_info['default']['namespace']);
+     unset($connection_info['default']['autoload']);
+     unset($connection_info['default']['pdo']);
+     unset($connection_info['default']['init_commands']);
+     // Remove database connection info that is not used by SQLite.
+-    if ($driver === 'sqlite') {
++    if ($driverExtensionName === "sqlite\\sqlite") {
+       unset($connection_info['default']['username']);
+       unset($connection_info['default']['password']);
+       unset($connection_info['default']['host']);
+       unset($connection_info['default']['port']);
+     }
++
+     $parameters = [
+       'interactive' => FALSE,
+       'parameters' => [
+@@ -534,8 +538,8 @@ protected function installParameters() {
+       ],
+       'forms' => [
+         'install_settings_form' => [
+-          'driver' => $driver,
+-          $driver => $connection_info['default'],
++          'driver' => $driverExtensionName,
++          $driverExtensionName => $connection_info['default'],
+         ],
+         'install_configure_form' => [
+           'site_name' => 'Drupal',
+@@ -558,7 +562,6 @@ protected function installParameters() {
      ];
  
      // If we only have one db driver available, we cannot set the driver.
@@ -961,7 +1010,7 @@ index 5d37d5c8ad..a124c01a39 100644
      if (count($this->getDatabaseTypes()) == 1) {
        unset($parameters['forms']['install_settings_form']['driver']);
      }
-@@ -695,7 +694,8 @@ protected function prepareEnvironment() {
+@@ -695,7 +698,8 @@ protected function prepareEnvironment() {
    /**
     * Returns all supported database driver installer objects.
     *
@@ -971,7 +1020,7 @@ index 5d37d5c8ad..a124c01a39 100644
     *
     * @return \Drupal\Core\Database\Install\Tasks[]
     *   An array of available database driver installer objects.
-@@ -704,7 +704,10 @@ protected function getDatabaseTypes() {
+@@ -704,7 +708,10 @@ protected function getDatabaseTypes() {
      if (isset($this->originalContainer) && $this->originalContainer) {
        \Drupal::setContainer($this->originalContainer);
      }
@@ -1342,23 +1391,6 @@ index 2202dc000b..55fb6ac5b8 100644
        'required' => TRUE,
      ];
      $settings['settings'] = [
-diff --git a/core/tests/Drupal/FunctionalTests/Asset/AssetOptimizationTest.php b/core/tests/Drupal/FunctionalTests/Asset/AssetOptimizationTest.php
-index c7b71cd84d..844f22aa67 100644
---- a/core/tests/Drupal/FunctionalTests/Asset/AssetOptimizationTest.php
-+++ b/core/tests/Drupal/FunctionalTests/Asset/AssetOptimizationTest.php
-@@ -14,6 +14,12 @@
-  */
- class AssetOptimizationTest extends BrowserTestBase {
- 
-+  protected function setUp(): void {
-+global $xxx;
-+$xxx = TRUE;
-+parent::setUp();    
-+  }
-+
-   /**
-    * {@inheritdoc}
-    */
 diff --git a/core/tests/Drupal/FunctionalTests/Installer/InstallerExistingBrokenDatabaseSettingsTest.php b/core/tests/Drupal/FunctionalTests/Installer/InstallerExistingBrokenDatabaseSettingsTest.php
 index 3a42b319c1..6955829ae0 100644
 --- a/core/tests/Drupal/FunctionalTests/Installer/InstallerExistingBrokenDatabaseSettingsTest.php
