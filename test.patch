@@ -46,7 +46,7 @@ index 6655001af1..afb144e748 100644
      class: Drupal\Core\Extension\ExtensionPathResolver
      arguments: ['@extension.list.module', '@extension.list.profile', '@extension.list.theme', '@extension.list.theme_engine']
 diff --git a/core/includes/install.core.inc b/core/includes/install.core.inc
-index 8f8ba759f4..d614c272f0 100644
+index 8f8ba759f4..fc449ea739 100644
 --- a/core/includes/install.core.inc
 +++ b/core/includes/install.core.inc
 @@ -7,6 +7,7 @@
@@ -90,7 +90,7 @@ index 8f8ba759f4..d614c272f0 100644
 -      $form_state->setValues($install_state['forms'][$install_form_id]);
 +      $values = $install_state['forms'][$install_form_id];
 +      if ($install_form_id === 'install_settings_form' && !str_contains($values['driver'], "\\")) {
-+        @trigger_error("Passing a database driver name '{$values['driver']}' to " . __FUNCTION__ . '() is deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. Pass a database driver extension name in the format \'module\\driver\' instead. See https://www.drupal.org/node/3258175', E_USER_DEPRECATED);
++        @trigger_error("Passing a database driver name '{$values['driver']}' to " . __FUNCTION__ . '() is deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. Pass a database driver namespace instead. See https://www.drupal.org/node/3258175', E_USER_DEPRECATED);
 +        $databaseDriverList = \Drupal::service('extension.list.database_driver');
 +        $driverExtension = $databaseDriverList->getFromDriverName($values['driver']);
 +        $tmp = [];
@@ -586,10 +586,10 @@ index 0000000000..4e134c1a7a
 +}
 diff --git a/core/lib/Drupal/Core/Extension/DatabaseDriverList.php b/core/lib/Drupal/Core/Extension/DatabaseDriverList.php
 new file mode 100644
-index 0000000000..274b0bec79
+index 0000000000..9f6ea1d274
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Extension/DatabaseDriverList.php
-@@ -0,0 +1,256 @@
+@@ -0,0 +1,255 @@
 +<?php
 +
 +namespace Drupal\Core\Extension;
@@ -719,7 +719,7 @@ index 0000000000..274b0bec79
 +   */
 +  public function get($extension_name) {
 +    if (!str_contains($extension_name, "\\")) {
-+      @trigger_error("Passing a database driver name '{$extension_name}' to " . __METHOD__ . '() is deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. Pass a database driver extension name in the format \'module\\driver\' instead. See https://www.drupal.org/node/3258175', E_USER_DEPRECATED);
++      @trigger_error("Passing a database driver name '{$extension_name}' to " . __METHOD__ . '() is deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. Pass a database driver namespace instead. See https://www.drupal.org/node/3258175', E_USER_DEPRECATED);
 +      return $this->getFromDriverName($extension_name);
 +    }
 +    return parent::get($extension_name);
@@ -738,13 +738,12 @@ index 0000000000..274b0bec79
 +   *   When no matching driver extension can be found.
 +   *
 +   * @deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. Use
-+   *   DatabaseDriverList::get() instead, passing a database driver extension
-+   *   name in the format 'module\driver\'.
++   *   DatabaseDriverList::get() instead, passing a database driver namespace.
 +   *
 +   * @see https://www.drupal.org/node/3258175
 +   */
 +  public function getFromDriverName(string $driverName): DatabaseDriver {
-+    @trigger_error(__METHOD__ . '() is deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. Use DatabaseDriverList::get() instead, passing a database driver extension name in the format \'module\\driver\'. See https://www.drupal.org/node/3258175', E_USER_DEPRECATED);
++    @trigger_error(__METHOD__ . '() is deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. Use DatabaseDriverList::get() instead, passing a database driver namespace. See https://www.drupal.org/node/3258175', E_USER_DEPRECATED);
 +    foreach ($this->getList() as $extensionName => $driver) {
 +      [, $extensionDriverName] = explode('\\', $extensionName);
 +      if ($extensionDriverName === $driverName) {
@@ -879,7 +878,7 @@ index 6f9e95bbbe..f12c9a61f8 100644
     * @var string
     */
 diff --git a/core/lib/Drupal/Core/Installer/Form/SiteSettingsForm.php b/core/lib/Drupal/Core/Installer/Form/SiteSettingsForm.php
-index dc26547122..744636cdde 100644
+index dc26547122..47fd3f36eb 100644
 --- a/core/lib/Drupal/Core/Installer/Form/SiteSettingsForm.php
 +++ b/core/lib/Drupal/Core/Installer/Form/SiteSettingsForm.php
 @@ -4,6 +4,7 @@
@@ -1000,10 +999,10 @@ index dc26547122..744636cdde 100644
      $settings = [];
 +
 +    // For BC, just save the database driver name, not the database driver
-+    // extension name which has a format 'module\driver'.
++    // extension name which equals the driver's namespace.
      $database = $form_state->get('database');
-+    [, $driverName] = explode('\\', $database['driver']);
-+    $database['driver'] = $driverName;
++    $namespaceParts = explode('\\', $database['driver']);
++    $database['driver'] = end($namespaceParts);
      $settings['databases']['default']['default'] = (object) [
        'value'    => $database,
        'required' => TRUE,
@@ -1629,19 +1628,20 @@ index ee6caea944..1d3a7277a5 100644
      ];
    }
 diff --git a/core/tests/Drupal/FunctionalTests/Installer/InstallerNonDefaultDatabaseDriverTest.php b/core/tests/Drupal/FunctionalTests/Installer/InstallerNonDefaultDatabaseDriverTest.php
-index c7e4dff8b8..945a159a56 100644
+index c7e4dff8b8..87fa2fae0a 100644
 --- a/core/tests/Drupal/FunctionalTests/Installer/InstallerNonDefaultDatabaseDriverTest.php
 +++ b/core/tests/Drupal/FunctionalTests/Installer/InstallerNonDefaultDatabaseDriverTest.php
-@@ -6,6 +6,8 @@
+@@ -6,6 +6,9 @@
  use Drupal\Core\Extension\Extension;
  use Drupal\Core\Extension\ModuleUninstallValidatorException;
  
-+// cspell:ignore testdrivertestmysql testdrivertestpgsql
++// cspell:ignore drupaldriver testdriverdatabasedrivertestmysql
++// cspell:ignore testdriverdatabasedrivertestpgsql
 +
  /**
   * Tests the interactive installer.
   *
-@@ -28,21 +30,23 @@ class InstallerNonDefaultDatabaseDriverTest extends InstallerTestBase {
+@@ -28,21 +31,23 @@ class InstallerNonDefaultDatabaseDriverTest extends InstallerTestBase {
     * {@inheritdoc}
     */
    protected function setUpSettings() {
@@ -1674,7 +1674,7 @@ index c7e4dff8b8..945a159a56 100644
      $edit = $this->translatePostValues($settings);
      $this->submitForm($edit, $this->translations['Save and continue']);
    }
-@@ -61,6 +65,21 @@ public function testInstalled() {
+@@ -61,6 +66,21 @@ public function testInstalled() {
      $this->assertStringContainsString("'driver' => '{$this->testDriverName}',", $contents);
      $this->assertStringContainsString("'autoload' => 'core/modules/system/tests/modules/driver_test/src/Driver/Database/{$this->testDriverName}/',", $contents);
  
