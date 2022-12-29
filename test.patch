@@ -46,7 +46,7 @@ index 6655001af1..afb144e748 100644
      class: Drupal\Core\Extension\ExtensionPathResolver
      arguments: ['@extension.list.module', '@extension.list.profile', '@extension.list.theme', '@extension.list.theme_engine']
 diff --git a/core/includes/install.core.inc b/core/includes/install.core.inc
-index 8f8ba759f4..bc1da6429e 100644
+index 8f8ba759f4..4ddba7d79c 100644
 --- a/core/includes/install.core.inc
 +++ b/core/includes/install.core.inc
 @@ -7,6 +7,7 @@
@@ -83,7 +83,7 @@ index 8f8ba759f4..bc1da6429e 100644
    $container->set('class_loader', $class_loader);
  
    \Drupal::setContainer($container);
-@@ -960,7 +969,17 @@ function install_get_form($form_id, array &$install_state) {
+@@ -960,7 +969,16 @@ function install_get_form($form_id, array &$install_state) {
      // values taken from the installation state.
      $install_form_id = $form_builder->getFormId($form_id, $form_state);
      if (!empty($install_state['forms'][$install_form_id])) {
@@ -91,18 +91,17 @@ index 8f8ba759f4..bc1da6429e 100644
 +      $values = $install_state['forms'][$install_form_id];
 +      if ($install_form_id === 'install_settings_form' && !str_contains($values['driver'], "\\")) {
 +        @trigger_error("Passing a database driver name '{$values['driver']}' to " . __FUNCTION__ . '() is deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. Pass a database driver namespace instead. See https://www.drupal.org/node/3258175', E_USER_DEPRECATED);
-+        $databaseDriverList = \Drupal::service('extension.list.database_driver');
-+        $driverExtension = $databaseDriverList->getFromDriverName($values['driver']);
++        $driverExtension = Database::getDriverList()->getFromDriverName($values['driver']);
 +        $tmp = [];
-+        $tmp['driver'] = $driverExtension->getName();
-+        $tmp[$driverExtension->getName()] = $values[$values['driver']];
++        $tmp['driver'] = $driverExtension->getNamespace();
++        $tmp[$driverExtension->getNamespace()] = $values[$values['driver']];
 +        $values = $tmp;
 +      }
 +      $form_state->setValues($values);
      }
      $form_builder->submitForm($form_id, $form_state);
  
-@@ -1192,15 +1211,10 @@ function install_verify_database_ready() {
+@@ -1192,15 +1210,10 @@ function install_verify_database_ready() {
  function install_database_errors($database, $settings_file) {
    $errors = [];
  
@@ -121,7 +120,7 @@ index 8f8ba759f4..bc1da6429e 100644
      if (!empty($errors)) {
        // No point to try further.
        return $errors;
-@@ -1208,8 +1222,10 @@ function install_database_errors($database, $settings_file) {
+@@ -1208,8 +1221,10 @@ function install_database_errors($database, $settings_file) {
      // Run tasks associated with the database type. Any errors are caught in the
      // calling function.
      Database::addConnectionInfo('default', 'default', $database);
@@ -586,7 +585,7 @@ index 0000000000..4e134c1a7a
 +}
 diff --git a/core/lib/Drupal/Core/Extension/DatabaseDriverList.php b/core/lib/Drupal/Core/Extension/DatabaseDriverList.php
 new file mode 100644
-index 0000000000..9f6ea1d274
+index 0000000000..34c15e9504
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Extension/DatabaseDriverList.php
 @@ -0,0 +1,255 @@
@@ -745,12 +744,12 @@ index 0000000000..9f6ea1d274
 +  public function getFromDriverName(string $driverName): DatabaseDriver {
 +    @trigger_error(__METHOD__ . '() is deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. Use DatabaseDriverList::get() instead, passing a database driver namespace. See https://www.drupal.org/node/3258175', E_USER_DEPRECATED);
 +    foreach ($this->getList() as $extensionName => $driver) {
-+      [, $extensionDriverName] = explode('\\', $extensionName);
-+      if ($extensionDriverName === $driverName) {
++      $namespaceParts = explode('\\', $extensionName);
++      if (end($namespaceParts) === $driverName) {
 +        return parent::get($extensionName);
 +      }
 +    }
-+    throw new UnknownExtensionException("Could not find a database driver named {$driverName} in any module");
++    throw new UnknownExtensionException("Could not find a database driver named '{$driverName}' in any module");
 +  }
 +
 +  /**
@@ -1269,7 +1268,7 @@ index 776f115f7a..18ec74bb16 100644
              ],
            ],
 diff --git a/core/modules/system/system.install b/core/modules/system/system.install
-index 2fd5cc4e61..d7e36245a7 100644
+index 3c589e3a5b..9766c0bb36 100644
 --- a/core/modules/system/system.install
 +++ b/core/modules/system/system.install
 @@ -507,8 +507,7 @@ function system_requirements($phase) {
@@ -1746,6 +1745,52 @@ index 0000000000..d0de6c7e38
 +    $this->assertEquals($installableDriverNames, drupal_detect_database_types());
 +  }
 +
++}
+diff --git a/core/tests/Drupal/KernelTests/Core/Extension/DatabaseDriverListTest.php b/core/tests/Drupal/KernelTests/Core/Extension/DatabaseDriverListTest.php
+new file mode 100644
+index 0000000000..7c786d7644
+--- /dev/null
++++ b/core/tests/Drupal/KernelTests/Core/Extension/DatabaseDriverListTest.php
+@@ -0,0 +1,40 @@
++<?php
++
++namespace Drupal\KernelTests\Core\Extension;
++
++use Drupal\Core\Database\Database;
++use Drupal\KernelTests\KernelTestBase;
++
++/**
++ * Tests DatabaseDriverList methods.
++ *
++ * @coversDefaultClass \Drupal\Core\Extension\DatabaseDriverList
++ * @group extension
++ */
++class DatabaseDriverListTest extends KernelTestBase {
++
++  /**
++   * @covers ::getFromDriverName
++   * @group legacy
++   *
++   * @dataProvider providerTestLegacyGetFromDriverName
++   */
++  public function testLegacyGetFromDriverName(string $driverName, string $driverExtensionName): void {
++    $this->expectDeprecation('Drupal\\Core\\Extension\\DatabaseDriverList::getFromDriverName() is deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. Use DatabaseDriverList::get() instead, passing a database driver namespace. See https://www.drupal.org/node/3258175');
++    $this->assertSame($driverExtensionName, Database::getDriverList()->getFromDriverName($driverName));
++  }
++
++  /**
++   * Data provider for testLegacyGetFromDriverName().
++   */
++  public function providerTestLegacyGetFromDriverName(): array {
++    return [
++      ['mysql', 'Drupal\\mysql\\Driver\\Database\\mysql'],
++      ['pgsql', 'Drupal\\pgsql\\Driver\\Database\\pgsql'],
++      ['sqlite', 'Drupal\\sqlite\\Driver\\Database\\sqlite'],
++      ['DrivertestMysql', 'Drupal\\driver_test\\Driver\\Database\\DrivertestMysql'],
++      ['DrivertestPgsql', 'Drupal\\driver_test\\Driver\\Database\\DrivertestPgsql'],
++      ['DrivertestMysqlDeprecatedVersion', 'Drupal\\driver_test\\Driver\\Database\\DrivertestMysqlDeprecatedVersion'],
++    ];
++  }
 +}
 diff --git a/core/tests/Drupal/Tests/Core/Database/DatabaseTest.php b/core/tests/Drupal/Tests/Core/Database/DatabaseTest.php
 index bf61c2467c..f8998a7249 100644
