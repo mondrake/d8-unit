@@ -1,267 +1,81 @@
-diff --git a/core/lib/Drupal/Core/ImageToolkit/ImageToolkitBase.php b/core/lib/Drupal/Core/ImageToolkit/ImageToolkitBase.php
-index ce0e283c8e..1fba360804 100644
---- a/core/lib/Drupal/Core/ImageToolkit/ImageToolkitBase.php
-+++ b/core/lib/Drupal/Core/ImageToolkit/ImageToolkitBase.php
-@@ -127,8 +127,14 @@ public function apply($operation, array $arguments = []) {
-       $this->logger->error("The selected image handling toolkit '@toolkit' can not process operation '@operation'.", ['@toolkit' => $this->getPluginId(), '@operation' => $operation]);
-       return FALSE;
-     }
--    catch (\InvalidArgumentException $e) {
--      $this->logger->warning($e->getMessage(), []);
-+    catch (\Throwable $t) {
-+      $this->logger->warning("The image toolkit '@toolkit' failed processing '@operation' for image '@image'. Reported error: @class - @message", [
-+        '@toolkit' => $this->getPluginId(),
-+        '@operation' => $operation,
-+        '@image' => $this->getSource(),
-+        '@class' => get_class($t),
-+        '@message' => $t->getMessage(),
-+      ]);
-       return FALSE;
-     }
-   }
-diff --git a/core/lib/Drupal/Core/ImageToolkit/ImageToolkitOperationBase.php b/core/lib/Drupal/Core/ImageToolkit/ImageToolkitOperationBase.php
-index dcc3b3d121..95b8a9c4f7 100644
---- a/core/lib/Drupal/Core/ImageToolkit/ImageToolkitOperationBase.php
-+++ b/core/lib/Drupal/Core/ImageToolkit/ImageToolkitOperationBase.php
-@@ -185,6 +185,9 @@ protected function validateArguments(array $arguments) {
-    *
-    * @return bool
-    *   TRUE if the operation was performed successfully, FALSE otherwise.
-+   *
-+   * @throws \RuntimeException
-+   *   If the operation can not be performed.
-    */
-   abstract protected function execute(array $arguments);
+diff --git a/core/lib/Drupal/Core/Database/Query/Select.php b/core/lib/Drupal/Core/Database/Query/Select.php
+index 93ffa081a6..c4fd8535f4 100644
+--- a/core/lib/Drupal/Core/Database/Query/Select.php
++++ b/core/lib/Drupal/Core/Database/Query/Select.php
+@@ -878,7 +878,10 @@ public function __toString() {
  
-diff --git a/core/modules/system/src/Plugin/ImageToolkit/GDToolkit.php b/core/modules/system/src/Plugin/ImageToolkit/GDToolkit.php
-index 2753273a41..2abda1bdbe 100644
---- a/core/modules/system/src/Plugin/ImageToolkit/GDToolkit.php
-+++ b/core/modules/system/src/Plugin/ImageToolkit/GDToolkit.php
-@@ -180,31 +180,54 @@ protected function load() {
-       return FALSE;
+     // GROUP BY
+     if ($this->group) {
+-      $query .= "\nGROUP BY " . implode(', ', $this->group);
++      $group_by_fields = array_map(function (string $field): string {
++        return $this->connection->escapeField($field);
++      }, $this->group);
++      $query .= "\nGROUP BY " . implode(', ', $group_by_fields);
      }
  
-+    // Invalidate the image object and return if there's no function to load the
-+    // image file.
-     $function = 'imagecreatefrom' . image_type_to_extension($this->getType(), FALSE);
--    if (function_exists($function) && $resource = $function($this->getSource())) {
--      $this->setResource($resource);
--      if (imageistruecolor($resource)) {
--        return TRUE;
--      }
--      else {
--        // Convert indexed images to truecolor, copying the image to a new
--        // truecolor resource, so that filters work correctly and don't result
--        // in unnecessary dither.
--        $data = [
--          'width' => imagesx($resource),
--          'height' => imagesy($resource),
--          'extension' => image_type_to_extension($this->getType(), FALSE),
--          'transparent_color' => $this->getTransparentColor(),
--          'is_temp' => TRUE,
--        ];
--        if ($this->apply('create_new', $data)) {
--          imagecopy($this->getResource(), $resource, 0, 0, 0, 0, imagesx($resource), imagesy($resource));
--          imagedestroy($resource);
--        }
-+    if (!function_exists($function)) {
-+      $this->logger->error("The image toolkit '@toolkit' can not process image '@image'.", [
-+        '@toolkit' => $this->getPluginId(),
-+        '@image' => $this->getSource(),
-+      ]);
-+      $this->preLoadInfo = NULL;
-+      return FALSE;
-+    }
-+
-+    // Invalidate the image object and return if the load fails.
-+    try {
-+      $resource = $function($this->getSource());
-+    }
-+    catch (\Throwable $t) {
-+      $this->logger->error("The image toolkit '@toolkit' failed loading image '@image'. Reported error: @class - @message", [
-+        '@toolkit' => $this->getPluginId(),
-+        '@image' => $this->getSource(),
-+        '@class' => get_class($t),
-+        '@message' => $t->getMessage(),
-+      ]);
-+      $this->preLoadInfo = NULL;
-+      return FALSE;
-+    }
-+
-+    $this->setResource($resource);
-+    if (imageistruecolor($resource)) {
-+      return TRUE;
-+    }
-+    else {
-+      // Convert indexed images to truecolor, copying the image to a new
-+      // truecolor resource, so that filters work correctly and don't result
-+      // in unnecessary dither.
-+      $data = [
-+        'width' => imagesx($resource),
-+        'height' => imagesy($resource),
-+        'extension' => image_type_to_extension($this->getType(), FALSE),
-+        'transparent_color' => $this->getTransparentColor(),
-+        'is_temp' => TRUE,
-+      ];
-+      if ($this->apply('create_new', $data)) {
-+        imagecopy($this->getResource(), $resource, 0, 0, 0, 0, imagesx($resource), imagesy($resource));
-+        imagedestroy($resource);
-       }
--      return (bool) $this->getResource();
-     }
--    return FALSE;
-+    return (bool) $this->getResource();
+     // HAVING
+diff --git a/core/modules/views/tests/src/Kernel/QueryGroupByTest.php b/core/modules/views/tests/src/Kernel/QueryGroupByTest.php
+index 171688321e..20a55769fb 100644
+--- a/core/modules/views/tests/src/Kernel/QueryGroupByTest.php
++++ b/core/modules/views/tests/src/Kernel/QueryGroupByTest.php
+@@ -230,7 +230,7 @@ public function testGroupByBaseField() {
+     $view->displayHandlers->get('default')->options['fields']['name']['group_type'] = 'min';
+     unset($view->displayHandlers->get('default')->options['fields']['id']['group_type']);
+     $this->executeView($view);
+-    $this->assertStringContainsString('GROUP BY entity_test.id', (string) $view->build_info['query'], 'GROUP BY field includes the base table name when grouping on the base field.');
++    $this->assertMatchesRegularExpression('/GROUP BY .*[^\w\s]entity_test[^\w\s]\.[^\w\s]id[^\w\s]/', (string) $view->build_info['query'], 'GROUP BY field includes the base table name when grouping on the base field.');
    }
  
    /**
-@@ -236,7 +259,18 @@ public function save($destination) {
-       return FALSE;
-     }
-     if ($this->getType() == IMAGETYPE_JPEG) {
--      $success = $function($this->getResource(), $destination, $this->configFactory->get('system.image.gd')->get('jpeg_quality'));
-+      try {
-+        $success = $function($this->getResource(), $destination, $this->configFactory->get('system.image.gd')->get('jpeg_quality'));
-+      }
-+      catch (\Throwable $t) {
-+        $this->logger->error("The image toolkit '@toolkit' failed saving image '@image'. Reported error: @class - @message", [
-+          '@toolkit' => $this->getPluginId(),
-+          '@image' => $destination,
-+          '@class' => get_class($t),
-+          '@message' => $t->getMessage(),
-+        ]);
-+        $success = FALSE;
-+      }
-     }
-     else {
-       // Image types that support alpha need to be saved accordingly.
-@@ -244,7 +278,18 @@ public function save($destination) {
-         imagealphablending($this->getResource(), FALSE);
-         imagesavealpha($this->getResource(), TRUE);
-       }
--      $success = $function($this->getResource(), $destination);
-+      try {
-+        $success = $function($this->getResource(), $destination);
-+      }
-+      catch (\Throwable $t) {
-+        $this->logger->error("The image toolkit '@toolkit' failed saving image '@image'. Reported error: @class - @message", [
-+          '@toolkit' => $this->getPluginId(),
-+          '@image' => $destination,
-+          '@class' => get_class($t),
-+          '@message' => $t->getMessage(),
-+        ]);
-+        $success = FALSE;
-+      }
-     }
-     // Move temporary local file to remote destination.
-     if (isset($permanent_destination) && $success) {
-diff --git a/core/modules/system/tests/modules/image_test/src/Plugin/ImageToolkit/Operation/test/Failing.php b/core/modules/system/tests/modules/image_test/src/Plugin/ImageToolkit/Operation/test/Failing.php
-new file mode 100644
-index 0000000000..eb37d9f07d
---- /dev/null
-+++ b/core/modules/system/tests/modules/image_test/src/Plugin/ImageToolkit/Operation/test/Failing.php
-@@ -0,0 +1,25 @@
-+<?php
-+
-+namespace Drupal\image_test\Plugin\ImageToolkit\Operation\test;
-+
-+/**
-+ * An image toolkit operation that throws a \RuntimeException.
-+ *
-+ * @ImageToolkitOperation(
-+ *   id = "failing",
-+ *   toolkit = "test",
-+ *   operation = "failing",
-+ *   label = @Translation("An image toolkit operation that throws a \\RuntimeException"),
-+ *   description = @Translation("An image toolkit operation that throws a \\RuntimeException.")
-+ * )
-+ */
-+class Failing extends OperationBase {
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function execute(array $arguments) {
-+    throw new \RuntimeException('Ahem, this image operation failed');
-+  }
-+
-+}
-diff --git a/core/modules/system/tests/modules/image_test/src/Plugin/ImageToolkit/TestToolkit.php b/core/modules/system/tests/modules/image_test/src/Plugin/ImageToolkit/TestToolkit.php
-index eb38ec0656..09600e5734 100644
---- a/core/modules/system/tests/modules/image_test/src/Plugin/ImageToolkit/TestToolkit.php
-+++ b/core/modules/system/tests/modules/image_test/src/Plugin/ImageToolkit/TestToolkit.php
-@@ -258,7 +258,7 @@ protected static function supportedTypes() {
-    */
-   public function apply($operation, array $arguments = []) {
-     $this->logCall('apply', func_get_args());
--    return TRUE;
-+    return parent::apply($operation, $arguments);
-   }
- 
- }
-diff --git a/core/tests/Drupal/KernelTests/Core/Image/ToolkitTest.php b/core/tests/Drupal/KernelTests/Core/Image/ToolkitTest.php
-index 03c85052c7..70e72f39b0 100644
---- a/core/tests/Drupal/KernelTests/Core/Image/ToolkitTest.php
-+++ b/core/tests/Drupal/KernelTests/Core/Image/ToolkitTest.php
-@@ -84,7 +84,9 @@ public function testSave() {
-    */
-   public function testApply() {
-     $data = ['p1' => 1, 'p2' => TRUE, 'p3' => 'text'];
--    $this->assertTrue($this->image->apply('my_operation', $data));
-+
-+    // The operation plugin itself does not exist, so apply will return false.
-+    $this->assertFalse($this->image->apply('my_operation', $data));
- 
-     // Check that apply was called and with the correct parameters.
-     $this->assertToolkitOperationsCalled(['apply']);
-@@ -99,7 +101,8 @@ public function testApply() {
-    * Tests the 'apply' method without parameters.
-    */
-   public function testApplyNoParameters() {
--    $this->assertTrue($this->image->apply('my_operation'));
-+    // The operation plugin itself does not exist, so apply will return false.
-+    $this->assertFalse($this->image->apply('my_operation'));
- 
-     // Check that apply was called and with the correct parameters.
-     $this->assertToolkitOperationsCalled(['apply']);
-@@ -128,4 +131,17 @@ public function testDerivative() {
-     $this->assertEquals('bar', $invert->getPluginId());
+diff --git a/core/tests/Drupal/KernelTests/Core/Database/ReservedWordTest.php b/core/tests/Drupal/KernelTests/Core/Database/ReservedWordTest.php
+index 9bc296c8e6..08c26fb230 100644
+--- a/core/tests/Drupal/KernelTests/Core/Database/ReservedWordTest.php
++++ b/core/tests/Drupal/KernelTests/Core/Database/ReservedWordTest.php
+@@ -80,4 +80,32 @@ public function testSelectReservedWordAliasAllFields() {
+     $this->assertSame('27', $record->age);
    }
  
 +  /**
-+   * Tests calling a failing image operation plugin.
++   * Tests SELECT query with GROUP BY clauses on fields with reserved names.
 +   */
-+  public function testFailingOperation(): void {
-+    $this->assertFalse($this->image->apply('failing'));
++  public function testGroupBy() {
++    $this->connection->insert('select')
++      ->fields([
++        'id' => 2,
++        'update' => 'Update value 1',
++      ])
++      ->execute();
 +
-+    // Check that apply was called and with the correct parameters.
-+    $this->assertToolkitOperationsCalled(['apply']);
-+    $calls = $this->imageTestGetAllCalls();
-+    $this->assertEquals('failing', $calls['apply'][0][0]);
-+    $this->assertSame([], $calls['apply'][0][1]);
++    // Using aliases.
++    $query = $this->connection
++      ->select('select', 's');
++      ->addExpression('COUNT([id])', 'num');
++      ->addField('s', 'update');
++      ->groupBy('s.update');
++    $this->assertSame(2, $query->execute()->fetchField());
++
++    // Not using aliases.
++    $query = $this->connection
++      ->select('select');
++      ->addExpression('COUNT([id])', 'num');
++      ->addField('select', 'update');
++      ->groupBy('update');
++    $this->assertSame(2, $query->execute()->fetchField());
 +  }
 +
  }
-diff --git a/core/tests/Drupal/Tests/Traits/Core/Image/ToolkitTestTrait.php b/core/tests/Drupal/Tests/Traits/Core/Image/ToolkitTestTrait.php
-index 7e2f7a934b..45f9ca7816 100644
---- a/core/tests/Drupal/Tests/Traits/Core/Image/ToolkitTestTrait.php
-+++ b/core/tests/Drupal/Tests/Traits/Core/Image/ToolkitTestTrait.php
-@@ -42,6 +42,7 @@ public function assertToolkitOperationsCalled(array $expected): void {
-       'scale_and_crop',
-       'my_operation',
-       'convert',
-+      'failing',
-     ];
-     if (count(array_intersect($expected, $operations)) > 0 && !in_array('apply', $expected)) {
-       $expected[] = 'apply';
-@@ -101,7 +102,10 @@ protected function assertImageEffect(array $expected_operations, string $effect_
-     $effect = $this->imageEffectPluginManager->createInstance($effect_name, ['data' => $data]);
-     $image = $this->getImage();
-     $this->imageTestReset();
--    $this->assertTrue($effect->applyEffect($image));
-+    // The test toolkit does not actually implement the operation plugins,
-+    // therefore the calls to TestToolkit::apply() will fail. That's not a
-+    // problem here, we are not testing the actual operations.
-+    $this->assertFalse($effect->applyEffect($image));
-     $this->assertToolkitOperationsCalled($expected_operations);
-   }
+diff --git a/core/tests/Drupal/KernelTests/Core/Database/SelectComplexTest.php b/core/tests/Drupal/KernelTests/Core/Database/SelectComplexTest.php
+index 281f3d4d57..e7df5c4386 100644
+--- a/core/tests/Drupal/KernelTests/Core/Database/SelectComplexTest.php
++++ b/core/tests/Drupal/KernelTests/Core/Database/SelectComplexTest.php
+@@ -82,6 +82,10 @@ public function testGroupBy() {
+     $task_field = $query->addField('t', 'task');
+     $query->orderBy($count_field);
+     $query->groupBy($task_field);
++
++    $this->assertMatchesRegularExpression("/ORDER BY .*[^\w\s]num[^\w\s]/", (string) $query);
++    $this->assertMatchesRegularExpression("/GROUP BY .*[^\w\s]task[^\w\s]/", (string) $query);
++
+     $result = $query->execute();
  
+     $num_records = 0;
