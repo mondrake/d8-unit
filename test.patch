@@ -1,16 +1,14 @@
 diff --git a/core/core.services.yml b/core/core.services.yml
-index 6655001af1..de273e824d 100644
+index 6655001af1..ce8dc81940 100644
 --- a/core/core.services.yml
 +++ b/core/core.services.yml
-@@ -412,6 +412,11 @@ services:
+@@ -412,6 +412,9 @@ services:
      tags:
        - { name: event_subscriber }
    Drupal\Core\Database\ReplicaKillSwitch: '@database.replica_kill_switch'
-+  database.statement_execution_subscriber:
-+    class: Drupal\Core\Database\EventSubscriber\StatementExecutionSubscriber
++  Drupal\Core\Database\EventSubscriber\StatementExecutionSubscriber:
 +    tags:
 +      - { name: event_subscriber }
-+  Drupal\Core\Database\EventSubscriber\StatementExecutionSubscriber: '@database.statement_execution_subscriber'
    datetime.time:
      class: Drupal\Component\Datetime\Time
      arguments: ['@request_stack']
@@ -186,46 +184,12 @@ index 809b1552ca..322b2e5432 100644
        $new_connection->setLogger(self::$logs[$key]);
      }
  
-diff --git a/core/lib/Drupal/Core/Database/DatabaseEvents.php b/core/lib/Drupal/Core/Database/DatabaseEvents.php
-new file mode 100644
-index 0000000000..95fdf6893f
---- /dev/null
-+++ b/core/lib/Drupal/Core/Database/DatabaseEvents.php
-@@ -0,0 +1,28 @@
-+<?php
-+
-+namespace Drupal\Core\Database;
-+
-+/**
-+ * Defines events for the database system.
-+ */
-+final class DatabaseEvents {
-+
-+  /**
-+   * Name of the event fired when starting a statement execution.
-+   *
-+   * @Event
-+   *
-+   * @var string
-+   */
-+  const STATEMENT_EXECUTION_START = 'database.statement.execution.start';
-+
-+  /**
-+   * Name of the event fired when a statement execution is finished.
-+   *
-+   * @Event
-+   *
-+   * @var string
-+   */
-+  const STATEMENT_EXECUTION_END = 'database.statement.execution.end';
-+
-+}
 diff --git a/core/lib/Drupal/Core/Database/Event/DatabaseEvent.php b/core/lib/Drupal/Core/Database/Event/DatabaseEvent.php
 new file mode 100644
-index 0000000000..6f6ceca67d
+index 0000000000..1f75901158
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/Event/DatabaseEvent.php
-@@ -0,0 +1,11 @@
+@@ -0,0 +1,24 @@
 +<?php
 +
 +namespace Drupal\Core\Database\Event;
@@ -236,34 +200,94 @@ index 0000000000..6f6ceca67d
 + * Represents a database event.
 + */
 +abstract class DatabaseEvent extends Event {
++
++  /**
++   * The time of the event.
++   */
++  public readonly float $time;
++
++  /**
++   * Constructs a DatabaseEvent object.
++   */
++  public function __construct() {
++    $this->time = microtime(TRUE);
++  }
++
 +}
-diff --git a/core/lib/Drupal/Core/Database/Event/StatementExecutionEvent.php b/core/lib/Drupal/Core/Database/Event/StatementExecutionEvent.php
+diff --git a/core/lib/Drupal/Core/Database/Event/StatementExecutionEndEvent.php b/core/lib/Drupal/Core/Database/Event/StatementExecutionEndEvent.php
 new file mode 100644
-index 0000000000..8c91c307f6
+index 0000000000..9a78ec1ccb
 --- /dev/null
-+++ b/core/lib/Drupal/Core/Database/Event/StatementExecutionEvent.php
-@@ -0,0 +1,68 @@
++++ b/core/lib/Drupal/Core/Database/Event/StatementExecutionEndEvent.php
+@@ -0,0 +1,51 @@
 +<?php
 +
 +namespace Drupal\Core\Database\Event;
 +
 +/**
-+ * Represents a statement execution as an event.
++ * Represents the end of a statement execution as an event.
 + */
-+class StatementExecutionEvent extends DatabaseEvent {
-+
-+  /**
-+   * The time of the statement execution start.
-+   */
-+  public readonly float $startTime;
-+
-+  /**
-+   * The time of the statement execution end.
-+   */
-+  public readonly float $endTime;
++class StatementExecutionEndEvent extends DatabaseEvent {
 +
 +  /**
 +   * Constructs a StatementExecutionEvent object.
++   *
++   * See 'Customizing database settings' in settings.php for an explanation of
++   * the $key and $target connection values.
++   *
++   * @param string $key
++   *   The database connection key.
++   * @param string $target
++   *   The database connection target.
++   * @param string $queryString
++   *   The SQL statement string being executed, with placeholders.
++   * @param array $args
++   *   The placeholders' replacement values.
++   * @param array $caller
++   *   A normalized debug backtrace entry representing the last non-db method
++   *   called.
++   * @param float $startTime
++   *   The time of the statement execution start.
++   */
++  public function __construct(
++    public readonly string $key,
++    public readonly string $target,
++    public readonly string $queryString,
++    public readonly array $args,
++    public readonly array $caller,
++    public readonly float $startTime,
++  ) {
++    parent::__construct();
++  }
++
++  /**
++   * Gets the query execution elapsed time.
++   *
++   * @return float
++   *   The elapsed time.
++   */
++  public function getElapsedTime(): float {
++    return $this->time - $this->startTime;
++  }
++
++}
+diff --git a/core/lib/Drupal/Core/Database/Event/StatementExecutionStartEvent.php b/core/lib/Drupal/Core/Database/Event/StatementExecutionStartEvent.php
+new file mode 100644
+index 0000000000..c25194ef50
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/Event/StatementExecutionStartEvent.php
+@@ -0,0 +1,38 @@
++<?php
++
++namespace Drupal\Core\Database\Event;
++
++/**
++ * Represents the start of a statement execution as an event.
++ */
++class StatementExecutionStartEvent extends DatabaseEvent {
++
++  /**
++   * Constructs a StatementExecutionStartEvent object.
 +   *
 +   * See 'Customizing database settings' in settings.php for an explanation of
 +   * the $key and $target connection values.
@@ -287,43 +311,22 @@ index 0000000000..8c91c307f6
 +    public readonly array $args,
 +    public readonly array $caller,
 +  ) {
-+    $this->startTime = microtime(TRUE);
-+  }
-+
-+  /**
-+   * Sets the query end time.
-+   *
-+   * @param float $time
-+   *   The end time.
-+   */
-+  public function setEndTime(float $time): void {
-+    $this->endTime = $time;
-+  }
-+
-+  /**
-+   * Gets the query execution time.
-+   *
-+   * @return float
-+   *   The start time.
-+   */
-+  public function getElapsedTime(): float {
-+    return $this->endTime - $this->startTime;
++    parent::__construct();
 +  }
 +
 +}
 diff --git a/core/lib/Drupal/Core/Database/EventSubscriber/StatementExecutionSubscriber.php b/core/lib/Drupal/Core/Database/EventSubscriber/StatementExecutionSubscriber.php
 new file mode 100644
-index 0000000000..fc94a471be
+index 0000000000..f8fa73d96e
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/EventSubscriber/StatementExecutionSubscriber.php
-@@ -0,0 +1,39 @@
+@@ -0,0 +1,38 @@
 +<?php
 +
 +namespace Drupal\Core\Database\EventSubscriber;
 +
 +use Drupal\Core\Database\Database;
-+use Drupal\Core\Database\DatabaseEvents;
-+use Drupal\Core\Database\Event\StatementExecutionEvent;
++use Drupal\Core\Database\Event\StatementExecutionEndEvent;
 +use Symfony\Component\EventDispatcher\EventSubscriberInterface;
 +
 +/**
@@ -336,7 +339,7 @@ index 0000000000..fc94a471be
 +   */
 +  public static function getSubscribedEvents(): array {
 +    return [
-+      DatabaseEvents::STATEMENT_EXECUTION_END => 'onStatementExecutionEnd',
++      StatementExecutionEndEvent::class => 'onStatementExecutionEnd',
 +    ];
 +  }
 +
@@ -345,10 +348,10 @@ index 0000000000..fc94a471be
 +   *
 +   * Logs the statement query if logging is active.
 +   *
-+   * @param \Drupal\Core\Database\Event\StatementExecutionEvent $event
++   * @param \Drupal\Core\Database\Event\StatementExecutionEndEvent $event
 +   *   The database event.
 +   */
-+  public function onStatementExecutionEnd(StatementExecutionEvent $event): void {
++  public function onStatementExecutionEnd(StatementExecutionEndEvent $event): void {
 +    $logger = Database::getConnection($event->target, $event->key)->getLogger();
 +    if ($logger) {
 +      $logger->logFromEvent($event);
@@ -357,14 +360,14 @@ index 0000000000..fc94a471be
 +
 +}
 diff --git a/core/lib/Drupal/Core/Database/Log.php b/core/lib/Drupal/Core/Database/Log.php
-index b310d17284..8e8725ebd5 100644
+index b310d17284..758687d39e 100644
 --- a/core/lib/Drupal/Core/Database/Log.php
 +++ b/core/lib/Drupal/Core/Database/Log.php
 @@ -2,6 +2,8 @@
  
  namespace Drupal\Core\Database;
  
-+use Drupal\Core\Database\Event\StatementExecutionEvent;
++use Drupal\Core\Database\Event\StatementExecutionEndEvent;
 +
  /**
   * Database query logger.
@@ -376,10 +379,10 @@ index b310d17284..8e8725ebd5 100644
 +  /**
 +   * Log a query to all active logging keys, from a statement execution event.
 +   *
-+   * @param \Drupal\Core\Database\Event\StatementExecutionEvent $event
++   * @param \Drupal\Core\Database\Event\StatementExecutionEndEvent $event
 +   *   The statement execution event.
 +   */
-+  public function logFromEvent(StatementExecutionEvent $event): void {
++  public function logFromEvent(StatementExecutionendEvent $event): void {
 +    foreach (array_keys($this->queryLog) as $key) {
 +      $this->queryLog[$key][] = [
 +        'query' => $event->queryString,
@@ -470,19 +473,20 @@ index b310d17284..8e8725ebd5 100644
    }
  
 diff --git a/core/lib/Drupal/Core/Database/StatementPrefetch.php b/core/lib/Drupal/Core/Database/StatementPrefetch.php
-index 7edbf7b26b..19ad2ce3e6 100644
+index 7edbf7b26b..2770d0e7a4 100644
 --- a/core/lib/Drupal/Core/Database/StatementPrefetch.php
 +++ b/core/lib/Drupal/Core/Database/StatementPrefetch.php
-@@ -2,6 +2,8 @@
+@@ -2,6 +2,9 @@
  
  namespace Drupal\Core\Database;
  
-+use Drupal\Core\Database\Event\StatementExecutionEvent;
++use Drupal\Core\Database\Event\StatementExecutionEndEvent;
++use Drupal\Core\Database\Event\StatementExecutionStartEvent;
 +
  /**
   * An implementation of StatementInterface that prefetches all data.
   *
-@@ -172,9 +174,15 @@ public function execute($args = [], $options = []) {
+@@ -172,9 +175,15 @@ public function execute($args = [], $options = []) {
        }
      }
  
@@ -490,44 +494,51 @@ index 7edbf7b26b..19ad2ce3e6 100644
 -    if (!empty($logger)) {
 -      $query_start = microtime(TRUE);
 +    if ($this->connection->areStatementEventsEnabled()) {
-+      $event = new StatementExecutionEvent(
++      $startEvent = new StatementExecutionStartEvent(
 +        $this->connection->getKey(),
 +        $this->connection->getTarget(),
 +        $this->getQueryString(),
 +        $args ?? [],
 +        $this->connection->findCallerFromDebugBacktrace()
 +      );
-+      $this->connection->dispatchEvent($event, DatabaseEvents::STATEMENT_EXECUTION_START);
++      $this->connection->dispatchEvent($startEvent);
      }
  
      // Prepare the query.
-@@ -207,9 +215,9 @@ public function execute($args = [], $options = []) {
+@@ -207,9 +216,15 @@ public function execute($args = [], $options = []) {
        $this->columnNames = [];
      }
  
 -    if (!empty($logger)) {
 -      $query_end = microtime(TRUE);
 -      $logger->log($this, $args, $query_end - $query_start, $query_start);
-+    if (isset($event)) {
-+      $event->setEndTime(microtime(TRUE));
-+      $this->connection->dispatchEvent($event, DatabaseEvents::STATEMENT_EXECUTION_END);
++    if (isset($startEvent)) {
++      $this->connection->dispatchEvent(new StatementExecutionEndEvent(
++        $startEvent->key,
++        $startEvent->target,
++        $startEvent->queryString,
++        $startEvent->args,
++        $startEvent->caller,
++        $startEvent->startTime
++      ));
      }
  
      // Initialize the first row in $this->currentRow.
 diff --git a/core/lib/Drupal/Core/Database/StatementWrapper.php b/core/lib/Drupal/Core/Database/StatementWrapper.php
-index 4381fd1af6..e467ec6ac5 100644
+index 4381fd1af6..ace3815b92 100644
 --- a/core/lib/Drupal/Core/Database/StatementWrapper.php
 +++ b/core/lib/Drupal/Core/Database/StatementWrapper.php
-@@ -2,6 +2,8 @@
+@@ -2,6 +2,9 @@
  
  namespace Drupal\Core\Database;
  
-+use Drupal\Core\Database\Event\StatementExecutionEvent;
++use Drupal\Core\Database\Event\StatementExecutionEndEvent;
++use Drupal\Core\Database\Event\StatementExecutionStartEvent;
 +
  // cSpell:ignore maxlen driverdata INOUT
  
  /**
-@@ -87,16 +89,22 @@ public function execute($args = [], $options = []) {
+@@ -87,16 +90,28 @@ public function execute($args = [], $options = []) {
        }
      }
  
@@ -535,14 +546,14 @@ index 4381fd1af6..e467ec6ac5 100644
 -    if (!empty($logger)) {
 -      $query_start = microtime(TRUE);
 +    if ($this->connection->areStatementEventsEnabled()) {
-+      $event = new StatementExecutionEvent(
++      $startEvent = new StatementExecutionStartEvent(
 +        $this->connection->getKey(),
 +        $this->connection->getTarget(),
 +        $this->getQueryString(),
 +        $args ?? [],
 +        $this->connection->findCallerFromDebugBacktrace()
 +      );
-+      $this->connection->dispatchEvent($event, DatabaseEvents::STATEMENT_EXECUTION_START);
++      $this->connection->dispatchEvent($startEvent);
      }
  
      $return = $this->clientStatement->execute($args);
@@ -550,9 +561,15 @@ index 4381fd1af6..e467ec6ac5 100644
 -    if (!empty($logger)) {
 -      $query_end = microtime(TRUE);
 -      $logger->log($this, $args, $query_end - $query_start, $query_start);
-+    if (isset($event)) {
-+      $event->setEndTime(microtime(TRUE));
-+      $this->connection->dispatchEvent($event, DatabaseEvents::STATEMENT_EXECUTION_END);
++    if (isset($startEvent)) {
++      $this->connection->dispatchEvent(new StatementExecutionEndEvent(
++        $startEvent->key,
++        $startEvent->target,
++        $startEvent->queryString,
++        $startEvent->args,
++        $startEvent->caller,
++        $startEvent->startTime
++      ));
      }
  
      return $return;
@@ -581,10 +598,10 @@ index 1f55be5a29..d5bb777f06 100644
          $message .= ": " . $exception->query_string . "; " . print_r($exception->args, TRUE);
        }
 diff --git a/core/phpstan.neon.dist b/core/phpstan.neon.dist
-index ded8039518..17bfa1ce53 100644
+index ded8039518..9dd2564042 100644
 --- a/core/phpstan.neon.dist
 +++ b/core/phpstan.neon.dist
-@@ -37,3 +37,9 @@ parameters:
+@@ -37,3 +37,8 @@ parameters:
      - "#^Missing cache backend declaration for performance.#"
      - "#cache tag might be unclear and does not contain the cache key in it.#"
      - "#^Class .* extends @internal class#"
@@ -593,7 +610,6 @@ index ded8039518..17bfa1ce53 100644
 +    # is an opinionated interpretation of the PHP feature.
 +    # See https://github.com/phpstan/phpstan/issues/7477
 +    - "#^Class .* has an uninitialized readonly property .*\\. Assign it in the constructor\\.#"
-+    - "#^Readonly property .* is assigned outside of the constructor\\.#"
 diff --git a/core/tests/Drupal/KernelTests/Core/Database/LoggingTest.php b/core/tests/Drupal/KernelTests/Core/Database/LoggingTest.php
 index 7858169af1..27e2ac2aad 100644
 --- a/core/tests/Drupal/KernelTests/Core/Database/LoggingTest.php
