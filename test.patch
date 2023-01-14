@@ -1,79 +1,895 @@
-diff --git a/core/lib/Drupal/Core/Database/Query/Select.php b/core/lib/Drupal/Core/Database/Query/Select.php
-index 93ffa081a6..c4fd8535f4 100644
---- a/core/lib/Drupal/Core/Database/Query/Select.php
-+++ b/core/lib/Drupal/Core/Database/Query/Select.php
-@@ -878,7 +878,10 @@ public function __toString() {
+diff --git a/core/core.services.yml b/core/core.services.yml
+index 6655001af1..de273e824d 100644
+--- a/core/core.services.yml
++++ b/core/core.services.yml
+@@ -412,6 +412,11 @@ services:
+     tags:
+       - { name: event_subscriber }
+   Drupal\Core\Database\ReplicaKillSwitch: '@database.replica_kill_switch'
++  database.statement_execution_subscriber:
++    class: Drupal\Core\Database\EventSubscriber\StatementExecutionSubscriber
++    tags:
++      - { name: event_subscriber }
++  Drupal\Core\Database\EventSubscriber\StatementExecutionSubscriber: '@database.statement_execution_subscriber'
+   datetime.time:
+     class: Drupal\Component\Datetime\Time
+     arguments: ['@request_stack']
+diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
+index b6f7968dcf..49b13d6d10 100644
+--- a/core/lib/Drupal/Core/Database/Connection.php
++++ b/core/lib/Drupal/Core/Database/Connection.php
+@@ -3,6 +3,7 @@
+ namespace Drupal\Core\Database;
  
-     // GROUP BY
-     if ($this->group) {
--      $query .= "\nGROUP BY " . implode(', ', $this->group);
-+      $group_by_fields = array_map(function (string $field): string {
-+        return $this->connection->escapeField($field);
-+      }, $this->group);
-+      $query .= "\nGROUP BY " . implode(', ', $group_by_fields);
-     }
+ use Drupal\Component\Assertion\Inspector;
++use Drupal\Core\Database\Event\DatabaseEvent;
+ use Drupal\Core\Database\Query\Condition;
+ use Drupal\Core\Database\Query\Delete;
+ use Drupal\Core\Database\Query\Insert;
+@@ -216,6 +217,14 @@ abstract class Connection {
+    */
+   protected $identifierQuotes;
  
-     // HAVING
-diff --git a/core/modules/views/tests/src/Kernel/QueryGroupByTest.php b/core/modules/views/tests/src/Kernel/QueryGroupByTest.php
-index 171688321e..20a55769fb 100644
---- a/core/modules/views/tests/src/Kernel/QueryGroupByTest.php
-+++ b/core/modules/views/tests/src/Kernel/QueryGroupByTest.php
-@@ -230,7 +230,7 @@ public function testGroupByBaseField() {
-     $view->displayHandlers->get('default')->options['fields']['name']['group_type'] = 'min';
-     unset($view->displayHandlers->get('default')->options['fields']['id']['group_type']);
-     $this->executeView($view);
--    $this->assertStringContainsString('GROUP BY entity_test.id', (string) $view->build_info['query'], 'GROUP BY field includes the base table name when grouping on the base field.');
-+    $this->assertMatchesRegularExpression('/GROUP BY .*[^\w\s]entity_test[^\w\s]\.[^\w\s]id[^\w\s]/', (string) $view->build_info['query'], 'GROUP BY field includes the base table name when grouping on the base field.');
-   }
- 
++  /**
++   * Tracks whether statement execution dispatches events.
++   *
++   * For performance reasons, statement execution events are not yielded by
++   * default. Call ::enableStatementEvents(TRUE) to enable them.
++   */
++  private bool $statementEventsEnabled = FALSE;
++
    /**
-diff --git a/core/tests/Drupal/KernelTests/Core/Database/ReservedWordTest.php b/core/tests/Drupal/KernelTests/Core/Database/ReservedWordTest.php
-index 9bc296c8e6..c541f466d4 100644
---- a/core/tests/Drupal/KernelTests/Core/Database/ReservedWordTest.php
-+++ b/core/tests/Drupal/KernelTests/Core/Database/ReservedWordTest.php
-@@ -80,4 +80,30 @@ public function testSelectReservedWordAliasAllFields() {
-     $this->assertSame('27', $record->age);
+    * Constructs a Connection object.
+    *
+@@ -1867,4 +1876,124 @@ public function hasJson(): bool {
+     }
    }
  
 +  /**
-+   * Tests SELECT query with GROUP BY clauses on fields with reserved names.
++   * Returns the status of the statement execution events toggle.
++   *
++   * @return bool
++   *   TRUE if statement execution events will be dispatched.
 +   */
-+  public function testGroupBy() {
-+    $this->connection->insert('select')
-+      ->fields([
-+        'id' => 2,
-+        'update' => 'Update value 1',
-+      ])
-+      ->execute();
++  public function areStatementEventsEnabled(): bool {
++    return $this->statementEventsEnabled;
++  }
 +
-+    // Using aliases.
-+    $query = $this->connection->select('select', 's');
-+    $query->addExpression('COUNT([id])', 'num');
-+    $query->addField('s', 'update');
-+    $query->groupBy('s.update');
-+    $this->assertSame('2', $query->execute()->fetchAssoc()['num']);
++  /**
++   * Sets the status of the statement execution events toggle.
++   *
++   * @param bool $toggle
++   *   TRUE if statement execution events will be dispatched, FALSE otherwise.
++   */
++  public function enableStatementEvents(bool $toggle): static {
++    $this->statementEventsEnabled = $toggle;
++    return $this;
++  }
 +
-+    // Not using aliases.
-+    $query = $this->connection->select('select');
-+    $query->addExpression('COUNT([id])', 'num');
-+    $query->addField('select', 'update');
-+    $query->groupBy('update');
-+    $this->assertSame('2', $query->execute()->fetchAssoc()['num']);
++  /**
++   * Dispatches a database API event via the container dispatcher.
++   *
++   * @param \Drupal\Core\Database\Event\DatabaseEvent $event
++   *   The database event.
++   * @param string|null $eventName
++   *   (Optional) the name of the event to dispatch.
++   *
++   * @return \Drupal\Core\Database\Event\DatabaseEvent
++   *   The database event.
++   */
++  public function dispatchEvent(DatabaseEvent $event, ?string $eventName = NULL): DatabaseEvent {
++    if (\Drupal::hasService('event_dispatcher')) {
++      return \Drupal::service('event_dispatcher')->dispatch($event, $eventName);
++    }
++    return $event;
++  }
++
++  /**
++   * Determine the last non-database method that called the database API.
++   *
++   * Traversing the call stack from the very first call made during the
++   * request, we define "the routine that called this query" as the last entry
++   * in the call stack that is not any method called from the namespace of the
++   * database driver, is not inside the Drupal\Core\Database namespace and does
++   * have a file (which excludes call_user_func_array(), anonymous functions
++   * and similar). That makes the climbing logic very simple, and handles the
++   * variable stack depth caused by the query builders.
++   *
++   * See the @link http://php.net/debug_backtrace debug_backtrace() @endlink
++   * function.
++   *
++   * @return array
++   *   This method returns a stack trace entry similar to that generated by
++   *   debug_backtrace(). However, it flattens the trace entry and the trace
++   *   entry before it so that we get the function and args of the function that
++   *   called into the database system, not the function and args of the
++   *   database call itself.
++   */
++  public function findCallerFromDebugBacktrace(): array {
++    $stack = $this->removeDatabaseEntriesFromDebugBacktrace($this->getDebugBacktrace(), $this->getConnectionOptions()['namespace']);
++    // Return the first function call whose stack entry has a 'file' key, that
++    // is, it is not a callback or a closure.
++    for ($i = 0; $i < count($stack); $i++) {
++      if (!empty($stack[$i]['file'])) {
++        return [
++          'file' => $stack[$i]['file'],
++          'line' => $stack[$i]['line'],
++          'function' => $stack[$i + 1]['function'],
++          'class' => $stack[$i + 1]['class'] ?? NULL,
++          'type' => $stack[$i + 1]['type'] ?? NULL,
++          'args' => $stack[$i + 1]['args'] ?? [],
++        ];
++      }
++    }
++
++    return [];
++  }
++
++  /**
++   * Removes database related calls from a backtrace array.
++   *
++   * @param array $backtrace
++   *   A standard PHP backtrace. Passed by reference.
++   * @param string $driver_namespace
++   *   The PHP namespace of the database driver.
++   *
++   * @return array
++   *   The cleaned backtrace array.
++   */
++  public static function removeDatabaseEntriesFromDebugBacktrace(array $backtrace, string $driver_namespace): array {
++    // Starting from the very first entry processed during the request, find
++    // the first function call that can be identified as a call to a
++    // method/function in the database layer.
++    for ($n = count($backtrace) - 1; $n >= 0; $n--) {
++      // If the call was made from a function, 'class' will be empty. We give
++      // it a default empty string value in that case.
++      $class = $backtrace[$n]['class'] ?? '';
++      if (str_starts_with($class, __NAMESPACE__) || str_starts_with($class, $driver_namespace)) {
++        break;
++      }
++    }
++
++    return array_values(array_slice($backtrace, $n));
++  }
++
++  /**
++   * Gets the debug backtrace.
++   *
++   * Wraps the debug_backtrace function to allow mocking results in PHPUnit
++   * tests.
++   *
++   * @return array[]
++   *   The debug backtrace.
++   */
++  protected function getDebugBacktrace(): array {
++    return debug_backtrace();
 +  }
 +
  }
-diff --git a/core/tests/Drupal/KernelTests/Core/Database/SelectComplexTest.php b/core/tests/Drupal/KernelTests/Core/Database/SelectComplexTest.php
-index 281f3d4d57..e7df5c4386 100644
---- a/core/tests/Drupal/KernelTests/Core/Database/SelectComplexTest.php
-+++ b/core/tests/Drupal/KernelTests/Core/Database/SelectComplexTest.php
-@@ -82,6 +82,10 @@ public function testGroupBy() {
-     $task_field = $query->addField('t', 'task');
-     $query->orderBy($count_field);
-     $query->groupBy($task_field);
-+
-+    $this->assertMatchesRegularExpression("/ORDER BY .*[^\w\s]num[^\w\s]/", (string) $query);
-+    $this->assertMatchesRegularExpression("/GROUP BY .*[^\w\s]task[^\w\s]/", (string) $query);
-+
-     $result = $query->execute();
+diff --git a/core/lib/Drupal/Core/Database/Database.php b/core/lib/Drupal/Core/Database/Database.php
+index 809b1552ca..322b2e5432 100644
+--- a/core/lib/Drupal/Core/Database/Database.php
++++ b/core/lib/Drupal/Core/Database/Database.php
+@@ -122,6 +122,7 @@ abstract class Database {
+       // logging object associated with it.
+       if (!empty(self::$connections[$key])) {
+         foreach (self::$connections[$key] as $connection) {
++          $connection->enableStatementEvents(TRUE);
+           $connection->setLogger(self::$logs[$key]);
+         }
+       }
+@@ -450,6 +451,7 @@ abstract class Database {
+     // If we have any active logging objects for this connection key, we need
+     // to associate them with the connection we just opened.
+     if (!empty(self::$logs[$key])) {
++      $new_connection->enableStatementEvents(TRUE);
+       $new_connection->setLogger(self::$logs[$key]);
+     }
  
-     $num_records = 0;
+diff --git a/core/lib/Drupal/Core/Database/DatabaseEvents.php b/core/lib/Drupal/Core/Database/DatabaseEvents.php
+new file mode 100644
+index 0000000000..95fdf6893f
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/DatabaseEvents.php
+@@ -0,0 +1,28 @@
++<?php
++
++namespace Drupal\Core\Database;
++
++/**
++ * Defines events for the database system.
++ */
++final class DatabaseEvents {
++
++  /**
++   * Name of the event fired when starting a statement execution.
++   *
++   * @Event
++   *
++   * @var string
++   */
++  const STATEMENT_EXECUTION_START = 'database.statement.execution.start';
++
++  /**
++   * Name of the event fired when a statement execution is finished.
++   *
++   * @Event
++   *
++   * @var string
++   */
++  const STATEMENT_EXECUTION_END = 'database.statement.execution.end';
++
++}
+diff --git a/core/lib/Drupal/Core/Database/Event/DatabaseEvent.php b/core/lib/Drupal/Core/Database/Event/DatabaseEvent.php
+new file mode 100644
+index 0000000000..6f6ceca67d
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/Event/DatabaseEvent.php
+@@ -0,0 +1,11 @@
++<?php
++
++namespace Drupal\Core\Database\Event;
++
++use Drupal\Component\EventDispatcher\Event;
++
++/**
++ * Represents a database event.
++ */
++abstract class DatabaseEvent extends Event {
++}
+diff --git a/core/lib/Drupal/Core/Database/Event/StatementExecutionEvent.php b/core/lib/Drupal/Core/Database/Event/StatementExecutionEvent.php
+new file mode 100644
+index 0000000000..73fd055ade
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/Event/StatementExecutionEvent.php
+@@ -0,0 +1,69 @@
++<?php
++
++namespace Drupal\Core\Database\Event;
++
++/**
++ * Represents a statement execution as an event.
++ */
++class StatementExecutionEvent extends DatabaseEvent {
++
++  /**
++   * The time of the statement execution start.
++   */
++  public readonly float $startTime;
++
++  /**
++   * The time of the statement execution end.
++   */
++  public readonly float $endTime;
++
++  /**
++   * Constructs a StatementExecutionEvent object.
++   *
++   * See 'Customizing database settings' in settings.php for an explanation of
++   * the $key and $target connection values.
++   *
++   * @param string $key
++   *   The database connection key.
++   * @param string $target
++   *   The database connection target.
++   * @param string $queryString
++   *   The SQL statement string being executed, with placeholders.
++   * @param array $args
++   *   The placeholders' replacement values.
++   * @param array $caller
++   *   A normalized debug backtrace entry representing the last non-db method
++   *   called.
++   */
++  public function __construct(
++    public readonly string $key,
++    public readonly string $target,
++    public readonly string $queryString,
++    public readonly array $args,
++    public readonly array $caller,
++    public readonly float $startTime;
++  ) {
++    $this->startTime = microtime(TRUE);
++  }
++
++  /**
++   * Sets the query end time.
++   *
++   * @param float $time
++   *   The end time.
++   */
++  public function setEndTime(float $time): void {
++    $this->endTime = $time;
++  }
++
++  /**
++   * Gets the query execution time.
++   *
++   * @return float
++   *   The start time.
++   */
++  public function getElapsedTime(): float {
++    return $this->endTime - $this->startTime;
++  }
++
++}
+diff --git a/core/lib/Drupal/Core/Database/EventSubscriber/StatementExecutionSubscriber.php b/core/lib/Drupal/Core/Database/EventSubscriber/StatementExecutionSubscriber.php
+new file mode 100644
+index 0000000000..fc94a471be
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/EventSubscriber/StatementExecutionSubscriber.php
+@@ -0,0 +1,39 @@
++<?php
++
++namespace Drupal\Core\Database\EventSubscriber;
++
++use Drupal\Core\Database\Database;
++use Drupal\Core\Database\DatabaseEvents;
++use Drupal\Core\Database\Event\StatementExecutionEvent;
++use Symfony\Component\EventDispatcher\EventSubscriberInterface;
++
++/**
++ * Response subscriber to statement executions.
++ */
++class StatementExecutionSubscriber implements EventSubscriberInterface {
++
++  /**
++   * {@inheritdoc}
++   */
++  public static function getSubscribedEvents(): array {
++    return [
++      DatabaseEvents::STATEMENT_EXECUTION_END => 'onStatementExecutionEnd',
++    ];
++  }
++
++  /**
++   * Subscribes to a statement execution finished event.
++   *
++   * Logs the statement query if logging is active.
++   *
++   * @param \Drupal\Core\Database\Event\StatementExecutionEvent $event
++   *   The database event.
++   */
++  public function onStatementExecutionEnd(StatementExecutionEvent $event): void {
++    $logger = Database::getConnection($event->target, $event->key)->getLogger();
++    if ($logger) {
++      $logger->logFromEvent($event);
++    }
++  }
++
++}
+diff --git a/core/lib/Drupal/Core/Database/Log.php b/core/lib/Drupal/Core/Database/Log.php
+index b310d17284..8e8725ebd5 100644
+--- a/core/lib/Drupal/Core/Database/Log.php
++++ b/core/lib/Drupal/Core/Database/Log.php
+@@ -2,6 +2,8 @@
+ 
+ namespace Drupal\Core\Database;
+ 
++use Drupal\Core\Database\Event\StatementExecutionEvent;
++
+ /**
+  * Database query logger.
+  *
+@@ -100,6 +102,25 @@ public function end($logging_key) {
+     unset($this->queryLog[$logging_key]);
+   }
+ 
++  /**
++   * Log a query to all active logging keys, from a statement execution event.
++   *
++   * @param \Drupal\Core\Database\Event\StatementExecutionEvent $event
++   *   The statement execution event.
++   */
++  public function logFromEvent(StatementExecutionEvent $event): void {
++    foreach (array_keys($this->queryLog) as $key) {
++      $this->queryLog[$key][] = [
++        'query' => $event->queryString,
++        'args' => $event->args,
++        'target' => $event->target,
++        'caller' => $event->caller,
++        'time' => $event->getElapsedTime(),
++        'start' => $event->startTime,
++      ];
++    }
++  }
++
+   /**
+    * Log a query to all active logging keys.
+    *
+@@ -113,8 +134,14 @@ public function end($logging_key) {
+    * @param float $start
+    *   The time the query started as a float (in seconds since the Unix epoch
+    *   with microsecond precision).
++   *
++   * @deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. Use
++   *   ::logFromEvent().
++   *
++   * @see https://www.drupal.org/node/3328053
+    */
+   public function log(StatementInterface $statement, $args, $time, float $start = NULL) {
++    @trigger_error(__METHOD__ . '() is deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. Use ::logFromEvent(). See https://www.drupal.org/node/3328053', E_USER_DEPRECATED);
+     foreach (array_keys($this->queryLog) as $key) {
+       $this->queryLog[$key][] = [
+         'query' => $statement->getQueryString(),
+@@ -147,8 +174,14 @@ public function log(StatementInterface $statement, $args, $time, float $start =
+    *   entry before it so that we get the function and args of the function that
+    *   called into the database system, not the function and args of the
+    *   database call itself.
++   *
++   * @deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. Use
++   *   Connection::findCallerFromDebugBacktrace().
++   *
++   * @see https://www.drupal.org/node/3328053
+    */
+   public function findCaller() {
++    @trigger_error(__METHOD__ . '() is deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. Use Connection::findCallerFromDebugBacktrace(). See https://www.drupal.org/node/3328053', E_USER_DEPRECATED);
+     $driver_namespace = Database::getConnectionInfo($this->connectionKey)['default']['namespace'];
+     $stack = static::removeDatabaseEntries($this->getDebugBacktrace(), $driver_namespace);
+ 
+@@ -178,21 +211,15 @@ public function findCaller() {
+    *
+    * @return array
+    *   The cleaned backtrace array.
++   *
++   * @deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. Use
++   *   Connection::removeDatabaseEntriesFromDebugBacktrace().
++   *
++   * @see https://www.drupal.org/node/3328053
+    */
+   public static function removeDatabaseEntries(array $backtrace, string $driver_namespace): array {
+-    // Starting from the very first entry processed during the request, find
+-    // the first function call that can be identified as a call to a
+-    // method/function in the database layer.
+-    for ($n = count($backtrace) - 1; $n >= 0; $n--) {
+-      // If the call was made from a function, 'class' will be empty. We give
+-      // it a default empty string value in that case.
+-      $class = $backtrace[$n]['class'] ?? '';
+-      if (strpos($class, __NAMESPACE__, 0) === 0 || strpos($class, $driver_namespace, 0) === 0) {
+-        break;
+-      }
+-    }
+-
+-    return array_values(array_slice($backtrace, $n));
++    @trigger_error(__METHOD__ . '() is deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. Use Connection::removeDatabaseEntriesFromDebugBacktrace(). See https://www.drupal.org/node/3328053', E_USER_DEPRECATED);
++    return Connection::removeDatabaseEntriesFromDebugBacktrace($backtrace, $driver_namespace);
+   }
+ 
+   /**
+@@ -203,8 +230,14 @@ public static function removeDatabaseEntries(array $backtrace, string $driver_na
+    *
+    * @return array[]
+    *   The debug backtrace.
++   *
++   * @deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. There is
++   *   no replacement.
++   *
++   * @see https://www.drupal.org/node/3328053
+    */
+   protected function getDebugBacktrace() {
++    @trigger_error(__METHOD__ . '() is deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. There is no replacement. See https://www.drupal.org/node/3328053', E_USER_DEPRECATED);
+     return debug_backtrace();
+   }
+ 
+diff --git a/core/lib/Drupal/Core/Database/StatementPrefetch.php b/core/lib/Drupal/Core/Database/StatementPrefetch.php
+index 7edbf7b26b..19ad2ce3e6 100644
+--- a/core/lib/Drupal/Core/Database/StatementPrefetch.php
++++ b/core/lib/Drupal/Core/Database/StatementPrefetch.php
+@@ -2,6 +2,8 @@
+ 
+ namespace Drupal\Core\Database;
+ 
++use Drupal\Core\Database\Event\StatementExecutionEvent;
++
+ /**
+  * An implementation of StatementInterface that prefetches all data.
+  *
+@@ -172,9 +174,15 @@ public function execute($args = [], $options = []) {
+       }
+     }
+ 
+-    $logger = $this->connection->getLogger();
+-    if (!empty($logger)) {
+-      $query_start = microtime(TRUE);
++    if ($this->connection->areStatementEventsEnabled()) {
++      $event = new StatementExecutionEvent(
++        $this->connection->getKey(),
++        $this->connection->getTarget(),
++        $this->getQueryString(),
++        $args ?? [],
++        $this->connection->findCallerFromDebugBacktrace()
++      );
++      $this->connection->dispatchEvent($event, DatabaseEvents::STATEMENT_EXECUTION_START);
+     }
+ 
+     // Prepare the query.
+@@ -207,9 +215,9 @@ public function execute($args = [], $options = []) {
+       $this->columnNames = [];
+     }
+ 
+-    if (!empty($logger)) {
+-      $query_end = microtime(TRUE);
+-      $logger->log($this, $args, $query_end - $query_start, $query_start);
++    if (isset($event)) {
++      $event->setEndTime(microtime(TRUE));
++      $this->connection->dispatchEvent($event, DatabaseEvents::STATEMENT_EXECUTION_END);
+     }
+ 
+     // Initialize the first row in $this->currentRow.
+diff --git a/core/lib/Drupal/Core/Database/StatementWrapper.php b/core/lib/Drupal/Core/Database/StatementWrapper.php
+index 4381fd1af6..e467ec6ac5 100644
+--- a/core/lib/Drupal/Core/Database/StatementWrapper.php
++++ b/core/lib/Drupal/Core/Database/StatementWrapper.php
+@@ -2,6 +2,8 @@
+ 
+ namespace Drupal\Core\Database;
+ 
++use Drupal\Core\Database\Event\StatementExecutionEvent;
++
+ // cSpell:ignore maxlen driverdata INOUT
+ 
+ /**
+@@ -87,16 +89,22 @@ public function execute($args = [], $options = []) {
+       }
+     }
+ 
+-    $logger = $this->connection->getLogger();
+-    if (!empty($logger)) {
+-      $query_start = microtime(TRUE);
++    if ($this->connection->areStatementEventsEnabled()) {
++      $event = new StatementExecutionEvent(
++        $this->connection->getKey(),
++        $this->connection->getTarget(),
++        $this->getQueryString(),
++        $args ?? [],
++        $this->connection->findCallerFromDebugBacktrace()
++      );
++      $this->connection->dispatchEvent($event, DatabaseEvents::STATEMENT_EXECUTION_START);
+     }
+ 
+     $return = $this->clientStatement->execute($args);
+ 
+-    if (!empty($logger)) {
+-      $query_end = microtime(TRUE);
+-      $logger->log($this, $args, $query_end - $query_start, $query_start);
++    if (isset($event)) {
++      $event->setEndTime(microtime(TRUE));
++      $this->connection->dispatchEvent($event, DatabaseEvents::STATEMENT_EXECUTION_END);
+     }
+ 
+     return $return;
+diff --git a/core/lib/Drupal/Core/Utility/Error.php b/core/lib/Drupal/Core/Utility/Error.php
+index 1f55be5a29..d5bb777f06 100644
+--- a/core/lib/Drupal/Core/Utility/Error.php
++++ b/core/lib/Drupal/Core/Utility/Error.php
+@@ -4,9 +4,9 @@
+ 
+ use Drupal\Component\Render\FormattableMarkup;
+ use Drupal\Component\Utility\Xss;
++use Drupal\Core\Database\Connection;
+ use Drupal\Core\Database\Database;
+ use Drupal\Core\Database\DatabaseExceptionWrapper;
+-use Drupal\Core\Database\Log;
+ 
+ /**
+  * Drupal error utility class.
+@@ -52,7 +52,7 @@ public static function decodeException($exception) {
+     // skipping internal functions of the database layer.
+     if ($exception instanceof \PDOException || $exception instanceof DatabaseExceptionWrapper) {
+       $driver_namespace = Database::getConnectionInfo()['default']['namespace'];
+-      $backtrace = Log::removeDatabaseEntries($backtrace, $driver_namespace);
++      $backtrace = Connection::removeDatabaseEntriesFromDebugBacktrace($backtrace, $driver_namespace);
+       if (isset($exception->query_string, $exception->args)) {
+         $message .= ": " . $exception->query_string . "; " . print_r($exception->args, TRUE);
+       }
+diff --git a/core/phpstan.neon.dist b/core/phpstan.neon.dist
+index ded8039518..17bfa1ce53 100644
+--- a/core/phpstan.neon.dist
++++ b/core/phpstan.neon.dist
+@@ -37,3 +37,9 @@ parameters:
+     - "#^Missing cache backend declaration for performance.#"
+     - "#cache tag might be unclear and does not contain the cache key in it.#"
+     - "#^Class .* extends @internal class#"
++
++    # PHPStan enforces readonly property initialization in constructors, which
++    # is an opinionated interpretation of the PHP feature.
++    # See https://github.com/phpstan/phpstan/issues/7477
++    - "#^Class .* has an uninitialized readonly property .*\\. Assign it in the constructor\\.#"
++    - "#^Readonly property .* is assigned outside of the constructor\\.#"
+diff --git a/core/tests/Drupal/KernelTests/Core/Database/LoggingTest.php b/core/tests/Drupal/KernelTests/Core/Database/LoggingTest.php
+index 7858169af1..27e2ac2aad 100644
+--- a/core/tests/Drupal/KernelTests/Core/Database/LoggingTest.php
++++ b/core/tests/Drupal/KernelTests/Core/Database/LoggingTest.php
+@@ -154,8 +154,13 @@ public function testGetLoggingWrongKey() {
+    * @covers ::findCaller
+    *
+    * @dataProvider providerContribDriverLog
++   *
++   * @group legacy
+    */
+   public function testContribDriverLog($driver_namespace, $stack, array $expected_entry) {
++    $this->expectDeprecation('Drupal\Core\Database\Log::findCaller() is deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. Use Connection::findCallerFromDebugBacktrace(). See https://www.drupal.org/node/3328053');
++    $this->expectDeprecation('Drupal\Core\Database\Log::removeDatabaseEntries() is deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. Use Connection::removeDatabaseEntriesFromDebugBacktrace(). See https://www.drupal.org/node/3328053');
++
+     $mock_builder = $this->getMockBuilder(Log::class);
+     $log = $mock_builder
+       ->onlyMethods(['getDebugBacktrace'])
+diff --git a/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php b/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
+index e46a01d8e7..f0d0bc7660 100644
+--- a/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
++++ b/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
+@@ -3,6 +3,7 @@
+ namespace Drupal\Tests\Core\Database;
+ 
+ use Composer\Autoload\ClassLoader;
++use Drupal\Core\Database\Database;
+ use Drupal\Tests\Core\Database\Stub\StubConnection;
+ use Drupal\Tests\Core\Database\Stub\StubPDO;
+ use Drupal\Tests\UnitTestCase;
+@@ -645,4 +646,224 @@ public function provideQueriesToTrim() {
+     ];
+   }
+ 
++  /**
++   * Tests that the proper caller is retrieved from the backtrace.
++   *
++   * @covers ::findCallerFromDebugBacktrace
++   * @covers ::removeDatabaseEntriesFromDebugBacktrace
++   * @covers ::getDebugBacktrace
++   */
++  public function testFindCallerFromDebugBacktrace() {
++    Database::addConnectionInfo('default', 'default', [
++      'driver' => 'test',
++      'namespace' => 'Drupal\Tests\Core\Database\Stub',
++    ]);
++    $connection = new StubConnection($this->createMock(StubPDO::class), []);
++    $result = $connection->findCallerFromDebugBacktrace();
++    $this->assertSame([
++      'file' => __FILE__,
++      'line' => 662,
++      'function' => 'testFindCallerFromDebugBacktrace',
++      'class' => 'Drupal\Tests\Core\Database\ConnectionTest',
++      'type' => '->',
++      'args' => [],
++    ], $result);
++  }
++
++  /**
++   * Tests that a log called by a custom database driver returns proper caller.
++   *
++   * @param string $driver_namespace
++   *   The driver namespace to be tested.
++   * @param array $stack
++   *   A test debug_backtrace stack.
++   * @param array $expected_entry
++   *   The expected stack entry.
++   *
++   * @covers ::findCallerFromDebugBacktrace
++   * @covers ::removeDatabaseEntriesFromDebugBacktrace
++   *
++   * @dataProvider providerMockedBacktrace
++   *
++   * @group legacy
++   */
++  public function testFindCallerFromDebugBacktraceWithMockedBacktrace(string $driver_namespace, array $stack, array $expected_entry): void {
++    $mock_builder = $this->getMockBuilder(StubConnection::class);
++    $connection = $mock_builder
++      ->onlyMethods(['getDebugBacktrace', 'getConnectionOptions'])
++      ->setConstructorArgs([$this->createMock(StubPDO::class), []])
++      ->getMock();
++    $connection->expects($this->once())
++      ->method('getConnectionOptions')
++      ->willReturn([
++        'driver' => 'test',
++        'namespace' => $driver_namespace,
++      ]);
++    $connection->expects($this->once())
++      ->method('getDebugBacktrace')
++      ->willReturn($stack);
++
++    $result = $connection->findCallerFromDebugBacktrace();
++    $this->assertEquals($expected_entry, $result);
++  }
++
++  /**
++   * Provides data for testFindCallerFromDebugBacktraceWithMockedBacktrace.
++   *
++   * @return array[]
++   *   A associative array of simple arrays, each having the following elements:
++   *   - the contrib driver PHP namespace
++   *   - a test debug_backtrace stack
++   *   - the stack entry expected to be returned.
++   *
++   * @see ::testFindCallerFromDebugBacktraceWithMockedBacktrace()
++   */
++  public function providerMockedBacktrace(): array {
++    $stack = [
++      [
++        'file' => '/var/www/core/lib/Drupal/Core/Database/Log.php',
++        'line' => 125,
++        'function' => 'findCaller',
++        'class' => 'Drupal\\Core\\Database\\Log',
++        'object' => 'test',
++        'type' => '->',
++        'args' => [
++          0 => 'test',
++        ],
++      ],
++      [
++        'file' => '/var/www/libraries/drudbal/lib/Statement.php',
++        'line' => 264,
++        'function' => 'log',
++        'class' => 'Drupal\\Core\\Database\\Log',
++        'object' => 'test',
++        'type' => '->',
++        'args' => [
++          0 => 'test',
++        ],
++      ],
++      [
++        'file' => '/var/www/libraries/drudbal/lib/Connection.php',
++        'line' => 213,
++        'function' => 'execute',
++        'class' => 'Drupal\\Driver\\Database\\dbal\\Statement',
++        'object' => 'test',
++        'type' => '->',
++        'args' => [
++          0 => 'test',
++        ],
++      ],
++      [
++        'file' => '/var/www/core/tests/Drupal/KernelTests/Core/Database/LoggingTest.php',
++        'line' => 23,
++        'function' => 'query',
++        'class' => 'Drupal\\Driver\\Database\\dbal\\Connection',
++        'object' => 'test',
++        'type' => '->',
++        'args' => [
++          0 => 'test',
++        ],
++      ],
++      [
++        'file' => '/var/www/vendor/phpunit/phpunit/src/Framework/TestCase.php',
++        'line' => 1154,
++        'function' => 'testEnableLogging',
++        'class' => 'Drupal\\KernelTests\\Core\\Database\\LoggingTest',
++        'object' => 'test',
++        'type' => '->',
++        'args' => [
++          0 => 'test',
++        ],
++      ],
++      [
++        'file' => '/var/www/vendor/phpunit/phpunit/src/Framework/TestCase.php',
++        'line' => 842,
++        'function' => 'runTest',
++        'class' => 'PHPUnit\\Framework\\TestCase',
++        'object' => 'test',
++        'type' => '->',
++        'args' => [
++          0 => 'test',
++        ],
++      ],
++      [
++        'file' => '/var/www/vendor/phpunit/phpunit/src/Framework/TestResult.php',
++        'line' => 693,
++        'function' => 'runBare',
++        'class' => 'PHPUnit\\Framework\\TestCase',
++        'object' => 'test',
++        'type' => '->',
++        'args' => [
++          0 => 'test',
++        ],
++      ],
++      [
++        'file' => '/var/www/vendor/phpunit/phpunit/src/Framework/TestCase.php',
++        'line' => 796,
++        'function' => 'run',
++        'class' => 'PHPUnit\\Framework\\TestResult',
++        'object' => 'test',
++        'type' => '->',
++        'args' => [
++          0 => 'test',
++        ],
++      ],
++      [
++        'file' => 'Standard input code',
++        'line' => 57,
++        'function' => 'run',
++        'class' => 'PHPUnit\\Framework\\TestCase',
++        'object' => 'test',
++        'type' => '->',
++        'args' => [
++          0 => 'test',
++        ],
++      ],
++      [
++        'file' => 'Standard input code',
++        'line' => 111,
++        'function' => '__phpunit_run_isolated_test',
++        'args' => [
++          0 => 'test',
++        ],
++      ],
++    ];
++
++    return [
++      // Test that if the driver namespace is in the stack trace, the first
++      // non-database entry is returned.
++      'contrib driver namespace' => [
++        'Drupal\\Driver\\Database\\dbal',
++        $stack,
++        [
++          'class' => 'Drupal\\KernelTests\\Core\\Database\\LoggingTest',
++          'function' => 'testEnableLogging',
++          'file' => '/var/www/core/tests/Drupal/KernelTests/Core/Database/LoggingTest.php',
++          'line' => 23,
++          'type' => '->',
++          'args' => [
++            0 => 'test',
++          ],
++        ],
++      ],
++      // Extreme case, should not happen at normal runtime - if the driver
++      // namespace is not in the stack trace, the first entry to a method
++      // in core database namespace is returned.
++      'missing driver namespace' => [
++        'Drupal\\Driver\\Database\\fake',
++        $stack,
++        [
++          'class' => 'Drupal\\Driver\\Database\\dbal\\Statement',
++          'function' => 'execute',
++          'file' => '/var/www/libraries/drudbal/lib/Statement.php',
++          'line' => 264,
++          'type' => '->',
++          'args' => [
++            0 => 'test',
++          ],
++        ],
++      ],
++    ];
++  }
++
+ }
+diff --git a/core/tests/Drupal/Tests/Core/Database/LogTest.php b/core/tests/Drupal/Tests/Core/Database/LogTest.php
+index 7184be4dc2..7d5e5fec71 100644
+--- a/core/tests/Drupal/Tests/Core/Database/LogTest.php
++++ b/core/tests/Drupal/Tests/Core/Database/LogTest.php
+@@ -12,6 +12,7 @@
+  * Tests the Log class.
+  *
+  * @group Database
++ * @group legacy
+  * @runTestsInSeparateProcesses
+  * @preserveGlobalState disabled
+  * @coversDefaultClass \Drupal\Core\Database\Log
+@@ -29,11 +30,14 @@ public function testContribDriverLog() {
+       'namespace' => 'Drupal\Tests\Core\Database\Stub',
+     ]);
+ 
++    $this->expectDeprecation('Drupal\Core\Database\Log::findCaller() is deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. Use Connection::findCallerFromDebugBacktrace(). See https://www.drupal.org/node/3328053');
++    $this->expectDeprecation('Drupal\Core\Database\Log::getDebugBacktrace() is deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. There is no replacement. See https://www.drupal.org/node/3328053');
++    $this->expectDeprecation('Drupal\Core\Database\Log::removeDatabaseEntries() is deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. Use Connection::removeDatabaseEntriesFromDebugBacktrace(). See https://www.drupal.org/node/3328053');
+     $pdo = $this->prophesize(StubPDO::class)->reveal();
+     $result = (new StubConnection($pdo, []))->testLogCaller();
+     $this->assertSame([
+       'file' => __FILE__,
+-      'line' => 33,
++      'line' => 37,
+       'function' => 'testContribDriverLog',
+       'class' => 'Drupal\Tests\Core\Database\LogTest',
+       'type' => '->',
+@@ -41,10 +45,13 @@ public function testContribDriverLog() {
+     ], $result);
+ 
+     // Test calling the database log from outside of database code.
++    $this->expectDeprecation('Drupal\Core\Database\Log::findCaller() is deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. Use Connection::findCallerFromDebugBacktrace(). See https://www.drupal.org/node/3328053');
++    $this->expectDeprecation('Drupal\Core\Database\Log::getDebugBacktrace() is deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. There is no replacement. See https://www.drupal.org/node/3328053');
++    $this->expectDeprecation('Drupal\Core\Database\Log::removeDatabaseEntries() is deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. Use Connection::removeDatabaseEntriesFromDebugBacktrace(). See https://www.drupal.org/node/3328053');
+     $result = (new Log())->findCaller();
+     $this->assertSame([
+       'file' => __FILE__,
+-      'line' => 44,
++      'line' => 51,
+       'function' => 'testContribDriverLog',
+       'class' => 'Drupal\Tests\Core\Database\LogTest',
+       'type' => '->',
