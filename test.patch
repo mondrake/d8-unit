@@ -13,7 +13,7 @@ index 6655001af1..ce8dc81940 100644
      class: Drupal\Component\Datetime\Time
      arguments: ['@request_stack']
 diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
-index b6f7968dcf..49b13d6d10 100644
+index b6f7968dcf..d27d3072a5 100644
 --- a/core/lib/Drupal/Core/Database/Connection.php
 +++ b/core/lib/Drupal/Core/Database/Connection.php
 @@ -3,6 +3,7 @@
@@ -31,36 +31,61 @@ index b6f7968dcf..49b13d6d10 100644
 +  /**
 +   * Tracks whether statement execution dispatches events.
 +   *
-+   * For performance reasons, statement execution events are not yielded by
-+   * default. Call ::enableStatementEvents(TRUE) to enable them.
++   * For performance reasons, database API events are not yielded by default.
++   * Call ::enableEvents() to enable them.
 +   */
-+  private bool $statementEventsEnabled = FALSE;
++  private array $enabledEvents = [];
 +
    /**
     * Constructs a Connection object.
     *
-@@ -1867,4 +1876,124 @@ public function hasJson(): bool {
+@@ -1867,4 +1876,149 @@ public function hasJson(): bool {
      }
    }
  
 +  /**
-+   * Returns the status of the statement execution events toggle.
++   * Returns the status of a database API event toggle.
 +   *
++   * @param string $eventName
++   *   The name of the event to check.
++   * 
 +   * @return bool
-+   *   TRUE if statement execution events will be dispatched.
++   *   TRUE if the event is going to be fired by the database API, FALSE
++   *   otherwise.
 +   */
-+  public function areStatementEventsEnabled(): bool {
-+    return $this->statementEventsEnabled;
++  public function isEventEnabled(string $eventName): bool {
++    return $this->enabledEvents[$eventName] ?? FALSE;
 +  }
 +
 +  /**
-+   * Sets the status of the statement execution events toggle.
++   * Enables database API events dispatching.
 +   *
-+   * @param bool $toggle
-+   *   TRUE if statement execution events will be dispatched, FALSE otherwise.
++   * @param string[] $eventNames
++   *   A list of database events to be enabled.
++   * 
++   * @return static
 +   */
-+  public function enableStatementEvents(bool $toggle): static {
-+    $this->statementEventsEnabled = $toggle;
++  public function enableEvents(array $eventNames): static {
++    foreach ($eventNames as $eventName) {
++      assert(class_exists($eventName));
++      $this->enabledEvents[$eventName] = TRUE;
++    } 
++    return $this;
++  }
++
++  /**
++   * Disables database API events dispatching.
++   *
++   * @param string[] $eventNames
++   *   A list of database events to be disabled.
++   * 
++   * @return static
++   */
++  public function disableEvents(array $eventNames): static {
++    foreach ($eventNames as $eventName) {
++      assert(class_exists($eventName));
++      $this->enabledEvents[$eventName] = FALSE;
++    } 
 +    return $this;
 +  }
 +
@@ -165,10 +190,19 @@ index b6f7968dcf..49b13d6d10 100644
 +
  }
 diff --git a/core/lib/Drupal/Core/Database/Database.php b/core/lib/Drupal/Core/Database/Database.php
-index 809b1552ca..322b2e5432 100644
+index 809b1552ca..52d4283259 100644
 --- a/core/lib/Drupal/Core/Database/Database.php
 +++ b/core/lib/Drupal/Core/Database/Database.php
-@@ -122,6 +122,7 @@ abstract class Database {
+@@ -3,6 +3,8 @@
+ namespace Drupal\Core\Database;
+ 
+ use Composer\Autoload\ClassLoader;
++use Drupal\Core\Database\Event\StatementExecutionEndEvent;
++use Drupal\Core\Database\Event\StatementExecutionStartEvent;
+ use Drupal\Core\Extension\ExtensionDiscovery;
+ 
+ /**
+@@ -122,6 +124,7 @@ abstract class Database {
        // logging object associated with it.
        if (!empty(self::$connections[$key])) {
          foreach (self::$connections[$key] as $connection) {
@@ -176,11 +210,14 @@ index 809b1552ca..322b2e5432 100644
            $connection->setLogger(self::$logs[$key]);
          }
        }
-@@ -450,6 +451,7 @@ abstract class Database {
+@@ -450,6 +453,10 @@ abstract class Database {
      // If we have any active logging objects for this connection key, we need
      // to associate them with the connection we just opened.
      if (!empty(self::$logs[$key])) {
-+      $new_connection->enableStatementEvents(TRUE);
++      $new_connection->enableEvents([
++        StatementExecutionStartEvent::class,
++        StatementExecutionEndEvent::class,
++      ]);
        $new_connection->setLogger(self::$logs[$key]);
      }
  
@@ -216,7 +253,7 @@ index 0000000000..1f75901158
 +}
 diff --git a/core/lib/Drupal/Core/Database/Event/StatementExecutionEndEvent.php b/core/lib/Drupal/Core/Database/Event/StatementExecutionEndEvent.php
 new file mode 100644
-index 0000000000..9a78ec1ccb
+index 0000000000..4bbf75aeaf
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/Event/StatementExecutionEndEvent.php
 @@ -0,0 +1,51 @@
@@ -230,7 +267,7 @@ index 0000000000..9a78ec1ccb
 +class StatementExecutionEndEvent extends DatabaseEvent {
 +
 +  /**
-+   * Constructs a StatementExecutionEvent object.
++   * Constructs a StatementExecutionEndEvent object.
 +   *
 +   * See 'Customizing database settings' in settings.php for an explanation of
 +   * the $key and $target connection values.
@@ -360,7 +397,7 @@ index 0000000000..f8fa73d96e
 +
 +}
 diff --git a/core/lib/Drupal/Core/Database/Log.php b/core/lib/Drupal/Core/Database/Log.php
-index b310d17284..758687d39e 100644
+index b310d17284..876be39f8b 100644
 --- a/core/lib/Drupal/Core/Database/Log.php
 +++ b/core/lib/Drupal/Core/Database/Log.php
 @@ -2,6 +2,8 @@
@@ -382,7 +419,7 @@ index b310d17284..758687d39e 100644
 +   * @param \Drupal\Core\Database\Event\StatementExecutionEndEvent $event
 +   *   The statement execution event.
 +   */
-+  public function logFromEvent(StatementExecutionendEvent $event): void {
++  public function logFromEvent(StatementExecutionEndEvent $event): void {
 +    foreach (array_keys($this->queryLog) as $key) {
 +      $this->queryLog[$key][] = [
 +        'query' => $event->queryString,
@@ -473,7 +510,7 @@ index b310d17284..758687d39e 100644
    }
  
 diff --git a/core/lib/Drupal/Core/Database/StatementPrefetch.php b/core/lib/Drupal/Core/Database/StatementPrefetch.php
-index 7edbf7b26b..2d39cc3f6f 100644
+index 7edbf7b26b..18c4b05fa0 100644
 --- a/core/lib/Drupal/Core/Database/StatementPrefetch.php
 +++ b/core/lib/Drupal/Core/Database/StatementPrefetch.php
 @@ -2,6 +2,9 @@
@@ -493,7 +530,7 @@ index 7edbf7b26b..2d39cc3f6f 100644
 -    $logger = $this->connection->getLogger();
 -    if (!empty($logger)) {
 -      $query_start = microtime(TRUE);
-+    if ($this->connection->areStatementEventsEnabled()) {
++    if ($this->connection->isEventEnabled(StatementExecutionStartEvent::class)) {
 +      $startEvent = new StatementExecutionStartEvent(
 +        $this->connection->getKey(),
 +        $this->connection->getTarget(),
@@ -512,7 +549,7 @@ index 7edbf7b26b..2d39cc3f6f 100644
 -    if (!empty($logger)) {
 -      $query_end = microtime(TRUE);
 -      $logger->log($this, $args, $query_end - $query_start, $query_start);
-+    if (isset($startEvent)) {
++    if (isset($startEvent) && $this->connection->isEventEnabled(StatementExecutionEndEvent::class)) {
 +      $this->connection->dispatchEvent(new StatementExecutionEndEvent(
 +        $startEvent->key,
 +        $startEvent->target,
@@ -525,7 +562,7 @@ index 7edbf7b26b..2d39cc3f6f 100644
  
      // Initialize the first row in $this->currentRow.
 diff --git a/core/lib/Drupal/Core/Database/StatementWrapper.php b/core/lib/Drupal/Core/Database/StatementWrapper.php
-index 4381fd1af6..a9c064c438 100644
+index 4381fd1af6..2b0d9ddb95 100644
 --- a/core/lib/Drupal/Core/Database/StatementWrapper.php
 +++ b/core/lib/Drupal/Core/Database/StatementWrapper.php
 @@ -2,6 +2,9 @@
@@ -545,7 +582,7 @@ index 4381fd1af6..a9c064c438 100644
 -    $logger = $this->connection->getLogger();
 -    if (!empty($logger)) {
 -      $query_start = microtime(TRUE);
-+    if ($this->connection->areStatementEventsEnabled()) {
++    if ($this->connection->isEventEnabled(StatementExecutionStartEvent::class)) {
 +      $startEvent = new StatementExecutionStartEvent(
 +        $this->connection->getKey(),
 +        $this->connection->getTarget(),
@@ -561,7 +598,7 @@ index 4381fd1af6..a9c064c438 100644
 -    if (!empty($logger)) {
 -      $query_end = microtime(TRUE);
 -      $logger->log($this, $args, $query_end - $query_start, $query_start);
-+    if (isset($startEvent)) {
++    if (isset($startEvent) && $this->connection->isEventEnabled(StatementExecutionEndEvent::class)) {
 +      $this->connection->dispatchEvent(new StatementExecutionEndEvent(
 +        $startEvent->key,
 +        $startEvent->target,
@@ -597,19 +634,6 @@ index 1f55be5a29..d5bb777f06 100644
        if (isset($exception->query_string, $exception->args)) {
          $message .= ": " . $exception->query_string . "; " . print_r($exception->args, TRUE);
        }
-diff --git a/core/phpstan.neon.dist b/core/phpstan.neon.dist
-index ded8039518..9dd2564042 100644
---- a/core/phpstan.neon.dist
-+++ b/core/phpstan.neon.dist
-@@ -37,3 +37,8 @@ parameters:
-     - "#^Missing cache backend declaration for performance.#"
-     - "#cache tag might be unclear and does not contain the cache key in it.#"
-     - "#^Class .* extends @internal class#"
-+
-+    # PHPStan enforces readonly property initialization in constructors, which
-+    # is an opinionated interpretation of the PHP feature.
-+    # See https://github.com/phpstan/phpstan/issues/7477
-+    - "#^Class .* has an uninitialized readonly property .*\\. Assign it in the constructor\\.#"
 diff --git a/core/tests/Drupal/KernelTests/Core/Database/LoggingTest.php b/core/tests/Drupal/KernelTests/Core/Database/LoggingTest.php
 index 7858169af1..27e2ac2aad 100644
 --- a/core/tests/Drupal/KernelTests/Core/Database/LoggingTest.php
