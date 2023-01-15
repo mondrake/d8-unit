@@ -13,7 +13,7 @@ index 6655001af1..ce8dc81940 100644
      class: Drupal\Component\Datetime\Time
      arguments: ['@request_stack']
 diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
-index b6f7968dcf..77d68fc7b0 100644
+index b6f7968dcf..123b2c6146 100644
 --- a/core/lib/Drupal/Core/Database/Connection.php
 +++ b/core/lib/Drupal/Core/Database/Connection.php
 @@ -3,6 +3,7 @@
@@ -48,7 +48,7 @@ index b6f7968dcf..77d68fc7b0 100644
 +   *
 +   * @param string $eventName
 +   *   The name of the event to check.
-+   * 
++   *
 +   * @return bool
 +   *   TRUE if the event is going to be fired by the database API, FALSE
 +   *   otherwise.
@@ -62,14 +62,14 @@ index b6f7968dcf..77d68fc7b0 100644
 +   *
 +   * @param string[] $eventNames
 +   *   A list of database events to be enabled.
-+   * 
++   *
 +   * @return static
 +   */
 +  public function enableEvents(array $eventNames): static {
 +    foreach ($eventNames as $eventName) {
 +      assert(class_exists($eventName), "Event class {$eventName} does not exist");
 +      $this->enabledEvents[$eventName] = TRUE;
-+    } 
++    }
 +    return $this;
 +  }
 +
@@ -78,14 +78,14 @@ index b6f7968dcf..77d68fc7b0 100644
 +   *
 +   * @param string[] $eventNames
 +   *   A list of database events to be disabled.
-+   * 
++   *
 +   * @return static
 +   */
 +  public function disableEvents(array $eventNames): static {
 +    foreach ($eventNames as $eventName) {
 +      assert(class_exists($eventName), "Event class {$eventName} does not exist");
 +      $this->enabledEvents[$eventName] = FALSE;
-+    } 
++    }
 +    return $this;
 +  }
 +
@@ -399,6 +399,23 @@ index 0000000000..f8fa73d96e
 +  }
 +
 +}
+diff --git a/core/lib/Drupal/Core/Database/Exception/EventException.php b/core/lib/Drupal/Core/Database/Exception/EventException.php
+new file mode 100644
+index 0000000000..66c97d3476
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/Exception/EventException.php
+@@ -0,0 +1,11 @@
++<?php
++
++namespace Drupal\Core\Database\Exception;
++
++use Drupal\Core\Database\DatabaseException;
++
++/**
++ * Exception thrown by the database event API.
++ */
++class EventException extends \RuntimeException implements DatabaseException {
++}
 diff --git a/core/lib/Drupal/Core/Database/Log.php b/core/lib/Drupal/Core/Database/Log.php
 index b310d17284..876be39f8b 100644
 --- a/core/lib/Drupal/Core/Database/Log.php
@@ -637,6 +654,158 @@ index 1f55be5a29..d5bb777f06 100644
        if (isset($exception->query_string, $exception->args)) {
          $message .= ": " . $exception->query_string . "; " . print_r($exception->args, TRUE);
        }
+diff --git a/core/modules/system/tests/modules/database_test/database_test.services.yml b/core/modules/system/tests/modules/database_test/database_test.services.yml
+new file mode 100644
+index 0000000000..0bac13c303
+--- /dev/null
++++ b/core/modules/system/tests/modules/database_test/database_test.services.yml
+@@ -0,0 +1,5 @@
++services:
++  # A test subscriber for the database API events.
++  Drupal\database_test\EventSubscriber\DatabaseEventSubscriber:
++    tags:
++      - { name: event_subscriber }
+diff --git a/core/modules/system/tests/modules/database_test/src/EventSubscriber/DatabaseEventSubscriber.php b/core/modules/system/tests/modules/database_test/src/EventSubscriber/DatabaseEventSubscriber.php
+new file mode 100644
+index 0000000000..e63b6df7f2
+--- /dev/null
++++ b/core/modules/system/tests/modules/database_test/src/EventSubscriber/DatabaseEventSubscriber.php
+@@ -0,0 +1,55 @@
++<?php
++
++namespace Drupal\database_test\EventSubscriber;
++
++use Drupal\Core\Database\Database;
++use Drupal\Core\Database\Event\StatementExecutionEndEvent;
++use Drupal\Core\Database\Event\StatementExecutionStartEvent;
++use Symfony\Component\EventDispatcher\EventSubscriberInterface;
++
++/**
++ * Responds to database API events.
++ */
++class DatabaseEventSubscriber implements EventSubscriberInterface {
++
++  /**
++   * A counter of started statement executions.
++   */
++  public int $countStatementStarts = 0;
++
++  /**
++   * A counter of finished statement executions.
++   */
++  public int $countStatementEnds = 0;
++
++  /**
++   * {@inheritdoc}
++   */
++  public static function getSubscribedEvents(): array {
++    return [
++      StatementExecutionStartEvent::class => 'onStatementExecutionStart',
++      StatementExecutionEndEvent::class => 'onStatementExecutionEnd',
++    ];
++  }
++
++  /**
++   * Subscribes to a statement execution started event.
++   *
++   * @param \Drupal\Core\Database\Event\StatementExecutionEndEvent $event
++   *   The database event.
++   */
++  public function onStatementExecutionStart(StatementExecutionStartEvent $event): void {
++    $this->countStatementStarts++;
++  }
++
++  /**
++   * Subscribes to a statement execution finished event.
++   *
++   * @param \Drupal\Core\Database\Event\StatementExecutionEndEvent $event
++   *   The database event.
++   */
++  public function onStatementExecutionEnd(StatementExecutionEndEvent $event): void {
++    $this->countStatementEnds++;
++  }
++
++}
+diff --git a/core/tests/Drupal/KernelTests/Core/Database/DatabaseEventTest.php b/core/tests/Drupal/KernelTests/Core/Database/DatabaseEventTest.php
+new file mode 100644
+index 0000000000..eea6615cf2
+--- /dev/null
++++ b/core/tests/Drupal/KernelTests/Core/Database/DatabaseEventTest.php
+@@ -0,0 +1,74 @@
++<?php
++
++namespace Drupal\KernelTests\Core\Database;
++
++use Drupal\Core\Database\Event\StatementExecutionEndEvent;
++use Drupal\Core\Database\Event\StatementExecutionStartEvent;
++use Drupal\database_test\EventSubscriber\DatabaseEventSubscriber;
++
++/**
++ * Tests the database API events.
++ *
++ * @group Database
++ */
++class DatabaseEventTest extends DatabaseTestBase {
++
++  /**
++   * Tests statement execution events.
++   */
++  public function testStatementExecutionEvents() {
++    $subscriber = $this->container->get(DatabaseEventSubscriber::class);
++
++    // At first, no events have occurred, and events are not enabled.
++    $this->assertSame(0, $subscriber->countStatementStarts);
++    $this->assertSame(0, $subscriber->countStatementEnds);
++    $this->assertFalse($this->connection->isEventEnabled(StatementExecutionStartEvent::class));
++    $this->assertFalse($this->connection->isEventEnabled(StatementExecutionEndEvent::class));
++
++    // Execute a query, still no events captured.
++    $this->connection->query('SELECT * FROM {test}');
++    $this->assertSame(0, $subscriber->countStatementStarts);
++    $this->assertSame(0, $subscriber->countStatementEnds);
++    $this->assertFalse($this->connection->isEventEnabled(StatementExecutionStartEvent::class));
++    $this->assertFalse($this->connection->isEventEnabled(StatementExecutionEndEvent::class));
++
++    // Enable the statement execution start event and execute a query, start
++    // event captured but no end one.
++    $this->connection->enableEvents([StatementExecutionStartEvent::class]);
++    $this->connection->query('SELECT * FROM {test}');
++    $this->assertSame(1, $subscriber->countStatementStarts);
++    $this->assertSame(0, $subscriber->countStatementEnds);
++    $this->assertTrue($this->connection->isEventEnabled(StatementExecutionStartEvent::class));
++    $this->assertFalse($this->connection->isEventEnabled(StatementExecutionEndEvent::class));
++
++    // Enable the statement execution end event and execute a query, both
++    // events captured.
++    $this->connection->enableEvents([StatementExecutionEndEvent::class]);
++    $this->connection->query('SELECT * FROM {test}');
++    $this->assertSame(2, $subscriber->countStatementStarts);
++    $this->assertSame(1, $subscriber->countStatementEnds);
++    $this->assertTrue($this->connection->isEventEnabled(StatementExecutionStartEvent::class));
++    $this->assertTrue($this->connection->isEventEnabled(StatementExecutionEndEvent::class));
++
++    // Disable both events, no more events captured.
++    $this->connection->disableEvents([
++      StatementExecutionStartEvent::class,
++      StatementExecutionEndEvent::class,
++    ]);
++    $this->connection->query('SELECT * FROM {test}');
++    $this->assertSame(2, $subscriber->countStatementStarts);
++    $this->assertSame(1, $subscriber->countStatementEnds);
++    $this->assertFalse($this->connection->isEventEnabled(StatementExecutionStartEvent::class));
++    $this->assertFalse($this->connection->isEventEnabled(StatementExecutionEndEvent::class));
++
++    // Enable the statement execution end only, no events captured since the
++    // start event is required before the end one can be fired.
++    $this->connection->enableEvents([StatementExecutionEndEvent::class]);
++    $this->connection->query('SELECT * FROM {test}');
++    $this->assertSame(2, $subscriber->countStatementStarts);
++    $this->assertSame(1, $subscriber->countStatementEnds);
++    $this->assertFalse($this->connection->isEventEnabled(StatementExecutionStartEvent::class));
++    $this->assertTrue($this->connection->isEventEnabled(StatementExecutionEndEvent::class));
++  }
++
++}
 diff --git a/core/tests/Drupal/KernelTests/Core/Database/LoggingTest.php b/core/tests/Drupal/KernelTests/Core/Database/LoggingTest.php
 index 7858169af1..27e2ac2aad 100644
 --- a/core/tests/Drupal/KernelTests/Core/Database/LoggingTest.php
