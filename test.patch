@@ -77,8 +77,29 @@ index cd92d8102d..cf1e26d809 100644
 +#      # Run nightwatch testing.
 +#      # @see https://www.drupal.org/project/drupal/issues/2869825
 +#      nightwatchjs: {}
+diff --git a/core/includes/form.inc b/core/includes/form.inc
+index 4f353d0088..4b6e225a3b 100644
+--- a/core/includes/form.inc
++++ b/core/includes/form.inc
+@@ -897,9 +897,13 @@ function batch_process($redirect = NULL, Url $url = NULL, $redirect_callback = N
+     // environments.
+     \Drupal::moduleHandler()->alter('batch', $batch);
+ 
+-    // Assign an arbitrary id: don't rely on a serial column in the 'batch'
+-    // table, since non-progressive batches skip database storage completely.
+-    $batch['id'] = \Drupal::database()->nextId();
++    // Assign an id: non-progressive batches skip database storage completely.
++    if ($batch['progressive']) {
++      $batch['id'] = \Drupal::service('batch.storage')->getId();
++    }
++    else {
++      $batch['id'] = rand();
++    }
+ 
+     // Move operations to a job queue. Non-progressive batches will use a
+     // memory-based queue.
 diff --git a/core/lib/Drupal/Core/Batch/BatchStorage.php b/core/lib/Drupal/Core/Batch/BatchStorage.php
-index 3c44628ef9..766b1013ea 100644
+index 3c44628ef9..7543ebe22b 100644
 --- a/core/lib/Drupal/Core/Batch/BatchStorage.php
 +++ b/core/lib/Drupal/Core/Batch/BatchStorage.php
 @@ -126,7 +126,7 @@ public function create(array $batch) {
@@ -99,37 +120,36 @@ index 3c44628ef9..766b1013ea 100644
      }
    }
  
-@@ -147,16 +147,26 @@ public function create(array $batch) {
-    *
-    * @param array $batch
+@@ -149,13 +149,25 @@ public function create(array $batch) {
     *   The array representing the batch to create.
-+   *
-+   * @return int
-+   *   The batch id.
     */
    protected function doCreate(array $batch) {
 -    $this->connection->insert('batch')
-+    throw new \Exception('here');
-+    $transaction = $this->connection->startTransaction();
-+    $batchId = $this->connection->insert('batch')
++    $this->connection->update('batch')
        ->fields([
 -        'bid' => $batch['id'],
-         'timestamp' => REQUEST_TIME,
--        'token' => $this->csrfToken->get($batch['id']),
-+        'token' => '',
+-        'timestamp' => REQUEST_TIME,
+         'token' => $this->csrfToken->get($batch['id']),
          'batch' => serialize($batch),
        ])
-       ->execute();
-+    $this->connection->update('batch')
-+      ->fields(['token' => $this->csrfToken->get($batchId)])
-+      ->condition('bid', $batchId)
++      ->condition('bid', $batch['id'])
 +      ->execute();
-+    $transaction = NULL;
-+    return $batchId;
++  }
++
++  /**
++   * @todo
++   */
++  public function getId(): int {
++    return $this->connection->insert('batch')
++      ->fields([
++        'timestamp' => REQUEST_TIME,
++        'token' => '',
++        'batch' => NULL,
++      ])
+       ->execute();
    }
  
-   /**
-@@ -208,9 +218,7 @@ public function schemaDefinition() {
+@@ -208,9 +220,7 @@ public function schemaDefinition() {
        'fields' => [
          'bid' => [
            'description' => 'Primary Key: Unique batch ID.',
