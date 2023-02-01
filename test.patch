@@ -1,535 +1,4081 @@
-diff --git a/core/lib/Drupal/Core/Database/StatementInterface.php b/core/lib/Drupal/Core/Database/StatementInterface.php
-index 09a6b94f50..b4adf3742d 100644
---- a/core/lib/Drupal/Core/Database/StatementInterface.php
-+++ b/core/lib/Drupal/Core/Database/StatementInterface.php
-@@ -7,12 +7,12 @@
- /**
-  * Represents a prepared statement.
-  *
-- * Child implementations should either extend StatementWrapper:
-+ * Child implementations should either extend StatementWrapperIterator:
-  * @code
-- * class Drupal\mymodule\Driver\Database\mydriver\Statement extends Drupal\Core\Database\StatementWrapper {}
-+ * class Drupal\mymodule\Driver\Database\mydriver\Statement extends Drupal\Core\Database\StatementWrapperIterator {}
-  * @endcode
-  * or define their own class. If defining their own class, they will also have
-- * to implement either the Iterator or IteratorAggregate interface before
-+ * to implement either the \Iterator or \IteratorAggregate interface before
-  * Drupal\Core\Database\StatementInterface:
-  * @code
-  * class Drupal\mymodule\Driver\Database\mydriver\Statement implements Iterator, Drupal\Core\Database\StatementInterface {}
-diff --git a/core/lib/Drupal/Core/Database/StatementPrefetch.php b/core/lib/Drupal/Core/Database/StatementPrefetch.php
-index 7edbf7b26b..5ec6db68da 100644
---- a/core/lib/Drupal/Core/Database/StatementPrefetch.php
-+++ b/core/lib/Drupal/Core/Database/StatementPrefetch.php
-@@ -5,9 +5,9 @@
- /**
-  * An implementation of StatementInterface that prefetches all data.
-  *
-- * This class behaves very similar to a StatementWrapper of a \PDOStatement
-- * but as it always fetches every row it is possible to manipulate those
-- * results.
-+ * This class behaves very similar to a StatementWrapperIterator of a
-+ * \PDOStatement but as it always fetches every row it is possible to
-+ * manipulate those results.
+diff --git a/core/misc/cspell/dictionary.txt b/core/misc/cspell/dictionary.txt
+index 66fb08a96f..532ac6ce7f 100644
+--- a/core/misc/cspell/dictionary.txt
++++ b/core/misc/cspell/dictionary.txt
+@@ -372,6 +372,7 @@ eins
+ elbonia
+ elems
+ encapsed
++encryptable
+ endapply
+ endautoescape
+ endcode
+diff --git a/core/modules/image/image.admin.inc b/core/modules/image/image.admin.inc
+index 9921e7b94b..3e8ade6b03 100644
+--- a/core/modules/image/image.admin.inc
++++ b/core/modules/image/image.admin.inc
+@@ -6,6 +6,7 @@
   */
- class StatementPrefetch implements \Iterator, StatementInterface {
  
-diff --git a/core/lib/Drupal/Core/Database/StatementWrapper.php b/core/lib/Drupal/Core/Database/StatementWrapper.php
-index 4381fd1af6..f85b347423 100644
---- a/core/lib/Drupal/Core/Database/StatementWrapper.php
-+++ b/core/lib/Drupal/Core/Database/StatementWrapper.php
-@@ -4,8 +4,15 @@
+ use Drupal\Core\Render\Element;
++use Drupal\image\ImageProcessor;
  
- // cSpell:ignore maxlen driverdata INOUT
+ /**
+  * Prepares variables for image style preview templates.
+@@ -51,13 +52,34 @@ function template_preprocess_image_style_preview(&$variables) {
+     $variables['preview']['original']['width'] = round($variables['preview']['original']['height'] / $variables['original']['height'] * $variables['original']['width']);
+   }
  
-+@trigger_error('\Drupal\Core\Database\StatementWrapper is deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. Use \Drupal\Core\Database\StatementWrapperIterator instead. See https://www.drupal.org/node/3265938', E_USER_DEPRECATED);
+-  // Set up derivative file information.
+-  $preview_file = $style->buildUri($original_path);
++  // Set up derivative file pipeline.
++  $pipeline = \Drupal::service(ImageProcessor::class)->createInstance('derivative')
++    ->setImageStyle($style)
++    ->setSourceImageUri($original_path);
++  $preview_file = $pipeline->getDerivativeImageUri();
 +
- /**
-  * Implementation of StatementInterface encapsulating PDOStatement.
-+ *
-+ * @deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. Use
-+ *   \Drupal\Core\Database\StatementWrapperIterator instead.
-+ *
-+ * @see https://www.drupal.org/node/3265938
-  */
- class StatementWrapper implements \IteratorAggregate, StatementInterface {
+   // Create derivative if necessary.
+   if (!file_exists($preview_file)) {
+-    $style->createDerivative($original_path, $preview_file);
++    $pipeline->buildDerivativeImage();
++  }
++
++  // The resulting image dimensions may be available from the Image object in
++  // the pipeline. If not (the image was already processed, or the state of
++  // dimensions from Image object is not determined), then load the Image
++  // object form the file.
++  $load_from_file = TRUE;
++  if ($pipeline->hasImage()) {
++    $preview_image = $pipeline->getImage();
++    if ($preview_image->getWidth() && $preview_image->getHeight()) {
++      $load_from_file = FALSE;
++    }
+   }
+-  $preview_image = $image_factory->get($preview_file);
++  if ($load_from_file) {
++    $preview_image = $image_factory->get($preview_file);
++  }
++
++  assert(isset($preview_image));
++
+   $variables['derivative'] = [
+     'url' => $file_url_generator->generateString($preview_file),
+     'width' => $preview_image->getWidth(),
+diff --git a/core/modules/image/image.module b/core/modules/image/image.module
+index 59127a41b9..04e6f2a7e5 100644
+--- a/core/modules/image/image.module
++++ b/core/modules/image/image.module
+@@ -14,6 +14,9 @@
+ use Drupal\field\FieldStorageConfigInterface;
+ use Drupal\file\FileInterface;
+ use Drupal\image\Entity\ImageStyle;
++use Drupal\image\Event\ImageStyleEvent;
++use Drupal\image\Event\ImageStyleEvents;
++use Drupal\image\ImageProcessor;
  
-diff --git a/core/lib/Drupal/Core/Database/StatementWrapperIterator.php b/core/lib/Drupal/Core/Database/StatementWrapperIterator.php
+ /**
+  * The name of the query parameter for image derivative tokens.
+@@ -192,10 +195,12 @@ function image_file_predelete(FileInterface $file) {
+  *   The Drupal file path to the original image.
+  */
+ function image_path_flush($path) {
+-  $styles = ImageStyle::loadMultiple();
+-  foreach ($styles as $style) {
+-    $style->flush($path);
+-  }
++  \Drupal::service('event_dispatcher')->dispatch(
++    new ImageStyleEvent(NULL, [
++      'sourceImageUri' => $path,
++    ]),
++    ImageStyleEvents::FLUSH_FROM_SOURCE_IMAGE_URI
++  );
+ }
+ 
+ /**
+@@ -252,18 +257,15 @@ function image_style_options($include_empty = TRUE) {
+ function template_preprocess_image_style(&$variables) {
+   $style = ImageStyle::load($variables['style_name']);
+ 
+-  // Determine the dimensions of the styled image.
+-  $dimensions = [
+-    'width' => $variables['width'],
+-    'height' => $variables['height'],
+-  ];
+-
+-  $style->transformDimensions($dimensions, $variables['uri']);
++  $pipeline = \Drupal::service(ImageProcessor::class)->createInstance('derivative')
++    ->setImageStyle($style)
++    ->setSourceImageUri($variables['uri'])
++    ->setSourceImageDimensions($variables['width'], $variables['height']);
+ 
+   $variables['image'] = [
+     '#theme' => 'image',
+-    '#width' => $dimensions['width'],
+-    '#height' => $dimensions['height'],
++    '#width' => $pipeline->getDerivativeImageWidth(),
++    '#height' => $pipeline->getDerivativeImageHeight(),
+     '#attributes' => $variables['attributes'],
+     '#style_name' => $variables['style_name'],
+   ];
+@@ -271,8 +273,8 @@ function template_preprocess_image_style(&$variables) {
+   // If the current image toolkit supports this file type, prepare the URI for
+   // the derivative image. If not, just use the original image resized to the
+   // dimensions specified by the style.
+-  if ($style->supportsUri($variables['uri'])) {
+-    $variables['image']['#uri'] = $style->buildUrl($variables['uri']);
++  if ($pipeline->isSourceImageProcessable()) {
++    $variables['image']['#uri'] = $pipeline->getDerivativeImageUrl()->toString();
+   }
+   else {
+     $variables['image']['#uri'] = $variables['uri'];
+diff --git a/core/modules/image/image.services.yml b/core/modules/image/image.services.yml
+index 2f17bb5c8e..dc8f5aaa0d 100644
+--- a/core/modules/image/image.services.yml
++++ b/core/modules/image/image.services.yml
+@@ -4,6 +4,18 @@ services:
+     arguments: ['@stream_wrapper_manager']
+     tags:
+       - { name: path_processor_inbound, priority: 300 }
++  Drupal\image\ImageProcessor:
++    autowire: true
++    arguments:
++      $namespaces: '@container.namespaces'
++      $cache: '@cache.discovery'
++    tags:
++      - { name: plugin_manager_cache_clear }
++  image.pipeline.derivative.event_subscriber:
++    class:  Drupal\image\EventSubscriber\ImageDerivativeSubscriber
++    arguments: ['@image.factory', '@Drupal\image\ImageProcessor', '@stream_wrapper_manager', '@private_key', '@module_handler','@config.factory', '@request_stack', '@logger.channel.image', '@file_system', '@file_url_generator']
++    tags:
++      - { name: 'event_subscriber' }
+   plugin.manager.image.effect:
+     class: Drupal\image\ImageEffectManager
+     parent: default_plugin_manager
+diff --git a/core/modules/image/src/Annotation/ImageProcessPipeline.php b/core/modules/image/src/Annotation/ImageProcessPipeline.php
 new file mode 100644
-index 0000000000..8f2db4469c
+index 0000000000..0a691b39a3
 --- /dev/null
-+++ b/core/lib/Drupal/Core/Database/StatementWrapperIterator.php
-@@ -0,0 +1,390 @@
++++ b/core/modules/image/src/Annotation/ImageProcessPipeline.php
+@@ -0,0 +1,32 @@
 +<?php
 +
-+namespace Drupal\Core\Database;
++namespace Drupal\image\Annotation;
 +
-+// cSpell:ignore maxlen driverdata INOUT
++use Drupal\Component\Annotation\Plugin;
 +
 +/**
-+ * StatementInterface iterator implementation.
++ * Defines a Plugin annotation object for ImageProcessPipeline plugins.
 + *
-+ * This class is meant to be generic enough for any type of database clients,
-+ * even if all Drupal core database drivers currently use PDO clients. We
-+ * implement \Iterator instead of \IteratorAggregate to allow iteration to be
-+ * kept in sync with the underlying database resultset cursor. PDO is not able
-+ * to execute a database operation while a cursor is open on the result of an
-+ * earlier select query, so Drupal by default uses buffered queries setting
-+ * \PDO::MYSQL_ATTR_USE_BUFFERED_QUERY to TRUE on the connection. This forces
-+ * the query to return all the results in a buffer local to the client library,
-+ * potentially leading to memory issues in case of large datasets being
-+ * returned by a query. Other database clients, however, could allow
-+ * multithread queries, or developers could disable buffered queries in PDO:
-+ * in that case, this class prevents the resultset to be entirely fetched in
-+ * PHP memory (that an \IteratorAggregate implementation would force) and
-+ * therefore optimize memory usage while iterating the resultset.
++ * @Annotation
 + */
-+class StatementWrapperIterator implements \Iterator, StatementInterface {
++class ImageProcessPipeline extends Plugin {
 +
 +  /**
-+   * The client database Statement object.
++   * The plugin ID.
 +   *
-+   * For a \PDO client connection, this will be a \PDOStatement object.
++   * @var string
 +   */
-+  protected object $clientStatement;
++  public $id;
 +
 +  /**
-+   * Traces if rows can be fetched from the resultset.
-+   */
-+  private bool $isResultsetIterable = FALSE;
-+
-+  /**
-+   * The current row, retrieved in the current fetch format.
-+   */
-+  private mixed $resultsetRow = NULL;
-+
-+  /**
-+   * The key of the current row.
++   * An informative description of the plugin.
 +   *
-+   * This keeps the index of rows fetched from the underlying statement. It is
-+   * set to -1 when no rows have been fetched yet.
-+   */
-+  private int $resultsetKey = -1;
-+
-+  /**
-+   * Constructs a StatementWrapperIterator object.
++   * The string should be wrapped in a @Translation().
 +   *
-+   * @param \Drupal\Core\Database\Connection $connection
-+   *   Drupal database connection object.
-+   * @param object $clientConnection
-+   *   Client database connection object, for example \PDO.
-+   * @param string $query
-+   *   The SQL query string.
-+   * @param array $options
-+   *   Array of query options.
-+   * @param bool $rowCountEnabled
-+   *   (optional) Enables counting the rows matched. Defaults to FALSE.
-+   */
-+  public function __construct(
-+    protected readonly Connection $connection,
-+    object $clientConnection,
-+    string $query,
-+    array $options,
-+    protected readonly bool $rowCountEnabled = FALSE,
-+  ) {
-+    $this->clientStatement = $clientConnection->prepare($query, $options);
-+    $this->setFetchMode(\PDO::FETCH_OBJ);
-+  }
-+
-+  /**
-+   * Returns the client-level database statement object.
++   * @var \Drupal\Core\Annotation\Translation
 +   *
-+   * This method should normally be used only within database driver code.
++   * @ingroup plugin_translatable
++   */
++  public $description;
++
++}
+diff --git a/core/modules/image/src/Controller/ImageStyleDownloadController.php b/core/modules/image/src/Controller/ImageStyleDownloadController.php
+index b077c93336..1ce8968da5 100644
+--- a/core/modules/image/src/Controller/ImageStyleDownloadController.php
++++ b/core/modules/image/src/Controller/ImageStyleDownloadController.php
+@@ -9,6 +9,7 @@
+ use Drupal\Core\Site\Settings;
+ use Drupal\Core\StreamWrapper\StreamWrapperManager;
+ use Drupal\Core\StreamWrapper\StreamWrapperManagerInterface;
++use Drupal\image\ImageProcessor;
+ use Drupal\image\ImageStyleInterface;
+ use Drupal\system\FileDownloadController;
+ use Symfony\Component\DependencyInjection\ContainerInterface;
+@@ -38,6 +39,13 @@ class ImageStyleDownloadController extends FileDownloadController {
+    */
+   protected $imageFactory;
+ 
++  /**
++   * The image processor service.
 +   *
-+   * @return object
-+   *   The client-level database statement, for example \PDOStatement.
++   * @var \Drupal\image\ImageProcessor
 +   */
-+  public function getClientStatement(): object {
-+    return $this->clientStatement;
-+  }
++  protected $imageProcessor;
 +
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function getConnectionTarget(): string {
-+    return $this->connection->getTarget();
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function execute($args = [], $options = []) {
-+    if (isset($options['fetch'])) {
-+      if (is_string($options['fetch'])) {
-+        // \PDO::FETCH_PROPS_LATE tells __construct() to run before properties
-+        // are added to the object.
-+        $this->setFetchMode(\PDO::FETCH_CLASS | \PDO::FETCH_PROPS_LATE, $options['fetch']);
-+      }
-+      else {
-+        $this->setFetchMode($options['fetch']);
-+      }
+   /**
+    * A logger instance.
+    *
+@@ -63,11 +71,14 @@ class ImageStyleDownloadController extends FileDownloadController {
+    *   The stream wrapper manager.
+    * @param \Drupal\Core\File\FileSystemInterface $file_system
+    *   The system service.
++   * @param \Drupal\image\ImageProcessor $image_processor
++   *   The image processor service.
+    */
+-  public function __construct(LockBackendInterface $lock, ImageFactory $image_factory, StreamWrapperManagerInterface $stream_wrapper_manager, FileSystemInterface $file_system) {
++  public function __construct(LockBackendInterface $lock, ImageFactory $image_factory, StreamWrapperManagerInterface $stream_wrapper_manager, FileSystemInterface $file_system, ImageProcessor $image_processor = NULL) {
+     parent::__construct($stream_wrapper_manager);
+     $this->lock = $lock;
+     $this->imageFactory = $image_factory;
++    $this->imageProcessor = $image_processor;
+     $this->logger = $this->getLogger('image');
+     $this->fileSystem = $file_system;
+   }
+@@ -80,7 +91,8 @@ public static function create(ContainerInterface $container) {
+       $container->get('lock'),
+       $container->get('image.factory'),
+       $container->get('stream_wrapper_manager'),
+-      $container->get('file_system')
++      $container->get('file_system'),
++      $container->get(ImageProcessor::class)
+     );
+   }
+ 
+@@ -107,11 +119,46 @@ public static function create(ContainerInterface $container) {
+    *   Thrown when the file is still being generated.
+    */
+   public function deliver(Request $request, $scheme, ImageStyleInterface $image_style) {
++    // Check that the style is defined, return a 404 (Page Not Found) if
++    // missing.
++    if (empty($image_style)) {
++      throw new NotFoundHttpException();
 +    }
 +
-+    $logger = $this->connection->getLogger();
-+    if (!empty($logger)) {
-+      $queryStart = microtime(TRUE);
++    // Check that the URI scheme is valid, return a 404 (Page Not Found) if
++    // invalid.
++    if (!$this->streamWrapperManager->isValidScheme($scheme)) {
++      throw new NotFoundHttpException();
 +    }
 +
-+    $return = $this->clientStatement->execute($args);
-+    $this->markResultsetIterable($return);
-+
-+    if (!empty($logger)) {
-+      $queryEnd = microtime(TRUE);
-+      $logger->log($this, $args, $queryEnd - $queryStart, $queryStart);
-+    }
-+
-+    return $return;
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function getQueryString() {
-+    return $this->clientStatement->queryString;
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function fetchCol($index = 0) {
-+    return $this->fetchAll(\PDO::FETCH_COLUMN, $index);
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function fetchAllAssoc($key, $fetch = NULL) {
-+    $return = [];
-+    if (isset($fetch)) {
-+      if (is_string($fetch)) {
-+        $this->setFetchMode(\PDO::FETCH_CLASS, $fetch);
-+      }
-+      else {
-+        $this->setFetchMode($fetch);
-+      }
-+    }
-+
-+    foreach ($this as $record) {
-+      $recordKey = is_object($record) ? $record->$key : $record[$key];
-+      $return[$recordKey] = $record;
-+    }
-+
-+    return $return;
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function fetchAllKeyed($keyIndex = 0, $valueIndex = 1) {
-+    $return = [];
-+    $this->setFetchMode(\PDO::FETCH_NUM);
-+    foreach ($this as $record) {
-+      $return[$record[$keyIndex]] = $record[$valueIndex];
-+    }
-+    return $return;
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function fetchField($index = 0) {
-+    // We use ::fetch(\PDO::FETCH_NUM) here instead of calling fetchColumn()
-+    // on the client statement to avoid calling a PDO-specific method.
-+    $fields = $this->fetch(\PDO::FETCH_NUM);
-+    return $fields === FALSE ? FALSE : ($fields[$index] ?? NULL);
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function fetchAssoc() {
-+    return $this->fetch(\PDO::FETCH_ASSOC);
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function fetchObject(string $className = NULL, array $constructorArguments = NULL) {
-+    if ($className) {
-+      $row = $this->clientStatement->fetchObject($className, $constructorArguments);
++    // Check that the source image file exists. If the image style converts
++    // the image format, the new format extension has been added to the original
++    // filename, resulting in filenames like image.png.jpeg. So to find the real
++    // source image, we remove the extension and check if that image exists.
+     $target = $request->query->get('file');
+-    $image_uri = $scheme . '://' . $target;
++    $request_image_uri = $scheme . '://' . $target;
++    if (file_exists($request_image_uri)) {
++      $image_uri = $request_image_uri;
 +    }
 +    else {
-+      $row = $this->clientStatement->fetchObject();
++      $path_info = pathinfo(StreamWrapperManager::getTarget($request_image_uri));
++      $dir_name = $path_info['dirname'] !== '.' ? $path_info['dirname'] . DIRECTORY_SEPARATOR : '';
++      $original_image_uri = sprintf('%s://%s%s', $scheme, $dir_name, $path_info['filename']);
++      if (file_exists($original_image_uri)) {
++        $image_uri = $original_image_uri;
++      }
 +    }
-+
-+    if ($row) {
-+      $this->setCurrentResultsetRow($row);
++    // Don't try to generate file if source is missing.
++    if (!isset($image_uri)) {
++      $this->logger->notice('Source image at %source_image_path not found while trying to generate derivative image.', ['%source_image_path' => $request_image_uri]);
++      return new Response($this->t('Error generating image, missing source file.'), 404);
 +    }
+ 
+-    // Check that the style is defined and the scheme is valid.
+-    $valid = !empty($image_style) && $this->streamWrapperManager->isValidScheme($scheme);
++    // Create an image process pipeline.
++    $pipeline = $this->imageProcessor->createInstance('derivative');
++    $pipeline
++      ->setImageStyle($image_style)
++      ->setSourceImageUri($image_uri);
+ 
+     // Also validate the derivative token. Sites which require image
+     // derivatives to be generated without a token can set the
+@@ -123,8 +170,9 @@ public function deliver(Request $request, $scheme, ImageStyleInterface $image_st
+     // The $target variable for a derivative of a style has
+     // styles/<style_name>/... as structure, so we check if the $target variable
+     // starts with styles/.
++    $valid = TRUE;
+     $token = $request->query->get(IMAGE_DERIVATIVE_TOKEN, '');
+-    $token_is_valid = hash_equals($image_style->getPathToken($image_uri), $token);
++    $token_is_valid = hash_equals($pipeline->getDerivativeImageUrlSecurityToken() ?? '', $token);
+     if (!$this->config('image.settings')->get('allow_insecure_derivatives') || str_starts_with(ltrim($target, '\/'), 'styles/')) {
+       $valid = $valid && $token_is_valid;
+     }
+@@ -137,7 +185,7 @@ public function deliver(Request $request, $scheme, ImageStyleInterface $image_st
+       throw new NotFoundHttpException();
+     }
+ 
+-    $derivative_uri = $image_style->buildUri($image_uri);
++    $derivative_uri = $pipeline->getDerivativeImageUri();
+     $derivative_scheme = $this->streamWrapperManager->getScheme($derivative_uri);
+ 
+     if ($token_is_valid) {
+@@ -193,7 +241,7 @@ public function deliver(Request $request, $scheme, ImageStyleInterface $image_st
+ 
+     // Try to generate the image, unless another thread just did it while we
+     // were acquiring the lock.
+-    $success = file_exists($derivative_uri) || $image_style->createDerivative($image_uri, $derivative_uri);
++    $success = file_exists($derivative_uri) || $pipeline->buildDerivativeImage();
+ 
+     if (!empty($lock_acquired)) {
+       $this->lock->release($lock_name);
+diff --git a/core/modules/image/src/Entity/ImageStyle.php b/core/modules/image/src/Entity/ImageStyle.php
+index f7edba286b..a1b3ab2784 100644
+--- a/core/modules/image/src/Entity/ImageStyle.php
++++ b/core/modules/image/src/Entity/ImageStyle.php
+@@ -2,24 +2,18 @@
+ 
+ namespace Drupal\image\Entity;
+ 
+-use Drupal\Core\Cache\Cache;
+ use Drupal\Core\Config\Entity\ConfigEntityBase;
+ use Drupal\Core\Entity\Entity\EntityFormDisplay;
+ use Drupal\Core\Entity\EntityStorageInterface;
+ use Drupal\Core\Entity\EntityWithPluginCollectionInterface;
+-use Drupal\Core\File\Exception\FileException;
+-use Drupal\Core\File\FileSystemInterface;
+-use Drupal\Core\Routing\RequestHelper;
+ use Drupal\Core\Site\Settings;
+-use Drupal\Core\StreamWrapper\StreamWrapperManager;
+-use Drupal\Core\Url;
++use Drupal\image\Event\ImageDerivativePipelineEvents;
++use Drupal\image\Event\ImageStyleEvent;
++use Drupal\image\Event\ImageStyleEvents;
+ use Drupal\image\ImageEffectPluginCollection;
+ use Drupal\image\ImageEffectInterface;
++use Drupal\image\ImageProcessor;
+ use Drupal\image\ImageStyleInterface;
+-use Drupal\Component\Utility\Crypt;
+-use Drupal\Component\Utility\UrlHelper;
+-use Drupal\Core\StreamWrapper\StreamWrapperInterface;
+-use Symfony\Component\DependencyInjection\Exception\ServiceNotFoundException;
+ use Drupal\Core\Entity\Entity\EntityViewDisplay;
+ 
+ /**
+@@ -174,135 +168,40 @@ protected static function replaceImageStyle(ImageStyleInterface $style) {
+    * {@inheritdoc}
+    */
+   public function buildUri($uri) {
+-    $source_scheme = $scheme = StreamWrapperManager::getScheme($uri);
+-    $default_scheme = $this->fileDefaultScheme();
+-
+-    if ($source_scheme) {
+-      $path = StreamWrapperManager::getTarget($uri);
+-      // The scheme of derivative image files only needs to be computed for
+-      // source files not stored in the default scheme.
+-      if ($source_scheme != $default_scheme) {
+-        $class = $this->getStreamWrapperManager()->getClass($source_scheme);
+-        $is_writable = NULL;
+-        if ($class) {
+-          $is_writable = $class::getType() & StreamWrapperInterface::WRITE;
+-        }
+-
+-        // Compute the derivative URI scheme. Derivatives created from writable
+-        // source stream wrappers will inherit the scheme. Derivatives created
+-        // from read-only stream wrappers will fall-back to the default scheme.
+-        $scheme = $is_writable ? $source_scheme : $default_scheme;
+-      }
+-    }
+-    else {
+-      $path = $uri;
+-      $source_scheme = $scheme = $default_scheme;
+-    }
+-    return "$scheme://styles/{$this->id()}/$source_scheme/{$this->addExtension($path)}";
++    @trigger_error('The ' . __METHOD__ . ' method is deprecated since version 9.x.x and will be removed in y.y.y.', E_USER_DEPRECATED);
++    return \Drupal::service(ImageProcessor::class)->createInstance('derivative')
++      ->setImageStyle($this)
++      ->setSourceImageUri($uri)
++      ->getDerivativeImageUri();
+   }
+ 
+   /**
+    * {@inheritdoc}
+    */
+   public function buildUrl($path, $clean_urls = NULL) {
+-    $uri = $this->buildUri($path);
+-
+-    /** @var \Drupal\Core\StreamWrapper\StreamWrapperManagerInterface $stream_wrapper_manager */
+-    $stream_wrapper_manager = \Drupal::service('stream_wrapper_manager');
+-
+-    // The token query is added even if the
+-    // 'image.settings:allow_insecure_derivatives' configuration is TRUE, so
+-    // that the emitted links remain valid if it is changed back to the default
+-    // FALSE. However, sites which need to prevent the token query from being
+-    // emitted at all can additionally set the
+-    // 'image.settings:suppress_itok_output' configuration to TRUE to achieve
+-    // that (if both are set, the security token will neither be emitted in the
+-    // image derivative URL nor checked for in
+-    // \Drupal\image\ImageStyleInterface::deliver()).
+-    $token_query = [];
+-    if (!\Drupal::config('image.settings')->get('suppress_itok_output')) {
+-      // The passed $path variable can be either a relative path or a full URI.
+-      if (!$stream_wrapper_manager::getScheme($path)) {
+-        $path = \Drupal::config('system.file')->get('default_scheme') . '://' . $path;
+-      }
+-      $original_uri = $stream_wrapper_manager->normalizeUri($path);
+-      $token_query = [IMAGE_DERIVATIVE_TOKEN => $this->getPathToken($original_uri)];
+-    }
+-
+-    if ($clean_urls === NULL) {
+-      // Assume clean URLs unless the request tells us otherwise.
+-      $clean_urls = TRUE;
+-      try {
+-        $request = \Drupal::request();
+-        $clean_urls = RequestHelper::isCleanUrl($request);
+-      }
+-      catch (ServiceNotFoundException $e) {
+-      }
+-    }
+-
+-    // If not using clean URLs, the image derivative callback is only available
+-    // with the script path. If the file does not exist, use Url::fromUri() to
+-    // ensure that it is included. Once the file exists it's fine to fall back
+-    // to the actual file path, this avoids bootstrapping PHP once the files are
+-    // built.
+-    if ($clean_urls === FALSE && $stream_wrapper_manager::getScheme($uri) == 'public' && !file_exists($uri)) {
+-      $directory_path = $stream_wrapper_manager->getViaUri($uri)->getDirectoryPath();
+-      return Url::fromUri('base:' . $directory_path . '/' . $stream_wrapper_manager::getTarget($uri), ['absolute' => TRUE, 'query' => $token_query])->toString();
+-    }
+-
+-    /** @var \Drupal\Core\File\FileUrlGeneratorInterface $file_url_generator */
+-    $file_url_generator = \Drupal::service('file_url_generator');
+-    $file_url = $file_url_generator->generateAbsoluteString($uri);
+-    // Append the query string with the token, if necessary.
+-    if ($token_query) {
+-      $file_url .= (strpos($file_url, '?') !== FALSE ? '&' : '?') . UrlHelper::buildQuery($token_query);
+-    }
+-
+-    return $file_url;
++    @trigger_error('The ' . __METHOD__ . ' method is deprecated since version 9.x.x and will be removed in y.y.y.', E_USER_DEPRECATED);
++    return \Drupal::service(ImageProcessor::class)->createInstance('derivative')
++      ->setImageStyle($this)
++      ->setSourceImageUri($path)
++      ->setCleanUrl($clean_urls)
++      ->getDerivativeImageUrl()
++      ->toString();
+   }
+ 
+   /**
+    * {@inheritdoc}
+    */
+   public function flush($path = NULL) {
+-    // A specific image path has been provided. Flush only that derivative.
+-    /** @var \Drupal\Core\File\FileSystemInterface $file_system */
+-    $file_system = \Drupal::service('file_system');
+     if (isset($path)) {
+-      $derivative_uri = $this->buildUri($path);
+-      if (file_exists($derivative_uri)) {
+-        try {
+-          $file_system->delete($derivative_uri);
+-        }
+-        catch (FileException $e) {
+-          // Ignore failed deletes.
+-        }
+-      }
+-      return $this;
++      // A specific image path has been provided. Flush only that derivative.
++      \Drupal::service(ImageProcessor::class)->createInstance('derivative')
++        ->setImageStyle($this)
++        ->setSourceImageUri($path)
++        ->dispatch(ImageDerivativePipelineEvents::REMOVE_DERIVATIVE_IMAGE);
+     }
+-
+-    // Delete the style directory in each registered wrapper.
+-    $wrappers = $this->getStreamWrapperManager()->getWrappers(StreamWrapperInterface::WRITE_VISIBLE);
+-    foreach ($wrappers as $wrapper => $wrapper_data) {
+-      if (file_exists($directory = $wrapper . '://styles/' . $this->id())) {
+-        try {
+-          $file_system->deleteRecursive($directory);
+-        }
+-        catch (FileException $e) {
+-          // Ignore failed deletes.
+-        }
+-      }
 +    else {
-+      $this->markResultsetFetchingComplete();
-+    }
-+
-+    return $row;
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function rowCount() {
-+    // SELECT query should not use the method.
-+    if ($this->rowCountEnabled) {
-+      return $this->clientStatement->rowCount();
-+    }
-+    else {
-+      throw new RowCountException();
-+    }
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function setFetchMode($mode, $a1 = NULL, $a2 = []) {
-+    // Call \PDOStatement::setFetchMode to set fetch mode.
-+    // \PDOStatement is picky about the number of arguments in some cases so we
-+    // need to be pass the exact number of arguments we where given.
-+    switch (func_num_args()) {
-+      case 1:
-+        return $this->clientStatement->setFetchMode($mode);
-+
-+      case 2:
-+        return $this->clientStatement->setFetchMode($mode, $a1);
-+
-+      case 3:
-+      default:
-+        return $this->clientStatement->setFetchMode($mode, $a1, $a2);
-+    }
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function fetch($mode = NULL, $cursorOrientation = NULL, $cursorOffset = NULL) {
-+    // Call \PDOStatement::fetchAll to fetch all rows.
-+    // \PDOStatement is picky about the number of arguments in some cases so we
-+    // need to pass the exact number of arguments we were given.
-+    switch (func_num_args()) {
-+      case 0:
-+        $row = $this->clientStatement->fetch();
-+        break;
-+
-+      case 1:
-+        $row = $this->clientStatement->fetch($mode);
-+        break;
-+
-+      case 2:
-+        $row = $this->clientStatement->fetch($mode, $cursorOrientation);
-+        break;
-+
-+      case 3:
-+      default:
-+        $row = $this->clientStatement->fetch($mode, $cursorOrientation, $cursorOffset);
-+        break;
-+    }
-+
-+    if ($row) {
-+      $this->setCurrentResultsetRow($row);
-+    }
-+    else {
-+      $this->markResultsetFetchingComplete();
-+    }
-+
-+    return $row;
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function fetchAll($mode = NULL, $columnIndex = NULL, $constructorArguments = NULL) {
-+    // Call \PDOStatement::fetchAll to fetch all rows.
-+    // \PDOStatement is picky about the number of arguments in some cases so we
-+    // need to be pass the exact number of arguments we where given.
-+    switch (func_num_args()) {
-+      case 0:
-+        $return = $this->clientStatement->fetchAll();
-+        break;
-+
-+      case 1:
-+        $return = $this->clientStatement->fetchAll($mode);
-+        break;
-+
-+      case 2:
-+        $return = $this->clientStatement->fetchAll($mode, $columnIndex);
-+        break;
-+
-+      case 3:
-+      default:
-+        $return = $this->clientStatement->fetchAll($mode, $columnIndex, $constructorArguments);
-+    }
-+
-+    $this->markResultsetFetchingComplete();
-+
-+    return $return;
-+  }
-+
-+  /**
-+   * Informs the iterator whether rows can be fetched from the resultset.
++      \Drupal::service('event_dispatcher')->dispatch(new ImageStyleEvent($this), ImageStyleEvents::FLUSH);
+     }
+-
+-    // Let other modules update as necessary on flush.
+-    $module_handler = \Drupal::moduleHandler();
+-    $module_handler->invokeAll('image_style_flush', [$this]);
+-
+-    // Clear caches so that formatters may be added for this style.
+-    drupal_theme_rebuild();
+-
+-    Cache::invalidateTags($this->getCacheTagsToInvalidate());
+-
+     return $this;
+   }
+ 
+@@ -310,60 +209,49 @@ public function flush($path = NULL) {
+    * {@inheritdoc}
+    */
+   public function createDerivative($original_uri, $derivative_uri) {
+-    // If the source file doesn't exist, return FALSE without creating folders.
+-    $image = $this->getImageFactory()->get($original_uri);
+-    if (!$image->isValid()) {
+-      return FALSE;
+-    }
+-
+-    // Get the folder for the final location of this style.
+-    $directory = \Drupal::service('file_system')->dirname($derivative_uri);
+-
+-    // Build the destination folder tree if it doesn't already exist.
+-    if (!\Drupal::service('file_system')->prepareDirectory($directory, FileSystemInterface::CREATE_DIRECTORY | FileSystemInterface::MODIFY_PERMISSIONS)) {
+-      \Drupal::logger('image')->error('Failed to create style directory: %directory', ['%directory' => $directory]);
+-      return FALSE;
+-    }
+-
+-    foreach ($this->getEffects() as $effect) {
+-      $effect->applyEffect($image);
+-    }
+-
+-    if (!$image->save($derivative_uri)) {
+-      if (file_exists($derivative_uri)) {
+-        \Drupal::logger('image')->error('Cached image file %destination already exists. There may be an issue with your rewrite configuration.', ['%destination' => $derivative_uri]);
+-      }
+-      return FALSE;
+-    }
+-
+-    return TRUE;
++    @trigger_error('The ' . __METHOD__ . ' method is deprecated since version 9.x.x and will be removed in y.y.y.', E_USER_DEPRECATED);
++    return \Drupal::service(ImageProcessor::class)->createInstance('derivative')
++      ->setImageStyle($this)
++      ->setSourceImageUri($original_uri)
++      ->setDerivativeImageUri($derivative_uri)
++      ->buildDerivativeImage();
+   }
+ 
+   /**
+    * {@inheritdoc}
+    */
+   public function transformDimensions(array &$dimensions, $uri) {
+-    foreach ($this->getEffects() as $effect) {
+-      $effect->transformDimensions($dimensions, $uri);
+-    }
++    @trigger_error('The ' . __METHOD__ . ' method is deprecated since version 9.x.x and will be removed in y.y.y.', E_USER_DEPRECATED);
++    $pipeline = \Drupal::service(ImageProcessor::class)->createInstance('derivative');
++    $pipeline
++      ->setImageStyle($this)
++      ->setSourceImageUri($uri)
++      ->setSourceImageDimensions($dimensions['width'] ?? NULL, $dimensions['height'] ?? NULL)
++      ->dispatch(ImageDerivativePipelineEvents::RESOLVE_DERIVATIVE_IMAGE_DIMENSIONS);
++    $dimensions['width'] = $pipeline->getVariable('derivativeImageWidth');
++    $dimensions['height'] = $pipeline->getVariable('derivativeImageHeight');
+   }
+ 
+   /**
+    * {@inheritdoc}
+    */
+   public function getDerivativeExtension($extension) {
+-    foreach ($this->getEffects() as $effect) {
+-      $extension = $effect->getDerivativeExtension($extension);
+-    }
+-    return $extension;
++    @trigger_error('The ' . __METHOD__ . ' method is deprecated since version 9.x.x and will be removed in y.y.y.', E_USER_DEPRECATED);
++    return \Drupal::service(ImageProcessor::class)->createInstance('derivative')
++      ->setImageStyle($this)
++      ->setSourceImageFileExtension($extension)
++      ->getDerivativeImageFileExtension();
+   }
+ 
+   /**
+    * {@inheritdoc}
+    */
+   public function getPathToken($uri) {
+-    // Return the first 8 characters.
+-    return substr(Crypt::hmacBase64($this->id() . ':' . $this->addExtension($uri), $this->getPrivateKey() . $this->getHashSalt()), 0, 8);
++    @trigger_error('The ' . __METHOD__ . ' method is deprecated since version 9.x.x and will be removed in y.y.y.', E_USER_DEPRECATED);
++    return \Drupal::service(ImageProcessor::class)->createInstance('derivative')
++      ->setImageStyle($this)
++      ->setSourceImageUri($uri)
++      ->getDerivativeImageUrlSecurityToken();
+   }
+ 
+   /**
+@@ -379,12 +267,11 @@ public function deleteImageEffect(ImageEffectInterface $effect) {
+    * {@inheritdoc}
+    */
+   public function supportsUri($uri) {
+-    // Only support the URI if its extension is supported by the current image
+-    // toolkit.
+-    return in_array(
+-      mb_strtolower(pathinfo($uri, PATHINFO_EXTENSION)),
+-      $this->getImageFactory()->getSupportedExtensions()
+-    );
++    @trigger_error('The ' . __METHOD__ . ' method is deprecated since version 9.x.x and will be removed in y.y.y.', E_USER_DEPRECATED);
++    return \Drupal::service(ImageProcessor::class)->createInstance('derivative')
++      ->setImageStyle($this)
++      ->setSourceImageUri($uri)
++      ->isSourceImageProcessable();
+   }
+ 
+   /**
+@@ -460,8 +347,11 @@ protected function getImageEffectPluginManager() {
+    *
+    * @return \Drupal\Core\Image\ImageFactory
+    *   The image factory.
 +   *
-+   * @param bool $valid
-+   *   The result of the execution of the client statement.
-+   */
-+  protected function markResultsetIterable(bool $valid): void {
-+    $this->isResultsetIterable = $valid;
-+    $this->resultsetRow = NULL;
-+    $this->resultsetKey = -1;
-+  }
-+
-+  /**
-+   * Sets the current resultset row for the iterator, and increments the key.
++   * @todo deprecated since version 9.x.x and will be removed in y.y.y.
+    */
+   protected function getImageFactory() {
++    @trigger_error('The ' . __METHOD__ . ' method is deprecated since version 9.x.x and will be removed in y.y.y.', E_USER_DEPRECATED);
+     return \Drupal::service('image.factory');
+   }
+ 
+@@ -470,8 +360,11 @@ protected function getImageFactory() {
+    *
+    * @return string
+    *   The Drupal private key.
 +   *
-+   * @param mixed $row
-+   *   The last row fetched from the client statement.
-+   */
-+  protected function setCurrentResultsetRow(mixed $row): void {
-+    $this->resultsetRow = $row;
-+    $this->resultsetKey++;
-+  }
-+
-+  /**
-+   * Informs the iterator that no more rows can be fetched from the resultset.
-+   */
-+  protected function markResultsetFetchingComplete(): void {
-+    $this->markResultsetIterable(FALSE);
-+  }
-+
-+  /**
-+   * {@inheritdoc}
++   * @todo deprecated since version 9.x.x and will be removed in y.y.y.
+    */
+   protected function getPrivateKey() {
++    @trigger_error('The ' . __METHOD__ . ' method is deprecated since version 9.x.x and will be removed in y.y.y.', E_USER_DEPRECATED);
+     return \Drupal::service('private_key')->get();
+   }
+ 
+@@ -482,8 +375,11 @@ protected function getPrivateKey() {
+    *   A salt based on information in settings.php, not in the database.
+    *
+    * @throws \RuntimeException
 +   *
-+   * @internal This method should not be called directly.
-+   */
-+  public function current(): mixed {
-+    return $this->resultsetRow;
-+  }
++   * @todo deprecated since version 9.x.x and will be removed in y.y.y.
+    */
+   protected function getHashSalt() {
++    @trigger_error('The ' . __METHOD__ . ' method is deprecated since version 9.x.x and will be removed in y.y.y.', E_USER_DEPRECATED);
+     return Settings::getHashSalt();
+   }
+ 
+@@ -500,8 +396,11 @@ protected function getHashSalt() {
+    * @return string
+    *   The given path if this image style doesn't change its extension, or the
+    *   path with the added extension if it does.
++   *
++   * @todo deprecated since version 9.x.x and will be removed in y.y.y.
+    */
+   protected function addExtension($path) {
++    @trigger_error('The ' . __METHOD__ . ' method is deprecated since version 9.x.x and will be removed in y.y.y.', E_USER_DEPRECATED);
+     $original_extension = pathinfo($path, PATHINFO_EXTENSION);
+     $extension = $this->getDerivativeExtension($original_extension);
+     if ($original_extension !== $extension) {
+@@ -517,8 +416,11 @@ protected function addExtension($path) {
+    *
+    * @return string
+    *   'public', 'private' or any other file scheme defined as the default.
++   *
++   * @todo deprecated since version 9.x.x and will be removed in y.y.y.
+    */
+   protected function fileDefaultScheme() {
++    @trigger_error('The ' . __METHOD__ . ' method is deprecated since version 9.x.x and will be removed in y.y.y.', E_USER_DEPRECATED);
+     return \Drupal::config('system.file')->get('default_scheme');
+   }
+ 
+@@ -528,9 +430,10 @@ protected function fileDefaultScheme() {
+    * @return \Drupal\Core\StreamWrapper\StreamWrapperManagerInterface
+    *   The stream wrapper manager service
+    *
+-   * @todo Properly inject this service in Drupal 9.0.x.
++   * @todo deprecated since version 9.x.x and will be removed in y.y.y.
+    */
+   protected function getStreamWrapperManager() {
++    @trigger_error('The ' . __METHOD__ . ' method is deprecated since version 9.x.x and will be removed in y.y.y.', E_USER_DEPRECATED);
+     return \Drupal::service('stream_wrapper_manager');
+   }
+ 
+diff --git a/core/modules/image/src/Event/ImageDerivativePipelineEvents.php b/core/modules/image/src/Event/ImageDerivativePipelineEvents.php
+new file mode 100644
+index 0000000000..820589ba70
+--- /dev/null
++++ b/core/modules/image/src/Event/ImageDerivativePipelineEvents.php
+@@ -0,0 +1,162 @@
++<?php
++
++namespace Drupal\image\Event;
++
++/**
++ * Defines events for the image derivative pipeline.
++ */
++final class ImageDerivativePipelineEvents {
 +
 +  /**
-+   * {@inheritdoc}
++   * Name of the event fired to determine the format of the source image.
 +   *
-+   * @internal This method should not be called directly.
++   * @Event
++   *
++   * @see \Drupal\image\EventSubscriber\ImageDerivativeSubscriber::resolveSourceImageFormat()
++   *
++   * @var string
 +   */
-+  public function key(): mixed {
-+    return $this->resultsetKey;
-+  }
++  const RESOLVE_SOURCE_IMAGE_FORMAT = 'image.pipeline.derivative.resolve_source_image_format';
 +
 +  /**
-+   * {@inheritdoc}
++   * Name of the event fired to determine if a source image can be derived.
 +   *
-+   * @internal This method should not be called directly.
++   * @Event
++   *
++   * @see \Drupal\image\Plugin\ImageProcessPipeline\Derivative::isSourceImageProcessable()
++   * @see \Drupal\image\EventSubscriber\ImageDerivativeSubscriber::resolveSourceImageProcessable()
++   *
++   * @var string
 +   */
-+  public function rewind(): void {
-+    // Nothing to do: our DatabaseStatement can't be rewound.
-+  }
++  const RESOLVE_SOURCE_IMAGE_PROCESSABLE = 'image.pipeline.derivative.resolve_source_image_processable';
 +
 +  /**
-+   * {@inheritdoc}
++   * Name of the event fired to determine the format of the derivative image.
 +   *
-+   * @internal This method should not be called directly.
++   * @Event
++   *
++   * @see \Drupal\image\Plugin\ImageProcessPipeline\Derivative::getDerivativeImageFileExtension()
++   * @see \Drupal\image\EventSubscriber\ImageDerivativeSubscriber::resolveDerivativeImageFormat()
++   *
++   * @var string
 +   */
-+  public function next(): void {
-+    $this->fetch();
-+  }
++  const RESOLVE_DERIVATIVE_IMAGE_FORMAT = 'image.pipeline.derivative.resolve_derivative_image_format';
 +
 +  /**
-+   * {@inheritdoc}
++   * Name of the event fired to determine the format of the derivative image.
 +   *
-+   * @internal This method should not be called directly.
++   * @Event
++   *
++   * @see \Drupal\image\Plugin\ImageProcessPipeline\Derivative::getDerivativeImageWidth()
++   * @see \Drupal\image\Plugin\ImageProcessPipeline\Derivative::getDerivativeImageHeight()
++   * @see \Drupal\image\EventSubscriber\ImageDerivativeSubscriber::resolveDerivativeImageDimensions()
++   *
++   * @var string
 +   */
-+  public function valid(): bool {
-+    if ($this->isResultsetIterable && $this->resultsetKey === -1) {
-+      $this->fetch();
-+    }
-+    return $this->isResultsetIterable;
++  const RESOLVE_DERIVATIVE_IMAGE_DIMENSIONS = 'image.pipeline.derivative.resolve_derivative_image_dimensions';
++
++  /**
++   * Name of the event fired to determine the URI of the derivative image.
++   *
++   * @Event
++   *
++   * @see \Drupal\image\Plugin\ImageProcessPipeline\Derivative::getDerivativeImageUri()
++   * @see \Drupal\image\EventSubscriber\ImageDerivativeSubscriber::resolveDerivativeImageUri()
++   *
++   * @var string
++   */
++  const RESOLVE_DERIVATIVE_IMAGE_URI = 'image.pipeline.derivative.resolve_derivative_image_uri';
++
++  /**
++   * Name of the event fired to produce a protection for the derivative URL.
++   *
++   * @Event
++   *
++   * @see \Drupal\image\Plugin\ImageProcessPipeline\Derivative::getDerivativeImageUrlSecurityToken()
++   * @see \Drupal\image\EventSubscriber\ImageDerivativeSubscriber::resolveDerivativeImageUrlProtection()
++   *
++   * @var string
++   */
++  const RESOLVE_DERIVATIVE_IMAGE_URL_PROTECTION = 'image.pipeline.derivative.resolve_derivative_image_url_protection';
++
++  /**
++   * Name of the event fired to determine the URL of the derivative image.
++   *
++   * @Event
++   *
++   * @see \Drupal\image\Plugin\ImageProcessPipeline\Derivative::getDerivativeImageUrl()
++   * @see \Drupal\image\EventSubscriber\ImageDerivativeSubscriber::resolveDerivativeImageUrl()
++   *
++   * @var string
++   */
++  const RESOLVE_DERIVATIVE_IMAGE_URL = 'image.pipeline.derivative.resolve_derivative_image_url';
++
++  /**
++   * Name of the event fired to load an Image for processing into a derivative.
++   *
++   * @Event
++   *
++   * @see \Drupal\image\EventSubscriber\ImageDerivativeSubscriber::loadSourceImage()
++   *
++   * @var string
++   */
++  const LOAD_SOURCE_IMAGE = 'image.pipeline.derivative.load_source_image';
++
++  /**
++   * Name of the event fired to build a derivative image.
++   *
++   * @Event
++   *
++   * @see \Drupal\image\Plugin\ImageProcessPipeline\Derivative::buildDerivativeImage()
++   * @see \Drupal\image\EventSubscriber\ImageDerivativeSubscriber::buildDerivativeImage()
++   *
++   * @var string
++   */
++  const BUILD_DERIVATIVE_IMAGE = 'image.pipeline.derivative.build_derivative_image';
++
++  /**
++   * Name of the event fired to apply an image style to the image object.
++   *
++   * @Event
++   *
++   * @see \Drupal\image\EventSubscriber\ImageDerivativeSubscriber::applyImageStyle()
++   *
++   * @var string
++   */
++  const APPLY_IMAGE_STYLE = 'image.pipeline.derivative.apply_image_style';
++
++  /**
++   * Name of the event fired to apply a single image effect to the image object.
++   *
++   * @Event
++   *
++   * @see \Drupal\image\EventSubscriber\ImageDerivativeSubscriber::applyImageEffect()
++   *
++   * @var string
++   */
++  const APPLY_IMAGE_EFFECT = 'image.pipeline.derivative.apply_image_effect';
++
++  /**
++   * Name of the event fired to stores the image at the derivative URI.
++   *
++   * @Event
++   *
++   * @see \Drupal\image\EventSubscriber\ImageDerivativeSubscriber::saveDerivativeImage()
++   *
++   * @var string
++   */
++  const SAVE_DERIVATIVE_IMAGE = 'image.pipeline.derivative.save_derivative_image';
++
++  /**
++   * Name of the event fired to remove a derivative image.
++   *
++   * @Event
++   *
++   * @see \Drupal\image\Entity\ImageStyle::flush()
++   * @see \Drupal\image\EventSubscriber\ImageDerivativeSubscriber::removeDerivativeImage()
++   *
++   * @var string
++   */
++  const REMOVE_DERIVATIVE_IMAGE = 'image.pipeline.derivative.remove_derivative_image';
++
++}
+diff --git a/core/modules/image/src/Event/ImageProcessEvent.php b/core/modules/image/src/Event/ImageProcessEvent.php
+new file mode 100644
+index 0000000000..70b9a6e5cb
+--- /dev/null
++++ b/core/modules/image/src/Event/ImageProcessEvent.php
+@@ -0,0 +1,23 @@
++<?php
++
++namespace Drupal\image\Event;
++
++use Drupal\image\ImageProcessPipelineInterface;
++use Symfony\Component\EventDispatcher\GenericEvent;
++
++/**
++ * Provides a class for events related to processing images through pipelines.
++ */
++class ImageProcessEvent extends GenericEvent {
++
++  /**
++   * Returns the ImageProcessPipeline object subject of the event.
++   *
++   * @return \Drupal\image\ImageProcessPipelineInterface
++   *   The ImageProcessPipeline object.
++   */
++  public function getPipeline(): ImageProcessPipelineInterface {
++    return $this->getSubject();
 +  }
 +
 +}
-diff --git a/core/modules/mysql/src/Driver/Database/mysql/Connection.php b/core/modules/mysql/src/Driver/Database/mysql/Connection.php
-index 5062d5ebab..7c9fab2836 100644
---- a/core/modules/mysql/src/Driver/Database/mysql/Connection.php
-+++ b/core/modules/mysql/src/Driver/Database/mysql/Connection.php
-@@ -4,7 +4,7 @@
- 
- use Drupal\Core\Database\DatabaseAccessDeniedException;
- use Drupal\Core\Database\DatabaseExceptionWrapper;
--use Drupal\Core\Database\StatementWrapper;
-+use Drupal\Core\Database\StatementWrapperIterator;
- use Drupal\Core\Database\Database;
- use Drupal\Core\Database\DatabaseNotFoundException;
- use Drupal\Core\Database\DatabaseException;
-@@ -50,7 +50,7 @@ class Connection extends DatabaseConnection implements SupportsTemporaryTablesIn
-   /**
-    * {@inheritdoc}
+diff --git a/core/modules/image/src/Event/ImageStyleEvent.php b/core/modules/image/src/Event/ImageStyleEvent.php
+new file mode 100644
+index 0000000000..c40de29b87
+--- /dev/null
++++ b/core/modules/image/src/Event/ImageStyleEvent.php
+@@ -0,0 +1,23 @@
++<?php
++
++namespace Drupal\image\Event;
++
++use Drupal\image\ImageStyleInterface;
++use Symfony\Component\EventDispatcher\GenericEvent;
++
++/**
++ * Provides a class for events related to image styles.
++ */
++class ImageStyleEvent extends GenericEvent {
++
++  /**
++   * Returns the Image Style object subject of the event.
++   *
++   * @return \Drupal\image\ImageStyleInterface
++   *   The Image Style object.
++   */
++  public function getImageStyle(): ImageStyleInterface {
++    return $this->getSubject();
++  }
++
++}
+diff --git a/core/modules/image/src/Event/ImageStyleEvents.php b/core/modules/image/src/Event/ImageStyleEvents.php
+new file mode 100644
+index 0000000000..35a8cee043
+--- /dev/null
++++ b/core/modules/image/src/Event/ImageStyleEvents.php
+@@ -0,0 +1,32 @@
++<?php
++
++namespace Drupal\image\Event;
++
++/**
++ * Defines events for the image style.
++ */
++final class ImageStyleEvents {
++
++  /**
++   * Event fired to remove all the image derivatives of an image style.
++   *
++   * @Event
++   *
++   * @see \Drupal\image\Entity\ImageStyle::flush()
++   *
++   * @var string
++   */
++  const FLUSH = 'image.style.flush';
++
++  /**
++   * Event fired to remove derivatives of a source image in all image styles.
++   *
++   * @Event
++   *
++   * @see image_path_flush()
++   *
++   * @var string
++   */
++  const FLUSH_FROM_SOURCE_IMAGE_URI = 'image.style.flush_from_source_image_uri';
++
++}
+diff --git a/core/modules/image/src/EventSubscriber/ImageDerivativeSubscriber.php b/core/modules/image/src/EventSubscriber/ImageDerivativeSubscriber.php
+new file mode 100644
+index 0000000000..83cf5ace0d
+--- /dev/null
++++ b/core/modules/image/src/EventSubscriber/ImageDerivativeSubscriber.php
+@@ -0,0 +1,563 @@
++<?php
++
++namespace Drupal\image\EventSubscriber;
++
++use Drupal\Component\Utility\Crypt;
++use Drupal\Core\Cache\Cache;
++use Drupal\Core\Config\ConfigFactoryInterface;
++use Drupal\Core\Extension\ModuleHandlerInterface;
++use Drupal\Core\File\FileSystemInterface;
++use Drupal\Core\File\FileUrlGeneratorInterface;
++use Drupal\Core\Image\ImageFactory;
++use Drupal\Core\PrivateKey;
++use Drupal\Core\Routing\RequestHelper;
++use Drupal\Core\Site\Settings;
++use Drupal\Core\StreamWrapper\StreamWrapperInterface;
++use Drupal\Core\StreamWrapper\StreamWrapperManagerInterface;
++use Drupal\Core\Url;
++use Drupal\image\Entity\ImageStyle;
++use Drupal\image\Event\ImageDerivativePipelineEvents;
++use Drupal\image\Event\ImageProcessEvent;
++use Drupal\image\Event\ImageStyleEvent;
++use Drupal\image\Event\ImageStyleEvents;
++use Drupal\image\ImageProcessException;
++use Drupal\image\ImageProcessor;
++use Psr\Log\LoggerInterface;
++use Symfony\Component\DependencyInjection\Exception\ServiceNotFoundException;
++use Symfony\Component\EventDispatcher\EventSubscriberInterface;
++use Symfony\Component\HttpFoundation\RequestStack;
++
++/**
++ * Defines a class for listening to image derivative processing requests.
++ */
++class ImageDerivativeSubscriber implements EventSubscriberInterface {
++
++  /**
++   * The image factory service.
++   *
++   * @var \Drupal\Core\Image\ImageFactory
++   */
++  protected $imageFactory;
++
++  /**
++   * The image processor service.
++   *
++   * @var \Drupal\image\ImageProcessor
++   */
++  protected $imageProcessor;
++
++  /**
++   * The stream wrapper manager service.
++   *
++   * @var \Drupal\Core\StreamWrapper\StreamWrapperManagerInterface
++   */
++  protected $streamWrapperManager;
++
++  /**
++   * The Drupal private key.
++   *
++   * @var string
++   */
++  protected $privateKey;
++
++  /**
++   * The module handler service.
++   *
++   * @var \Drupal\Core\Extension\ModuleHandlerInterface
++   */
++  protected $moduleHandler;
++
++  /**
++   * The configuration factory.
++   *
++   * @var \Drupal\Core\Config\ConfigFactoryInterface
++   */
++  protected $configFactory;
++
++  /**
++   * The current request.
++   *
++   * @var \Symfony\Component\HttpFoundation\Request
++   */
++  protected $currentRequest;
++
++  /**
++   * The logger service.
++   *
++   * @var \Psr\Log\LoggerInterface
++   */
++  protected $logger;
++
++  /**
++   * The file system service.
++   *
++   * @var \Drupal\Core\File\FileSystemInterface
++   */
++  protected $fileSystem;
++
++  /**
++   * The file URL generator.
++   *
++   * @var \Drupal\Core\File\FileUrlGeneratorInterface
++   */
++  protected $fileUrlGenerator;
++
++  /**
++   * Constructs a new ImageDerivativeSubscriber.
++   *
++   * @param \Drupal\Core\Image\ImageFactory $image_factory
++   *   The image factory.
++   * @param \Drupal\image\ImageProcessor $image_processor
++   *   The image processor service.
++   * @param \Drupal\Core\StreamWrapper\StreamWrapperManagerInterface $stream_wrapper_manager
++   *   The stream wrapper manager service.
++   * @param \Drupal\Core\PrivateKey $private_key
++   *   The Drupal private key service.
++   * @param \Drupal\Core\Extension\ModuleHandlerInterface $module_handler
++   *   The module handler service.
++   * @param \Drupal\Core\Config\ConfigFactoryInterface $config_factory
++   *   The config factory service.
++   * @param \Symfony\Component\HttpFoundation\RequestStack $request_stack
++   *   The request stack.
++   * @param \Psr\Log\LoggerInterface $logger
++   *   The logger service.
++   * @param \Drupal\Core\File\FileSystemInterface $file_system
++   *   The file system service.
++   * @param \Drupal\Core\File\FileUrlGeneratorInterface $file_url_generator
++   *   The file URL generator.
++   */
++  public function __construct(ImageFactory $image_factory, ImageProcessor $image_processor, StreamWrapperManagerInterface $stream_wrapper_manager, PrivateKey $private_key, ModuleHandlerInterface $module_handler, ConfigFactoryInterface $config_factory, RequestStack $request_stack, LoggerInterface $logger, FileSystemInterface $file_system, FileUrlGeneratorInterface $file_url_generator) {
++    $this->imageFactory = $image_factory;
++    $this->imageProcessor = $image_processor;
++    $this->streamWrapperManager = $stream_wrapper_manager;
++    $this->privateKey = $private_key->get();
++    $this->moduleHandler = $module_handler;
++    $this->configFactory = $config_factory;
++    $this->currentRequest = $request_stack->getCurrentRequest();
++    $this->logger = $logger;
++    $this->fileSystem = $file_system;
++    $this->fileUrlGenerator = $file_url_generator;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public static function getSubscribedEvents() {
++    return [
++      ImageDerivativePipelineEvents::RESOLVE_SOURCE_IMAGE_FORMAT => 'resolveSourceImageFormat',
++      ImageDerivativePipelineEvents::RESOLVE_SOURCE_IMAGE_PROCESSABLE => 'resolveSourceImageProcessable',
++      ImageDerivativePipelineEvents::RESOLVE_DERIVATIVE_IMAGE_FORMAT => 'resolveDerivativeImageFormat',
++      ImageDerivativePipelineEvents::RESOLVE_DERIVATIVE_IMAGE_DIMENSIONS => 'resolveDerivativeImageDimensions',
++      ImageDerivativePipelineEvents::RESOLVE_DERIVATIVE_IMAGE_URI => 'resolveDerivativeImageUri',
++      ImageDerivativePipelineEvents::RESOLVE_DERIVATIVE_IMAGE_URL_PROTECTION => 'resolveDerivativeImageUrlProtection',
++      ImageDerivativePipelineEvents::RESOLVE_DERIVATIVE_IMAGE_URL => 'resolveDerivativeImageUrl',
++      ImageDerivativePipelineEvents::BUILD_DERIVATIVE_IMAGE => 'buildDerivativeImage',
++      ImageDerivativePipelineEvents::LOAD_SOURCE_IMAGE => 'loadSourceImage',
++      ImageDerivativePipelineEvents::APPLY_IMAGE_STYLE => 'applyImageStyle',
++      ImageDerivativePipelineEvents::APPLY_IMAGE_EFFECT => 'applyImageEffect',
++      ImageDerivativePipelineEvents::SAVE_DERIVATIVE_IMAGE => 'saveDerivativeImage',
++      ImageStyleEvents::FLUSH => 'flushImageStyle',
++      ImageStyleEvents::FLUSH_FROM_SOURCE_IMAGE_URI => 'flushFromSourceImageUri',
++      ImageDerivativePipelineEvents::REMOVE_DERIVATIVE_IMAGE => 'removeDerivativeImage',
++    ];
++  }
++
++  /**
++   * Determines the format of a source image.
++   *
++   * @param \Drupal\image\Event\ImageProcessEvent $event
++   *   The image process event, carrying the process pipeline object.
++   */
++  public function resolveSourceImageFormat(ImageProcessEvent $event): void {
++    $pipeline = $event->getPipeline();
++
++    // Get the image file extension from the URI if not already specified.
++    if (!$pipeline->hasVariable('sourceImageFileExtension')) {
++      $pipeline->setSourceImageFileExtension(mb_strtolower(pathinfo($pipeline->getVariable('sourceImageUri'), PATHINFO_EXTENSION)));
++    }
++  }
++
++  /**
++   * Verifies that an image can be processed into a derivative.
++   *
++   * @param \Drupal\image\Event\ImageProcessEvent $event
++   *   The image process event, carrying the process pipeline object.
++   */
++  public function resolveSourceImageProcessable(ImageProcessEvent $event): void {
++    $pipeline = $event->getPipeline();
++
++    // Determine the image toolkit.
++    if (!$pipeline->hasVariable('imageToolkitId')) {
++      $pipeline->setImageToolkitId($this->imageFactory->getToolkitId());
++    }
++
++    // Ensure we know the format of the source image.
++    try {
++      $pipeline->dispatch(ImageDerivativePipelineEvents::RESOLVE_SOURCE_IMAGE_FORMAT);
++    }
++    catch (ImageProcessException $e) {
++      $pipeline->setVariable('isSourceImageProcessable', FALSE);
++      return;
++    }
++
++    // The source image can be processed if the image toolkit supports its
++    // format.
++    $pipeline->setVariable(
++      'isSourceImageProcessable',
++      in_array(
++        $pipeline->getVariable('sourceImageFileExtension'),
++        $this->imageFactory->getSupportedExtensions($pipeline->getVariable('imageToolkitId'))
++      )
++    );
++  }
++
++  /**
++   * Determines the format of a derivative image.
++   *
++   * @param \Drupal\image\Event\ImageProcessEvent $event
++   *   The image process event, carrying the process pipeline object.
++   */
++  public function resolveDerivativeImageFormat(ImageProcessEvent $event): void {
++    $pipeline = $event->getPipeline();
++
++    // Ensure we can process the source image.
++    $pipeline->dispatch(ImageDerivativePipelineEvents::RESOLVE_SOURCE_IMAGE_PROCESSABLE);
++    if (!$pipeline->getVariable('isSourceImageProcessable')) {
++      throw new ImageProcessException('Cannot determine derivative image format, source image not processable');
++    }
++
++    // Determine the derivative image file extension by looping through the
++    // image effects' ::getDerivativeExtension methods.
++    $extension = $pipeline->getVariable('sourceImageFileExtension');
++    foreach ($pipeline->getVariable('imageStyle')->getEffects() as $effect) {
++      $extension = $effect->getDerivativeExtension($extension);
++    }
++    $pipeline->setVariable('derivativeImageFileExtension', $extension);
++  }
++
++  /**
++   * Determines the dimensions of a derivative image.
++   *
++   * Takes the source URI, the image style, and the starting dimensions to
++   * determine the expected dimensions of the derivative image. The source URI
++   * is used to allow effects to optionally use this information to retrieve
++   * additional image metadata to determine output dimensions. The key
++   * objective is to calculate derivative image dimensions without performing
++   * actual image operations, so be aware that performing I/O on the URI may
++   * lead to decrease in performance.
++   *
++   * @param \Drupal\image\Event\ImageProcessEvent $event
++   *   The image process event, carrying the process pipeline object.
++   */
++  public function resolveDerivativeImageDimensions(ImageProcessEvent $event): void {
++    $pipeline = $event->getPipeline();
++
++    // It's still possible to calculate dimensions even if the image at source
++    // is not processable but we have input dimensions.
++    $pipeline->dispatch(ImageDerivativePipelineEvents::RESOLVE_SOURCE_IMAGE_PROCESSABLE);
++    if (!$pipeline->getVariable('isSourceImageProcessable') && (!$pipeline->hasVariable('sourceImageWidth') || !$pipeline->hasVariable('sourceImageHeight'))) {
++      return;
++    }
++
++    // Determine the derivative image dimensions by looping through the image
++    // style effects' ::transformDimensions methods.
++    $dimensions = [
++      'width' => $pipeline->getVariable('sourceImageWidth'),
++      'height' => $pipeline->getVariable('sourceImageHeight'),
++    ];
++    foreach ($pipeline->getVariable('imageStyle')->getEffects() as $effect) {
++      $effect->transformDimensions($dimensions, $pipeline->getVariable('sourceImageUri'));
++    }
++    $pipeline->setVariable('derivativeImageWidth', $dimensions['width']);
++    $pipeline->setVariable('derivativeImageHeight', $dimensions['height']);
++  }
++
++  /**
++   * Determines the URI of a derivative image.
++   *
++   * @param \Drupal\image\Event\ImageProcessEvent $event
++   *   The image process event, carrying the process pipeline object.
++   */
++  public function resolveDerivativeImageUri(ImageProcessEvent $event): void {
++    $pipeline = $event->getPipeline();
++
++    // Return if we already have the derivative URI.
++    if ($pipeline->hasVariable('derivativeImageUri')) {
++      return;
++    }
++
++    // Ensure we can process the source image.
++    $pipeline->dispatch(ImageDerivativePipelineEvents::RESOLVE_DERIVATIVE_IMAGE_FORMAT);
++    if (!$pipeline->getVariable('isSourceImageProcessable')) {
++      throw new ImageProcessException('Cannot determine derivative image URI, source image not processable');
++    }
++
++    // Determine derivative image URI.
++    $source_scheme = $scheme = $this->streamWrapperManager->getScheme($pipeline->getVariable('sourceImageUri'));
++    $default_scheme = $this->configFactory->get('system.file')->get('default_scheme');
++
++    if ($source_scheme) {
++      $path = $this->streamWrapperManager->getTarget($pipeline->getVariable('sourceImageUri'));
++      // The scheme of derivative image files only needs to be computed for
++      // source files not stored in the default scheme.
++      if ($source_scheme != $default_scheme) {
++        $class = $this->streamWrapperManager->getClass($source_scheme);
++        $is_writable = NULL;
++        if ($class) {
++          $is_writable = $class::getType() & StreamWrapperInterface::WRITE;
++        }
++
++        // Compute the derivative URI scheme. Derivatives created from writable
++        // source stream wrappers will inherit the scheme. Derivatives created
++        // from read-only stream wrappers will fall-back to the default scheme.
++        $scheme = $is_writable ? $source_scheme : $default_scheme;
++      }
++    }
++    else {
++      $path = $pipeline->getVariable('sourceImageUri');
++      $source_scheme = $scheme = $default_scheme;
++    }
++    $path = $pipeline->getVariable('derivativeImageFileExtension') === $pipeline->getVariable('sourceImageFileExtension') ? $path : $path . '.' . $pipeline->getVariable('derivativeImageFileExtension');
++    $pipeline->setVariable('derivativeImageUri', "$scheme://styles/{$pipeline->getVariable('imageStyle')->id()}/$source_scheme/$path");
++  }
++
++  /**
++   * Determines the URL protection token of a derivative image.
++   *
++   * @param \Drupal\image\Event\ImageProcessEvent $event
++   *   The image process event, carrying the process pipeline object.
++   */
++  public function resolveDerivativeImageUrlProtection(ImageProcessEvent $event): void {
++    $pipeline = $event->getPipeline();
++
++    // Ensure we have the derivative image URI.
++    $pipeline->dispatch(ImageDerivativePipelineEvents::RESOLVE_DERIVATIVE_IMAGE_URI);
++
++    // The token query is added even if the
++    // 'image.settings:allow_insecure_derivatives' configuration is TRUE, so
++    // that the emitted links remain valid if it is changed back to the default
++    // FALSE. However, sites which need to prevent the token query from being
++    // emitted at all can additionally set the
++    // 'image.settings:suppress_itok_output' configuration to TRUE to achieve
++    // that (if both are set, the security token will neither be emitted in the
++    // image derivative URL nor checked for in
++    // \Drupal\image\ImageStyleInterface::deliver()).
++    $token_query = [];
++    $suppress_itok_output = $this->configFactory->get('image.settings')->get('suppress_itok_output');
++    if (!$suppress_itok_output) {
++      // The sourceUri property can be either a relative path or a full URI.
++      $path = $pipeline->getVariable('sourceImageUri');
++      if (!$this->streamWrapperManager->getScheme($path)) {
++        $path = \Drupal::config('system.file')->get('default_scheme') . '://' . $path;
++      }
++      $original_uri_normalized = $this->streamWrapperManager->normalizeUri($path);
++      $encryptable_uri = $pipeline->getVariable('derivativeImageFileExtension') === $pipeline->getVariable('sourceImageFileExtension') ? $original_uri_normalized : $original_uri_normalized . '.' . $pipeline->getVariable('derivativeImageFileExtension');
++      // Return the first 8 characters.
++      $token_query = [IMAGE_DERIVATIVE_TOKEN => substr(Crypt::hmacBase64($pipeline->getVariable('imageStyle')->id() . ':' . $encryptable_uri, $this->privateKey . Settings::getHashSalt()), 0, 8)];
++      $pipeline->setVariable('derivativeImageUrlProtection', $token_query);
++    }
++  }
++
++  /**
++   * Determines the URL of a derivative image.
++   *
++   * Including the security token if specified.
++   *
++   * @param \Drupal\image\Event\ImageProcessEvent $event
++   *   The image process event, carrying the process pipeline object.
++   */
++  public function resolveDerivativeImageUrl(ImageProcessEvent $event): void {
++    $pipeline = $event->getPipeline();
++
++    // Ensure we have the derivative image URI and the URL protection token.
++    $pipeline->dispatch(ImageDerivativePipelineEvents::RESOLVE_DERIVATIVE_IMAGE_URI);
++    $pipeline->dispatch(ImageDerivativePipelineEvents::RESOLVE_DERIVATIVE_IMAGE_URL_PROTECTION);
++
++    $clean_urls = $pipeline->hasVariable('setCleanUrl') ? $pipeline->getVariable('setCleanUrl') : NULL;
++    $derivative_uri = $pipeline->getVariable('derivativeImageUri');
++    $token_query = $pipeline->hasVariable('derivativeImageUrlProtection') ? $pipeline->getVariable('derivativeImageUrlProtection') : [];
++
++    // Determine whether clean URLs can be used.
++    if ($clean_urls === NULL) {
++      // Assume clean URLs unless the request tells us otherwise.
++      $clean_urls = TRUE;
++      try {
++        $clean_urls = RequestHelper::isCleanUrl($this->currentRequest);
++      }
++      catch (ServiceNotFoundException $e) {
++      }
++    }
++
++    // If not using clean URLs, the image derivative callback is only available
++    // with the script path. If the file does not exist, use Url::fromUri() to
++    // ensure that it is included. Once the file exists it's fine to fall back
++    // to the actual file path, this avoids bootstrapping PHP once the files are
++    // built.
++    if ($clean_urls === FALSE && $this->streamWrapperManager->getScheme($derivative_uri) == 'public' && !file_exists($derivative_uri)) {
++      $validated_uri = 'base:' . $this->streamWrapperManager->getViaUri($derivative_uri)->getDirectoryPath() . '/' . $this->streamWrapperManager->getTarget($derivative_uri);
++    }
++    else {
++      // Using clean URLs.
++      $validated_uri = $this->fileUrlGenerator->generateAbsoluteString($derivative_uri);
++    }
++
++    $pipeline->setVariable('derivativeImageUrl', Url::fromUri($validated_uri, [
++      'absolute' => TRUE,
++      'query' => $token_query,
++    ]));
++  }
++
++  /**
++   * Loads an Image object for subsequent processing into a derivative.
++   *
++   * @param \Drupal\image\Event\ImageProcessEvent $event
++   *   The image process event, carrying the process pipeline object.
++   */
++  public function loadSourceImage(ImageProcessEvent $event): void {
++    $pipeline = $event->getPipeline();
++
++    if ($pipeline->hasVariable('sourceImageUri') && !$pipeline->hasImage()) {
++      // If the source file doesn't exist or is invalid, throw an exception.
++      $image = $this->imageFactory->get($pipeline->getVariable('sourceImageUri'), $pipeline->getVariable('imageToolkitId'));
++      if (!$image->isValid()) {
++        throw new ImageProcessException('Missing or invalid source image file ' . $pipeline->getVariable('sourceImageUri'));
++      }
++      $pipeline->setImage($image);
++    }
++  }
++
++  /**
++   * Stores a transformed image at the derivative URI.
++   *
++   * @param \Drupal\image\Event\ImageProcessEvent $event
++   *   The image process event, carrying the process pipeline object.
++   */
++  public function saveDerivativeImage(ImageProcessEvent $event): void {
++    $pipeline = $event->getPipeline();
++
++    $pipeline->dispatch(ImageDerivativePipelineEvents::RESOLVE_DERIVATIVE_IMAGE_URI);
++
++    // Get the folder for the final location of this style.
++    $directory = $this->fileSystem->dirname($pipeline->getVariable('derivativeImageUri'));
++
++    // Build the destination folder tree if it doesn't already exist.
++    if (!$this->fileSystem->prepareDirectory($directory, FileSystemInterface::CREATE_DIRECTORY | FileSystemInterface::MODIFY_PERMISSIONS)) {
++      $this->logger->error('Failed to create style directory: %directory', ['%directory' => $directory]);
++      throw new ImageProcessException('Failed to create style directory');
++    }
++
++    if (!$pipeline->getImage()->save($pipeline->getVariable('derivativeImageUri'))) {
++      if (file_exists($pipeline->getVariable('derivativeImageUri'))) {
++        $this->logger->error('Cached image file %destination already exists. There may be an issue with your rewrite configuration.', ['%destination' => $pipeline->getVariable('derivativeImageUri')]);
++      }
++      throw new ImageProcessException('Cached image file already exists');
++    }
++  }
++
++  /**
++   * Produces an image derivative.
++   *
++   * @param \Drupal\image\Event\ImageProcessEvent $event
++   *   The image process event, carrying the process pipeline object.
++   */
++  public function buildDerivativeImage(ImageProcessEvent $event): void {
++    $event->getPipeline()
++      ->dispatch(ImageDerivativePipelineEvents::RESOLVE_SOURCE_IMAGE_PROCESSABLE)
++      ->dispatch(ImageDerivativePipelineEvents::LOAD_SOURCE_IMAGE)
++      ->dispatch(ImageDerivativePipelineEvents::APPLY_IMAGE_STYLE)
++      ->dispatch(ImageDerivativePipelineEvents::SAVE_DERIVATIVE_IMAGE);
++  }
++
++  /**
++   * Applies an image style to the image object.
++   *
++   * @param \Drupal\image\Event\ImageProcessEvent $event
++   *   The image process event, carrying the process pipeline object.
++   */
++  public function applyImageStyle(ImageProcessEvent $event): void {
++    $pipeline = $event->getPipeline();
++
++    // Apply the image effects to the image object.
++    foreach ($pipeline->getVariable('imageStyle')->getEffects() as $effect) {
++      $pipeline->dispatch(
++        ImageDerivativePipelineEvents::APPLY_IMAGE_EFFECT, [
++          'imageEffect' => $effect,
++        ]);
++    }
++  }
++
++  /**
++   * Applies a single image effect to the image object.
++   *
++   * @param \Drupal\image\Event\ImageProcessEvent $event
++   *   The image process event, carrying the process pipeline object.
++   */
++  public function applyImageEffect(ImageProcessEvent $event): void {
++    $pipeline = $event->getPipeline();
++    $effect = $event->getArgument('imageEffect');
++    $effect->applyEffect($pipeline->getImage());
++  }
++
++  /**
++   * Removes an image derivative file based on its source file URI.
++   *
++   * @param \Drupal\image\Event\ImageProcessEvent $event
++   *   The image process event, carrying the process pipeline object.
++   */
++  public function removeDerivativeImage(ImageProcessEvent $event): void {
++    $pipeline = $event->getPipeline();
++
++    try {
++      // Remove a single image derivative.
++      $pipeline->dispatch(ImageDerivativePipelineEvents::RESOLVE_DERIVATIVE_IMAGE_URI);
++      if ($pipeline->hasVariable('derivativeImageUri') && file_exists($pipeline->getVariable('derivativeImageUri'))) {
++        $this->fileSystem->delete($pipeline->getVariable('derivativeImageUri'));
++      }
++    }
++    catch (ImageProcessException $e) {
++      // Do nothing if derivative is non determinable.
++    }
++  }
++
++  /**
++   * Flushes all image derivatives for the specified image style.
++   *
++   * @param \Drupal\image\Event\ImageStyleEvent $event
++   *   The image style event.
++   */
++  public function flushImageStyle(ImageStyleEvent $event): void {
++    $image_style = $event->getImageStyle();
++
++    // Delete the style directory in each registered wrapper.
++    $wrappers = $this->streamWrapperManager->getWrappers(StreamWrapperInterface::WRITE_VISIBLE);
++    foreach ($wrappers as $wrapper => $wrapper_data) {
++      if (file_exists($directory = $wrapper . '://styles/' . $image_style->id())) {
++        $this->fileSystem->deleteRecursive($directory);
++      }
++    }
++
++    // Let other modules update as necessary on flush.
++    $this->moduleHandler->invokeAllDeprecated("is deprecated since version 9.x.x and will be removed in y.y.y.", 'image_style_flush', [$image_style]);
++
++    // Clear caches so that formatters may be added for this style.
++    drupal_theme_rebuild();
++
++    Cache::invalidateTags($image_style->getCacheTagsToInvalidate());
++  }
++
++  /**
++   * Flushes all derivative versions of a specific file in all styles.
++   *
++   * @param \Drupal\image\Event\ImageStyleEvent $event
++   *   The image style event.
++   */
++  public function flushFromSourceImageUri(ImageStyleEvent $event): void {
++    foreach (ImageStyle::loadMultiple() as $style) {
++      $this->imageProcessor->createInstance('derivative')
++        ->setImageStyle($style)
++        ->setSourceImageUri($event->getArgument('sourceImageUri'))
++        ->dispatch(ImageDerivativePipelineEvents::REMOVE_DERIVATIVE_IMAGE);
++    }
++  }
++
++}
+diff --git a/core/modules/image/src/ImageProcessException.php b/core/modules/image/src/ImageProcessException.php
+new file mode 100644
+index 0000000000..009a8218d7
+--- /dev/null
++++ b/core/modules/image/src/ImageProcessException.php
+@@ -0,0 +1,8 @@
++<?php
++
++namespace Drupal\image;
++
++/**
++ * Throw this exception to signal errors while processing images.
++ */
++class ImageProcessException extends \RuntimeException {}
+diff --git a/core/modules/image/src/ImageProcessPipelineInterface.php b/core/modules/image/src/ImageProcessPipelineInterface.php
+new file mode 100644
+index 0000000000..c6c668ab58
+--- /dev/null
++++ b/core/modules/image/src/ImageProcessPipelineInterface.php
+@@ -0,0 +1,102 @@
++<?php
++
++namespace Drupal\image;
++
++use Drupal\Component\Plugin\PluginInspectionInterface;
++use Drupal\Core\Image\ImageInterface;
++use Drupal\Core\Plugin\ContainerFactoryPluginInterface;
++
++/**
++ * Provides an interface defining an ImageProcessPipeline plugin.
++ */
++interface ImageProcessPipelineInterface extends ContainerFactoryPluginInterface, PluginInspectionInterface {
++
++  /**
++   * Sets a pipeline variable to a specified value.
++   *
++   * @param string $variable
++   *   The variable to set.
++   * @param mixed $value
++   *   The value to set.
++   *
++   * @return self
++   */
++  public function setVariable(string $variable, $value): ImageProcessPipelineInterface;
++
++  /**
++   * Returns the value of a pipeline variable.
++   *
++   * @param string $variable
++   *   The variable to get.
++   *
++   * @return mixed
++   *   The value of the variable.
++   *
++   * @throws \Drupal\image\ImageProcessException
++   *   If the variable is not set.
++   */
++  public function getVariable(string $variable);
++
++  /**
++   * Returns whether a pipeline variable is set.
++   *
++   * @param string $variable
++   *   The variable to check.
++   *
++   * @return bool
++   *   TRUE if the variable is set, FALSE otherwise.
++   */
++  public function hasVariable(string $variable): bool;
++
++  /**
++   * Deletes a pipeline variable.
++   *
++   * @param string $variable
++   *   The variable to delete.
++   *
++   * @return self
++   */
++  public function deleteVariable(string $variable): ImageProcessPipelineInterface;
++
++  /**
++   * Sets the Image object to be manipulated.
++   *
++   * @param \Drupal\Core\Image\ImageInterface $image
++   *   The ImageInterface object to be derived.
++   *
++   * @return self
++   */
++  public function setImage(ImageInterface $image): ImageProcessPipelineInterface;
++
++  /**
++   * Returns the current Image object.
++   *
++   * @return \Drupal\Core\Image\ImageInterface
++   *   The ImageInterface object to be derived.
++   */
++  public function getImage(): ImageInterface;
++
++  /**
++   * Returns whether the Image object is set.
++   *
++   * @return bool
++   *   TRUE if the Image is set, FALSE otherwise.
++   */
++  public function hasImage(): bool;
++
++  /**
++   * Dispatches an event to be executed on the pipeline.
++   *
++   * The event envelope will contain the pipeline itself as the subject, and any
++   * additional argument specified.
++   *
++   * @param string $event
++   *   The event identifier.
++   * @param array $arguments
++   *   (Optional) Additional arguments for the event.
++   *
++   * @return self
++   */
++  public function dispatch(string $event, array $arguments = []): ImageProcessPipelineInterface;
++
++}
+diff --git a/core/modules/image/src/ImageProcessor.php b/core/modules/image/src/ImageProcessor.php
+new file mode 100644
+index 0000000000..69c719ce0f
+--- /dev/null
++++ b/core/modules/image/src/ImageProcessor.php
+@@ -0,0 +1,30 @@
++<?php
++
++namespace Drupal\image;
++
++use Drupal\Core\Cache\CacheBackendInterface;
++use Drupal\Core\Extension\ModuleHandlerInterface;
++use Drupal\Core\Plugin\DefaultPluginManager;
++use Drupal\image\Annotation\ImageProcessPipeline;
++
++/**
++ * Service to manage ImageProcessPipeline plugins.
++ */
++class ImageProcessor extends DefaultPluginManager {
++
++  /**
++   * {@inheritdoc}
++   */
++  public function __construct(\Traversable $namespaces, CacheBackendInterface $cacheDiscovery, ModuleHandlerInterface $module_handler) {
++    parent::__construct(
++      'Plugin/ImageProcessPipeline',
++      $namespaces,
++      $module_handler,
++      ImageProcessPipelineInterface::class,
++      ImageProcessPipeline::class
++    );
++    $this->alterInfo('image_process_pipeline_plugin_info');
++    $this->setCacheBackend($cacheDiscovery, 'image_process_pipeline_plugins');
++  }
++
++}
+diff --git a/core/modules/image/src/ImageStyleInterface.php b/core/modules/image/src/ImageStyleInterface.php
+index 2339858e76..573585a954 100644
+--- a/core/modules/image/src/ImageStyleInterface.php
++++ b/core/modules/image/src/ImageStyleInterface.php
+@@ -40,6 +40,8 @@ public function setName($name);
+    *
+    * @return string
+    *   The URI to the image derivative for this style.
++   *
++   * @todo deprecated since version 9.x.x and will be removed in y.y.y.
     */
--  protected $statementWrapperClass = StatementWrapper::class;
-+  protected $statementWrapperClass = StatementWrapperIterator::class;
+   public function buildUri($uri);
  
-   /**
-    * Flag to indicate if the cleanup function in __destruct() should run.
-diff --git a/core/modules/mysql/tests/src/Unit/ConnectionTest.php b/core/modules/mysql/tests/src/Unit/ConnectionTest.php
-index 878d7672ad..5ebe43b626 100644
---- a/core/modules/mysql/tests/src/Unit/ConnectionTest.php
-+++ b/core/modules/mysql/tests/src/Unit/ConnectionTest.php
-@@ -77,9 +77,9 @@ public function __construct(\PDO $connection) {
+@@ -57,6 +59,8 @@ public function buildUri($uri);
+    *
+    * @see \Drupal\image\Controller\ImageStyleDownloadController::deliver()
+    * @see \Drupal\Core\File\FileUrlGeneratorInterface::transformRelative()
++   *
++   * @todo deprecated since version 9.x.x and will be removed in y.y.y.
     */
-   public function testVersionAndIsMariaDb(bool $expected_is_mariadb, string $server_version, string $expected_version): void {
-     $this->pdoStatement
--      ->fetchColumn(Argument::any())
-+      ->fetch(Argument::any())
-       ->shouldBeCalled()
--      ->willReturn($server_version);
-+      ->willReturn([$server_version]);
+   public function buildUrl($path, $clean_urls = NULL);
  
-     $connection = $this->createConnection();
- 
-diff --git a/core/modules/pgsql/src/Driver/Database/pgsql/Connection.php b/core/modules/pgsql/src/Driver/Database/pgsql/Connection.php
-index 8417ed831b..a458b5d4e4 100644
---- a/core/modules/pgsql/src/Driver/Database/pgsql/Connection.php
-+++ b/core/modules/pgsql/src/Driver/Database/pgsql/Connection.php
-@@ -7,7 +7,7 @@
- use Drupal\Core\Database\DatabaseAccessDeniedException;
- use Drupal\Core\Database\DatabaseNotFoundException;
- use Drupal\Core\Database\StatementInterface;
--use Drupal\Core\Database\StatementWrapper;
-+use Drupal\Core\Database\StatementWrapperIterator;
- use Drupal\Core\Database\SupportsTemporaryTablesInterface;
- 
- // cSpell:ignore ilike nextval
-@@ -43,7 +43,7 @@ class Connection extends DatabaseConnection implements SupportsTemporaryTablesIn
-   /**
-    * {@inheritdoc}
+@@ -72,6 +76,8 @@ public function buildUrl($path, $clean_urls = NULL);
+    * @return string
+    *   An eight-character token which can be used to protect image style
+    *   derivatives against denial-of-service attacks.
++   *
++   * @todo deprecated since version 9.x.x and will be removed in y.y.y.
     */
--  protected $statementWrapperClass = StatementWrapper::class;
-+  protected $statementWrapperClass = StatementWrapperIterator::class;
+   public function getPathToken($uri);
+ 
+@@ -100,6 +106,8 @@ public function flush($path = NULL);
+    * @return bool
+    *   TRUE if an image derivative was generated, or FALSE if the image
+    *   derivative could not be generated.
++   *
++   * @todo deprecated since version 9.x.x and will be removed in y.y.y.
+    */
+   public function createDerivative($original_uri, $derivative_uri);
+ 
+@@ -124,6 +132,8 @@ public function createDerivative($original_uri, $derivative_uri);
+    *   performance.
+    *
+    * @see ImageEffectInterface::transformDimensions
++   *
++   * @todo deprecated since version 9.x.x and will be removed in y.y.y.
+    */
+   public function transformDimensions(array &$dimensions, $uri);
+ 
+@@ -136,6 +146,8 @@ public function transformDimensions(array &$dimensions, $uri);
+    * @return string
+    *   The extension the derivative image will have, given the extension of the
+    *   original.
++   *
++   * @todo deprecated since version 9.x.x and will be removed in y.y.y.
+    */
+   public function getDerivativeExtension($extension);
+ 
+@@ -187,6 +199,8 @@ public function deleteImageEffect(ImageEffectInterface $effect);
+    *
+    * @return bool
+    *   TRUE if the image is supported, FALSE otherwise.
++   *
++   * @todo deprecated since version 9.x.x and will be removed in y.y.y.
+    */
+   public function supportsUri($uri);
+ 
+diff --git a/core/modules/image/src/Plugin/Field/FieldFormatter/ImageFormatter.php b/core/modules/image/src/Plugin/Field/FieldFormatter/ImageFormatter.php
+index ab2c11c2e5..6c857141ab 100644
+--- a/core/modules/image/src/Plugin/Field/FieldFormatter/ImageFormatter.php
++++ b/core/modules/image/src/Plugin/Field/FieldFormatter/ImageFormatter.php
+@@ -10,6 +10,7 @@
+ use Drupal\Core\Session\AccountInterface;
+ use Drupal\Core\Url;
+ use Drupal\image\Entity\ImageStyle;
++use Drupal\image\ImageProcessor;
+ use Symfony\Component\DependencyInjection\ContainerInterface;
+ use Drupal\Core\Form\FormStateInterface;
+ use Drupal\Core\Cache\Cache;
+@@ -48,6 +49,13 @@ class ImageFormatter extends ImageFormatterBase {
+    */
+   protected $fileUrlGenerator;
+ 
++  /**
++   * The image processor service.
++   *
++   * @var \Drupal\image\ImageProcessor
++   */
++  protected $imageProcessor;
++
+   /**
+    * Constructs an ImageFormatter object.
+    *
+@@ -71,12 +79,15 @@ class ImageFormatter extends ImageFormatterBase {
+    *   The image style storage.
+    * @param \Drupal\Core\File\FileUrlGeneratorInterface $file_url_generator
+    *   The file URL generator.
++   * @param \Drupal\image\ImageProcessor $image_processor
++   *   The image processor service.
+    */
+-  public function __construct($plugin_id, $plugin_definition, FieldDefinitionInterface $field_definition, array $settings, $label, $view_mode, array $third_party_settings, AccountInterface $current_user, EntityStorageInterface $image_style_storage, FileUrlGeneratorInterface $file_url_generator) {
++  public function __construct($plugin_id, $plugin_definition, FieldDefinitionInterface $field_definition, array $settings, $label, $view_mode, array $third_party_settings, AccountInterface $current_user, EntityStorageInterface $image_style_storage, FileUrlGeneratorInterface $file_url_generator, ImageProcessor $image_processor = NULL) {
+     parent::__construct($plugin_id, $plugin_definition, $field_definition, $settings, $label, $view_mode, $third_party_settings);
+     $this->currentUser = $current_user;
+     $this->imageStyleStorage = $image_style_storage;
+     $this->fileUrlGenerator = $file_url_generator;
++    $this->imageProcessor = $image_processor;
+   }
  
    /**
-    * A map of condition operators to PostgreSQL operators.
-diff --git a/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php b/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
-index e46a01d8e7..fc46544d59 100644
---- a/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
-+++ b/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
-@@ -645,4 +645,17 @@ public function provideQueriesToTrim() {
-     ];
+@@ -93,7 +104,8 @@ public static function create(ContainerInterface $container, array $configuratio
+       $configuration['third_party_settings'],
+       $container->get('current_user'),
+       $container->get('entity_type.manager')->getStorage('image_style'),
+-      $container->get('file_url_generator')
++      $container->get('file_url_generator'),
++      $container->get(ImageProcessor::class)
+     );
+   }
+ 
+diff --git a/core/modules/image/src/Plugin/Field/FieldFormatter/ImageUrlFormatter.php b/core/modules/image/src/Plugin/Field/FieldFormatter/ImageUrlFormatter.php
+index dc4557949c..09b1ed8e3d 100644
+--- a/core/modules/image/src/Plugin/Field/FieldFormatter/ImageUrlFormatter.php
++++ b/core/modules/image/src/Plugin/Field/FieldFormatter/ImageUrlFormatter.php
+@@ -10,6 +10,7 @@
+ use Drupal\Core\Link;
+ use Drupal\Core\Session\AccountInterface;
+ use Drupal\Core\Url;
++use Drupal\image\ImageProcessor;
+ use Symfony\Component\DependencyInjection\ContainerInterface;
+ 
+ /**
+@@ -39,6 +40,13 @@ class ImageUrlFormatter extends ImageFormatterBase {
+    */
+   protected $currentUser;
+ 
++  /**
++   * The image processor service.
++   *
++   * @var \Drupal\image\ImageProcessor
++   */
++  protected $imageProcessor;
++
+   /**
+    * Constructs an ImageFormatter object.
+    *
+@@ -60,11 +68,14 @@ class ImageUrlFormatter extends ImageFormatterBase {
+    *   The image style storage.
+    * @param \Drupal\Core\Session\AccountInterface $current_user
+    *   The current user.
++   * @param \Drupal\image\ImageProcessor $image_processor
++   *   The image processor service.
+    */
+-  public function __construct($plugin_id, $plugin_definition, FieldDefinitionInterface $field_definition, array $settings, $label, $view_mode, array $third_party_settings, EntityStorageInterface $image_style_storage, AccountInterface $current_user) {
++  public function __construct($plugin_id, $plugin_definition, FieldDefinitionInterface $field_definition, array $settings, $label, $view_mode, array $third_party_settings, EntityStorageInterface $image_style_storage, AccountInterface $current_user, ImageProcessor $image_processor = NULL) {
+     parent::__construct($plugin_id, $plugin_definition, $field_definition, $settings, $label, $view_mode, $third_party_settings);
+     $this->imageStyleStorage = $image_style_storage;
+     $this->currentUser = $current_user;
++    $this->imageProcessor = $image_processor;
+   }
+ 
+   /**
+@@ -81,6 +92,7 @@ public static function create(ContainerInterface $container, array $configuratio
+       $configuration['third_party_settings'],
+       $container->get('entity_type.manager')->getStorage('image_style'),
+       $container->get('current_user'),
++      $container->get(ImageProcessor::class),
+     );
+   }
+ 
+@@ -161,7 +173,17 @@ public function viewElements(FieldItemListInterface $items, $langcode) {
+     /** @var \Drupal\file\FileInterface[] $images */
+     foreach ($images as $delta => $image) {
+       $image_uri = $image->getFileUri();
+-      $url = $image_style ? $file_url_generator->transformRelative($image_style->buildUrl($image_uri)) : $file_url_generator->generateString($image_uri);
++      if ($image_style) {
++        $url = $this->imageProcessor->createInstance('derivative')
++          ->setImageStyle($image_style)
++          ->setSourceImageUri($image_uri)
++          ->getDerivativeImageUrl()
++          ->toString();
++      }
++      else {
++        $url = $file_url_generator->generateString($image_uri);
++      }
++      $url = $file_url_generator->transformRelative($url);
+ 
+       // Add cacheability metadata from the image and image style.
+       $cacheability = CacheableMetadata::createFromObject($image);
+diff --git a/core/modules/image/src/Plugin/ImageProcessPipeline/Derivative.php b/core/modules/image/src/Plugin/ImageProcessPipeline/Derivative.php
+new file mode 100644
+index 0000000000..e514d5a8f3
+--- /dev/null
++++ b/core/modules/image/src/Plugin/ImageProcessPipeline/Derivative.php
+@@ -0,0 +1,248 @@
++<?php
++
++namespace Drupal\image\Plugin\ImageProcessPipeline;
++
++use Drupal\Core\Image\ImageInterface;
++use Drupal\Core\Url;
++use Drupal\image\Event\ImageDerivativePipelineEvents;
++use Drupal\image\ImageProcessException;
++use Drupal\image\ImageProcessPipelineInterface;
++use Drupal\image\ImageStyleInterface;
++
++/**
++ * ImageProcessPipeline to produce image derivatives through image styles.
++ *
++ * @ImageProcessPipeline(
++ *   id = "derivative",
++ *   description = @Translation("Processes source images through image style configuration to produce image derivatives."),
++ * )
++ */
++class Derivative extends ImageProcessPipelineBase {
++
++  /**
++   * Sets the 'imageToolkitId' variable.
++   *
++   * @param string $toolkit_id
++   *   The id of the image toolkit to use to produce the derivative image.
++   *
++   * @return $this
++   */
++  public function setImageToolkitId(string $toolkit_id): self {
++    $this->setVariable('imageToolkitId', $toolkit_id);
++    return $this;
++  }
++
++  /**
++   * Sets the 'sourceImageUri' variable.
++   *
++   * @param string $uri
++   *   The URI of the source image file.
++   *
++   * @return $this
++   */
++  public function setSourceImageUri(string $uri): self {
++    $this->setVariable('sourceImageUri', $uri);
++    return $this;
++  }
++
++  /**
++   * Sets the 'sourceImageFileExtension' variable.
++   *
++   * Normally this method should not be called, the pipeline will determine the
++   * image file extension based on the source URI. This method will override
++   * that.
++   *
++   * @param string $extension
++   *   An image file extension.
++   *
++   * @return $this
++   */
++  public function setSourceImageFileExtension(string $extension): self {
++    $this->setVariable('sourceImageFileExtension', $extension);
++    return $this;
++  }
++
++  /**
++   * Sets the 'imageStyle' variable.
++   *
++   * @param \Drupal\image\ImageStyleInterface $image_style
++   *   The ImageStyle config entity to use for derivative creation.
++   *
++   * @return $this
++   */
++  public function setImageStyle(ImageStyleInterface $image_style): self {
++    $this->setVariable('imageStyle', $image_style);
++    return $this;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function setImage(ImageInterface $image): ImageProcessPipelineInterface {
++    if (!$this->hasVariable('sourceImageUri')) {
++      $this->setVariable('sourceImageUri', NULL);
++    }
++    return parent::setImage($image);
++  }
++
++  /**
++   * Sets the 'sourceImageWidth' and 'sourceImageHeight' variables.
++   *
++   * @param int|null $width
++   *   (Optional) Integer with the starting image width.
++   * @param int|null $height
++   *   (Optional) Integer with the starting image height.
++   *
++   * @return $this
++   */
++  public function setSourceImageDimensions(?int $width, ?int $height): self {
++    $this->setVariable('sourceImageWidth', $width);
++    $this->setVariable('sourceImageHeight', $height);
++    return $this;
++  }
++
++  /**
++   * Sets the 'derivativeImageUri' variable.
++   *
++   * Normally this method should not be called, the pipeline will determine the
++   * derivative URI based on the source URI. This method will override that.
++   *
++   * @param string $uri
++   *   Derivative image file URI.
++   *
++   * @return $this
++   */
++  public function setDerivativeImageUri(string $uri): self {
++    $this->setVariable('derivativeImageUri', $uri);
++    return $this;
++  }
++
++  /**
++   * Sets the 'setCleanUrl' variable.
++   *
++   * @param bool|null $clean_url
++   *   (Optional) Whether clean URLs are in use.
++   *
++   * @return $this
++   */
++  public function setCleanUrl(?bool $clean_url): self {
++    $this->setVariable('setCleanUrl', $clean_url);
++    return $this;
++  }
++
++  /**
++   * Determines if the source image at URI can be derived.
++   *
++   * Takes the source URI and the image style to determine if the image file
++   * can be loaded, transformed and saved as a derivative image.
++   *
++   * @return bool
++   *   TRUE if the image is supported, FALSE otherwise.
++   */
++  public function isSourceImageProcessable(): bool {
++    $this->dispatch(ImageDerivativePipelineEvents::RESOLVE_SOURCE_IMAGE_PROCESSABLE);
++    return $this->getVariable('isSourceImageProcessable');
++  }
++
++  /**
++   * Determines the extension of the derivative image.
++   *
++   * @return string
++   *   The extension the derivative image will have, given the extension of the
++   *   original.
++   */
++  public function getDerivativeImageFileExtension(): string {
++    $this->dispatch(ImageDerivativePipelineEvents::RESOLVE_DERIVATIVE_IMAGE_FORMAT);
++    return $this->getVariable('derivativeImageFileExtension');
++  }
++
++  /**
++   * Determines the width of the derivative image.
++   *
++   * @return int|null
++   *   The width of the derivative image, or NULL if it cannot be calculated.
++   */
++  public function getDerivativeImageWidth(): ?int {
++    $this->dispatch(ImageDerivativePipelineEvents::RESOLVE_DERIVATIVE_IMAGE_DIMENSIONS);
++    return $this->getVariable('derivativeImageWidth');
++  }
++
++  /**
++   * Determines the height of the derivative image.
++   *
++   * @return int|null
++   *   The height of the derivative image, or NULL if it cannot be calculated.
++   */
++  public function getDerivativeImageHeight(): ?int {
++    $this->dispatch(ImageDerivativePipelineEvents::RESOLVE_DERIVATIVE_IMAGE_DIMENSIONS);
++    return $this->getVariable('derivativeImageHeight');
++  }
++
++  /**
++   * Returns the URI of the derivative image file.
++   *
++   * Takes the source URI and the image style to determine the derivative URI.
++   * The path returned by this function may not exist. The default generation
++   * method only creates images when they are requested by a user's browser.
++   * Plugins may implement this method to decide where to place derivatives.
++   *
++   * @return string
++   *   The URI to the image derivative for this style.
++   */
++  public function getDerivativeImageUri(): string {
++    $this->dispatch(ImageDerivativePipelineEvents::RESOLVE_DERIVATIVE_IMAGE_URI);
++    return $this->getVariable('derivativeImageUri');
++  }
++
++  /**
++   * Returns the URL of the derivative image file.
++   *
++   * Takes the source URI and the image style to determine the derivative URL.
++   *
++   * @return \Drupal\Core\Url
++   *   The absolute URL where a style image can be downloaded, suitable for use
++   *   in an <img> tag.
++   *
++   * @see \Drupal\image\Controller\ImageStyleDownloadController::deliver()
++   * @see \Drupal\Core\File\FileUrlGeneratorInterface::transformRelative()
++   */
++  public function getDerivativeImageUrl(): Url {
++    $this->dispatch(ImageDerivativePipelineEvents::RESOLVE_DERIVATIVE_IMAGE_URL);
++    return $this->getVariable('derivativeImageUrl');
++  }
++
++  /**
++   * Returns a token to protect an image style derivative.
++   *
++   * This prevents unauthorized generation of an image style derivative,
++   * which can be costly both in CPU time and disk space.
++   *
++   * @return string
++   *   An eight-character token which can be used to protect image style
++   *   derivatives against denial-of-service attacks.
++   */
++  public function getDerivativeImageUrlSecurityToken(): ?string {
++    $this->dispatch(ImageDerivativePipelineEvents::RESOLVE_DERIVATIVE_IMAGE_URL_PROTECTION);
++    return $this->hasVariable('derivativeImageUrlProtection') ? $this->getVariable('derivativeImageUrlProtection')[IMAGE_DERIVATIVE_TOKEN] : NULL;
++  }
++
++  /**
++   * Transform an image based on the image style settings.
++   *
++   * Generates an image derivative applying all image effects. Takes the source
++   * URI or an ImageInterface object and the image style to process the image.
++   *
++   * @return bool
++   *   TRUE if the image was transformed, or FALSE in case of failure.
++   */
++  public function buildDerivativeImage(): bool {
++    try {
++      $this->dispatch(ImageDerivativePipelineEvents::BUILD_DERIVATIVE_IMAGE);
++      return TRUE;
++    }
++    catch (ImageProcessException $e) {
++      return FALSE;
++    }
++  }
++
++}
+diff --git a/core/modules/image/src/Plugin/ImageProcessPipeline/ImageProcessPipelineBase.php b/core/modules/image/src/Plugin/ImageProcessPipeline/ImageProcessPipelineBase.php
+new file mode 100644
+index 0000000000..10d686d2d5
+--- /dev/null
++++ b/core/modules/image/src/Plugin/ImageProcessPipeline/ImageProcessPipelineBase.php
+@@ -0,0 +1,138 @@
++<?php
++
++namespace Drupal\image\Plugin\ImageProcessPipeline;
++
++use Drupal\Core\Image\ImageInterface;
++use Drupal\Core\KeyValueStore\MemoryStorage;
++use Drupal\Core\Plugin\PluginBase;
++use Drupal\image\Event\ImageProcessEvent;
++use Drupal\image\ImageProcessException;
++use Drupal\image\ImageProcessPipelineInterface;
++use Symfony\Component\DependencyInjection\ContainerInterface;
++use Symfony\Component\EventDispatcher\EventDispatcherInterface;
++
++/**
++ * ImageProcessPipeline base class.
++ */
++class ImageProcessPipelineBase extends PluginBase implements ImageProcessPipelineInterface {
++
++  /**
++   * The event dispatcher.
++   *
++   * @var \Symfony\Component\EventDispatcher\EventDispatcherInterface
++   */
++  protected $eventDispatcher;
++
++  /**
++   * A pool of variables required to derive images.
++   *
++   * @var \Drupal\Core\KeyValueStore\MemoryStorage
++   */
++  protected $variables;
++
++  /**
++   * The Image object being processed.
++   *
++   * @var \Drupal\Core\Image\ImageInterface
++   */
++  protected $image;
++
++  /**
++   * Constructs a ImageProcessPipeline plugin.
++   *
++   * @param array $configuration
++   *   A configuration array containing information about the plugin instance.
++   * @param string $plugin_id
++   *   The plugin_id for the plugin instance.
++   * @param array $plugin_definition
++   *   The plugin implementation definition.
++   * @param \Symfony\Component\EventDispatcher\EventDispatcherInterface $dispatcher
++   *   The event dispatcher.
++   */
++  public function __construct(array $configuration, $plugin_id, array $plugin_definition, EventDispatcherInterface $dispatcher) {
++    parent::__construct($configuration, $plugin_id, $plugin_definition);
++    $this->variables = new MemoryStorage('image_pipeline_variables');
++    $this->eventDispatcher = $dispatcher;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public static function create(ContainerInterface $container, array $configuration, $plugin_id, $plugin_definition) {
++    return new static(
++      $configuration,
++      $plugin_id,
++      $plugin_definition,
++      $container->get('event_dispatcher')
++    );
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function setVariable(string $variable, $value): ImageProcessPipelineInterface {
++    $this->variables->set($variable, $value);
++    return $this;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function getVariable(string $variable) {
++    if (!$this->variables->has($variable)) {
++      throw new ImageProcessException("Variable {$variable} not set");
++    }
++    return $this->variables->get($variable);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function hasVariable(string $variable): bool {
++    return $this->variables->has($variable);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function deleteVariable(string $variable): ImageProcessPipelineInterface {
++    $this->variables->delete($variable);
++    return $this;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function setImage(ImageInterface $image): ImageProcessPipelineInterface {
++    $this->image = $image;
++    return $this;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function getImage(): ImageInterface {
++    return $this->image;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function hasImage(): bool {
++    return (bool) $this->image;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function dispatch(string $event, array $arguments = []): ImageProcessPipelineInterface {
++    try {
++      $this->eventDispatcher->dispatch(new ImageProcessEvent($this, $arguments), $event);
++    }
++    catch (ImageProcessException $e) {
++      throw new ImageProcessException("Failure processing '$event': " . $e->getMessage(), $e->getCode(), $e);
++    }
++    return $this;
++  }
++
++}
+diff --git a/core/modules/image/tests/src/Functional/FileMoveTest.php b/core/modules/image/tests/src/Functional/FileMoveTest.php
+index 6de0c1bb2c..029f999021 100644
+--- a/core/modules/image/tests/src/Functional/FileMoveTest.php
++++ b/core/modules/image/tests/src/Functional/FileMoveTest.php
+@@ -5,6 +5,7 @@
+ use Drupal\Core\File\FileSystemInterface;
+ use Drupal\file\Entity\File;
+ use Drupal\image\Entity\ImageStyle;
++use Drupal\image\ImageProcessor;
+ use Drupal\Tests\BrowserTestBase;
+ use Drupal\Tests\TestFileCreationTrait;
+ 
+@@ -49,8 +50,13 @@ protected function setUp(): void {
+ 
+   /**
+    * Tests moving a randomly generated image.
++   *
++   * @group legacy
+    */
+-  public function testNormal() {
++  public function testNormalLegacy() {
++    $this->expectDeprecation('The Drupal\image\Entity\ImageStyle::buildUri method is deprecated since version 9.x.x and will be removed in y.y.y.');
++    $this->expectDeprecation('The Drupal\image\Entity\ImageStyle::createDerivative method is deprecated since version 9.x.x and will be removed in y.y.y.');
++
+     // Pick a file for testing.
+     $file = File::create((array) current($this->drupalGetTestFiles('image')));
+ 
+@@ -76,4 +82,36 @@ public function testNormal() {
+     $this->assertFileDoesNotExist($derivative_uri);
    }
  
 +  /**
-+   * Tests deprecation of the StatementWrapper class.
-+   *
-+   * @group legacy
++   * Tests moving a randomly generated image.
 +   */
-+  public function testStatementWrapperDeprecation() {
-+    $this->expectDeprecation('\\Drupal\\Core\\Database\\StatementWrapper is deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. Use \\Drupal\\Core\\Database\\StatementWrapperIterator instead. See https://www.drupal.org/node/3265938');
-+    $mock_pdo = $this->createMock(StubPDO::class);
-+    $connection = new StubConnection($mock_pdo, []);
-+    $this->expectError();
-+    $connection->prepareStatement('boing', []);
++  public function testNormal() {
++    // Pick a file for testing.
++    $file = File::create((array) current($this->drupalGetTestFiles('image')));
++
++    // Create derivative image.
++    $styles = ImageStyle::loadMultiple();
++    $style = reset($styles);
++    $original_uri = $file->getFileUri();
++    $pipeline = \Drupal::service(ImageProcessor::class)->createInstance('derivative')
++      ->setImageStyle($style)
++      ->setSourceImageUri($original_uri);
++    $derivative_uri = $pipeline->getDerivativeImageUri();
++    $pipeline->buildDerivativeImage();
++
++    // Check if derivative image exists.
++    $this->assertFileExists($derivative_uri, 'Make sure derivative image is generated successfully.');
++
++    // Clone the object so we don't have to worry about the function changing
++    // our reference copy.
++    $desired_filepath = 'public://' . $this->randomMachineName();
++    $result = $this->fileRepository->move(clone $file, $desired_filepath, FileSystemInterface::EXISTS_ERROR);
++
++    // Check if image has been moved.
++    $this->assertFileExists($result->getFileUri(), 'Make sure image is moved successfully.');
++
++    // Check if derivative image has been flushed.
++    $this->assertFileDoesNotExist($derivative_uri, 'Make sure derivative image has been flushed.');
 +  }
 +
  }
+diff --git a/core/modules/image/tests/src/Functional/ImageAdminStylesTest.php b/core/modules/image/tests/src/Functional/ImageAdminStylesTest.php
+index 38f8ded293..acd10a540d 100644
+--- a/core/modules/image/tests/src/Functional/ImageAdminStylesTest.php
++++ b/core/modules/image/tests/src/Functional/ImageAdminStylesTest.php
+@@ -7,6 +7,7 @@
+ use Drupal\Core\Url;
+ use Drupal\file\Entity\File;
+ use Drupal\image\Entity\ImageStyle;
++use Drupal\image\ImageProcessor;
+ use Drupal\image\ImageStyleInterface;
+ use Drupal\node\Entity\Node;
+ use Drupal\Tests\TestFileCreationTrait;
+@@ -42,7 +43,10 @@ public function createSampleImage(ImageStyleInterface $style) {
+       $file_path = \Drupal::service('file_system')->copy($file->uri, 'public://');
+     }
+ 
+-    return $style->buildUrl($file_path) ? $file_path : FALSE;
++    $pipeline = \Drupal::service(ImageProcessor::class)->createInstance('derivative')
++      ->setImageStyle($style)
++      ->setSourceImageUri($file_path);
++    return $pipeline->getDerivativeImageUrl() ? $file_path : FALSE;
+   }
+ 
+   /**
+@@ -348,7 +352,10 @@ public function testStyleReplacement() {
+     $file_url_generator = \Drupal::service('file_url_generator');
+ 
+     $this->drupalGet('node/' . $nid);
+-    $this->assertSession()->responseContains($file_url_generator->transformRelative($style->buildUrl($original_uri)));
++    $pipeline = \Drupal::service(ImageProcessor::class)->createInstance('derivative')
++      ->setImageStyle($style)
++      ->setSourceImageUri($original_uri);
++    $this->assertSession()->responseContains($file_url_generator->transformRelative($pipeline->getDerivativeImageUrl()->toString()));
+ 
+     // Rename the style and make sure the image field is updated.
+     $new_style_name = strtolower($this->randomMachineName(10));
+@@ -364,7 +371,10 @@ public function testStyleReplacement() {
+ 
+     // Reload the image style using the new name.
+     $style = ImageStyle::load($new_style_name);
+-    $this->assertSession()->responseContains($file_url_generator->transformRelative($style->buildUrl($original_uri)));
++    $pipeline = \Drupal::service(ImageProcessor::class)->createInstance('derivative')
++      ->setImageStyle($style)
++      ->setSourceImageUri($original_uri);
++    $this->assertSession()->responseContains($file_url_generator->transformRelative($pipeline->getDerivativeImageUrl()->toString()));
+ 
+     // Delete the style and choose a replacement style.
+     $edit = [
+@@ -376,7 +386,10 @@ public function testStyleReplacement() {
+ 
+     $replacement_style = ImageStyle::load('thumbnail');
+     $this->drupalGet('node/' . $nid);
+-    $this->assertSession()->responseContains($file_url_generator->transformRelative($replacement_style->buildUrl($original_uri)));
++    $pipeline = \Drupal::service(ImageProcessor::class)->createInstance('derivative')
++      ->setImageStyle($replacement_style)
++      ->setSourceImageUri($original_uri);
++    $this->assertSession()->responseContains($file_url_generator->transformRelative($pipeline->getDerivativeImageUrl()->toString()));
+   }
+ 
+   /**
+@@ -448,8 +461,10 @@ public function testFlushUserInterface() {
+     // Create an image to make sure it gets flushed.
+     $files = $this->drupalGetTestFiles('image');
+     $image_uri = $files[0]->uri;
+-    $derivative_uri = $style->buildUri($image_uri);
+-    $this->assertTrue($style->createDerivative($image_uri, $derivative_uri));
++    $pipeline = \Drupal::service(ImageProcessor::class)->createInstance('derivative')
++      ->setImageStyle($style)
++      ->setSourceImageUri($image_uri);
++    $this->assertTrue($pipeline->buildDerivativeImage());
+     $this->assertEquals(1, $this->getImageCount($style));
+ 
+     // Go to image styles list page and check if the flush operation link
+@@ -498,7 +513,10 @@ public function testConfigImport() {
+ 
+     // Test that image is displayed using newly created style.
+     $this->drupalGet('node/' . $nid);
+-    $this->assertSession()->responseContains(\Drupal::service('file_url_generator')->transformRelative($style->buildUrl($original_uri)));
++    $pipeline = \Drupal::service(ImageProcessor::class)->createInstance('derivative')
++      ->setImageStyle($style)
++      ->setSourceImageUri($original_uri);
++    $this->assertSession()->responseContains(\Drupal::service('file_url_generator')->transformRelative($pipeline->getDerivativeImageUrl()->toString()));
+ 
+     // Copy config to sync, and delete the image style.
+     $sync = $this->container->get('config.storage.sync');
+diff --git a/core/modules/image/tests/src/Functional/ImageDimensionsTest.php b/core/modules/image/tests/src/Functional/ImageDimensionsTest.php
+index 83f5dc39db..8670262d33 100644
+--- a/core/modules/image/tests/src/Functional/ImageDimensionsTest.php
++++ b/core/modules/image/tests/src/Functional/ImageDimensionsTest.php
+@@ -4,6 +4,7 @@
+ 
+ use Drupal\Core\File\FileSystemInterface;
+ use Drupal\image\Entity\ImageStyle;
++use Drupal\image\ImageProcessor;
+ use Drupal\Tests\BrowserTestBase;
+ use Drupal\Tests\TestFileCreationTrait;
+ 
+@@ -35,8 +36,12 @@ class ImageDimensionsTest extends BrowserTestBase {
+ 
+   /**
+    * Tests styled image dimensions cumulatively.
++   *
++   * @group legacy
+    */
+-  public function testImageDimensions() {
++  public function testLegacyImageDimensions() {
++    $this->expectDeprecation('The Drupal\image\Entity\ImageStyle::buildUrl method is deprecated since version 9.x.x and will be removed in y.y.y.');
++
+     $image_factory = $this->container->get('image.factory');
+     // Create a working copy of the file.
+     $files = $this->drupalGetTestFiles('image');
+@@ -225,7 +230,7 @@ public function testImageDimensions() {
+     $style->save();
+     // @todo Uncomment this once
+     //   https://www.drupal.org/project/drupal/issues/2670966 is resolved.
+-    // $this->assertEquals('<img src="' . $url . '" width="41" height="41" alt="" class="image-style-test" />', $this->getImageTag($variables));
++    // $this->assertEquals('<img src="' . $url . '" width="41" height="41" alt="" />', $this->getImageTag($variables));
+     $this->assertFileDoesNotExist($generated_uri);
+     $this->drupalGet($this->getAbsoluteUrl($url));
+     $this->assertSession()->statusCodeEquals(200);
+@@ -293,6 +298,276 @@ public function testImageDimensions() {
+     $this->assertEquals(50, $image_file->getHeight());
+   }
+ 
++  /**
++   * Test styled image dimensions cumulatively.
++   */
++  public function testImageDimensions() {
++    $image_factory = $this->container->get('image.factory');
++    // Create a working copy of the file.
++    $files = $this->drupalGetTestFiles('image');
++    $file = reset($files);
++    /** @var \Drupal\Core\File\FileSystemInterface $file_system */
++    $file_system = \Drupal::service('file_system');
++    $original_uri = $file_system->copy($file->uri, 'public://', FileSystemInterface::EXISTS_RENAME);
++
++    // Create a style.
++    /** @var \Drupal\image\ImageStyleInterface $style */
++    $style = ImageStyle::create(['name' => 'test', 'label' => 'Test']);
++    $style->save();
++
++    $pipeline = \Drupal::service(ImageProcessor::class)->createInstance('derivative')
++      ->setImageStyle($style)
++      ->setSourceImageUri($original_uri);
++
++    $generated_uri = 'public://styles/test/public/' . $file_system->basename($original_uri);
++    $url = \Drupal::service('file_url_generator')->transformRelative($pipeline->getDerivativeImageUrl()->toString());
++
++    $variables = [
++      '#theme' => 'image_style',
++      '#style_name' => 'test',
++      '#uri' => $original_uri,
++      '#width' => 40,
++      '#height' => 20,
++    ];
++    // Verify that the original image matches the hard-coded values.
++    $image_file = $image_factory->get($original_uri);
++    $this->assertSame($variables['#width'], $image_file->getWidth());
++    $this->assertSame($variables['#height'], $image_file->getHeight());
++
++    // Scale an image that is wider than it is high.
++    $effect = [
++      'id' => 'image_scale',
++      'data' => [
++        'width' => 120,
++        'height' => 90,
++        'upscale' => TRUE,
++      ],
++      'weight' => 0,
++    ];
++
++    $style->addImageEffect($effect);
++    $style->save();
++    $this->assertSame('<img src="' . $url . '" width="120" height="60" alt="" loading="lazy" />', $this->getImageTag($variables));
++    $this->assertFileDoesNotExist($generated_uri, 'Generated file does not exist.');
++    $this->drupalGet($this->getAbsoluteUrl($url));
++    $this->assertSession()->statusCodeEquals(200);
++    $this->assertFileExists($generated_uri, 'Generated file does exist after we accessed it.');
++    $image_file = $image_factory->get($generated_uri);
++    $this->assertSame(120, $image_file->getWidth());
++    $this->assertSame(60, $image_file->getHeight());
++
++    // Rotate 90 degrees anticlockwise.
++    $effect = [
++      'id' => 'image_rotate',
++      'data' => [
++        'degrees' => -90,
++        'random' => FALSE,
++      ],
++      'weight' => 1,
++    ];
++
++    $style->addImageEffect($effect);
++    $style->save();
++    $this->assertSame('<img src="' . $url . '" width="60" height="120" alt="" loading="lazy" />', $this->getImageTag($variables));
++    $this->assertFileDoesNotExist($generated_uri, 'Generated file does not exist.');
++    $this->drupalGet($this->getAbsoluteUrl($url));
++    $this->assertSession()->statusCodeEquals(200);
++    $this->assertFileExists($generated_uri, 'Generated file does exist after we accessed it.');
++    $image_file = $image_factory->get($generated_uri);
++    $this->assertSame(60, $image_file->getWidth());
++    $this->assertSame(120, $image_file->getHeight());
++
++    // Scale an image that is higher than it is wide (rotated by previous effect).
++    $effect = [
++      'id' => 'image_scale',
++      'data' => [
++        'width' => 120,
++        'height' => 90,
++        'upscale' => TRUE,
++      ],
++      'weight' => 2,
++    ];
++
++    $style->addImageEffect($effect);
++    $style->save();
++    $this->assertSame('<img src="' . $url . '" width="45" height="90" alt="" loading="lazy" />', $this->getImageTag($variables));
++    $this->assertFileDoesNotExist($generated_uri, 'Generated file does not exist.');
++    $this->drupalGet($this->getAbsoluteUrl($url));
++    $this->assertSession()->statusCodeEquals(200);
++    $this->assertFileExists($generated_uri, 'Generated file does exist after we accessed it.');
++    $image_file = $image_factory->get($generated_uri);
++    $this->assertSame(45, $image_file->getWidth());
++    $this->assertSame(90, $image_file->getHeight());
++
++    // Test upscale disabled.
++    $effect = [
++      'id' => 'image_scale',
++      'data' => [
++        'width' => 400,
++        'height' => 200,
++        'upscale' => FALSE,
++      ],
++      'weight' => 3,
++    ];
++
++    $style->addImageEffect($effect);
++    $style->save();
++    $this->assertSame('<img src="' . $url . '" width="45" height="90" alt="" loading="lazy" />', $this->getImageTag($variables));
++    $this->assertFileDoesNotExist($generated_uri, 'Generated file does not exist.');
++    $this->drupalGet($this->getAbsoluteUrl($url));
++    $this->assertSession()->statusCodeEquals(200);
++    $this->assertFileExists($generated_uri, 'Generated file does exist after we accessed it.');
++    $image_file = $image_factory->get($generated_uri);
++    $this->assertSame(45, $image_file->getWidth());
++    $this->assertSame(90, $image_file->getHeight());
++
++    // Add a desaturate effect.
++    $effect = [
++      'id' => 'image_desaturate',
++      'data' => [],
++      'weight' => 4,
++    ];
++
++    $style->addImageEffect($effect);
++    $style->save();
++    $this->assertSame('<img src="' . $url . '" width="45" height="90" alt="" loading="lazy" />', $this->getImageTag($variables));
++    $this->assertFileDoesNotExist($generated_uri, 'Generated file does not exist.');
++    $this->drupalGet($this->getAbsoluteUrl($url));
++    $this->assertSession()->statusCodeEquals(200);
++    $this->assertFileExists($generated_uri, 'Generated file does exist after we accessed it.');
++    $image_file = $image_factory->get($generated_uri);
++    $this->assertSame(45, $image_file->getWidth());
++    $this->assertSame(90, $image_file->getHeight());
++
++    // Add a random rotate effect.
++    $effect = [
++      'id' => 'image_rotate',
++      'data' => [
++        'degrees' => 180,
++        'random' => TRUE,
++      ],
++      'weight' => 5,
++    ];
++
++    $style->addImageEffect($effect);
++    $style->save();
++    $this->assertSame('<img src="' . $url . '" alt="" />', $this->getImageTag($variables));
++    $this->assertFileDoesNotExist($generated_uri, 'Generated file does not exist.');
++    $this->drupalGet($this->getAbsoluteUrl($url));
++    $this->assertSession()->statusCodeEquals(200);
++    $this->assertFileExists($generated_uri, 'Generated file does exist after we accessed it.');
++
++    // Add a crop effect.
++    $effect = [
++      'id' => 'image_crop',
++      'data' => [
++        'width' => 30,
++        'height' => 30,
++        'anchor' => 'center-center',
++      ],
++      'weight' => 6,
++    ];
++
++    $style->addImageEffect($effect);
++    $style->save();
++    $this->assertEquals('<img src="' . $url . '" width="30" height="30" alt="" loading="lazy" />', $this->getImageTag($variables));
++    $this->assertFileDoesNotExist($generated_uri, 'Generated file does not exist.');
++    $this->drupalGet($this->getAbsoluteUrl($url));
++    $this->assertSession()->statusCodeEquals(200);
++    $this->assertFileExists($generated_uri, 'Generated file does exist after we accessed it.');
++    $image_file = $image_factory->get($generated_uri);
++    $this->assertSame(30, $image_file->getWidth());
++    $this->assertSame(30, $image_file->getHeight());
++
++    // Rotate to a non-multiple of 90 degrees.
++    $effect = [
++      'id' => 'image_rotate',
++      'data' => [
++        'degrees' => 57,
++        'random' => FALSE,
++      ],
++      'weight' => 7,
++    ];
++
++    $effect_id = $style->addImageEffect($effect);
++    $style->save();
++    // @todo Uncomment this once
++    //   https://www.drupal.org/project/drupal/issues/2670966 is resolved.
++    // $this->assertSame('<img src="' . $url . '" width="41" height="41" alt="" />', $this->getImageTag($variables));
++    $this->assertFileDoesNotExist($generated_uri, 'Generated file does not exist.');
++    $this->drupalGet($this->getAbsoluteUrl($url));
++    $this->assertSession()->statusCodeEquals(200);
++    $this->assertFileExists($generated_uri, 'Generated file does exist after we accessed it.');
++    $image_file = $image_factory->get($generated_uri);
++    // @todo Uncomment this once
++    //   https://www.drupal.org/project/drupal/issues/2670966 is resolved.
++    // $this->assertSame(41, $image_file->getWidth());
++    // $this->assertSame(41, $image_file->getHeight());
++
++    $effect_plugin = $style->getEffect($effect_id);
++    $style->deleteImageEffect($effect_plugin);
++
++    // Ensure that an effect can unset dimensions.
++    $effect = [
++      'id' => 'image_module_test_null',
++      'data' => [],
++      'weight' => 8,
++    ];
++
++    $style->addImageEffect($effect);
++    $style->save();
++    $this->assertSame('<img src="' . $url . '" alt="" />', $this->getImageTag($variables));
++
++    // Test URI dependent image effect.
++    $style = ImageStyle::create(['name' => 'test_uri', 'label' => 'Test URI']);
++    $effect = [
++      'id' => 'image_module_test_uri_dependent',
++      'data' => [],
++      'weight' => 0,
++    ];
++    $style->addImageEffect($effect);
++    $style->save();
++    $variables = [
++      '#theme' => 'image_style',
++      '#style_name' => 'test_uri',
++      '#uri' => $original_uri,
++      '#width' => 40,
++      '#height' => 20,
++    ];
++    // PNG original image. Should be resized to 100x100.
++    $pipeline = \Drupal::service(ImageProcessor::class)->createInstance('derivative')
++      ->setImageStyle($style)
++      ->setSourceImageUri($original_uri);
++    $generated_uri = 'public://styles/test_uri/public/' . $file_system->basename($original_uri);
++    $url = \Drupal::service('file_url_generator')->transformRelative($pipeline->getDerivativeImageUrl()->toString());
++
++    $this->assertSame('<img src="' . $url . '" width="100" height="100" alt="" loading="lazy" />', $this->getImageTag($variables));
++    $this->assertFileDoesNotExist($generated_uri, 'Generated file does not exist.');
++    $this->drupalGet($this->getAbsoluteUrl($url));
++    $this->assertSession()->statusCodeEquals(200);
++    $this->assertFileExists($generated_uri, 'Generated file does exist after we accessed it.');
++    $image_file = $image_factory->get($generated_uri);
++    $this->assertSame(100, $image_file->getWidth());
++    $this->assertSame(100, $image_file->getHeight());
++    // GIF original image. Should be resized to 50x50.
++    $file = $files[1];
++    $original_uri = $file_system->copy($file->uri, 'public://', FileSystemInterface::EXISTS_RENAME);
++    $pipeline = \Drupal::service(ImageProcessor::class)->createInstance('derivative')
++      ->setImageStyle($style)
++      ->setSourceImageUri($original_uri);
++    $generated_uri = 'public://styles/test_uri/public/' . $file_system->basename($original_uri);
++    $url = \Drupal::service('file_url_generator')->transformRelative($pipeline->getDerivativeImageUrl()->toString());
++    $variables['#uri'] = $original_uri;
++    $this->assertSame('<img src="' . $url . '" width="50" height="50" alt="" loading="lazy" />', $this->getImageTag($variables));
++    $this->assertFileDoesNotExist($generated_uri, 'Generated file does not exist.');
++    $this->drupalGet($this->getAbsoluteUrl($url));
++    $this->assertSession()->statusCodeEquals(200);
++    $this->assertFileExists($generated_uri, 'Generated file does exist after we accessed it.');
++    $image_file = $image_factory->get($generated_uri);
++    $this->assertSame(50, $image_file->getWidth());
++    $this->assertSame(50, $image_file->getHeight());
++  }
++
+   /**
+    * Render an image style element.
+    *
+diff --git a/core/modules/image/tests/src/Functional/ImageEffect/ConvertTest.php b/core/modules/image/tests/src/Functional/ImageEffect/ConvertTest.php
+index e726b6a6d4..09bcb0cb5a 100644
+--- a/core/modules/image/tests/src/Functional/ImageEffect/ConvertTest.php
++++ b/core/modules/image/tests/src/Functional/ImageEffect/ConvertTest.php
+@@ -4,6 +4,7 @@
+ 
+ use Drupal\Core\File\FileSystemInterface;
+ use Drupal\image\Entity\ImageStyle;
++use Drupal\image\ImageProcessor;
+ use Drupal\Tests\BrowserTestBase;
+ 
+ /**
+@@ -47,9 +48,12 @@ public function testConvertFileInRoot() {
+     $this->assertFileExists($test_uri);
+ 
+     // Execute the image style on the test image via a GET request.
++    $pipeline = \Drupal::service(ImageProcessor::class)->createInstance('derivative')
++      ->setImageStyle($image_style)
++      ->setSourceImageUri($test_uri);
+     $derivative_uri = 'public://styles/image_effect_test/public/image-test-do.png.jpeg';
+     $this->assertFileDoesNotExist($derivative_uri);
+-    $url = \Drupal::service('file_url_generator')->transformRelative($image_style->buildUrl($test_uri));
++    $url = \Drupal::service('file_url_generator')->transformRelative($pipeline->getDerivativeImageUrl()->toString());
+     $this->drupalGet($this->getAbsoluteUrl($url));
+     $this->assertSession()->statusCodeEquals(200);
+     $this->assertFileExists($derivative_uri);
+diff --git a/core/modules/image/tests/src/Functional/ImageFieldDisplayTest.php b/core/modules/image/tests/src/Functional/ImageFieldDisplayTest.php
+index 7502129a79..21fbbed275 100644
+--- a/core/modules/image/tests/src/Functional/ImageFieldDisplayTest.php
++++ b/core/modules/image/tests/src/Functional/ImageFieldDisplayTest.php
+@@ -7,6 +7,7 @@
+ use Drupal\Core\Url;
+ use Drupal\field\Entity\FieldStorageConfig;
+ use Drupal\image\Entity\ImageStyle;
++use Drupal\image\ImageProcessor;
+ use Drupal\Tests\system\Functional\Cache\AssertPageCacheContextsAndTagsTrait;
+ use Drupal\Tests\TestFileCreationTrait;
+ use Drupal\user\RoleInterface;
+@@ -185,7 +186,10 @@ public function _testImageFieldFormatters($scheme) {
+ 
+     // Ensure the derivative image is generated so we do not have to deal with
+     // image style callback paths.
+-    $this->drupalGet(ImageStyle::load('thumbnail')->buildUrl($image_uri));
++    $pipeline = \Drupal::service(ImageProcessor::class)->createInstance('derivative')
++      ->setImageStyle(ImageStyle::load('thumbnail'))
++      ->setSourceImageUri($image_uri);
++    $this->drupalGet($pipeline->getDerivativeImageUrl()->toString());
+     $image_style = [
+       '#theme' => 'image_style',
+       '#uri' => $image_uri,
+@@ -204,7 +208,7 @@ public function _testImageFieldFormatters($scheme) {
+     if ($scheme == 'private') {
+       // Log out and ensure the file cannot be accessed.
+       $this->drupalLogout();
+-      $this->drupalGet(ImageStyle::load('thumbnail')->buildUrl($image_uri));
++      $this->drupalGet($pipeline->getDerivativeImageUrl()->toString());
+       $this->assertSession()->statusCodeEquals(403);
+ 
+       // Log in again.
+@@ -221,7 +225,7 @@ public function _testImageFieldFormatters($scheme) {
+ 
+     // Test the image URL formatter with an image style.
+     $display_options['settings']['image_style'] = 'thumbnail';
+-    $expected_url = \Drupal::service('file_url_generator')->transformRelative(ImageStyle::load('thumbnail')->buildUrl($image_uri));
++    $expected_url = \Drupal::service('file_url_generator')->transformRelative($pipeline->getDerivativeImageUrl()->toString());
+     $this->assertEquals($expected_url, $node->{$field_name}->view($display_options)[0]['#markup']);
+ 
+     // Test the settings summary.
+@@ -292,8 +296,11 @@ public function testImageFieldSettings() {
+     $node = $node_storage->load($nid);
+     $file = $node->{$field_name}->entity;
+ 
++    $pipeline = \Drupal::service(ImageProcessor::class)->createInstance('derivative')
++      ->setImageStyle(ImageStyle::load('medium'))
++      ->setSourceImageUri($file->getFileUri());
+     $file_url_generator = \Drupal::service('file_url_generator');
+-    $url = $file_url_generator->transformRelative(ImageStyle::load('medium')->buildUrl($file->getFileUri()));
++    $url = $file_url_generator->transformRelative($pipeline->getDerivativeImageUrl()->toString());
+     $this->assertSession()->elementExists('css', 'img[width=40][height=20][src="' . $url . '"]');
+ 
+     // Add alt/title fields to the image and verify that they are displayed.
+@@ -456,7 +463,10 @@ public function testImageLoadingAttribute(): void {
+ 
+     // Ensure the derivative image is generated so we do not have to deal with
+     // image style callback paths.
+-    $this->drupalGet(ImageStyle::load('thumbnail')->buildUrl($image_uri));
++    $pipeline = \Drupal::service(ImageProcessor::class)->createInstance('derivative')
++      ->setImageStyle(ImageStyle::load('thumbnail'))
++      ->setSourceImageUri($image_uri);
++    $this->drupalGet($pipeline->getDerivativeImageUrl());
+     $image_style = [
+       '#theme' => 'image_style',
+       '#uri' => $image_uri,
+diff --git a/core/modules/image/tests/src/Functional/ImageStyleFlushTest.php b/core/modules/image/tests/src/Functional/ImageStyleFlushTest.php
+index 820bedffa2..3203f64fe9 100644
+--- a/core/modules/image/tests/src/Functional/ImageStyleFlushTest.php
++++ b/core/modules/image/tests/src/Functional/ImageStyleFlushTest.php
+@@ -4,6 +4,7 @@
+ 
+ use Drupal\Component\Render\FormattableMarkup;
+ use Drupal\image\Entity\ImageStyle;
++use Drupal\image\ImageProcessor;
+ use Drupal\Tests\TestFileCreationTrait;
+ 
+ /**
+@@ -37,8 +38,11 @@ public function createSampleImage($style, $wrapper) {
+     // Make sure we have an image in our wrapper testing file directory.
+     $source_uri = \Drupal::service('file_system')->copy($file->uri, $wrapper . '://');
+     // Build the derivative image.
+-    $derivative_uri = $style->buildUri($source_uri);
+-    $derivative = $style->createDerivative($source_uri, $derivative_uri);
++    $pipeline = \Drupal::service(ImageProcessor::class)->createInstance('derivative')
++      ->setImageStyle($style)
++      ->setSourceImageUri($source_uri);
++    $derivative_uri = $pipeline->getDerivativeImageUri();
++    $derivative = $pipeline->buildDerivativeImage();
+ 
+     return $derivative ? $derivative_uri : FALSE;
+   }
+diff --git a/core/modules/image/tests/src/Functional/ImageStylesPathAndUrlTest.php b/core/modules/image/tests/src/Functional/ImageStylesPathAndUrlTest.php
+index 6d89a920d8..4736afc788 100644
+--- a/core/modules/image/tests/src/Functional/ImageStylesPathAndUrlTest.php
++++ b/core/modules/image/tests/src/Functional/ImageStylesPathAndUrlTest.php
+@@ -5,6 +5,7 @@
+ use Drupal\Core\File\FileSystemInterface;
+ use Drupal\Core\StreamWrapper\StreamWrapperManager;
+ use Drupal\image\Entity\ImageStyle;
++use Drupal\image\ImageProcessor;
+ use Drupal\language\Entity\ConfigurableLanguage;
+ use Drupal\Tests\BrowserTestBase;
+ use Drupal\Tests\TestFileCreationTrait;
+@@ -58,8 +59,12 @@ protected function setUp(): void {
+ 
+   /**
+    * Tests \Drupal\image\ImageStyleInterface::buildUri().
++   *
++   * @group legacy
+    */
+-  public function testImageStylePath() {
++  public function testLegacyImageStylePath() {
++    $this->expectDeprecation('The Drupal\image\Entity\ImageStyle::buildUri method is deprecated since version 9.x.x and will be removed in y.y.y.');
++
+     $scheme = 'public';
+     $actual = $this->style->buildUri("$scheme://foo/bar.gif");
+     $expected = "$scheme://styles/" . $this->style->id() . "/$scheme/foo/bar.gif";
+@@ -72,57 +77,96 @@ public function testImageStylePath() {
+ 
+   /**
+    * Tests an image style URL using the "public://" scheme.
++   *
++   * @group legacy
+    */
+-  public function testImageStyleUrlAndPathPublic() {
+-    $this->doImageStyleUrlAndPathTests('public');
++  public function testLegacyImageStyleUrlAndPathPublic() {
++    $this->expectDeprecation('The Drupal\image\Entity\ImageStyle::buildUri method is deprecated since version 9.x.x and will be removed in y.y.y.');
++    $this->expectDeprecation('The Drupal\image\Entity\ImageStyle::buildUrl method is deprecated since version 9.x.x and will be removed in y.y.y.');
++
++    $this->doLegacyImageStyleUrlAndPathTests('public');
+   }
+ 
+   /**
+    * Tests an image style URL using the "private://" scheme.
++   *
++   * @group legacy
+    */
+-  public function testImageStyleUrlAndPathPrivate() {
+-    $this->doImageStyleUrlAndPathTests('private');
++  public function testLegacyImageStyleUrlAndPathPrivate() {
++    $this->expectDeprecation('The Drupal\image\Entity\ImageStyle::buildUri method is deprecated since version 9.x.x and will be removed in y.y.y.');
++    $this->expectDeprecation('The Drupal\image\Entity\ImageStyle::buildUrl method is deprecated since version 9.x.x and will be removed in y.y.y.');
++
++    $this->doLegacyImageStyleUrlAndPathTests('private');
+   }
+ 
+   /**
+    * Tests an image style URL with the "public://" scheme and unclean URLs.
++   *
++   * @group legacy
+    */
+-  public function testImageStyleUrlAndPathPublicUnclean() {
+-    $this->doImageStyleUrlAndPathTests('public', FALSE);
++  public function testLegacyImageStyleUrlAndPathPublicUnclean() {
++    $this->expectDeprecation('The Drupal\image\Entity\ImageStyle::buildUri method is deprecated since version 9.x.x and will be removed in y.y.y.');
++    $this->expectDeprecation('The Drupal\image\Entity\ImageStyle::buildUrl method is deprecated since version 9.x.x and will be removed in y.y.y.');
++
++    $this->doLegacyImageStyleUrlAndPathTests('public', FALSE);
+   }
+ 
+   /**
+    * Tests an image style URL with the "private://" schema and unclean URLs.
++   *
++   * @group legacy
+    */
+-  public function testImageStyleUrlAndPathPrivateUnclean() {
+-    $this->doImageStyleUrlAndPathTests('private', FALSE);
++  public function testLegacyImageStyleUrlAndPathPrivateUnclean() {
++    $this->expectDeprecation('The Drupal\image\Entity\ImageStyle::buildUri method is deprecated since version 9.x.x and will be removed in y.y.y.');
++    $this->expectDeprecation('The Drupal\image\Entity\ImageStyle::buildUrl method is deprecated since version 9.x.x and will be removed in y.y.y.');
++
++    $this->doLegacyImageStyleUrlAndPathTests('private', FALSE);
+   }
+ 
+   /**
+    * Tests an image style URL with the "public://" schema and language prefix.
++   *
++   * @group legacy
+    */
+-  public function testImageStyleUrlAndPathPublicLanguage() {
+-    $this->doImageStyleUrlAndPathTests('public', TRUE, TRUE, 'fr');
++  public function testLegacyImageStyleUrlAndPathPublicLanguage() {
++    $this->expectDeprecation('The Drupal\image\Entity\ImageStyle::buildUri method is deprecated since version 9.x.x and will be removed in y.y.y.');
++    $this->expectDeprecation('The Drupal\image\Entity\ImageStyle::buildUrl method is deprecated since version 9.x.x and will be removed in y.y.y.');
++
++    $this->doLegacyImageStyleUrlAndPathTests('public', TRUE, TRUE, 'fr');
+   }
+ 
+   /**
+    * Tests an image style URL with the "private://" schema and language prefix.
++   *
++   * @group legacy
+    */
+-  public function testImageStyleUrlAndPathPrivateLanguage() {
+-    $this->doImageStyleUrlAndPathTests('private', TRUE, TRUE, 'fr');
++  public function testLegacyImageStyleUrlAndPathPrivateLanguage() {
++    $this->expectDeprecation('The Drupal\image\Entity\ImageStyle::buildUri method is deprecated since version 9.x.x and will be removed in y.y.y.');
++    $this->expectDeprecation('The Drupal\image\Entity\ImageStyle::buildUrl method is deprecated since version 9.x.x and will be removed in y.y.y.');
++
++    $this->doLegacyImageStyleUrlAndPathTests('private', TRUE, TRUE, 'fr');
+   }
+ 
+   /**
+    * Tests an image style URL with a file URL that has an extra slash in it.
++   *
++   * @group legacy
+    */
+-  public function testImageStyleUrlExtraSlash() {
+-    $this->doImageStyleUrlAndPathTests('public', TRUE, TRUE);
++  public function testLegacyImageStyleUrlExtraSlash() {
++    $this->expectDeprecation('The Drupal\image\Entity\ImageStyle::buildUri method is deprecated since version 9.x.x and will be removed in y.y.y.');
++    $this->expectDeprecation('The Drupal\image\Entity\ImageStyle::buildUrl method is deprecated since version 9.x.x and will be removed in y.y.y.');
++
++    $this->doLegacyImageStyleUrlAndPathTests('public', TRUE, TRUE);
+   }
+ 
+   /**
+    * Tests that an invalid source image returns a 404.
++   *
++   * @group legacy
+    */
+-  public function testImageStyleUrlForMissingSourceImage() {
++  public function testLegacyImageStyleUrlForMissingSourceImage() {
++    $this->expectDeprecation('The Drupal\image\Entity\ImageStyle::buildUrl method is deprecated since version 9.x.x and will be removed in y.y.y.');
++
+     $non_existent_uri = 'public://foo.png';
+     $generated_url = $this->style->buildUrl($non_existent_uri);
+     $this->drupalGet($generated_url);
+@@ -131,8 +175,10 @@ public function testImageStyleUrlForMissingSourceImage() {
+ 
+   /**
+    * Tests building an image style URL.
++   *
++   * @todo This is a legacy method, remove in y.y.y.
+    */
+-  public function doImageStyleUrlAndPathTests($scheme, $clean_url = TRUE, $extra_slash = FALSE, $langcode = FALSE) {
++  public function doLegacyImageStyleUrlAndPathTests($scheme, $clean_url = TRUE, $extra_slash = FALSE, $langcode = FALSE) {
+     $this->prepareRequestForGenerator($clean_url);
+ 
+     // Make the default scheme neither "public" nor "private" to verify the
+@@ -326,4 +372,275 @@ public function doImageStyleUrlAndPathTests($scheme, $clean_url = TRUE, $extra_s
+     $this->assertDirectoryDoesNotExist($directory);
+   }
+ 
++  /**
++   * @covers \Drupal\image\Plugin\ImageProcessPipeline\Derivative::getDerivativeImageUri
++   */
++  public function testImageStylePath() {
++    $scheme = 'public';
++
++    $pipeline = \Drupal::service(ImageProcessor::class)->createInstance('derivative')
++      ->setImageStyle($this->style)
++      ->setSourceImageUri("$scheme://foo/bar.gif");
++    // Got the path for a file URI.
++    $this->assertSame("$scheme://styles/" . $this->style->id() . "/$scheme/foo/bar.gif", $pipeline->getDerivativeImageUri());
++
++    $pipeline = \Drupal::service(ImageProcessor::class)->createInstance('derivative')
++      ->setImageStyle($this->style)
++      ->setSourceImageUri('foo/bar.gif');
++    // Got the path for a relative file path.
++    $this->assertSame("$scheme://styles/" . $this->style->id() . "/$scheme/foo/bar.gif", $pipeline->getDerivativeImageUri());
++  }
++
++  /**
++   * Tests that an invalid source image returns a 404.
++   */
++  public function testImageStyleUrlForMissingSourceImage() {
++    $non_existent_uri = 'public://foo.png';
++    $generated_url = \Drupal::service(ImageProcessor::class)->createInstance('derivative')
++      ->setImageStyle($this->style)
++      ->setSourceImageUri($non_existent_uri)
++      ->getDerivativeImageUrl()
++      ->toString();
++    $this->drupalGet($generated_url);
++    $this->assertSession()->statusCodeEquals(404);
++  }
++
++  /**
++   * Provides setup data for the test method.
++   */
++  public function providerImageStyleUrlAndPath() {
++    return [
++      'public scheme' => ['public', TRUE, FALSE, NULL],
++      'private scheme' => ['private', TRUE, FALSE, NULL],
++      'public scheme, unclean URLs' => ['public', FALSE, FALSE, NULL],
++      'private scheme, unclean URLs' => ['private', FALSE, FALSE, NULL],
++      'public scheme, language prefix' => ['public', TRUE, TRUE, 'fr'],
++      'private scheme, language prefix' => ['private', TRUE, TRUE, 'fr'],
++      'public scheme, extra slash' => ['public', TRUE, TRUE, NULL],
++    ];
++  }
++
++  /**
++   * Tests building image style URLs.
++   *
++   * @dataProvider providerImageStyleUrlAndPath
++   */
++  public function testImageStyleUrlAndPath(string $scheme, bool $clean_url, bool $extra_slash, ?string $langcode) {
++    $this->prepareRequestForGenerator($clean_url);
++
++    // Make the default scheme neither "public" nor "private" to verify the
++    // functions work for other than the default scheme.
++    $this->config('system.file')->set('default_scheme', 'temporary')->save();
++
++    // Create the directories for the styles.
++    $directory = $scheme . '://styles/' . $this->style->id();
++    $this->assertNotFalse(\Drupal::service('file_system')->prepareDirectory($directory, FileSystemInterface::CREATE_DIRECTORY));
++
++    // Override the language to build the URL for the correct language.
++    if ($langcode) {
++      $language_manager = \Drupal::service('language_manager');
++      $language = $language_manager->getLanguage($langcode);
++      $language_manager->setConfigOverrideLanguage($language);
++    }
++
++    // Create a working copy of the file.
++    $files = $this->drupalGetTestFiles('image');
++    $file = array_shift($files);
++    /** @var \Drupal\Core\File\FileSystemInterface $file_system */
++    $file_system = \Drupal::service('file_system');
++    $original_uri = $file_system->copy($file->uri, $scheme . '://', FileSystemInterface::EXISTS_RENAME);
++    // Let the image_module_test module know about this file, so it can claim
++    // ownership in hook_file_download().
++    \Drupal::state()->set('image.test_file_download', $original_uri);
++    $this->assertNotFalse($original_uri, 'Created the generated image file.');
++
++    // Get the URL of a file that has not been generated and try to create it.
++    $pipeline = \Drupal::service(ImageProcessor::class)->createInstance('derivative')
++      ->setImageStyle($this->style)
++      ->setSourceImageUri($original_uri)
++      ->setCleanUrl($clean_url);
++    $generated_uri = $pipeline->getDerivativeImageUri();
++    $this->assertFileDoesNotExist($generated_uri);
++    $generate_url = $pipeline->getDerivativeImageUrl()->toString();
++    $this->assertFileDoesNotExist($generated_uri);
++
++    // Make sure that language prefix is never added to the image style URL.
++    if ($langcode) {
++      $this->assertStringNotContainsString("/$langcode/", $generate_url);
++    }
++
++    // Ensure that the tests still pass when the file is generated by accessing
++    // a poorly constructed (but still valid) file URL that has an extra slash
++    // in it.
++    if ($extra_slash) {
++      $modified_uri = str_replace('://', ':///', $original_uri);
++      // Check that an extra slash was added to the generated file URI.
++      $this->assertNotSame($original_uri, $modified_uri);
++      $pipeline = \Drupal::service(ImageProcessor::class)->createInstance('derivative')
++        ->setImageStyle($this->style)
++        ->setSourceImageUri($modified_uri)
++        ->setCleanUrl($clean_url);
++      $generate_url = $pipeline->getDerivativeImageUrl()->toString();
++    }
++
++    // When using non-clean URLS, the system path contains the script name.
++    if (!$clean_url) {
++      $this->assertStringContainsString('index.php/', $generate_url);
++    }
++
++    // Add some extra chars to the token.
++    $this->drupalGet(str_replace(IMAGE_DERIVATIVE_TOKEN . '=', IMAGE_DERIVATIVE_TOKEN . '=Zo', $generate_url));
++    $this->assertSession()->statusCodeEquals(404);
++    // Change the parameter name so the token is missing.
++    $this->drupalGet(str_replace(IMAGE_DERIVATIVE_TOKEN . '=', 'wrongparam=', $generate_url));
++    $this->assertSession()->statusCodeEquals(404);
++
++    // Check that the generated URL is the same when we pass in a relative path
++    // rather than a URI. We need to temporarily switch the default scheme to
++    // match the desired scheme before testing this, then switch it back to the
++    // "temporary" scheme used throughout this test afterwards.
++    $this->config('system.file')->set('default_scheme', $scheme)->save();
++    $relative_path = StreamWrapperManager::getTarget($original_uri);
++    $pipeline = \Drupal::service(ImageProcessor::class)->createInstance('derivative')
++      ->setImageStyle($this->style)
++      ->setSourceImageUri($relative_path)
++      ->setCleanUrl($clean_url);
++    $generate_url_from_relative_path = $pipeline->getDerivativeImageUrl()->toString();
++    $this->assertSame($generate_url, $generate_url_from_relative_path);
++    $this->config('system.file')->set('default_scheme', 'temporary')->save();
++
++    // Fetch the URL that generates the file.
++    $this->drupalGet($generate_url);
++    $this->assertSession()->statusCodeEquals(200);
++    $this->assertFileExists($generated_uri);
++    // assertRaw can't be used with string containing non UTF-8 chars.
++    $this->assertNotEmpty(file_get_contents($generated_uri), 'URL returns expected file.');
++    $image = $this->container->get('image.factory')->get($generated_uri);
++    $this->assertSession()->responseHeaderEquals('Content-Type', $image->getMimeType());
++    $this->assertSession()->responseHeaderEquals('Content-Length', (string) $image->getFileSize());
++
++    // Check that we did not download the original file.
++    $original_image = $this->container->get('image.factory')
++      ->get($original_uri);
++    $this->assertSession()->responseHeaderNotEquals('Content-Length', (string) $original_image->getFileSize());
++
++    if ($scheme == 'private') {
++      $this->assertSession()->responseHeaderEquals('Expires', 'Sun, 19 Nov 1978 05:00:00 GMT');
++      // Check that Cache-Control header contains 'no-cache' to prevent caching.
++      $this->assertSession()->responseHeaderContains('Cache-Control', 'no-cache');
++      $this->assertSession()->responseHeaderEquals('X-Image-Owned-By', 'image_module_test');
++
++      // Make sure that a second request to the already existing derivative
++      // works too.
++      $this->drupalGet($generate_url);
++      $this->assertSession()->statusCodeEquals(200);
++
++      // Check that the second request also returned the generated image.
++      $this->assertSession()->responseHeaderEquals('Content-Length', (string) $image->getFileSize());
++
++      // Check that we did not download the original file.
++      $this->assertSession()->responseHeaderNotEquals('Content-Length', (string) $original_image->getFileSize());
++
++      // Make sure that access is denied for existing style files if we do not
++      // have access.
++      \Drupal::state()->delete('image.test_file_download');
++      $this->drupalGet($generate_url);
++      $this->assertSession()->statusCodeEquals(403);
++
++      // Repeat this with a different file that we do not have access to and
++      // make sure that access is denied.
++      $file_noaccess = array_shift($files);
++      $original_uri_noaccess = $file_system->copy($file_noaccess->uri, $scheme . '://', FileSystemInterface::EXISTS_RENAME);
++      $generated_uri_noaccess = $scheme . '://styles/' . $this->style->id() . '/' . $scheme . '/' . $file_system->basename($original_uri_noaccess);
++      $this->assertFileDoesNotExist($generated_uri_noaccess);
++      $pipeline = \Drupal::service(ImageProcessor::class)->createInstance('derivative')
++        ->setImageStyle($this->style)
++        ->setSourceImageUri($original_uri_noaccess);
++      $generate_url_noaccess = $pipeline->getDerivativeImageUrl()->toString();
++
++      $this->drupalGet($generate_url_noaccess);
++      $this->assertSession()->statusCodeEquals(403);
++      // Verify that images are not appended to the response.
++      // Currently this test only uses PNG images.
++      $this->assertStringContainsString('.png', $generate_url, 'Confirming that private image styles are not appended require PNG file.');
++      // Check for PNG-Signature
++      // (cf. http://www.libpng.org/pub/png/book/chapter08.html#png.ch08.div.2)
++      // in the response body.
++      $raw = $this->getSession()->getPage()->getContent();
++      $this->assertStringNotContainsString(chr(137) . chr(80) . chr(78) . chr(71) . chr(13) . chr(10) . chr(26) . chr(10), $raw);
++    }
++    else {
++      $this->assertSession()->responseHeaderEquals('Expires', 'Sun, 19 Nov 1978 05:00:00 GMT');
++      // Check that Cache-Control header contains 'no-cache' to prevent caching.
++      $this->assertSession()->responseHeaderNotContains('Cache-Control', 'no-cache');
++
++      if ($clean_url) {
++        // Add some extra chars to the token.
++        $this->drupalGet(str_replace(IMAGE_DERIVATIVE_TOKEN . '=', IMAGE_DERIVATIVE_TOKEN . '=Zo', $generate_url));
++        $this->assertSession()->statusCodeEquals(200);
++      }
++    }
++
++    // Allow insecure image derivatives to be created for the remainder of this
++    // test.
++    $this->config('image.settings')
++      ->set('allow_insecure_derivatives', TRUE)
++      ->save();
++
++    // Create another working copy of the file.
++    $files = $this->drupalGetTestFiles('image');
++    $file = array_shift($files);
++    $original_uri = $file_system->copy($file->uri, $scheme . '://', FileSystemInterface::EXISTS_RENAME);
++    // Let the image_module_test module know about this file, so it can claim
++    // ownership in hook_file_download().
++    \Drupal::state()->set('image.test_file_download', $original_uri);
++
++    // Suppress the security token in the URL, then get the URL of a file that
++    // has not been created and try to create it. Check that the security token
++    // is not present in the URL but that the image is still accessible.
++    $this->config('image.settings')->set('suppress_itok_output', TRUE)->save();
++    $pipeline = \Drupal::service(ImageProcessor::class)->createInstance('derivative')
++      ->setImageStyle($this->style)
++      ->setSourceImageUri($original_uri)
++      ->setCleanUrl($clean_url);
++    $generated_uri = $pipeline->getDerivativeImageUri();
++    $this->assertFileDoesNotExist($generated_uri, 'Generated file does not exist.');
++    $generate_url = $pipeline->getDerivativeImageUrl()->toString();
++    $this->assertStringNotContainsString(IMAGE_DERIVATIVE_TOKEN . '=', $generate_url, 'The security token does not appear in the image style URL.');
++    $this->drupalGet($generate_url);
++    $this->assertSession()->statusCodeEquals(200);
++
++    // Stop suppressing the security token in the URL.
++    $this->config('image.settings')->set('suppress_itok_output', FALSE)->save();
++    // Ensure allow_insecure_derivatives is enabled.
++    $this->assertTrue($this->config('image.settings')->get('allow_insecure_derivatives'));
++    // Check that a security token is still required when generating a second
++    // image derivative using the first one as a source.
++    $pipeline = \Drupal::service(ImageProcessor::class)->createInstance('derivative')
++      ->setImageStyle($this->style)
++      ->setSourceImageUri($generated_uri)
++      ->setCleanUrl($clean_url);
++    $nested_url = $pipeline->getDerivativeImageUrl()->toString();
++    $matches_expected_url_format = (boolean) preg_match('/styles\/' . $this->style->id() . '\/' . $scheme . '\/styles\/' . $this->style->id() . '\/' . $scheme . '/', $nested_url);
++    $this->assertTrue($matches_expected_url_format, "URL for a derivative of an image style matches expected format.");
++    $nested_url_with_wrong_token = str_replace(IMAGE_DERIVATIVE_TOKEN . '=', 'wrongparam=', $nested_url);
++    $this->drupalGet($nested_url_with_wrong_token);
++    $this->assertSession()->statusCodeEquals(404);
++    // Check that this restriction cannot be bypassed by adding extra slashes
++    // to the URL.
++    $this->drupalGet(substr_replace($nested_url_with_wrong_token, '//styles/', strrpos($nested_url_with_wrong_token, '/styles/'), strlen('/styles/')));
++    $this->assertSession()->statusCodeEquals(404);
++    $this->drupalGet(substr_replace($nested_url_with_wrong_token, '////styles/', strrpos($nested_url_with_wrong_token, '/styles/'), strlen('/styles/')));
++    $this->assertSession()->statusCodeEquals(404);
++    // Make sure the image can still be generated if a correct token is used.
++    $this->drupalGet($nested_url);
++    $this->assertSession()->statusCodeEquals(200);
++
++    // Check that requesting a nonexistent image does not create any new
++    // directories in the file system.
++    $directory = $scheme . '://styles/' . $this->style->id() . '/' . $scheme . '/' . $this->randomMachineName();
++    $this->drupalGet(\Drupal::service('file_url_generator')->generateAbsoluteString($directory . '/' . $this->randomString()));
++    $this->assertFileDoesNotExist($directory, 'New directory was not created in the filesystem when requesting an unauthorized image.');
++  }
++
+ }
+diff --git a/core/modules/image/tests/src/Kernel/DerivativeImageProcessTest.php b/core/modules/image/tests/src/Kernel/DerivativeImageProcessTest.php
+new file mode 100644
+index 0000000000..ea17984bd9
+--- /dev/null
++++ b/core/modules/image/tests/src/Kernel/DerivativeImageProcessTest.php
+@@ -0,0 +1,213 @@
++<?php
++
++namespace Drupal\Tests\image\Kernel;
++
++use Drupal\KernelTests\KernelTestBase;
++use Drupal\image\Entity\ImageStyle;
++use Drupal\image\ImageProcessor;
++
++/**
++ * @coversDefaultClass \Drupal\image\Plugin\ImageProcessPipeline\Derivative
++ *
++ * @group image
++ */
++class DerivativeImageProcessTest extends KernelTestBase {
++
++  /**
++   * {@inheritdoc}
++   */
++  protected static $modules = ['system', 'image', 'image_module_test'];
++
++  /**
++   * The image processor service.
++   *
++   * @var \Drupal\image\ImageProcessor
++   */
++  protected $imageProcessor;
++
++  /**
++   * An image style for testing.
++   *
++   * @var \Drupal\image\ImageStyleInterface
++   */
++  protected $imageStyle;
++
++  /**
++   * {@inheritdoc}
++   */
++  protected function setUp(): void {
++    parent::setUp();
++    $this->installConfig(['system', 'image']);
++    $this->imageProcessor = \Drupal::service(ImageProcessor::class);
++    $this->imageStyle = ImageStyle::load('thumbnail');
++    \Drupal::service('file_system')->copy('core/tests/fixtures/files/image-1.png', 'public://test.png');
++  }
++
++  /**
++   * @covers ::setImageStyle
++   * @covers ::setSourceImageUri
++   * @covers ::isSourceImageProcessable
++   */
++  public function testIsSourceImageProcessable() {
++    // Starting off from a valid image file.
++    $pipeline = $this->imageProcessor->createInstance('derivative')
++      ->setImageStyle($this->imageStyle)
++      ->setSourceImageUri('public://test.png');
++    $this->assertTrue($pipeline->isSourceImageProcessable());
++
++    // Starting off from non-image file.
++    $pipeline = $this->imageProcessor->createInstance('derivative')
++      ->setImageStyle($this->imageStyle)
++      ->setSourceImageUri('public://test.csv');
++    $this->assertFalse($pipeline->isSourceImageProcessable());
++  }
++
++  /**
++   * @covers ::setImageStyle
++   * @covers ::setSourceImageUri
++   * @covers ::setSourceImageFileExtension
++   * @covers ::getDerivativeImageFileExtension
++   */
++  public function testGetDerivativeImageFileExtension() {
++    // Starting off from a real source.
++    $pipeline = $this->imageProcessor->createInstance('derivative')
++      ->setImageStyle($this->imageStyle)
++      ->setSourceImageUri('public://test.png');
++    $this->assertSame('png', $pipeline->getDerivativeImageFileExtension());
++
++    // Starting off from the image file extension.
++    $pipeline = $this->imageProcessor->createInstance('derivative')
++      ->setImageStyle($this->imageStyle)
++      ->setSourceImageFileExtension('jpg');
++    $this->assertSame('jpg', $pipeline->getDerivativeImageFileExtension());
++  }
++
++  /**
++   * @covers ::setImageStyle
++   * @covers ::setSourceImageUri
++   * @covers ::setSourceImageDimensions
++   * @covers ::getDerivativeImageWidth
++   * @covers ::getDerivativeImageHeight
++   */
++  public function testGetDerivativeImageDimensions() {
++    // Starting off from a real source.
++    $pipeline = $this->imageProcessor->createInstance('derivative')
++      ->setImageStyle($this->imageStyle)
++      ->setSourceImageUri('public://test.png')
++      ->setSourceImageDimensions(360, 240);
++    $this->assertSame(100, $pipeline->getDerivativeImageWidth());
++    $this->assertSame(67, $pipeline->getDerivativeImageHeight());
++
++    // Starting off from a non-existent source, only dimensions.
++    $pipeline = $this->imageProcessor->createInstance('derivative')
++      ->setImageStyle($this->imageStyle)
++      ->setSourceImageUri('')
++      ->setSourceImageDimensions(100, 200);
++    $this->assertSame(50, $pipeline->getDerivativeImageWidth());
++    $this->assertSame(100, $pipeline->getDerivativeImageHeight());
++  }
++
++  /**
++   * @covers ::setImageStyle
++   * @covers ::setSourceImageUri
++   * @covers ::getDerivativeImageUri
++   */
++  public function testGetDerivativeImageUri() {
++    // Starting off from an URI.
++    $pipeline = $this->imageProcessor->createInstance('derivative')
++      ->setImageStyle($this->imageStyle)
++      ->setSourceImageUri('public://test.png');
++    $this->assertEquals('public://styles/thumbnail/public/test.png', $pipeline->getDerivativeImageUri());
++
++    // Starting off from a path.
++    $pipeline = $this->imageProcessor->createInstance('derivative')
++      ->setImageStyle($this->imageStyle)
++      ->setSourceImageUri('core/modules/image/sample.png');
++    $this->assertEquals('public://styles/thumbnail/public/core/modules/image/sample.png', $pipeline->getDerivativeImageUri());
++  }
++
++  /**
++   * @covers ::setImageStyle
++   * @covers ::setSourceImageUri
++   * @covers ::buildDerivativeImage
++   */
++  public function testBuildDerivativeImageFromFile() {
++    // Starting off from an URI.
++    $pipeline = $this->imageProcessor->createInstance('derivative')
++      ->setImageStyle($this->imageStyle)
++      ->setSourceImageUri('public://test.png');
++    $this->assertTrue($pipeline->buildDerivativeImage());
++    $this->assertFileExists('public://styles/thumbnail/public/test.png');
++    $image = \Drupal::service('image.factory')->get('public://styles/thumbnail/public/test.png');
++    $this->assertSame(100, $image->getWidth());
++    $this->assertSame(67, $image->getHeight());
++
++    // Starting off from an URI, file missing.
++    $pipeline = $this->imageProcessor->createInstance('derivative')
++      ->setImageStyle($this->imageStyle)
++      ->setSourceImageUri('public://missing.png');
++    $this->assertFalse($pipeline->buildDerivativeImage());
++    $this->assertFileDoesNotExist('public://styles/thumbnail/public/missing.png');
++
++    // Starting off from a path.
++    $pipeline = $this->imageProcessor->createInstance('derivative')
++      ->setImageStyle($this->imageStyle)
++      ->setSourceImageUri('core/modules/image/sample.png');
++    $this->assertTrue($pipeline->buildDerivativeImage());
++    $this->assertFileExists('public://styles/thumbnail/public/core/modules/image/sample.png');
++    $image = \Drupal::service('image.factory')->get('public://styles/thumbnail/public/core/modules/image/sample.png');
++    $this->assertSame(100, $image->getWidth());
++    $this->assertSame(75, $image->getHeight());
++  }
++
++  /**
++   * Tests creating a derivative straight from an Image object.
++   *
++   * @covers ::setImageStyle
++   * @covers ::setImage
++   * @covers ::setSourceImageFileExtension
++   * @covers ::setDerivativeImageUri
++   * @covers ::buildDerivativeImage
++   */
++  public function testBuildDerivativeImageFromImageObject() {
++    // Create scratch image.
++    $image = \Drupal::service('image.factory')->get();
++    $this->assertSame('', $image->getSource());
++    $this->assertSame('', $image->getMimeType());
++    $this->assertNull($image->getFileSize());
++    $image->createNew(600, 450, 'png');
++    $this->assertSame('', $image->getSource());
++    $this->assertSame('image/png', $image->getMimeType());
++    $this->assertNull($image->getFileSize());
++
++    // Create derivative.
++    $pipeline = $this->imageProcessor->createInstance('derivative');
++    $derivative_uri = 'public://test_0.png';
++    $pipeline
++      ->setImageStyle($this->imageStyle)
++      ->setImage($image)
++      ->setSourceImageFileExtension('png')
++      ->setDerivativeImageUri($derivative_uri);
++    $this->assertTrue($pipeline->buildDerivativeImage());
++
++    // Check if derivative image exists.
++    $this->assertFileExists($derivative_uri);
++
++    // Check derivative image after saving, with old object.
++    $this->assertSame(100, $image->getWidth());
++    $this->assertSame(75, $image->getHeight());
++    $this->assertSame($derivative_uri, $image->getSource());
++    $this->assertSame('image/png', $image->getMimeType());
++    $file_size = $image->getFileSize();
++    $this->assertGreaterThan(0, $file_size);
++
++    // Check derivative image after reloading from saved image file.
++    $image_r = \Drupal::service('image.factory')->get($derivative_uri);
++    $this->assertSame(100, $image_r->getWidth());
++    $this->assertSame(75, $image_r->getHeight());
++    $this->assertSame($derivative_uri, $image_r->getSource());
++    $this->assertSame('image/png', $image_r->getMimeType());
++    $this->assertSame($file_size, $image_r->getFileSize());
++  }
++
++}
+diff --git a/core/modules/image/tests/src/Kernel/ImageStyleCustomStreamWrappersTest.php b/core/modules/image/tests/src/Kernel/ImageStyleCustomStreamWrappersTest.php
+index 2c781e425a..7a97cd5d6f 100644
+--- a/core/modules/image/tests/src/Kernel/ImageStyleCustomStreamWrappersTest.php
++++ b/core/modules/image/tests/src/Kernel/ImageStyleCustomStreamWrappersTest.php
+@@ -10,6 +10,7 @@
+ use Drupal\file_test\StreamWrapper\DummyRemoteReadOnlyStreamWrapper;
+ use Drupal\file_test\StreamWrapper\DummyStreamWrapper;
+ use Drupal\image\Entity\ImageStyle;
++use Drupal\image\ImageProcessor;
+ use Drupal\KernelTests\KernelTestBase;
+ 
+ /**
+@@ -75,7 +76,11 @@ public function register(ContainerBuilder $container) {
+    *   The derivative expected stream wrapper scheme.
+    */
+   public function testCustomStreamWrappers($source_scheme, $expected_scheme) {
+-    $derivative_uri = $this->imageStyle->buildUri("$source_scheme://some/path/image.png");
++    // Create an image process pipeline.
++    $pipeline = \Drupal::service(ImageProcessor::class)->createInstance('derivative')
++      ->setImageStyle($this->imageStyle)
++      ->setSourceImageUri("$source_scheme://some/path/image.png");
++    $derivative_uri = $pipeline->getDerivativeImageUri();
+     $derivative_scheme = StreamWrapperManager::getScheme($derivative_uri);
+ 
+     // Check that the derivative scheme is the expected scheme.
+diff --git a/core/modules/image/tests/src/Kernel/ImageStyleLegacyTest.php b/core/modules/image/tests/src/Kernel/ImageStyleLegacyTest.php
+new file mode 100644
+index 0000000000..78a8946d78
+--- /dev/null
++++ b/core/modules/image/tests/src/Kernel/ImageStyleLegacyTest.php
+@@ -0,0 +1,109 @@
++<?php
++
++namespace Drupal\Tests\image\Kernel;
++
++use Drupal\KernelTests\KernelTestBase;
++use Drupal\image\Entity\ImageStyle;
++
++/**
++ * Legacy test for deprecated ImageStyle methods.
++ *
++ * @coversDefaultClass \Drupal\image\Entity\ImageStyle
++ *
++ * @group image
++ * @group legacy
++ */
++class ImageStyleLegacyTest extends KernelTestBase {
++
++  /**
++   * Modules to enable.
++   *
++   * @var array
++   */
++  protected static $modules = ['system', 'image', 'image_module_test'];
++
++  /**
++   * An image style for testing.
++   *
++   * @var \Drupal\image\ImageStyleInterface
++   *   The mocked image style.
++   */
++  protected $imageStyle;
++
++  /**
++   * {@inheritdoc}
++   */
++  protected function setUp(): void {
++    parent::setUp();
++
++    $this->imageStyle = ImageStyle::create([
++      'name' => 'test',
++    ]);
++    $this->imageStyle->addImageEffect(['id' => 'image_module_test_null']);
++    $this->imageStyle->save();
++
++    \Drupal::service('file_system')->copy($this->root . '/core/misc/druplicon.png', 'public://test.png');
++  }
++
++  /**
++   * @covers ::buildUri
++   */
++  public function testBuildUri() {
++    $this->expectDeprecation('The Drupal\image\Entity\ImageStyle::buildUri method is deprecated since version 9.x.x and will be removed in y.y.y.');
++    $this->assertSame('public://styles/test/public/test.png', $this->imageStyle->buildUri('public://test.png'));
++  }
++
++  /**
++   * @covers ::buildUrl
++   */
++  public function testBuildUrl() {
++    $this->expectDeprecation('The Drupal\image\Entity\ImageStyle::buildUrl method is deprecated since version 9.x.x and will be removed in y.y.y.');
++    $this->assertStringContainsString('files/styles/test/public/test.png?itok=', $this->imageStyle->buildUrl('public://test.png'));
++  }
++
++  /**
++   * @covers ::createDerivative
++   */
++  public function testCreateDerivative() {
++    $this->expectDeprecation('The Drupal\image\Entity\ImageStyle::createDerivative method is deprecated since version 9.x.x and will be removed in y.y.y.');
++    $this->assertIsBool($this->imageStyle->createDerivative('public://test.png', 'public://test_derivative.png'));
++  }
++
++  /**
++   * @covers ::transformDimensions
++   */
++  public function testTransformDimensions() {
++    $this->expectDeprecation('The Drupal\image\Entity\ImageStyle::transformDimensions method is deprecated since version 9.x.x and will be removed in y.y.y.');
++    $dimensions = ['width' => 100, 'height' => 200];
++    $this->assertNull($this->imageStyle->transformDimensions($dimensions, 'public://test.png'));
++    $this->assertEquals([
++      'width' => NULL,
++      'height' => NULL,
++    ], $dimensions);
++  }
++
++  /**
++   * @covers ::getDerivativeExtension
++   */
++  public function testGetDerivativeExtension() {
++    $this->expectDeprecation('The Drupal\image\Entity\ImageStyle::getDerivativeExtension method is deprecated since version 9.x.x and will be removed in y.y.y.');
++    $this->assertSame('png', $this->imageStyle->getDerivativeExtension('png'));
++  }
++
++  /**
++   * @covers ::getPathToken
++   */
++  public function testGetPathToken() {
++    $this->expectDeprecation('The Drupal\image\Entity\ImageStyle::getPathToken method is deprecated since version 9.x.x and will be removed in y.y.y.');
++    $this->assertNotEmpty($this->imageStyle->getPathToken('public://test.png'));
++  }
++
++  /**
++   * @covers ::supportsUri
++   */
++  public function testSupportsUri() {
++    $this->expectDeprecation('The Drupal\image\Entity\ImageStyle::supportsUri method is deprecated since version 9.x.x and will be removed in y.y.y.');
++    $this->assertTrue($this->imageStyle->supportsUri('public://test.png'));
++  }
++
++}
+diff --git a/core/modules/image/tests/src/Kernel/ImageThemeFunctionTest.php b/core/modules/image/tests/src/Kernel/ImageThemeFunctionTest.php
+index 6fc83f07a7..f23e6f287c 100644
+--- a/core/modules/image/tests/src/Kernel/ImageThemeFunctionTest.php
++++ b/core/modules/image/tests/src/Kernel/ImageThemeFunctionTest.php
+@@ -9,6 +9,7 @@
+ use Drupal\field\Entity\FieldConfig;
+ use Drupal\file\Entity\File;
+ use Drupal\image\Entity\ImageStyle;
++use Drupal\image\ImageProcessor;
+ use Drupal\KernelTests\KernelTestBase;
+ use Drupal\field\Entity\FieldStorageConfig;
+ use Drupal\Tests\TestFileCreationTrait;
+@@ -96,7 +97,12 @@ public function testImageFormatterTheme() {
+     // Create a style.
+     $style = ImageStyle::create(['name' => 'test', 'label' => 'Test']);
+     $style->save();
+-    $url = \Drupal::service('file_url_generator')->transformRelative($style->buildUrl($original_uri));
++
++    // Create an image process pipeline.
++    $pipeline = \Drupal::service(ImageProcessor::class)->createInstance('derivative')
++      ->setImageStyle($style)
++      ->setSourceImageUri($original_uri);
++    $url = \Drupal::service('file_url_generator')->transformRelative($pipeline->getDerivativeImageUrl()->toString());
+ 
+     // Create a test entity with the image field set.
+     $entity = EntityTest::create();
+@@ -158,7 +164,12 @@ public function testImageStyleTheme() {
+     // Create a style.
+     $style = ImageStyle::create(['name' => 'image_test', 'label' => 'Test']);
+     $style->save();
+-    $url = \Drupal::service('file_url_generator')->transformRelative($style->buildUrl($original_uri));
++
++    // Create an image process pipeline.
++    $pipeline = \Drupal::service(ImageProcessor::class)->createInstance('derivative')
++      ->setImageStyle($style)
++      ->setSourceImageUri($original_uri);
++    $url = \Drupal::service('file_url_generator')->transformRelative($pipeline->getDerivativeImageUrl()->toString());
+ 
+     // Create the base element that we'll use in the tests below.
+     $base_element = [
+diff --git a/core/modules/image/tests/src/Unit/ImageStyleTest.php b/core/modules/image/tests/src/Unit/ImageStyleTest.php
+deleted file mode 100644
+index 6ea87730a2..0000000000
+--- a/core/modules/image/tests/src/Unit/ImageStyleTest.php
++++ /dev/null
+@@ -1,204 +0,0 @@
+-<?php
+-
+-namespace Drupal\Tests\image\Unit;
+-
+-use Drupal\Component\Utility\Crypt;
+-use Drupal\Tests\UnitTestCase;
+-
+-/**
+- * @coversDefaultClass \Drupal\image\Entity\ImageStyle
+- *
+- * @group Image
+- */
+-class ImageStyleTest extends UnitTestCase {
+-
+-  /**
+-   * The entity type used for testing.
+-   *
+-   * @var \Drupal\Core\Entity\EntityTypeInterface|\PHPUnit\Framework\MockObject\MockObject
+-   */
+-  protected $entityType;
+-
+-  /**
+-   * The entity type manager used for testing.
+-   *
+-   * @var \Drupal\Core\Entity\EntityTypeManagerInterface|\PHPUnit\Framework\MockObject\MockObject
+-   */
+-  protected $entityTypeManager;
+-
+-  /**
+-   * The ID of the type of the entity under test.
+-   *
+-   * @var string
+-   */
+-  protected $entityTypeId;
+-
+-  /**
+-   * Gets a mocked image style for testing.
+-   *
+-   * @param string $image_effect_id
+-   *   The image effect ID.
+-   * @param \Drupal\image\ImageEffectInterface|\PHPUnit\Framework\MockObject\MockObject $image_effect
+-   *   The image effect used for testing.
+-   * @param array $stubs
+-   *   An array of additional method names to mock.
+-   *
+-   * @return \Drupal\image\ImageStyleInterface
+-   *   The mocked image style.
+-   */
+-  protected function getImageStyleMock($image_effect_id, $image_effect, $stubs = []) {
+-    $effectManager = $this->getMockBuilder('\Drupal\image\ImageEffectManager')
+-      ->disableOriginalConstructor()
+-      ->getMock();
+-    $effectManager->expects($this->any())
+-      ->method('createInstance')
+-      ->with($image_effect_id)
+-      ->willReturn($image_effect);
+-    $default_stubs = ['getImageEffectPluginManager', 'fileDefaultScheme'];
+-    $image_style = $this->getMockBuilder('\Drupal\image\Entity\ImageStyle')
+-      ->setConstructorArgs([
+-        ['effects' => [$image_effect_id => ['id' => $image_effect_id]]],
+-        $this->entityTypeId,
+-      ])
+-      ->onlyMethods(array_merge($default_stubs, $stubs))
+-      ->getMock();
+-
+-    $image_style->expects($this->any())
+-      ->method('getImageEffectPluginManager')
+-      ->willReturn($effectManager);
+-    $image_style->expects($this->any())
+-      ->method('fileDefaultScheme')
+-      ->willReturnCallback([$this, 'fileDefaultScheme']);
+-
+-    return $image_style;
+-  }
+-
+-  /**
+-   * {@inheritdoc}
+-   */
+-  protected function setUp(): void {
+-    $this->entityTypeId = $this->randomMachineName();
+-    $provider = $this->randomMachineName();
+-    $this->entityType = $this->createMock('\Drupal\Core\Entity\EntityTypeInterface');
+-    $this->entityType->expects($this->any())
+-      ->method('getProvider')
+-      ->willReturn($provider);
+-    $this->entityTypeManager = $this->createMock('\Drupal\Core\Entity\EntityTypeManagerInterface');
+-    $this->entityTypeManager->expects($this->any())
+-      ->method('getDefinition')
+-      ->with($this->entityTypeId)
+-      ->willReturn($this->entityType);
+-  }
+-
+-  /**
+-   * @covers ::getDerivativeExtension
+-   */
+-  public function testGetDerivativeExtension() {
+-    $image_effect_id = $this->randomMachineName();
+-    $logger = $this->getMockBuilder('\Psr\Log\LoggerInterface')->getMock();
+-    $image_effect = $this->getMockBuilder('\Drupal\image\ImageEffectBase')
+-      ->setConstructorArgs([[], $image_effect_id, [], $logger])
+-      ->getMock();
+-    $image_effect->expects($this->any())
+-      ->method('getDerivativeExtension')
+-      ->willReturn('png');
+-
+-    $image_style = $this->getImageStyleMock($image_effect_id, $image_effect);
+-
+-    $extensions = ['jpeg', 'gif', 'png'];
+-    foreach ($extensions as $extension) {
+-      $extensionReturned = $image_style->getDerivativeExtension($extension);
+-      $this->assertEquals('png', $extensionReturned);
+-    }
+-  }
+-
+-  /**
+-   * @covers ::buildUri
+-   */
+-  public function testBuildUri() {
+-    // Image style that changes the extension.
+-    $image_effect_id = $this->randomMachineName();
+-    $logger = $this->getMockBuilder('\Psr\Log\LoggerInterface')->getMock();
+-    $image_effect = $this->getMockBuilder('\Drupal\image\ImageEffectBase')
+-      ->setConstructorArgs([[], $image_effect_id, [], $logger])
+-      ->getMock();
+-    $image_effect->expects($this->any())
+-      ->method('getDerivativeExtension')
+-      ->willReturn('png');
+-
+-    $image_style = $this->getImageStyleMock($image_effect_id, $image_effect);
+-    $this->assertEquals($image_style->buildUri('public://test.jpeg'), 'public://styles/' . $image_style->id() . '/public/test.jpeg.png');
+-
+-    // Image style that doesn't change the extension.
+-    $image_effect_id = $this->randomMachineName();
+-    $image_effect = $this->getMockBuilder('\Drupal\image\ImageEffectBase')
+-      ->setConstructorArgs([[], $image_effect_id, [], $logger])
+-      ->getMock();
+-    $image_effect->expects($this->any())
+-      ->method('getDerivativeExtension')
+-      ->will($this->returnArgument(0));
+-
+-    $image_style = $this->getImageStyleMock($image_effect_id, $image_effect);
+-    $this->assertEquals($image_style->buildUri('public://test.jpeg'), 'public://styles/' . $image_style->id() . '/public/test.jpeg');
+-  }
+-
+-  /**
+-   * @covers ::getPathToken
+-   */
+-  public function testGetPathToken() {
+-    $logger = $this->getMockBuilder('\Psr\Log\LoggerInterface')->getMock();
+-    $private_key = $this->randomMachineName();
+-    $hash_salt = $this->randomMachineName();
+-
+-    // Image style that changes the extension.
+-    $image_effect_id = $this->randomMachineName();
+-    $image_effect = $this->getMockBuilder('\Drupal\image\ImageEffectBase')
+-      ->setConstructorArgs([[], $image_effect_id, [], $logger])
+-      ->getMock();
+-    $image_effect->expects($this->any())
+-      ->method('getDerivativeExtension')
+-      ->willReturn('png');
+-
+-    $image_style = $this->getImageStyleMock($image_effect_id, $image_effect, ['getPrivateKey', 'getHashSalt']);
+-    $image_style->expects($this->any())
+-      ->method('getPrivateKey')
+-      ->willReturn($private_key);
+-    $image_style->expects($this->any())
+-      ->method('getHashSalt')
+-      ->willReturn($hash_salt);
+-
+-    // Assert the extension has been added to the URI before creating the token.
+-    $this->assertEquals($image_style->getPathToken('public://test.jpeg.png'), $image_style->getPathToken('public://test.jpeg'));
+-    $this->assertEquals(substr(Crypt::hmacBase64($image_style->id() . ':' . 'public://test.jpeg.png', $private_key . $hash_salt), 0, 8), $image_style->getPathToken('public://test.jpeg'));
+-    $this->assertNotEquals(substr(Crypt::hmacBase64($image_style->id() . ':' . 'public://test.jpeg', $private_key . $hash_salt), 0, 8), $image_style->getPathToken('public://test.jpeg'));
+-
+-    // Image style that doesn't change the extension.
+-    $image_effect_id = $this->randomMachineName();
+-    $image_effect = $this->getMockBuilder('\Drupal\image\ImageEffectBase')
+-      ->setConstructorArgs([[], $image_effect_id, [], $logger])
+-      ->getMock();
+-    $image_effect->expects($this->any())
+-      ->method('getDerivativeExtension')
+-      ->will($this->returnArgument(0));
+-
+-    $image_style = $this->getImageStyleMock($image_effect_id, $image_effect, ['getPrivateKey', 'getHashSalt']);
+-    $image_style->expects($this->any())
+-      ->method('getPrivateKey')
+-      ->willReturn($private_key);
+-    $image_style->expects($this->any())
+-      ->method('getHashSalt')
+-      ->willReturn($hash_salt);
+-    // Assert no extension has been added to the uri before creating the token.
+-    $this->assertNotEquals($image_style->getPathToken('public://test.jpeg.png'), $image_style->getPathToken('public://test.jpeg'));
+-    $this->assertNotEquals(substr(Crypt::hmacBase64($image_style->id() . ':' . 'public://test.jpeg.png', $private_key . $hash_salt), 0, 8), $image_style->getPathToken('public://test.jpeg'));
+-    $this->assertEquals(substr(Crypt::hmacBase64($image_style->id() . ':' . 'public://test.jpeg', $private_key . $hash_salt), 0, 8), $image_style->getPathToken('public://test.jpeg'));
+-  }
+-
+-  /**
+-   * Mock function for ImageStyle::fileDefaultScheme().
+-   */
+-  public function fileDefaultScheme() {
+-    return 'public';
+-  }
+-
+-}
+diff --git a/core/modules/responsive_image/responsive_image.module b/core/modules/responsive_image/responsive_image.module
+index 8d48bedf0e..cd60554a7c 100644
+--- a/core/modules/responsive_image/responsive_image.module
++++ b/core/modules/responsive_image/responsive_image.module
+@@ -11,6 +11,7 @@
+ use Drupal\Core\Logger\RfcLogLevel;
+ use Drupal\Core\Routing\RouteMatchInterface;
+ use Drupal\image\Entity\ImageStyle;
++use Drupal\image\ImageProcessor;
+ use Drupal\responsive_image\Entity\ResponsiveImageStyle;
+ use Drupal\responsive_image\ResponsiveImageConfigUpdater;
+ use Drupal\responsive_image\ResponsiveImageStyleInterface;
+@@ -480,7 +481,13 @@ function responsive_image_get_image_dimensions($image_style_name, array $dimensi
+     ];
+   }
+   elseif ($entity = ImageStyle::load($image_style_name)) {
+-    $entity->transformDimensions($dimensions, $uri);
++    $pipeline = \Drupal::service(ImageProcessor::class)->createInstance('derivative');
++    $pipeline
++      ->setImageStyle($entity)
++      ->setSourceImageUri($uri)
++      ->setSourceImageDimensions($dimensions['width'] ?? NULL, $dimensions['height'] ?? NULL);
++    $dimensions['width'] = $pipeline->getDerivativeImageWidth();
++    $dimensions['height'] = $pipeline->getDerivativeImageHeight();
+   }
+ 
+   return $dimensions;
+@@ -507,7 +514,10 @@ function responsive_image_get_mime_type($image_style_name, $extension) {
+     $fake_path = 'responsive_image.' . $extension;
+   }
+   else {
+-    $fake_path = 'responsive_image.' . ImageStyle::load($image_style_name)->getDerivativeExtension($extension);
++    $pipeline = \Drupal::service(ImageProcessor::class)->createInstance('derivative')
++      ->setImageStyle(ImageStyle::load($image_style_name))
++      ->setSourceImageFileExtension($extension);
++    $fake_path = 'responsive_image.' . $pipeline->getDerivativeImageFileExtension();
+   }
+   return \Drupal::service('file.mime_type.guesser.extension')->guessMimeType($fake_path);
+ }
+@@ -527,7 +537,11 @@ function _responsive_image_image_style_url($style_name, $path) {
+ 
+   $entity = ImageStyle::load($style_name);
+   if ($entity instanceof ImageStyle) {
+-    return $file_url_generator->transformRelative($entity->buildUrl($path));
++    $pipeline = \Drupal::service(ImageProcessor::class)->createInstance('derivative');
++    $pipeline
++      ->setImageStyle($entity)
++      ->setSourceImageUri($path);
++    return $file_url_generator->transformRelative($pipeline->getDerivativeImageUrl()->toString());
+   }
+   return $file_url_generator->generateString($path);
+ }
+diff --git a/core/modules/responsive_image/tests/src/Functional/ResponsiveImageFieldDisplayTest.php b/core/modules/responsive_image/tests/src/Functional/ResponsiveImageFieldDisplayTest.php
+index e66978284a..bc1be103e0 100644
+--- a/core/modules/responsive_image/tests/src/Functional/ResponsiveImageFieldDisplayTest.php
++++ b/core/modules/responsive_image/tests/src/Functional/ResponsiveImageFieldDisplayTest.php
+@@ -6,6 +6,7 @@
+ use Drupal\image\ImageStyleInterface;
+ use Drupal\node\Entity\Node;
+ use Drupal\file\Entity\File;
++use Drupal\image\ImageProcessor;
+ use Drupal\responsive_image\Plugin\Field\FieldFormatter\ResponsiveImageFormatter;
+ use Drupal\responsive_image\Entity\ResponsiveImageStyle;
+ use Drupal\responsive_image\ResponsiveImageStyleInterface;
+@@ -293,8 +294,10 @@ protected function doTestResponsiveImageFieldFormatters($scheme, $empty_styles =
+       ->save();
+ 
+     // Create a derivative so at least one MIME type will be known.
+-    $large_style = ImageStyle::load('large');
+-    $large_style->createDerivative($image_uri, $large_style->buildUri($image_uri));
++    $large_style_pipeline = \Drupal::service(ImageProcessor::class)->createInstance('derivative')
++      ->setImageStyle(ImageStyle::load('large'))
++      ->setSourceImageUri($image_uri);
++    $large_style_pipeline->buildDerivativeImage();
+ 
+     // Output should contain all image styles and all breakpoints.
+     $this->drupalGet('node/' . $nid);
+@@ -302,9 +305,11 @@ protected function doTestResponsiveImageFieldFormatters($scheme, $empty_styles =
+       $this->assertSession()->responseContains('/styles/medium/');
+       // Assert the empty image is present.
+       $this->assertSession()->responseContains('data:image/gif;base64,R0lGODlhAQABAIABAP///wAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==');
+-      $thumbnail_style = ImageStyle::load('thumbnail');
++      $thumbnail_style_pipeline = \Drupal::service(ImageProcessor::class)->createInstance('derivative')
++        ->setImageStyle(ImageStyle::load('thumbnail'))
++        ->setSourceImageUri($image_uri);
+       // Assert the output of the 'srcset' attribute (small multipliers first).
+-      $this->assertSession()->responseContains('data:image/gif;base64,R0lGODlhAQABAIABAP///wAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw== 1x, ' . $this->fileUrlGenerator->transformRelative($thumbnail_style->buildUrl($image_uri)) . ' 1.5x');
++      $this->assertSession()->responseContains('data:image/gif;base64,R0lGODlhAQABAIABAP///wAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw== 1x, ' . $this->fileUrlGenerator->transformRelative($thumbnail_style_pipeline->getDerivativeImageUrl()->toString()) . ' 1.5x');
+       $this->assertSession()->responseContains('/styles/medium/');
+       // Assert the output of the original image.
+       $this->assertSession()->responseContains($this->fileUrlGenerator->generateString($image_uri) . ' 3x');
+@@ -315,8 +320,10 @@ protected function doTestResponsiveImageFieldFormatters($scheme, $empty_styles =
+       $this->assertSession()->responseContains('sizes="(min-width: 700px) 700px, 100vw"');
+       $this->assertSession()->responseMatches('/media="\(min-width: 560px\)".+?sizes="\(min-width: 700px\) 700px, 100vw"/');
+       // Assert the output of the 'srcset' attribute (small images first).
+-      $medium_style = ImageStyle::load('medium');
+-      $this->assertSession()->responseContains($this->fileUrlGenerator->transformRelative($medium_style->buildUrl($image_uri)) . ' 220w, ' . $this->fileUrlGenerator->transformRelative($large_style->buildUrl($image_uri)) . ' 360w');
++      $medium_style_pipeline = \Drupal::service(ImageProcessor::class)->createInstance('derivative')
++        ->setImageStyle(ImageStyle::load('medium'))
++        ->setSourceImageUri($image_uri);
++      $this->assertSession()->responseContains($this->fileUrlGenerator->transformRelative($medium_style_pipeline->getDerivativeImageUrl()->toString()) . ' 220w, ' . $this->fileUrlGenerator->transformRelative($large_style_pipeline->getDerivativeImageUrl()->toString()) . ' 360w');
+       $this->assertSession()->responseContains('media="(min-width: 851px)"');
+       // Assert the output of the 'width' attribute.
+       $this->assertSession()->responseContains('width="360"');
+@@ -335,10 +342,13 @@ protected function doTestResponsiveImageFieldFormatters($scheme, $empty_styles =
+ 
+     // Test the fallback image style.
+     $image = \Drupal::service('image.factory')->get($image_uri);
++    $large_style_pipeline = \Drupal::service(ImageProcessor::class)->createInstance('derivative')
++      ->setImageStyle(ImageStyle::load('large'))
++      ->setSourceImageUri($image->getSource());
+     $fallback_image = [
+       '#theme' => 'image',
+       '#alt' => $alt,
+-      '#uri' => $this->fileUrlGenerator->transformRelative($large_style->buildUrl($image->getSource())),
++      '#uri' => $this->fileUrlGenerator->transformRelative($large_style_pipeline->getDerivativeImageUrl()->toString()),
+       '#attributes' => ['loading' => 'lazy'],
+     ];
+     // The image.html.twig template has a newline after the <img> tag but
+@@ -350,7 +360,10 @@ protected function doTestResponsiveImageFieldFormatters($scheme, $empty_styles =
+     if ($scheme == 'private') {
+       // Log out and ensure the file cannot be accessed.
+       $this->drupalLogout();
+-      $this->drupalGet($large_style->buildUrl($image_uri));
++      $large_style_pipeline = \Drupal::service(ImageProcessor::class)->createInstance('derivative')
++        ->setImageStyle(ImageStyle::load('large'))
++        ->setSourceImageUri($image_uri);
++      $this->drupalGet($large_style_pipeline->getDerivativeImageUrl()->toString());
+       $this->assertSession()->statusCodeEquals(403);
+       $this->assertSession()->responseHeaderNotMatches('X-Drupal-Cache-Tags', '/ image_style\:/');
+     }
+@@ -416,10 +429,12 @@ public function testResponsiveImageFieldFormattersEmptyMediaQuery() {
+     $this->assertSession()->responseNotMatches('@srcset="data:image/gif;base64,R0lGODlhAQABAIABAP///wAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw== 1x".+?media=".+?/><source@');
+ 
+     // Assert the media attribute is present if it has a value.
+-    $thumbnail_style = ImageStyle::load('thumbnail');
+     $node = $node_storage->load($nid);
+     $image_uri = File::load($node->{$field_name}->target_id)->getFileUri();
+-    $this->assertSession()->responseMatches('/srcset="' . preg_quote($this->fileUrlGenerator->transformRelative($thumbnail_style->buildUrl($image_uri)), '/') . ' 1x".+?media="\(min-width: 0px\)"/');
++    $thumbnail_style_pipeline = \Drupal::service(ImageProcessor::class)->createInstance('derivative')
++      ->setImageStyle(ImageStyle::load('thumbnail'))
++      ->setSourceImageUri($image_uri);
++    $this->assertSession()->responseMatches('/srcset="' . preg_quote($this->fileUrlGenerator->transformRelative($thumbnail_style_pipeline->getDerivativeImageUrl()->toString()), '/') . ' 1x".+?media="\(min-width: 0px\)"/');
+   }
+ 
+   /**
+@@ -495,8 +510,14 @@ public function testResponsiveImageFieldFormattersMultipleSources() {
+     // from the large image style are used.
+     $node = $node_storage->load($nid);
+     $image_uri = File::load($node->{$field_name}->target_id)->getFileUri();
+-    $medium_transform_url = $this->fileUrlGenerator->transformRelative($medium_style->buildUrl($image_uri));
+-    $large_transform_url = $this->fileUrlGenerator->transformRelative($large_style->buildUrl($image_uri));
++    $large_style_pipeline = \Drupal::service(ImageProcessor::class)->createInstance('derivative')
++      ->setImageStyle(ImageStyle::load('large'))
++      ->setSourceImageUri($image_uri);
++    $large_transform_url = $this->fileUrlGenerator->transformRelative($large_style_pipeline->getDerivativeImageUrl()->toString());
++    $medium_style_pipeline = \Drupal::service(ImageProcessor::class)->createInstance('derivative')
++      ->setImageStyle(ImageStyle::load('medium'))
++      ->setSourceImageUri($image_uri);
++    $medium_transform_url = $this->fileUrlGenerator->transformRelative($medium_style_pipeline->getDerivativeImageUrl()->toString());
+     $this->assertSession()->responseMatches('/<img loading="eager" srcset="' . \preg_quote($medium_transform_url, '/') . ' 1x, ' . \preg_quote($large_transform_url, '/') . ' 1.5x, ' . \preg_quote($large_transform_url, '/') . ' 2x" width="220" height="220" src="' . \preg_quote($large_transform_url, '/') . '" alt="\w+" \/>/');
+ 
+     $this->responsiveImgStyle
+@@ -562,9 +583,11 @@ private function assertResponsiveImageFieldFormattersLink(string $link_type): vo
+       ->save();
+ 
+     // Create a derivative so at least one MIME type will be known.
+-    $large_style = ImageStyle::load('large');
+     $image_uri = File::load($node->{$field_name}->target_id)->getFileUri();
+-    $large_style->createDerivative($image_uri, $large_style->buildUri($image_uri));
++    \Drupal::service(ImageProcessor::class)->createInstance('derivative')
++      ->setImageStyle(ImageStyle::load('large'))
++      ->setSourceImageUri($image_uri)
++      ->buildDerivativeImage();
+ 
+     // Output should contain all image styles and all breakpoints.
+     $this->drupalGet('node/' . $nid);
+diff --git a/core/modules/user/tests/src/Functional/UserPictureTest.php b/core/modules/user/tests/src/Functional/UserPictureTest.php
+index 6d8fb5c107..6ab2c2bae4 100644
+--- a/core/modules/user/tests/src/Functional/UserPictureTest.php
++++ b/core/modules/user/tests/src/Functional/UserPictureTest.php
+@@ -7,6 +7,7 @@
+ use Drupal\Core\StreamWrapper\StreamWrapperManager;
+ use Drupal\file\Entity\File;
+ use Drupal\image\Entity\ImageStyle;
++use Drupal\image\ImageProcessor;
+ use Drupal\Tests\BrowserTestBase;
+ use Drupal\Tests\TestFileCreationTrait;
+ 
+@@ -118,8 +119,10 @@ public function testPictureOnNodeComment() {
+     $this->config('system.theme.global')->set('features.node_user_picture', TRUE)->save();
+ 
+     $image_style_id = $this->config('core.entity_view_display.user.user.compact')->get('content.user_picture.settings.image_style');
+-    $style = ImageStyle::load($image_style_id);
+-    $image_url = \Drupal::service('file_url_generator')->transformRelative($style->buildUrl($file->getFileUri()));
++    $pipeline = \Drupal::service(ImageProcessor::class)->createInstance('derivative')
++      ->setImageStyle(ImageStyle::load($image_style_id))
++      ->setSourceImageUri($file->getfileUri());
++    $image_url = \Drupal::service('file_url_generator')->transformRelative($pipeline->getDerivativeImageUrl()->toString());
+     $alt_text = 'Profile picture for user ' . $this->webUser->getAccountName();
+ 
+     // Verify that the image is displayed on the node page.
