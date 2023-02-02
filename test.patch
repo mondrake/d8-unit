@@ -62,20 +62,19 @@ index 9921e7b94b..3e8ade6b03 100644
      'url' => $file_url_generator->generateString($preview_file),
      'width' => $preview_image->getWidth(),
 diff --git a/core/modules/image/image.module b/core/modules/image/image.module
-index 59127a41b9..04e6f2a7e5 100644
+index 59127a41b9..1d48632eba 100644
 --- a/core/modules/image/image.module
 +++ b/core/modules/image/image.module
-@@ -14,6 +14,9 @@
+@@ -14,6 +14,8 @@
  use Drupal\field\FieldStorageConfigInterface;
  use Drupal\file\FileInterface;
  use Drupal\image\Entity\ImageStyle;
-+use Drupal\image\Event\ImageStyleEvent;
-+use Drupal\image\Event\ImageStyleEvents;
++use Drupal\image\Event\FlushSourceImageEvent;
 +use Drupal\image\ImageProcessor;
  
  /**
   * The name of the query parameter for image derivative tokens.
-@@ -192,10 +195,12 @@ function image_file_predelete(FileInterface $file) {
+@@ -192,10 +194,7 @@ function image_file_predelete(FileInterface $file) {
   *   The Drupal file path to the original image.
   */
  function image_path_flush($path) {
@@ -83,16 +82,11 @@ index 59127a41b9..04e6f2a7e5 100644
 -  foreach ($styles as $style) {
 -    $style->flush($path);
 -  }
-+  \Drupal::service('event_dispatcher')->dispatch(
-+    new ImageStyleEvent(NULL, [
-+      'sourceImageUri' => $path,
-+    ]),
-+    ImageStyleEvents::FLUSH_FROM_SOURCE_IMAGE_URI
-+  );
++  \Drupal::service('event_dispatcher')->dispatch(new FlushSourceImageEvent($path));
  }
  
  /**
-@@ -252,18 +257,15 @@ function image_style_options($include_empty = TRUE) {
+@@ -252,18 +251,15 @@ function image_style_options($include_empty = TRUE) {
  function template_preprocess_image_style(&$variables) {
    $style = ImageStyle::load($variables['style_name']);
  
@@ -117,7 +111,7 @@ index 59127a41b9..04e6f2a7e5 100644
      '#attributes' => $variables['attributes'],
      '#style_name' => $variables['style_name'],
    ];
-@@ -271,8 +273,8 @@ function template_preprocess_image_style(&$variables) {
+@@ -271,8 +267,8 @@ function template_preprocess_image_style(&$variables) {
    // If the current image toolkit supports this file type, prepare the URI for
    // the derivative image. If not, just use the original image resized to the
    // dimensions specified by the style.
@@ -322,10 +316,10 @@ index b077c93336..1ce8968da5 100644
      if (!empty($lock_acquired)) {
        $this->lock->release($lock_name);
 diff --git a/core/modules/image/src/Entity/ImageStyle.php b/core/modules/image/src/Entity/ImageStyle.php
-index f7edba286b..a1b3ab2784 100644
+index f7edba286b..82bf572745 100644
 --- a/core/modules/image/src/Entity/ImageStyle.php
 +++ b/core/modules/image/src/Entity/ImageStyle.php
-@@ -2,24 +2,18 @@
+@@ -2,24 +2,17 @@
  
  namespace Drupal\image\Entity;
  
@@ -341,8 +335,7 @@ index f7edba286b..a1b3ab2784 100644
 -use Drupal\Core\StreamWrapper\StreamWrapperManager;
 -use Drupal\Core\Url;
 +use Drupal\image\Event\ImageDerivativePipelineEvents;
-+use Drupal\image\Event\ImageStyleEvent;
-+use Drupal\image\Event\ImageStyleEvents;
++use Drupal\image\Event\ImageStyle\FlushEvent;
  use Drupal\image\ImageEffectPluginCollection;
  use Drupal\image\ImageEffectInterface;
 +use Drupal\image\ImageProcessor;
@@ -354,7 +347,7 @@ index f7edba286b..a1b3ab2784 100644
  use Drupal\Core\Entity\Entity\EntityViewDisplay;
  
  /**
-@@ -174,135 +168,40 @@ protected static function replaceImageStyle(ImageStyleInterface $style) {
+@@ -174,135 +167,40 @@ protected static function replaceImageStyle(ImageStyleInterface $style) {
     * {@inheritdoc}
     */
    public function buildUri($uri) {
@@ -494,7 +487,7 @@ index f7edba286b..a1b3ab2784 100644
 -        }
 -      }
 +    else {
-+      \Drupal::service('event_dispatcher')->dispatch(new ImageStyleEvent($this), ImageStyleEvents::FLUSH);
++      \Drupal::service('event_dispatcher')->dispatch(new FlushEvent($this));
      }
 -
 -    // Let other modules update as necessary on flush.
@@ -509,7 +502,7 @@ index f7edba286b..a1b3ab2784 100644
      return $this;
    }
  
-@@ -310,60 +209,49 @@ public function flush($path = NULL) {
+@@ -310,60 +208,49 @@ public function flush($path = NULL) {
     * {@inheritdoc}
     */
    public function createDerivative($original_uri, $derivative_uri) {
@@ -595,7 +588,7 @@ index f7edba286b..a1b3ab2784 100644
    }
  
    /**
-@@ -379,12 +267,11 @@ public function deleteImageEffect(ImageEffectInterface $effect) {
+@@ -379,12 +266,11 @@ public function deleteImageEffect(ImageEffectInterface $effect) {
     * {@inheritdoc}
     */
    public function supportsUri($uri) {
@@ -613,7 +606,7 @@ index f7edba286b..a1b3ab2784 100644
    }
  
    /**
-@@ -460,8 +347,11 @@ protected function getImageEffectPluginManager() {
+@@ -460,8 +346,11 @@ protected function getImageEffectPluginManager() {
     *
     * @return \Drupal\Core\Image\ImageFactory
     *   The image factory.
@@ -625,7 +618,7 @@ index f7edba286b..a1b3ab2784 100644
      return \Drupal::service('image.factory');
    }
  
-@@ -470,8 +360,11 @@ protected function getImageFactory() {
+@@ -470,8 +359,11 @@ protected function getImageFactory() {
     *
     * @return string
     *   The Drupal private key.
@@ -637,7 +630,7 @@ index f7edba286b..a1b3ab2784 100644
      return \Drupal::service('private_key')->get();
    }
  
-@@ -482,8 +375,11 @@ protected function getPrivateKey() {
+@@ -482,8 +374,11 @@ protected function getPrivateKey() {
     *   A salt based on information in settings.php, not in the database.
     *
     * @throws \RuntimeException
@@ -649,7 +642,7 @@ index f7edba286b..a1b3ab2784 100644
      return Settings::getHashSalt();
    }
  
-@@ -500,8 +396,11 @@ protected function getHashSalt() {
+@@ -500,8 +395,11 @@ protected function getHashSalt() {
     * @return string
     *   The given path if this image style doesn't change its extension, or the
     *   path with the added extension if it does.
@@ -661,7 +654,7 @@ index f7edba286b..a1b3ab2784 100644
      $original_extension = pathinfo($path, PATHINFO_EXTENSION);
      $extension = $this->getDerivativeExtension($original_extension);
      if ($original_extension !== $extension) {
-@@ -517,8 +416,11 @@ protected function addExtension($path) {
+@@ -517,8 +415,11 @@ protected function addExtension($path) {
     *
     * @return string
     *   'public', 'private' or any other file scheme defined as the default.
@@ -673,7 +666,7 @@ index f7edba286b..a1b3ab2784 100644
      return \Drupal::config('system.file')->get('default_scheme');
    }
  
-@@ -528,9 +430,10 @@ protected function fileDefaultScheme() {
+@@ -528,9 +429,10 @@ protected function fileDefaultScheme() {
     * @return \Drupal\Core\StreamWrapper\StreamWrapperManagerInterface
     *   The stream wrapper manager service
     *
@@ -685,6 +678,33 @@ index f7edba286b..a1b3ab2784 100644
      return \Drupal::service('stream_wrapper_manager');
    }
  
+diff --git a/core/modules/image/src/Event/FlushSourceImageEvent.php b/core/modules/image/src/Event/FlushSourceImageEvent.php
+new file mode 100644
+index 0000000000..6094208908
+--- /dev/null
++++ b/core/modules/image/src/Event/FlushSourceImageEvent.php
+@@ -0,0 +1,21 @@
++<?php
++
++namespace Drupal\image\Event;
++
++use Drupal\Component\EventDispatcher\Event;
++
++/**
++ * Event to remove derivatives of a source image in all image styles.
++ */
++class FlushSourceImageEvent extends Event {
++
++  /**
++   * Constructs a FlushSourceImageEvent object.
++   *
++   * @param string $uri
++   *   The URI of the source image.
++   */
++  public function __construct(public readonly string $uri) {
++  }    
++
++}
 diff --git a/core/modules/image/src/Event/ImageDerivativePipelineEvents.php b/core/modules/image/src/Event/ImageDerivativePipelineEvents.php
 new file mode 100644
 index 0000000000..820589ba70
@@ -882,15 +902,15 @@ index 0000000000..70b9a6e5cb
 +  }
 +
 +}
-diff --git a/core/modules/image/src/Event/ImageStyleEvent.php b/core/modules/image/src/Event/ImageStyleEvent.php
+diff --git a/core/modules/image/src/Event/ImageStyle/BaseEvent.php b/core/modules/image/src/Event/ImageStyle/BaseEvent.php
 new file mode 100644
-index 0000000000..c40de29b87
+index 0000000000..63be9b475e
 --- /dev/null
-+++ b/core/modules/image/src/Event/ImageStyleEvent.php
++++ b/core/modules/image/src/Event/ImageStyle/BaseEvent.php
 @@ -0,0 +1,23 @@
 +<?php
 +
-+namespace Drupal\image\Event;
++namespace Drupal\image\Event\ImageStyle;
 +
 +use Drupal\image\ImageStyleInterface;
 +use Symfony\Component\EventDispatcher\GenericEvent;
@@ -898,7 +918,7 @@ index 0000000000..c40de29b87
 +/**
 + * Provides a class for events related to image styles.
 + */
-+class ImageStyleEvent extends GenericEvent {
++abstract class BaseEvent extends GenericEvent {
 +
 +  /**
 +   * Returns the Image Style object subject of the event.
@@ -911,47 +931,24 @@ index 0000000000..c40de29b87
 +  }
 +
 +}
-diff --git a/core/modules/image/src/Event/ImageStyleEvents.php b/core/modules/image/src/Event/ImageStyleEvents.php
+diff --git a/core/modules/image/src/Event/ImageStyle/FlushEvent.php b/core/modules/image/src/Event/ImageStyle/FlushEvent.php
 new file mode 100644
-index 0000000000..35a8cee043
+index 0000000000..8304dfc6cc
 --- /dev/null
-+++ b/core/modules/image/src/Event/ImageStyleEvents.php
-@@ -0,0 +1,32 @@
++++ b/core/modules/image/src/Event/ImageStyle/FlushEvent.php
+@@ -0,0 +1,9 @@
 +<?php
 +
-+namespace Drupal\image\Event;
++namespace Drupal\image\Event\ImageStyle;
 +
 +/**
-+ * Defines events for the image style.
++ * Image style flush event.
 + */
-+final class ImageStyleEvents {
-+
-+  /**
-+   * Event fired to remove all the image derivatives of an image style.
-+   *
-+   * @Event
-+   *
-+   * @see \Drupal\image\Entity\ImageStyle::flush()
-+   *
-+   * @var string
-+   */
-+  const FLUSH = 'image.style.flush';
-+
-+  /**
-+   * Event fired to remove derivatives of a source image in all image styles.
-+   *
-+   * @Event
-+   *
-+   * @see image_path_flush()
-+   *
-+   * @var string
-+   */
-+  const FLUSH_FROM_SOURCE_IMAGE_URI = 'image.style.flush_from_source_image_uri';
-+
++class FlushEvent extends BaseEvent {
 +}
 diff --git a/core/modules/image/src/EventSubscriber/ImageDerivativeSubscriber.php b/core/modules/image/src/EventSubscriber/ImageDerivativeSubscriber.php
 new file mode 100644
-index 0000000000..cd8e3c0d96
+index 0000000000..53724505d2
 --- /dev/null
 +++ b/core/modules/image/src/EventSubscriber/ImageDerivativeSubscriber.php
 @@ -0,0 +1,510 @@
@@ -975,8 +972,8 @@ index 0000000000..cd8e3c0d96
 +use Drupal\image\Entity\ImageStyle;
 +use Drupal\image\Event\ImageDerivativePipelineEvents;
 +use Drupal\image\Event\ImageProcessEvent;
-+use Drupal\image\Event\ImageStyleEvent;
-+use Drupal\image\Event\ImageStyleEvents;
++use Drupal\image\Event\ImageStyle\FlushEvent;
++use Drupal\image\Event\FlushSourceImageEvent;
 +use Drupal\image\ImageProcessException;
 +use Drupal\image\ImageProcessor;
 +use Psr\Log\LoggerInterface;
@@ -1060,8 +1057,8 @@ index 0000000000..cd8e3c0d96
 +      ImageDerivativePipelineEvents::APPLY_IMAGE_STYLE => 'applyImageStyle',
 +      ImageDerivativePipelineEvents::APPLY_IMAGE_EFFECT => 'applyImageEffect',
 +      ImageDerivativePipelineEvents::SAVE_DERIVATIVE_IMAGE => 'saveDerivativeImage',
-+      ImageStyleEvents::FLUSH => 'flushImageStyle',
-+      ImageStyleEvents::FLUSH_FROM_SOURCE_IMAGE_URI => 'flushFromSourceImageUri',
++      FlushEvent::class => 'flushImageStyle',
++      FlushSourceImageEvent::class => 'flushFromSourceImageUri',
 +      ImageDerivativePipelineEvents::REMOVE_DERIVATIVE_IMAGE => 'removeDerivativeImage',
 +    ];
 +  }
@@ -1426,10 +1423,10 @@ index 0000000000..cd8e3c0d96
 +  /**
 +   * Flushes all image derivatives for the specified image style.
 +   *
-+   * @param \Drupal\image\Event\ImageStyleEvent $event
++   * @param \Drupal\image\Event\ImageStyle\FlushEvent $event
 +   *   The image style event.
 +   */
-+  public function flushImageStyle(ImageStyleEvent $event): void {
++  public function flushImageStyle(FlushEvent $event): void {
 +    $image_style = $event->getImageStyle();
 +
 +    // Delete the style directory in each registered wrapper.
@@ -1452,14 +1449,14 @@ index 0000000000..cd8e3c0d96
 +  /**
 +   * Flushes all derivative versions of a specific file in all styles.
 +   *
-+   * @param \Drupal\image\Event\ImageStyleEvent $event
++   * @param \Drupal\image\Event\FlushSourceImageEvent $event
 +   *   The image style event.
 +   */
-+  public function flushFromSourceImageUri(ImageStyleEvent $event): void {
++  public function flushFromSourceImageUri(FlushSourceImageEvent $event): void {
 +    foreach (ImageStyle::loadMultiple() as $style) {
 +      $this->imageProcessor->createInstance('derivative')
 +        ->setImageStyle($style)
-+        ->setSourceImageUri($event->getArgument('sourceImageUri'))
++        ->setSourceImageUri($event->uri))
 +        ->dispatch(ImageDerivativePipelineEvents::REMOVE_DERIVATIVE_IMAGE);
 +    }
 +  }
@@ -4003,7 +4000,7 @@ index e66978284a..bc1be103e0 100644
      // Output should contain all image styles and all breakpoints.
      $this->drupalGet('node/' . $nid);
 diff --git a/core/modules/user/tests/src/Functional/UserPictureTest.php b/core/modules/user/tests/src/Functional/UserPictureTest.php
-index 6d8fb5c107..6ab2c2bae4 100644
+index 6d8fb5c107..3f1ec51c6c 100644
 --- a/core/modules/user/tests/src/Functional/UserPictureTest.php
 +++ b/core/modules/user/tests/src/Functional/UserPictureTest.php
 @@ -7,6 +7,7 @@
@@ -4022,7 +4019,7 @@ index 6d8fb5c107..6ab2c2bae4 100644
 -    $image_url = \Drupal::service('file_url_generator')->transformRelative($style->buildUrl($file->getFileUri()));
 +    $pipeline = \Drupal::service(ImageProcessor::class)->createInstance('derivative')
 +      ->setImageStyle(ImageStyle::load($image_style_id))
-+      ->setSourceImageUri($file->getfileUri());
++      ->setSourceImageUri($file->getFileUri());
 +    $image_url = \Drupal::service('file_url_generator')->transformRelative($pipeline->getDerivativeImageUrl()->toString());
      $alt_text = 'Profile picture for user ' . $this->webUser->getAccountName();
  
