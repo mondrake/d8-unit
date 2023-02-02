@@ -316,10 +316,10 @@ index b077c93336..1ce8968da5 100644
      if (!empty($lock_acquired)) {
        $this->lock->release($lock_name);
 diff --git a/core/modules/image/src/Entity/ImageStyle.php b/core/modules/image/src/Entity/ImageStyle.php
-index f7edba286b..42d2243d0d 100644
+index f7edba286b..3e48021b74 100644
 --- a/core/modules/image/src/Entity/ImageStyle.php
 +++ b/core/modules/image/src/Entity/ImageStyle.php
-@@ -2,24 +2,17 @@
+@@ -2,24 +2,18 @@
  
  namespace Drupal\image\Entity;
  
@@ -335,6 +335,7 @@ index f7edba286b..42d2243d0d 100644
 -use Drupal\Core\StreamWrapper\StreamWrapperManager;
 -use Drupal\Core\Url;
 +use Drupal\image\Event\ImageDerivative\ImageDerivativePipelineEvents;
++use Drupal\image\Event\ImageDerivative\ResolveDerivativeImageDimensionsEvent;
 +use Drupal\image\Event\ImageStyle\FlushEvent;
  use Drupal\image\ImageEffectPluginCollection;
  use Drupal\image\ImageEffectInterface;
@@ -347,7 +348,7 @@ index f7edba286b..42d2243d0d 100644
  use Drupal\Core\Entity\Entity\EntityViewDisplay;
  
  /**
-@@ -174,135 +167,40 @@ protected static function replaceImageStyle(ImageStyleInterface $style) {
+@@ -174,135 +168,40 @@ protected static function replaceImageStyle(ImageStyleInterface $style) {
     * {@inheritdoc}
     */
    public function buildUri($uri) {
@@ -502,7 +503,7 @@ index f7edba286b..42d2243d0d 100644
      return $this;
    }
  
-@@ -310,60 +208,49 @@ public function flush($path = NULL) {
+@@ -310,60 +209,49 @@ public function flush($path = NULL) {
     * {@inheritdoc}
     */
    public function createDerivative($original_uri, $derivative_uri) {
@@ -554,7 +555,7 @@ index f7edba286b..42d2243d0d 100644
 +      ->setImageStyle($this)
 +      ->setSourceImageUri($uri)
 +      ->setSourceImageDimensions($dimensions['width'] ?? NULL, $dimensions['height'] ?? NULL)
-+      ->dispatch(ImageDerivativePipelineEvents::RESOLVE_DERIVATIVE_IMAGE_DIMENSIONS);
++      ->dispatch(ResolveDerivativeImageDimensionsEvent::class);
 +    $dimensions['width'] = $pipeline->getVariable('derivativeImageWidth');
 +    $dimensions['height'] = $pipeline->getVariable('derivativeImageHeight');
    }
@@ -588,7 +589,7 @@ index f7edba286b..42d2243d0d 100644
    }
  
    /**
-@@ -379,12 +266,11 @@ public function deleteImageEffect(ImageEffectInterface $effect) {
+@@ -379,12 +267,11 @@ public function deleteImageEffect(ImageEffectInterface $effect) {
     * {@inheritdoc}
     */
    public function supportsUri($uri) {
@@ -606,7 +607,7 @@ index f7edba286b..42d2243d0d 100644
    }
  
    /**
-@@ -460,8 +346,11 @@ protected function getImageEffectPluginManager() {
+@@ -460,8 +347,11 @@ protected function getImageEffectPluginManager() {
     *
     * @return \Drupal\Core\Image\ImageFactory
     *   The image factory.
@@ -618,7 +619,7 @@ index f7edba286b..42d2243d0d 100644
      return \Drupal::service('image.factory');
    }
  
-@@ -470,8 +359,11 @@ protected function getImageFactory() {
+@@ -470,8 +360,11 @@ protected function getImageFactory() {
     *
     * @return string
     *   The Drupal private key.
@@ -630,7 +631,7 @@ index f7edba286b..42d2243d0d 100644
      return \Drupal::service('private_key')->get();
    }
  
-@@ -482,8 +374,11 @@ protected function getPrivateKey() {
+@@ -482,8 +375,11 @@ protected function getPrivateKey() {
     *   A salt based on information in settings.php, not in the database.
     *
     * @throws \RuntimeException
@@ -642,7 +643,7 @@ index f7edba286b..42d2243d0d 100644
      return Settings::getHashSalt();
    }
  
-@@ -500,8 +395,11 @@ protected function getHashSalt() {
+@@ -500,8 +396,11 @@ protected function getHashSalt() {
     * @return string
     *   The given path if this image style doesn't change its extension, or the
     *   path with the added extension if it does.
@@ -654,7 +655,7 @@ index f7edba286b..42d2243d0d 100644
      $original_extension = pathinfo($path, PATHINFO_EXTENSION);
      $extension = $this->getDerivativeExtension($original_extension);
      if ($original_extension !== $extension) {
-@@ -517,8 +415,11 @@ protected function addExtension($path) {
+@@ -517,8 +416,11 @@ protected function addExtension($path) {
     *
     * @return string
     *   'public', 'private' or any other file scheme defined as the default.
@@ -666,7 +667,7 @@ index f7edba286b..42d2243d0d 100644
      return \Drupal::config('system.file')->get('default_scheme');
    }
  
-@@ -528,9 +429,10 @@ protected function fileDefaultScheme() {
+@@ -528,9 +430,10 @@ protected function fileDefaultScheme() {
     * @return \Drupal\Core\StreamWrapper\StreamWrapperManagerInterface
     *   The stream wrapper manager service
     *
@@ -736,10 +737,10 @@ index 0000000000..a5cd65dc02
 +}
 diff --git a/core/modules/image/src/Event/ImageDerivative/ImageDerivativePipelineEvents.php b/core/modules/image/src/Event/ImageDerivative/ImageDerivativePipelineEvents.php
 new file mode 100644
-index 0000000000..779469f16c
+index 0000000000..208e5837a8
 --- /dev/null
 +++ b/core/modules/image/src/Event/ImageDerivative/ImageDerivativePipelineEvents.php
-@@ -0,0 +1,127 @@
+@@ -0,0 +1,102 @@
 +<?php
 +
 +namespace Drupal\image\Event\ImageDerivative;
@@ -748,31 +749,6 @@ index 0000000000..779469f16c
 + * Defines events for the image derivative pipeline.
 + */
 +final class ImageDerivativePipelineEvents {
-+
-+  /**
-+   * Name of the event fired to determine the format of the derivative image.
-+   *
-+   * @Event
-+   *
-+   * @see \Drupal\image\Plugin\ImageProcessPipeline\Derivative::getDerivativeImageWidth()
-+   * @see \Drupal\image\Plugin\ImageProcessPipeline\Derivative::getDerivativeImageHeight()
-+   * @see \Drupal\image\EventSubscriber\ImageEventSubscriber::resolveDerivativeImageDimensions()
-+   *
-+   * @var string
-+   */
-+  const RESOLVE_DERIVATIVE_IMAGE_DIMENSIONS = 'image.pipeline.derivative.resolve_derivative_image_dimensions';
-+
-+  /**
-+   * Name of the event fired to determine the URI of the derivative image.
-+   *
-+   * @Event
-+   *
-+   * @see \Drupal\image\Plugin\ImageProcessPipeline\Derivative::getDerivativeImageUri()
-+   * @see \Drupal\image\EventSubscriber\ImageEventSubscriber::resolveDerivativeImageUri()
-+   *
-+   * @var string
-+   */
-+  const RESOLVE_DERIVATIVE_IMAGE_URI = 'image.pipeline.derivative.resolve_derivative_image_uri';
 +
 +  /**
 +   * Name of the event fired to produce a protection for the derivative URL.
@@ -867,6 +843,21 @@ index 0000000000..779469f16c
 +  const REMOVE_DERIVATIVE_IMAGE = 'image.pipeline.derivative.remove_derivative_image';
 +
 +}
+diff --git a/core/modules/image/src/Event/ImageDerivative/ResolveDerivativeImageDimensionsEvent.php b/core/modules/image/src/Event/ImageDerivative/ResolveDerivativeImageDimensionsEvent.php
+new file mode 100644
+index 0000000000..3538622727
+--- /dev/null
++++ b/core/modules/image/src/Event/ImageDerivative/ResolveDerivativeImageDimensionsEvent.php
+@@ -0,0 +1,9 @@
++<?php
++
++namespace Drupal\image\Event\ImageDerivative;
++
++/**
++ * Event fired to determine the dimensions of the derivative image.
++ */
++class ResolveDerivativeImageDimensionsEvent extends BaseEvent {
++}
 diff --git a/core/modules/image/src/Event/ImageDerivative/ResolveDerivativeImageFormatEvent.php b/core/modules/image/src/Event/ImageDerivative/ResolveDerivativeImageFormatEvent.php
 new file mode 100644
 index 0000000000..a2ad9ddfa5
@@ -881,6 +872,21 @@ index 0000000000..a2ad9ddfa5
 + * Event fired to determine the format of the derivative image.
 + */
 +class ResolveDerivativeImageFormatEvent extends BaseEvent {
++}
+diff --git a/core/modules/image/src/Event/ImageDerivative/ResolveDerivativeImageUriEvent.php b/core/modules/image/src/Event/ImageDerivative/ResolveDerivativeImageUriEvent.php
+new file mode 100644
+index 0000000000..b3d5e84fd5
+--- /dev/null
++++ b/core/modules/image/src/Event/ImageDerivative/ResolveDerivativeImageUriEvent.php
+@@ -0,0 +1,9 @@
++<?php
++
++namespace Drupal\image\Event\ImageDerivative;
++
++/**
++ * Event fired to determine the URI of the derivative image.
++ */
++class ResolveDerivativeImageUriEvent extends BaseEvent {
 +}
 diff --git a/core/modules/image/src/Event/ImageDerivative/ResolveSourceImageFormatEvent.php b/core/modules/image/src/Event/ImageDerivative/ResolveSourceImageFormatEvent.php
 new file mode 100644
@@ -958,10 +964,10 @@ index 0000000000..8304dfc6cc
 +}
 diff --git a/core/modules/image/src/EventSubscriber/ImageEventSubscriber.php b/core/modules/image/src/EventSubscriber/ImageEventSubscriber.php
 new file mode 100644
-index 0000000000..c5c9ec2c90
+index 0000000000..29f125c8eb
 --- /dev/null
 +++ b/core/modules/image/src/EventSubscriber/ImageEventSubscriber.php
-@@ -0,0 +1,512 @@
+@@ -0,0 +1,514 @@
 +<?php
 +
 +namespace Drupal\image\EventSubscriber;
@@ -981,7 +987,9 @@ index 0000000000..c5c9ec2c90
 +use Drupal\Core\Url;
 +use Drupal\image\Entity\ImageStyle;
 +use Drupal\image\Event\ImageDerivative\ImageDerivativePipelineEvents;
++use Drupal\image\Event\ImageDerivative\ResolveDerivativeImageDimensionsEvent;
 +use Drupal\image\Event\ImageDerivative\ResolveDerivativeImageFormatEvent;
++use Drupal\image\Event\ImageDerivative\ResolveDerivativeImageUriEvent;
 +use Drupal\image\Event\ImageDerivative\ResolveSourceImageFormatEvent;
 +use Drupal\image\Event\ImageDerivative\ResolveSourceImageProcessableEvent;
 +use Drupal\image\Event\ImageStyle\FlushEvent;
@@ -1060,8 +1068,8 @@ index 0000000000..c5c9ec2c90
 +      ResolveSourceImageFormatEvent::class => 'resolveSourceImageFormat',
 +      ResolveSourceImageProcessableEvent::class => 'resolveSourceImageProcessable',
 +      ResolveDerivativeImageFormatEvent::class => 'resolveDerivativeImageFormat',
-+      ImageDerivativePipelineEvents::RESOLVE_DERIVATIVE_IMAGE_DIMENSIONS => 'resolveDerivativeImageDimensions',
-+      ImageDerivativePipelineEvents::RESOLVE_DERIVATIVE_IMAGE_URI => 'resolveDerivativeImageUri',
++      ResolveDerivativeImageDimensionsEvent::class => 'resolveDerivativeImageDimensions',
++      ResolveDerivativeImageUriEvent::class => 'resolveDerivativeImageUri',
 +      ImageDerivativePipelineEvents::RESOLVE_DERIVATIVE_IMAGE_URL_PROTECTION => 'resolveDerivativeImageUrlProtection',
 +      ImageDerivativePipelineEvents::RESOLVE_DERIVATIVE_IMAGE_URL => 'resolveDerivativeImageUrl',
 +      ImageDerivativePipelineEvents::BUILD_DERIVATIVE_IMAGE => 'buildDerivativeImage',
@@ -1159,10 +1167,10 @@ index 0000000000..c5c9ec2c90
 +   * actual image operations, so be aware that performing I/O on the URI may
 +   * lead to decrease in performance.
 +   *
-+   * @param \Drupal\image\Event\ImageDerivative\ImageProcessEvent $event
++   * @param \Drupal\image\Event\ImageDerivative\ResolveDerivativeImageDimensionsEvent $event
 +   *   The image process event, carrying the process pipeline object.
 +   */
-+  public function resolveDerivativeImageDimensions(ImageProcessEvent $event): void {
++  public function resolveDerivativeImageDimensions(ResolveDerivativeImageDimensionsEvent $event): void {
 +    $pipeline = $event->getPipeline();
 +
 +    // It's still possible to calculate dimensions even if the image at source
@@ -1244,7 +1252,7 @@ index 0000000000..c5c9ec2c90
 +    $pipeline = $event->getPipeline();
 +
 +    // Ensure we have the derivative image URI.
-+    $pipeline->dispatch(ImageDerivativePipelineEvents::RESOLVE_DERIVATIVE_IMAGE_URI);
++    $pipeline->dispatch(ResolveDerivativeImageUriEvent::class);
 +
 +    // The token query is added even if the
 +    // 'image.settings:allow_insecure_derivatives' configuration is TRUE, so
@@ -1283,7 +1291,7 @@ index 0000000000..c5c9ec2c90
 +    $pipeline = $event->getPipeline();
 +
 +    // Ensure we have the derivative image URI and the URL protection token.
-+    $pipeline->dispatch(ImageDerivativePipelineEvents::RESOLVE_DERIVATIVE_IMAGE_URI);
++    $pipeline->dispatch(ResolveDerivativeImageUriEvent::class);
 +    $pipeline->dispatch(ImageDerivativePipelineEvents::RESOLVE_DERIVATIVE_IMAGE_URL_PROTECTION);
 +
 +    $clean_urls = $pipeline->hasVariable('setCleanUrl') ? $pipeline->getVariable('setCleanUrl') : NULL;
@@ -1348,7 +1356,7 @@ index 0000000000..c5c9ec2c90
 +  public function saveDerivativeImage(ImageProcessEvent $event): void {
 +    $pipeline = $event->getPipeline();
 +
-+    $pipeline->dispatch(ImageDerivativePipelineEvents::RESOLVE_DERIVATIVE_IMAGE_URI);
++    $pipeline->dispatch(ResolveDerivativeImageUriEvent::class);
 +
 +    // Get the folder for the final location of this style.
 +    $directory = $this->fileSystem->dirname($pipeline->getVariable('derivativeImageUri'));
@@ -1422,7 +1430,7 @@ index 0000000000..c5c9ec2c90
 +
 +    try {
 +      // Remove a single image derivative.
-+      $pipeline->dispatch(ImageDerivativePipelineEvents::RESOLVE_DERIVATIVE_IMAGE_URI);
++      $pipeline->dispatch(ResolveDerivativeImageUriEvent::class);
 +      if ($pipeline->hasVariable('derivativeImageUri') && file_exists($pipeline->getVariable('derivativeImageUri'))) {
 +        $this->fileSystem->delete($pipeline->getVariable('derivativeImageUri'));
 +      }
@@ -1823,10 +1831,10 @@ index dc4557949c..09b1ed8e3d 100644
        $cacheability = CacheableMetadata::createFromObject($image);
 diff --git a/core/modules/image/src/Plugin/ImageProcessPipeline/Derivative.php b/core/modules/image/src/Plugin/ImageProcessPipeline/Derivative.php
 new file mode 100644
-index 0000000000..0c00ff5a02
+index 0000000000..43f89c13cf
 --- /dev/null
 +++ b/core/modules/image/src/Plugin/ImageProcessPipeline/Derivative.php
-@@ -0,0 +1,250 @@
+@@ -0,0 +1,252 @@
 +<?php
 +
 +namespace Drupal\image\Plugin\ImageProcessPipeline;
@@ -1834,7 +1842,9 @@ index 0000000000..0c00ff5a02
 +use Drupal\Core\Image\ImageInterface;
 +use Drupal\Core\Url;
 +use Drupal\image\Event\ImageDerivative\ImageDerivativePipelineEvents;
++use Drupal\image\Event\ImageDerivative\ResolveDerivativeImageDimensionsEvent;
 +use Drupal\image\Event\ImageDerivative\ResolveDerivativeImageFormatEvent;
++use Drupal\image\Event\ImageDerivative\ResolveDerivativeImageUriEvent;
 +use Drupal\image\Event\ImageDerivative\ResolveSourceImageProcessableEvent;
 +use Drupal\image\ImageProcessException;
 +use Drupal\image\ImageProcessPipelineInterface;
@@ -1994,7 +2004,7 @@ index 0000000000..0c00ff5a02
 +   *   The width of the derivative image, or NULL if it cannot be calculated.
 +   */
 +  public function getDerivativeImageWidth(): ?int {
-+    $this->dispatch(ImageDerivativePipelineEvents::RESOLVE_DERIVATIVE_IMAGE_DIMENSIONS);
++    $this->dispatch(ResolveDerivativeImageDimensionsEvent::class);
 +    return $this->getVariable('derivativeImageWidth');
 +  }
 +
@@ -2005,7 +2015,7 @@ index 0000000000..0c00ff5a02
 +   *   The height of the derivative image, or NULL if it cannot be calculated.
 +   */
 +  public function getDerivativeImageHeight(): ?int {
-+    $this->dispatch(ImageDerivativePipelineEvents::RESOLVE_DERIVATIVE_IMAGE_DIMENSIONS);
++    $this->dispatch(ResolveDerivativeImageDimensionsEvent::class);
 +    return $this->getVariable('derivativeImageHeight');
 +  }
 +
@@ -2021,7 +2031,7 @@ index 0000000000..0c00ff5a02
 +   *   The URI to the image derivative for this style.
 +   */
 +  public function getDerivativeImageUri(): string {
-+    $this->dispatch(ImageDerivativePipelineEvents::RESOLVE_DERIVATIVE_IMAGE_URI);
++    $this->dispatch(ResolveDerivativeImageUriEvent::class);
 +    return $this->getVariable('derivativeImageUri');
 +  }
 +
