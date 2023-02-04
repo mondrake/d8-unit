@@ -184,10 +184,10 @@ index 7edbf7b26b..fba5429680 100644
  
 diff --git a/core/lib/Drupal/Core/Database/StatementPrefetchIterator.php b/core/lib/Drupal/Core/Database/StatementPrefetchIterator.php
 new file mode 100644
-index 0000000000..1d17411ab3
+index 0000000000..db793138ca
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/StatementPrefetchIterator.php
-@@ -0,0 +1,390 @@
+@@ -0,0 +1,422 @@
 +<?php
 +
 +namespace Drupal\Core\Database;
@@ -222,28 +222,6 @@ index 0000000000..1d17411ab3
 +   * The number of rows matched by the last query.
 +   */
 +  protected ?int $rowCount = NULL;
-+
-+  /**
-+   * The number of rows in this result set.
-+   */
-+  protected int $resultRowCount = 0;
-+
-+  /**
-+   * Holds the current fetch style (which will be used by the next fetch).
-+   *
-+   * @see \PDOStatement::fetch()
-+   */
-+  protected int $fetchStyle = \PDO::FETCH_OBJ;
-+
-+  /**
-+   * Holds supplementary current fetch options (which will be used by the next fetch).
-+   */
-+  protected array $fetchOptions = [
-+    'class' => 'stdClass',
-+    'constructor_args' => [],
-+    'object' => NULL,
-+    'column' => 0,
-+  ];
 +
 +  /**
 +   * Holds the default fetch style.
@@ -331,8 +309,7 @@ index 0000000000..1d17411ab3
 +    unset($statement);
 +    $this->markResultsetIterable($return);
 +
-+    $this->resultRowCount = count($this->data);
-+    $this->columnNames = $this->resultRowCount ? array_keys($this->data[0]) : [];
++    $this->columnNames = count($this->data) > 0 ? array_keys($this->data[0]) : [];
 +
 +    if (!empty($logger)) {
 +      $query_end = microtime(TRUE);
@@ -426,7 +403,62 @@ index 0000000000..1d17411ab3
 +    $nextKey = $this->key() + 1;
 +if ($xxx) dump([__METHOD__, $nextKey, $this->data]);
 +    if (isset($this->data[$nextKey])) {
-+      $row = $this->data[$nextKey];
++      $rowAssoc = $this->data[$nextKey];
++      switch ($fetch_style ?? $this->defaultFetchStyle) {
++        case \PDO::FETCH_ASSOC:
++          $row = $rowAssoc;
++          break;
++  
++        case \PDO::FETCH_BOTH:
++          // \PDO::FETCH_BOTH returns an array indexed by both the column name
++          // and the column number.
++          $row = $rowAssoc + array_values($rowAssoc);
++          break;
++  
++        case \PDO::FETCH_NUM:
++          $row = array_values($rowAssoc);
++          break;
++  
++        case \PDO::FETCH_LAZY:
++          // We do not do lazy as everything is fetched already. Fallback to
++          // \PDO::FETCH_OBJ.
++        case \PDO::FETCH_OBJ:
++          $row = (object) $rowAssoc;
++          break;
++  
++        case \PDO::FETCH_CLASS | \PDO::FETCH_CLASSTYPE:
++          $class_name = array_shift($this->resultsetRow);
++          // Deliberate no break.
++        case \PDO::FETCH_CLASS:
++          if (!isset($class_name)) {
++            $class_name = $this->fetchOptions['class'];
++          }
++          if (count($this->fetchOptions['constructor_args'])) {
++            $reflector = new \ReflectionClass($class_name);
++            $result = $reflector->newInstanceArgs($this->fetchOptions['constructor_args']);
++          }
++          else {
++            $result = new $class_name();
++          }
++          foreach ($this->resultsetRow as $k => $v) {
++            $result->$k = $v;
++          }
++          $row = $result;
++  
++        case \PDO::FETCH_INTO:
++          foreach ($this->resultsetRow as $k => $v) {
++            $this->fetchOptions['object']->$k = $v;
++          }
++          $row = $this->fetchOptions['object'];
++  
++        case \PDO::FETCH_COLUMN:
++          if (isset($this->columnNames[$this->fetchOptions['column']])) {
++            $row = $this->resultsetRow[$this->columnNames[$this->fetchOptions['column']]];
++          }
++          else {
++            return;
++          }
++      }
 +      $this->setCurrentResultsetRow($row);
 +if ($xxx) dump([__METHOD__, $row]);
 +      return $row;
