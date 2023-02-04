@@ -184,10 +184,10 @@ index 7edbf7b26b..fba5429680 100644
  
 diff --git a/core/lib/Drupal/Core/Database/StatementPrefetchIterator.php b/core/lib/Drupal/Core/Database/StatementPrefetchIterator.php
 new file mode 100644
-index 0000000000..db793138ca
+index 0000000000..53fff383ac
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/StatementPrefetchIterator.php
-@@ -0,0 +1,422 @@
+@@ -0,0 +1,405 @@
 +<?php
 +
 +namespace Drupal\Core\Database;
@@ -215,6 +215,8 @@ index 0000000000..db793138ca
 +
 +  /**
 +   * The list of column names in this result set.
++   *
++   * @var string[]
 +   */
 +  protected ?array $columnNames = NULL;
 +
@@ -229,9 +231,11 @@ index 0000000000..db793138ca
 +  protected int $defaultFetchStyle = \PDO::FETCH_OBJ;
 +
 +  /**
-+   * Holds supplementary default fetch options.
++   * Holds fetch options.
++   *
++   * @var string[]
 +   */
-+  protected array $defaultFetchOptions = [
++  protected array $fetchOptions = [
 +    'class' => 'stdClass',
 +    'constructor_args' => [],
 +    'object' => NULL,
@@ -362,24 +366,20 @@ index 0000000000..db793138ca
 +    $this->defaultFetchStyle = $mode;
 +    switch ($mode) {
 +      case \PDO::FETCH_CLASS:
-+        $this->defaultFetchOptions['class'] = $a1;
++        $this->fetchOptions['class'] = $a1;
 +        if ($a2) {
-+          $this->defaultFetchOptions['constructor_args'] = $a2;
++          $this->fetchOptions['constructor_args'] = $a2;
 +        }
 +        break;
 +
 +      case \PDO::FETCH_COLUMN:
-+        $this->defaultFetchOptions['column'] = $a1;
++        $this->fetchOptions['column'] = $a1;
 +        break;
 +
 +      case \PDO::FETCH_INTO:
-+        $this->defaultFetchOptions['object'] = $a1;
++        $this->fetchOptions['object'] = $a1;
 +        break;
 +    }
-+
-+    // Set the values for the next fetch.
-+    $this->fetchStyle = $this->defaultFetchStyle;
-+    $this->fetchOptions = $this->defaultFetchOptions;
 +  }
 +
 +  /**
@@ -427,7 +427,7 @@ index 0000000000..db793138ca
 +          break;
 +  
 +        case \PDO::FETCH_CLASS | \PDO::FETCH_CLASSTYPE:
-+          $class_name = array_shift($this->resultsetRow);
++          $class_name = array_shift($rowAssoc);
 +          // Deliberate no break.
 +        case \PDO::FETCH_CLASS:
 +          if (!isset($class_name)) {
@@ -440,24 +440,28 @@ index 0000000000..db793138ca
 +          else {
 +            $result = new $class_name();
 +          }
-+          foreach ($this->resultsetRow as $k => $v) {
++          foreach ($rowAssoc as $k => $v) {
 +            $result->$k = $v;
 +          }
 +          $row = $result;
++          break;
 +  
 +        case \PDO::FETCH_INTO:
-+          foreach ($this->resultsetRow as $k => $v) {
++          foreach ($rowAssoc as $k => $v) {
 +            $this->fetchOptions['object']->$k = $v;
 +          }
 +          $row = $this->fetchOptions['object'];
++          break;
 +  
 +        case \PDO::FETCH_COLUMN:
 +          if (isset($this->columnNames[$this->fetchOptions['column']])) {
-+            $row = $this->resultsetRow[$this->columnNames[$this->fetchOptions['column']]];
++            $row = $rowAssoc[$this->columnNames[$this->fetchOptions['column']]];
 +          }
 +          else {
 +            return;
 +          }
++          break;
++
 +      }
 +      $this->setCurrentResultsetRow($row);
 +if ($xxx) dump([__METHOD__, $row]);
@@ -487,31 +491,14 @@ index 0000000000..db793138ca
 +   * {@inheritdoc}
 +   */
 +  public function fetchObject(string $class_name = NULL, array $constructor_arguments = NULL) {
-+    if (isset($this->resultsetRow)) {
-+      if (!isset($class_name)) {
-+        // Directly cast to an object to avoid a function call.
-+        $result = (object) $this->resultsetRow;
-+      }
-+      else {
-+        $this->fetchStyle = \PDO::FETCH_CLASS;
-+        $this->fetchOptions = [
-+          'class' => $class_name,
-+          'constructor_args' => $constructor_arguments,
-+        ];
-+        // Grab the row in the format specified above.
-+        $result = $this->current();
-+        // Reset the fetch parameters to the value stored using setFetchMode().
-+        $this->fetchStyle = $this->defaultFetchStyle;
-+        $this->fetchOptions = $this->defaultFetchOptions;
-+      }
-+
-+      $this->next();
-+
-+      return $result;
++    if (!isset($class_name)) {
++      return $this->fetch(\PDO::FETCH_OBJ);
 +    }
-+    else {
-+      return FALSE;
-+    }
++    $this->fetchOptions = [
++      'class' => $class_name,
++      'constructor_args' => $constructor_arguments,
++    ];
++    return $this->fetch(\PDO::FETCH_CLASSJ);
 +  }
 +
 +  /**
@@ -526,7 +513,6 @@ index 0000000000..db793138ca
 +   */
 +  public function fetchAll($mode = NULL, $column_index = NULL, $constructor_arguments = NULL) {
 +    $this->fetchStyle = $mode ?? $this->defaultFetchStyle;
-+    $this->fetchOptions = $this->defaultFetchOptions;
 +    if (isset($column_index)) {
 +      $this->fetchOptions['column'] = $column_index;
 +    }
@@ -544,7 +530,6 @@ index 0000000000..db793138ca
 +
 +    // Reset the fetch parameters to the value stored using setFetchMode().
 +    $this->fetchStyle = $this->defaultFetchStyle;
-+    $this->fetchOptions = $this->defaultFetchOptions;
 +
 +    return $result;
 +  }
@@ -592,7 +577,6 @@ index 0000000000..db793138ca
 +   */
 +  public function fetchAllAssoc($key, $fetch_style = NULL) {
 +    $this->fetchStyle = $fetch_style ?? $this->defaultFetchStyle;
-+    $this->fetchOptions = $this->defaultFetchOptions;
 +
 +    $result = [];
 +    // Traverse the array as PHP would have done.
@@ -605,7 +589,6 @@ index 0000000000..db793138ca
 +
 +    // Reset the fetch parameters to the value stored using setFetchMode().
 +    $this->fetchStyle = $this->defaultFetchStyle;
-+    $this->fetchOptions = $this->defaultFetchOptions;
 +    return $result;
 +  }
 +
@@ -1080,17 +1063,25 @@ index 5de75a5dec..a3842b213a 100644
    }
  
 diff --git a/core/tests/Drupal/KernelTests/Core/Database/FetchTest.php b/core/tests/Drupal/KernelTests/Core/Database/FetchTest.php
-index 9368954cd2..c6c1985d00 100644
+index 9368954cd2..a4ee8e49d4 100644
 --- a/core/tests/Drupal/KernelTests/Core/Database/FetchTest.php
 +++ b/core/tests/Drupal/KernelTests/Core/Database/FetchTest.php
-@@ -22,6 +22,7 @@ public function testQueryFetchDefault() {
-     $records = [];
-     $result = $this->connection->query('SELECT [name] FROM {test} WHERE [age] = :age', [':age' => 25]);
-     $this->assertInstanceOf(StatementInterface::class, $result);
+@@ -68,6 +68,7 @@ public function testQueryFetchArray() {
+    * @see \Drupal\system\Tests\Database\FakeRecord
+    */
+   public function testQueryFetchClass() {
 +global $xxx; $xxx = TRUE;
+     $records = [];
+     $result = $this->connection->query('SELECT [name] FROM {test} WHERE [age] = :age', [':age' => 25], ['fetch' => FakeRecord::class]);
      foreach ($result as $record) {
-       $records[] = $record;
-       $this->assertIsObject($record);
+@@ -86,6 +87,7 @@ public function testQueryFetchClass() {
+    * @see \Drupal\Core\Database\StatementPrefetch::fetchObject
+    */
+   public function testQueryFetchObjectClass() {
++global $xxx; $xxx = TRUE;
+     $records = 0;
+     $query = $this->connection->query('SELECT [name] FROM {test} WHERE [age] = :age', [':age' => 25]);
+     while ($result = $query->fetchObject(FakeRecord::class, [1])) {
 diff --git a/core/tests/Drupal/KernelTests/Core/Database/StatementTest.php b/core/tests/Drupal/KernelTests/Core/Database/StatementTest.php
 index eeb2304663..0e8e1c9a7c 100644
 --- a/core/tests/Drupal/KernelTests/Core/Database/StatementTest.php
