@@ -18,6 +18,131 @@ index 09a6b94f50..b4adf3742d 100644
   * Drupal\Core\Database\StatementInterface:
   * @code
   * class Drupal\mymodule\Driver\Database\mydriver\Statement implements Iterator, Drupal\Core\Database\StatementInterface {}
+diff --git a/core/lib/Drupal/Core/Database/StatementIteratorTrait.php b/core/lib/Drupal/Core/Database/StatementIteratorTrait.php
+new file mode 100644
+index 0000000000..767f2221ae
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/StatementIteratorTrait.php
+@@ -0,0 +1,119 @@
++<?php
++
++namespace Drupal\Core\Database;
++
++/**
++ * StatementInterface iterator trait.
++ *
++ * Implements the \Iterator methods required by StatementInterface objects that
++ * implement that interface.
++ */
++class StatementIteratorTrait {
++
++  /**
++   * Traces if rows can be fetched from the resultset.
++   */
++  private bool $isResultsetIterable = FALSE;
++
++  /**
++   * The current row, retrieved in the current fetch format.
++   */
++  private mixed $resultsetRow = NULL;
++
++  /**
++   * The key of the current row.
++   *
++   * This keeps the index of rows fetched from the underlying statement. It is
++   * set to -1 when no rows have been fetched yet.
++   */
++  private int $resultsetKey = -1;
++
++  /**
++   * Informs the iterator whether rows can be fetched from the resultset.
++   *
++   * @param bool $valid
++   *   The result of the execution of the client statement.
++   */
++  protected function markResultsetIterable(bool $valid): void {
++    $currentlyIterable = $this->isResultsetIterable;
++    $this->isResultsetIterable = $valid;
++    $this->resultsetRow = NULL;
++    // When fetching is completed on a valid cursor, we do not reset the key.
++    if ($valid === FALSE && $currentlyIterable) {
++      return;
++    }
++    $this->resultsetKey = -1;
++  }
++
++  /**
++   * Sets the current resultset row for the iterator, and increments the key.
++   *
++   * @param mixed $row
++   *   The last row fetched from the client statement.
++   */
++  protected function setCurrentResultsetRow(mixed $row): void {
++    $this->resultsetRow = $row;
++    $this->resultsetKey++;
++  }
++
++  /**
++   * Informs the iterator that no more rows can be fetched from the resultset.
++   */
++  protected function markResultsetFetchingComplete(): void {
++    $this->markResultsetIterable(FALSE);
++  }
++
++  /**
++   * {@inheritdoc}
++   *
++   * @internal This method should not be called directly.
++   */
++  public function current(): mixed {
++    return $this->resultsetRow;
++  }
++
++  /**
++   * {@inheritdoc}
++   *
++   * @internal This method should not be called directly.
++   */
++  public function key(): mixed {
++    return $this->resultsetKey;
++  }
++
++  /**
++   * {@inheritdoc}
++   *
++   * @internal This method should not be called directly.
++   */
++  public function rewind(): void {
++    // Nothing to do: our DatabaseStatement can't be rewound. Throw a
++    // deprecation if attempted.
++    // @todo convert the deprecation to an exception in Drupal 11.
++    if ($this->resultsetKey >= 0) {
++      @trigger_error('Rewinding a StatementInterface object when fetching has started is deprecated in drupal:10.1.0 and will throw an exception from drupal:11.0.0. Refactor your code to avoid rewinding statement objects. See https://www.drupal.org/node/3265938', E_USER_DEPRECATED);
++    }
++  }
++
++  /**
++   * {@inheritdoc}
++   *
++   * @internal This method should not be called directly.
++   */
++  public function next(): void {
++    $this->fetch();
++  }
++
++  /**
++   * {@inheritdoc}
++   *
++   * @internal This method should not be called directly.
++   */
++  public function valid(): bool {
++    if ($this->isResultsetIterable && $this->resultsetKey === -1) {
++      $this->fetch();
++    }
++    return $this->isResultsetIterable;
++  }
++
++}
 diff --git a/core/lib/Drupal/Core/Database/StatementPrefetch.php b/core/lib/Drupal/Core/Database/StatementPrefetch.php
 index 7edbf7b26b..5ec6db68da 100644
 --- a/core/lib/Drupal/Core/Database/StatementPrefetch.php
@@ -57,10 +182,10 @@ index 4381fd1af6..f85b347423 100644
  
 diff --git a/core/lib/Drupal/Core/Database/StatementWrapperIterator.php b/core/lib/Drupal/Core/Database/StatementWrapperIterator.php
 new file mode 100644
-index 0000000000..ce1e31c28b
+index 0000000000..d17a2ce6e7
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/StatementWrapperIterator.php
-@@ -0,0 +1,400 @@
+@@ -0,0 +1,296 @@
 +<?php
 +
 +namespace Drupal\Core\Database;
@@ -87,30 +212,14 @@ index 0000000000..ce1e31c28b
 + */
 +class StatementWrapperIterator implements \Iterator, StatementInterface {
 +
++  use StatementIteratorTrait;
++
 +  /**
 +   * The client database Statement object.
 +   *
 +   * For a \PDO client connection, this will be a \PDOStatement object.
 +   */
 +  protected object $clientStatement;
-+
-+  /**
-+   * Traces if rows can be fetched from the resultset.
-+   */
-+  private bool $isResultsetIterable = FALSE;
-+
-+  /**
-+   * The current row, retrieved in the current fetch format.
-+   */
-+  private mixed $resultsetRow = NULL;
-+
-+  /**
-+   * The key of the current row.
-+   *
-+   * This keeps the index of rows fetched from the underlying statement. It is
-+   * set to -1 when no rows have been fetched yet.
-+   */
-+  private int $resultsetKey = -1;
 +
 +  /**
 +   * Constructs a StatementWrapperIterator object.
@@ -370,94 +479,6 @@ index 0000000000..ce1e31c28b
 +    $this->markResultsetFetchingComplete();
 +
 +    return $return;
-+  }
-+
-+  /**
-+   * Informs the iterator whether rows can be fetched from the resultset.
-+   *
-+   * @param bool $valid
-+   *   The result of the execution of the client statement.
-+   */
-+  protected function markResultsetIterable(bool $valid): void {
-+    $currentlyIterable = $this->isResultsetIterable;
-+    $this->isResultsetIterable = $valid;
-+    $this->resultsetRow = NULL;
-+    // When fetching is completed on a valid cursor, we do not reset the key.
-+    if ($valid === FALSE && $currentlyIterable) {
-+      return;  
-+    }
-+    $this->resultsetKey = -1;
-+  }
-+
-+  /**
-+   * Sets the current resultset row for the iterator, and increments the key.
-+   *
-+   * @param mixed $row
-+   *   The last row fetched from the client statement.
-+   */
-+  protected function setCurrentResultsetRow(mixed $row): void {
-+    $this->resultsetRow = $row;
-+    $this->resultsetKey++;
-+  }
-+
-+  /**
-+   * Informs the iterator that no more rows can be fetched from the resultset.
-+   */
-+  protected function markResultsetFetchingComplete(): void {
-+    $this->markResultsetIterable(FALSE);
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   *
-+   * @internal This method should not be called directly.
-+   */
-+  public function current(): mixed {
-+    return $this->resultsetRow;
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   *
-+   * @internal This method should not be called directly.
-+   */
-+  public function key(): mixed {
-+    return $this->resultsetKey;
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   *
-+   * @internal This method should not be called directly.
-+   */
-+  public function rewind(): void {
-+    // Nothing to do: our DatabaseStatement can't be rewound. Throw a
-+    // deprecation if attempted.
-+    // @todo convert the deprecation to an excpetion in Drupal 11.
-+    if ($this->resultsetKey >= 0) {
-+      @trigger_error('Rewinding a StatementInterface object when fetching has started is deprecated in drupal:10.1.0 and will throw an exception from drupal:11.0.0. Refactor your code to avoid rewinding statement objects. See https://www.drupal.org/node/3265938', E_USER_DEPRECATED);
-+    }
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   *
-+   * @internal This method should not be called directly.
-+   */
-+  public function next(): void {
-+    $this->fetch();
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   *
-+   * @internal This method should not be called directly.
-+   */
-+  public function valid(): bool {
-+    if ($this->isResultsetIterable && $this->resultsetKey === -1) {
-+      $this->fetch();
-+    }
-+    return $this->isResultsetIterable;
 +  }
 +
 +}
