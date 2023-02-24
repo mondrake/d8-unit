@@ -1,317 +1,54 @@
-diff --git a/core/includes/form.inc b/core/includes/form.inc
-index 4f353d0088..ef89b55d2f 100644
---- a/core/includes/form.inc
-+++ b/core/includes/form.inc
-@@ -6,6 +6,7 @@
-  */
+diff --git a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificSchemaTestBase.php b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificSchemaTestBase.php
+index de74ae5437..e7ea76af4d 100644
+--- a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificSchemaTestBase.php
++++ b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificSchemaTestBase.php
+@@ -1308,4 +1308,49 @@ public function testReservedKeywordsForNaming(): void {
+     $this->assertFalse($this->schema->tableExists($table_name_new));
+   }
  
- use Drupal\Component\Utility\UrlHelper;
-+use Drupal\Core\Database\IntegrityConstraintViolationException;
- use Drupal\Core\Render\Element;
- use Drupal\Core\Render\Element\RenderElement;
- use Drupal\Core\Template\Attribute;
-@@ -897,9 +898,26 @@ function batch_process($redirect = NULL, Url $url = NULL, $redirect_callback = N
-     // environments.
-     \Drupal::moduleHandler()->alter('batch', $batch);
- 
--    // Assign an arbitrary id: don't rely on a serial column in the 'batch'
--    // table, since non-progressive batches skip database storage completely.
--    $batch['id'] = \Drupal::database()->nextId();
-+    // Assign an id to progressive batches. Non-progressive batches skip
-+    // database storage completely.
-+    try {
-+      $batch['id'] = $batch['progressive'] ? \Drupal::service('batch.storage')->getId() : 'non-progressive';
-+    }
-+    catch (IntegrityConstraintViolationException $e) {
-+      // @todo this is here to support the update path to deprecate
-+      // Connection::nextId(). Remove in Drupal 11.
-+      $connection = \Drupal::database();
-+      $max_bid = (int) $connection->query('SELECT MAX([bid]) FROM {batch}')->fetchField();
-+      $batch['id'] = $max_bid + 1;
-+      $connection->insert('batch')
-+        ->fields([
-+          'bid' => $batch['id'],
-+          'timestamp' => \Drupal::time()->getRequestTime(),
-+          'token' => '',
-+          'batch' => NULL,
-+        ])
-+        ->execute();
-+    }
- 
-     // Move operations to a job queue. Non-progressive batches will use a
-     // memory-based queue.
-diff --git a/core/lib/Drupal/Core/Batch/BatchStorage.php b/core/lib/Drupal/Core/Batch/BatchStorage.php
-index 3c44628ef9..6d078b585a 100644
---- a/core/lib/Drupal/Core/Batch/BatchStorage.php
-+++ b/core/lib/Drupal/Core/Batch/BatchStorage.php
-@@ -121,12 +121,29 @@ public function cleanup() {
-    * {@inheritdoc}
-    */
-   public function create(array $batch) {
--    // Ensure that a session is started before using the CSRF token generator.
-+    // Ensure that a session is started before using the CSRF token generator,
-+    // and update the database record.
-     $this->session->start();
-+    $this->connection->update('batch')
-+      ->fields([
-+        'token' => $this->csrfToken->get($batch['id']),
-+        'batch' => serialize($batch),
-+      ])
-+      ->condition('bid', $batch['id'])
-+      ->execute();
-+  }
-+
 +  /**
-+   * Returns a new batch id.
-+   *
-+   * @return int
-+   *   A batch id.
++   * Tests converting an int to a serial when the int column has data.
 +   */
-+  public function getId(): int {
-     $try_again = FALSE;
-     try {
-       // The batch table might not yet exist.
--      $this->doCreate($batch);
-+      return $this->doInsertBatchRecord();
-     }
-     catch (\Exception $e) {
-       // If there was an exception, try to create the table.
-@@ -138,23 +155,22 @@ public function create(array $batch) {
-     }
-     // Now that the table has been created, try again if necessary.
-     if ($try_again) {
--      $this->doCreate($batch);
-+      return $this->doInsertBatchRecord();
-     }
-   }
- 
-   /**
--   * Saves a batch.
-+   * Inserts a record in the table and returns the batch id.
-    *
--   * @param array $batch
--   *   The array representing the batch to create.
-+   * @return int
-+   *   A batch id.
-    */
--  protected function doCreate(array $batch) {
--    $this->connection->insert('batch')
-+  protected function doInsertBatchRecord(): int {
-+    return $this->connection->insert('batch')
-       ->fields([
--        'bid' => $batch['id'],
--        'timestamp' => REQUEST_TIME,
--        'token' => $this->csrfToken->get($batch['id']),
--        'batch' => serialize($batch),
-+        'timestamp' => \Drupal::time()->getRequestTime(),
-+        'token' => '',
-+        'batch' => NULL,
-       ])
-       ->execute();
-   }
-@@ -208,9 +224,7 @@ public function schemaDefinition() {
-       'fields' => [
-         'bid' => [
-           'description' => 'Primary Key: Unique batch ID.',
--          // This is not a serial column, to allow both progressive and
--          // non-progressive batches. See batch_process().
--          'type' => 'int',
-+          'type' => 'serial',
-           'unsigned' => TRUE,
-           'not null' => TRUE,
-         ],
-diff --git a/core/lib/Drupal/Core/ProxyClass/Batch/BatchStorage.php b/core/lib/Drupal/Core/ProxyClass/Batch/BatchStorage.php
-index 5e6fc6df6d..4b54090cab 100644
---- a/core/lib/Drupal/Core/ProxyClass/Batch/BatchStorage.php
-+++ b/core/lib/Drupal/Core/ProxyClass/Batch/BatchStorage.php
-@@ -107,6 +107,14 @@ public function create(array $batch)
-             return $this->lazyLoadItself()->create($batch);
-         }
- 
-+        /**
-+         * {@inheritdoc}
-+         */
-+        public function getId(): int
-+        {
-+            return $this->lazyLoadItself()->getId();
-+        }
-+
-         /**
-          * {@inheritdoc}
-          */
-diff --git a/core/modules/pgsql/src/Driver/Database/pgsql/Connection.php b/core/modules/pgsql/src/Driver/Database/pgsql/Connection.php
-index 8417ed831b..27302a7f54 100644
---- a/core/modules/pgsql/src/Driver/Database/pgsql/Connection.php
-+++ b/core/modules/pgsql/src/Driver/Database/pgsql/Connection.php
-@@ -21,7 +21,7 @@
-  * PostgreSQL implementation of \Drupal\Core\Database\Connection.
-  */
- class Connection extends DatabaseConnection implements SupportsTemporaryTablesInterface {
--
-+public array $xyx = [];
-   /**
-    * The name by which to obtain a lock for retrieve the next insert id.
-    */
-@@ -203,6 +203,10 @@ public function prepareStatement(string $query, array $options, bool $allow_row_
-     // automatically cast the fields to the right type for these operators,
-     // so we need to alter the query and add the type-cast.
-     $query = preg_replace('/ ([^ ]+) +(I*LIKE|NOT +I*LIKE|~\*|!~\*) /i', ' ${1}::text ${2} ', $query);
-+global $xxx; if ($xxx) {
-+  $this->xyx[] = __METHOD__;
-+  $this->xyx[] = $query;
-+}
-     return parent::prepareStatement($query, $options, $allow_row_count);
-   }
- 
-diff --git a/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php b/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php
-index 2336d103fa..9141281e19 100644
---- a/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php
-+++ b/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php
-@@ -956,11 +956,25 @@ public function changeField($table, $field, $field_new, $spec, $new_keys = []) {
-       // not when altering. Because of that, the sequence needs to be created
-       // and initialized by hand.
-       $seq = $this->connection->makeSequenceName($table, $field_new);
-+global $xxx; $xxx = TRUE;
-+$this->connection->xyx[] = $this->connection->query("SELECT MAX([" . $field . "]) FROM {" . $table . "}")->fetchField();
-       $this->connection->query("CREATE SEQUENCE " . $seq);
-       // Set sequence to maximal field value to not conflict with existing
-       // entries.
-       $this->connection->query("SELECT setval('" . $seq . "', MAX([" . $field . "])) FROM {" . $table . "}");
-+$this->connection->xyx[] = $this->connection->query("SELECT nextval(" . $this->connection->quote($seq) . ')')->fetchField();
-+$this->connection->xyx[] = $this->connection->query("SELECT nextval(" . $this->connection->quote($seq) . ')')->fetchField();
-+$this->connection->xyx[] = $this->connection->query("SELECT nextval(" . $this->connection->quote($seq) . ')')->fetchField();
-+$this->connection->xyx[] = $this->connection->query("SELECT nextval(" . $this->connection->quote($seq) . ')')->fetchField();
-       $this->connection->query('ALTER TABLE {' . $table . '} ALTER [' . $field . '] SET DEFAULT nextval(' . $this->connection->quote($seq) . ')');
-+$q = $this->connection->query("select column_name, data_type, character_maximum_length, column_default, is_nullable
-+from INFORMATION_SCHEMA.COLUMNS where table_name = '" . $this->connection->getPrefix() . $table . "'")->fetchAll();
-+foreach ($q as $r) {
-+  foreach ($r as $cn => $cv) {
-+    $this->connection->xyx[] = $cn . " - " . $cv;
-+  }  
-+}
-+$xxx = FALSE;
-     }
- 
-     // Rename the column if necessary.
-diff --git a/core/modules/system/system.install b/core/modules/system/system.install
-index a896ba9897..321dd5c863 100644
---- a/core/modules/system/system.install
-+++ b/core/modules/system/system.install
-@@ -1757,3 +1757,22 @@ function system_update_10100(&$sandbox = NULL) {
-   }
- 
- }
-+
-+/**
-+ * Change the {batch} table [bid] field to serial.
-+ */
-+function system_update_10101(&$sandbox = NULL) {
-+  $connection = \Drupal::database();
-+  $schema = $connection->schema();
-+
-+  // Update batch table.
-+  if ($schema->tableExists('batch')) {
-+    $schema->changeField('batch', 'bid', 'bid', [
-+      'description' => 'Primary Key: Unique batch ID.',
-+      'type' => 'serial',
-+      'unsigned' => TRUE,
-+      'not null' => TRUE,
-+    ]);
-+  }
-+  return implode('<br/>', $connection->xyx);
-+}
-diff --git a/core/modules/system/tests/src/Functional/Update/BatchBidSerialUpdateTest.php b/core/modules/system/tests/src/Functional/Update/BatchBidSerialUpdateTest.php
-new file mode 100644
-index 0000000000..3d5418c9cd
---- /dev/null
-+++ b/core/modules/system/tests/src/Functional/Update/BatchBidSerialUpdateTest.php
-@@ -0,0 +1,76 @@
-+<?php
-+
-+namespace Drupal\Tests\system\Functional\Update;
-+
-+use Drupal\Core\Database\IntegrityConstraintViolationException;
-+use Drupal\FunctionalTests\Update\UpdatePathTestBase;
-+
-+/**
-+ * Tests system_update_10101() upgrade path.
-+ *
-+ * @group system
-+ * @group legacy
-+ */
-+class BatchBidSerialUpdateTest extends UpdatePathTestBase {
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  protected function setDatabaseDumpFiles() {
-+    $this->databaseDumpFiles = [
-+      __DIR__ . '/../../../../../system/tests/fixtures/update/drupal-9.4.0.bare.standard.php.gz',
++  public function testChangePrimaryKeyIntToSerial(): void {
++    // Test making an invalid field the primary key of the table upon creation.
++    $table_name = 'test_table';
++    $table_spec = [
++      'fields' => [
++        'test_field' => ['type' => 'int', 'not null' => TRUE],
++        'test_field_string'  => ['type' => 'varchar', 'length' => 20],
++      ],
++      'primary key' => ['test_field'],
 +    ];
-+  }
++    $this->schema->createTable($table_name, $table_spec);
 +
-+  /**
-+   * Tests the change of the {batch} table [bid] field to serial.
-+   */
-+  public function testUpdate(): void {
-+    /** @var \Drupal\Core\Database\Connection $connection */
-+    $connection = \Drupal::service('database');
++    $this->tryInsertExpectsIntegrityConstraintViolationException($table_name);
 +
-+    // Before the update, inserting a record in the {batch} table without
-+    // passing a value for [bid] should fail, with the exception of the SQLite
-+    // database where a NOT NULL integer field that is the primary key is set
-+    // to automatic increment anyway.
-+    //
-+    // @see https://www.drupal.org/project/drupal/issues/2665216#comment-14885361
-+    try {
-+      $connection->insert('batch')
-+        ->fields([
-+          'timestamp' => \Drupal::time()->getRequestTime(),
-+          'token' => '',
-+          'batch' => NULL,
-+        ])
++    foreach ([1, 2, 3] as $value) {
++      $this->connection
++        ->insert($table_name)
++        ->fields(['test_field' => $value])
 +        ->execute();
-+      if ($connection->databaseType() !== 'sqlite') {
-+        $this->fail('Insert to {batch} without bid should have failed, but it did not');
-+      }
 +    }
-+    catch (\Exception $e) {
-+      $this->assertInstanceOf(IntegrityConstraintViolationException::class, $e);
-+    }
++    $this->schema->changeField($table_name, 'test_field', 'test_field', ['type' => 'serial', 'not null' => TRUE]);
 +
-+    $this->runUpdates();
-+
-+    // $bid should be higher than one, since the update process would have
-+    // executed a batch already.
-+    $bid = (int) $connection->insert('batch')
-+      ->fields([
-+        'timestamp' => \Drupal::time()->getRequestTime(),
-+        'token' => '',
-+        'batch' => NULL,
-+      ])
-+      ->execute();
-+    $this->assertGreaterThan(1, $bid);
-+    $this->assertEquals($bid + 1, (int) $connection->insert('batch')
-+      ->fields([
-+        'timestamp' => \Drupal::time()->getRequestTime(),
-+        'token' => '',
-+        'batch' => NULL,
-+      ])
++    $data = $this->connection
++      ->select($table_name)
++      ->fields($table_name, ['test_field'])
 +      ->execute()
-+    );
++      ->fetchCol();
++    $this->assertEquals([1, 2, 3], array_values($data));
++
++    // Ensure auto numbering now works.
++    $id = $this->connection
++      ->insert($table_name)
++      ->fields(['test_field_string' => 'test'])
++      ->execute();
++    $this->assertEquals(4, $id);
++    $id = $this->connection
++      ->insert($table_name)
++      ->fields(['test_field_string' => 'test'])
++      ->execute();
++    $this->assertEquals(4, $id);
 +  }
 +
-+}
-diff --git a/core/phpstan-baseline.neon b/core/phpstan-baseline.neon
-index a956663a84..cca61630b2 100644
---- a/core/phpstan-baseline.neon
-+++ b/core/phpstan-baseline.neon
-@@ -232,7 +232,7 @@ parameters:
- 
- 		-
- 			message: "#^Call to deprecated constant REQUEST_TIME\\: Deprecated in drupal\\:8\\.3\\.0 and is removed from drupal\\:11\\.0\\.0\\. Use \\\\Drupal\\:\\:time\\(\\)\\-\\>getRequestTime\\(\\); $#"
--			count: 2
-+			count: 1
- 			path: lib/Drupal/Core/Batch/BatchStorage.php
- 
- 		-
+ }
