@@ -1,3 +1,774 @@
+diff --git a/core/includes/form.inc b/core/includes/form.inc
+index 4f353d0088..ef89b55d2f 100644
+--- a/core/includes/form.inc
++++ b/core/includes/form.inc
+@@ -6,6 +6,7 @@
+  */
+ 
+ use Drupal\Component\Utility\UrlHelper;
++use Drupal\Core\Database\IntegrityConstraintViolationException;
+ use Drupal\Core\Render\Element;
+ use Drupal\Core\Render\Element\RenderElement;
+ use Drupal\Core\Template\Attribute;
+@@ -897,9 +898,26 @@ function batch_process($redirect = NULL, Url $url = NULL, $redirect_callback = N
+     // environments.
+     \Drupal::moduleHandler()->alter('batch', $batch);
+ 
+-    // Assign an arbitrary id: don't rely on a serial column in the 'batch'
+-    // table, since non-progressive batches skip database storage completely.
+-    $batch['id'] = \Drupal::database()->nextId();
++    // Assign an id to progressive batches. Non-progressive batches skip
++    // database storage completely.
++    try {
++      $batch['id'] = $batch['progressive'] ? \Drupal::service('batch.storage')->getId() : 'non-progressive';
++    }
++    catch (IntegrityConstraintViolationException $e) {
++      // @todo this is here to support the update path to deprecate
++      // Connection::nextId(). Remove in Drupal 11.
++      $connection = \Drupal::database();
++      $max_bid = (int) $connection->query('SELECT MAX([bid]) FROM {batch}')->fetchField();
++      $batch['id'] = $max_bid + 1;
++      $connection->insert('batch')
++        ->fields([
++          'bid' => $batch['id'],
++          'timestamp' => \Drupal::time()->getRequestTime(),
++          'token' => '',
++          'batch' => NULL,
++        ])
++        ->execute();
++    }
+ 
+     // Move operations to a job queue. Non-progressive batches will use a
+     // memory-based queue.
+diff --git a/core/lib/Drupal/Core/Batch/BatchStorage.php b/core/lib/Drupal/Core/Batch/BatchStorage.php
+index 3c44628ef9..6d078b585a 100644
+--- a/core/lib/Drupal/Core/Batch/BatchStorage.php
++++ b/core/lib/Drupal/Core/Batch/BatchStorage.php
+@@ -121,12 +121,29 @@ public function cleanup() {
+    * {@inheritdoc}
+    */
+   public function create(array $batch) {
+-    // Ensure that a session is started before using the CSRF token generator.
++    // Ensure that a session is started before using the CSRF token generator,
++    // and update the database record.
+     $this->session->start();
++    $this->connection->update('batch')
++      ->fields([
++        'token' => $this->csrfToken->get($batch['id']),
++        'batch' => serialize($batch),
++      ])
++      ->condition('bid', $batch['id'])
++      ->execute();
++  }
++
++  /**
++   * Returns a new batch id.
++   *
++   * @return int
++   *   A batch id.
++   */
++  public function getId(): int {
+     $try_again = FALSE;
+     try {
+       // The batch table might not yet exist.
+-      $this->doCreate($batch);
++      return $this->doInsertBatchRecord();
+     }
+     catch (\Exception $e) {
+       // If there was an exception, try to create the table.
+@@ -138,23 +155,22 @@ public function create(array $batch) {
+     }
+     // Now that the table has been created, try again if necessary.
+     if ($try_again) {
+-      $this->doCreate($batch);
++      return $this->doInsertBatchRecord();
+     }
+   }
+ 
+   /**
+-   * Saves a batch.
++   * Inserts a record in the table and returns the batch id.
+    *
+-   * @param array $batch
+-   *   The array representing the batch to create.
++   * @return int
++   *   A batch id.
+    */
+-  protected function doCreate(array $batch) {
+-    $this->connection->insert('batch')
++  protected function doInsertBatchRecord(): int {
++    return $this->connection->insert('batch')
+       ->fields([
+-        'bid' => $batch['id'],
+-        'timestamp' => REQUEST_TIME,
+-        'token' => $this->csrfToken->get($batch['id']),
+-        'batch' => serialize($batch),
++        'timestamp' => \Drupal::time()->getRequestTime(),
++        'token' => '',
++        'batch' => NULL,
+       ])
+       ->execute();
+   }
+@@ -208,9 +224,7 @@ public function schemaDefinition() {
+       'fields' => [
+         'bid' => [
+           'description' => 'Primary Key: Unique batch ID.',
+-          // This is not a serial column, to allow both progressive and
+-          // non-progressive batches. See batch_process().
+-          'type' => 'int',
++          'type' => 'serial',
+           'unsigned' => TRUE,
+           'not null' => TRUE,
+         ],
+diff --git a/core/lib/Drupal/Core/ProxyClass/Batch/BatchStorage.php b/core/lib/Drupal/Core/ProxyClass/Batch/BatchStorage.php
+index 5e6fc6df6d..4b54090cab 100644
+--- a/core/lib/Drupal/Core/ProxyClass/Batch/BatchStorage.php
++++ b/core/lib/Drupal/Core/ProxyClass/Batch/BatchStorage.php
+@@ -107,6 +107,14 @@ public function create(array $batch)
+             return $this->lazyLoadItself()->create($batch);
+         }
+ 
++        /**
++         * {@inheritdoc}
++         */
++        public function getId(): int
++        {
++            return $this->lazyLoadItself()->getId();
++        }
++
+         /**
+          * {@inheritdoc}
+          */
+diff --git a/core/modules/pgsql/pgsql.install b/core/modules/pgsql/pgsql.install
+index c25620d789..13fcbf442c 100644
+--- a/core/modules/pgsql/pgsql.install
++++ b/core/modules/pgsql/pgsql.install
+@@ -6,6 +6,8 @@
+  */
+ 
+ use Drupal\Core\Database\Database;
++use Drupal\Core\Database\DatabaseExceptionWrapper;
++use Drupal\Core\Entity\Sql\SqlContentEntityStorage;
+ 
+ /**
+  * Implements hook_requirements().
+@@ -40,3 +42,124 @@ function pgsql_requirements() {
+ 
+   return $requirements;
+ }
++
++/**
++ * Fix any orphan sequences created from column changes in PostgreSQL.
++ */
++function pgsql_update_10100(&$sandbox) {
++  $connection = \Drupal::database();
++  if ($connection->databaseType() !== 'pgsql') {
++    // This database update is a no-op for all other core database drivers.
++    $sandbox['#finished'] = 1;
++    return NULL;
++  }
++
++  if (!isset($sandbox['progress'])) {
++    $sandbox['fixed'] = 0;
++    $sandbox['tables'] = [];
++
++    // Discovers all custom tables with serial columns.
++    $module_handler = \Drupal::moduleHandler();
++    $modules = $module_handler->getModuleList();
++    foreach ($modules as $extension) {
++      $module = $extension->getName();
++      if ($module_handler->moduleExists($module)) {
++        $module_handler->loadInclude($module, 'install');
++        $schema = $module_handler->invoke($module, 'schema');
++        if (!empty($schema)) {
++          foreach ($schema as $table_name => $table_info) {
++            foreach ($table_info['fields'] as $column_name => $column_info) {
++              if (substr($column_info['type'], 0, 6) === 'serial') {
++                $sandbox['tables'][] = [
++                  'table' => $table_name,
++                  'column' => $column_name,
++                ];
++              }
++            }
++          }
++        }
++      }
++    }
++
++    // Discovers all content entity types with integer entity keys that are most
++    // likely serial columns.
++    $entity_types = \Drupal::entityTypeManager()->getDefinitions();
++    /** @var \Drupal\Core\Entity\EntityTypeInterface $entity_type */
++    foreach ($entity_types as $entity_type) {
++      $storage_class = $entity_type->getStorageClass();
++      if (is_subclass_of($storage_class, SqlContentEntityStorage::class)) {
++        $entity_class = $entity_type->getClass();
++        $id_key = $entity_type->getKey('id');
++        $revision_key = $entity_type->getKey('revision');
++
++        /** @var \Drupal\Core\Field\BaseFieldDefinition[] $base_field_definitions */
++        $base_field_definitions = $entity_class::baseFieldDefinitions($entity_type);
++        if ($base_field_definitions[$id_key]->getType() === 'integer') {
++          $sandbox['tables'][] = [
++            'table' => $entity_type->getBaseTable(),
++            'column' => $id_key,
++          ];
++        }
++
++        if ($entity_type->isRevisionable() &&
++          $base_field_definitions[$revision_key]->getType() === 'integer') {
++          $sandbox['tables'][] = [
++            'table' => $entity_type->getRevisionTable(),
++            'column' => $revision_key,
++          ];
++        }
++      }
++    }
++    $sandbox['max'] = count($sandbox['tables']);
++    $sandbox['progress'] = 0;
++
++  }
++  else {
++    // Adds ownership of orphan sequences to tables.
++    $to_process = array_slice($sandbox['tables'], $sandbox['progress'], 50);
++
++    // Ensures that a sequence is not owned first, then ensures that the a
++    // sequence exists at all before trying to alter it.
++    foreach ($to_process as $table_info) {
++      if ($connection->schema()->tableExists($table_info['table'])) {
++        $owned = (bool) $connection->schema()
++          ->getSequenceName($table_info['table'], $table_info['column']);
++
++        if (!$owned) {
++          $sequence_name = $connection
++            ->makeSequenceName($table_info['table'], $table_info['column']);
++          $exists = $connection
++            ->schema()
++            ->sequenceExists($sequence_name);
++          if ($exists) {
++            $transaction = $connection->startTransaction($sequence_name);
++            try {
++              $connection
++                ->schema()
++                ->updateSequenceOwnership($table_info['table'], $table_info['column']);
++
++              $sandbox['fixed']++;
++            }
++            catch (DatabaseExceptionWrapper $e) {
++              $transaction->rollBack();
++            }
++          }
++        }
++      }
++
++      $sandbox['progress']++;
++    }
++  }
++
++  if ($sandbox['max'] && $sandbox['progress'] < $sandbox['max']) {
++    $sandbox['#finished'] = $sandbox['progress'] / $sandbox['max'];
++  }
++  else {
++    $sandbox['#finished'] = 1;
++
++    return \Drupal::translation()->formatPlural(
++      $sandbox['fixed'],
++      '1 orphaned sequence fixed.',
++      '@count orphaned sequences fixed');
++  }
++}
+diff --git a/core/modules/pgsql/src/Driver/Database/pgsql/Connection.php b/core/modules/pgsql/src/Driver/Database/pgsql/Connection.php
+index 8417ed831b..27302a7f54 100644
+--- a/core/modules/pgsql/src/Driver/Database/pgsql/Connection.php
++++ b/core/modules/pgsql/src/Driver/Database/pgsql/Connection.php
+@@ -21,7 +21,7 @@
+  * PostgreSQL implementation of \Drupal\Core\Database\Connection.
+  */
+ class Connection extends DatabaseConnection implements SupportsTemporaryTablesInterface {
+-
++public array $xyx = [];
+   /**
+    * The name by which to obtain a lock for retrieve the next insert id.
+    */
+@@ -203,6 +203,10 @@ public function prepareStatement(string $query, array $options, bool $allow_row_
+     // automatically cast the fields to the right type for these operators,
+     // so we need to alter the query and add the type-cast.
+     $query = preg_replace('/ ([^ ]+) +(I*LIKE|NOT +I*LIKE|~\*|!~\*) /i', ' ${1}::text ${2} ', $query);
++global $xxx; if ($xxx) {
++  $this->xyx[] = __METHOD__;
++  $this->xyx[] = $query;
++}
+     return parent::prepareStatement($query, $options, $allow_row_count);
+   }
+ 
+diff --git a/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php b/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php
+index 2336d103fa..19d0346c33 100644
+--- a/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php
++++ b/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php
+@@ -10,7 +10,7 @@
+ // cSpell:ignore attrelid atttypid atttypmod bigserial conkey conname conrelid
+ // cSpell:ignore contype fillfactor indexname indexrelid indisprimary indkey
+ // cSpell:ignore indrelid nextval nspname regclass relkind relname relnamespace
+-// cSpell:ignore schemaname setval
++// cSpell:ignore schemaname setval refobjid refobjsubid objid classid
+ 
+ /**
+  * @addtogroup schemaapi
+@@ -956,11 +956,25 @@ public function changeField($table, $field, $field_new, $spec, $new_keys = []) {
+       // not when altering. Because of that, the sequence needs to be created
+       // and initialized by hand.
+       $seq = $this->connection->makeSequenceName($table, $field_new);
+-      $this->connection->query("CREATE SEQUENCE " . $seq);
++global $xxx; $xxx = TRUE;
++$this->connection->xyx[] = $this->connection->query("SELECT MAX([" . $field . "]) FROM {" . $table . "}")->fetchField();
++      $this->connection->query("CREATE SEQUENCE " . $seq . " OWNED BY {" . $table . "}.[" . $field_new . ']');
+       // Set sequence to maximal field value to not conflict with existing
+       // entries.
+       $this->connection->query("SELECT setval('" . $seq . "', MAX([" . $field . "])) FROM {" . $table . "}");
++$this->connection->xyx[] = $this->connection->query("SELECT nextval(" . $this->connection->quote($seq) . ')')->fetchField();
++$this->connection->xyx[] = $this->connection->query("SELECT nextval(" . $this->connection->quote($seq) . ')')->fetchField();
++$this->connection->xyx[] = $this->connection->query("SELECT nextval(" . $this->connection->quote($seq) . ')')->fetchField();
++$this->connection->xyx[] = $this->connection->query("SELECT nextval(" . $this->connection->quote($seq) . ')')->fetchField();
+       $this->connection->query('ALTER TABLE {' . $table . '} ALTER [' . $field . '] SET DEFAULT nextval(' . $this->connection->quote($seq) . ')');
++$q = $this->connection->query("select column_name, data_type, character_maximum_length, column_default, is_nullable
++from INFORMATION_SCHEMA.COLUMNS where table_name = '" . $this->connection->getPrefix() . $table . "'")->fetchAll();
++foreach ($q as $r) {
++  foreach ($r as $cn => $cv) {
++    $this->connection->xyx[] = $cn . " - " . $cv;
++  }  
++}
++$xxx = FALSE;
+     }
+ 
+     // Rename the column if necessary.
+@@ -1062,6 +1076,78 @@ public function extensionExists($name): bool {
+     ])->fetchField();
+   }
+ 
++  /**
++   * Alters the ownership of a sequence.
++   *
++   * This is used for updating orphaned sequences.
++   *
++   * @param string $table
++   *   The unquoted or prefixed table name.
++   * @param string $column
++   *   The column name for the sequence.
++   *
++   * @see https://www.drupal.org/i/3028706
++   *
++   * @internal
++   */
++  public function updateSequenceOwnership(string $table, string $column): void {
++    $seq = $this->connection->makeSequenceName($table, $column);
++    $this->connection->query('ALTER SEQUENCE IF EXISTS ' . $seq . ' OWNED BY {' . $table . '}.[' . $column . ']');
++  }
++
++  /**
++   * Retrieves a sequence name that is owned by the table and column..
++   *
++   * @param string $table
++   *   A table name that is not prefixed or quoted.
++   * @param string $column
++   *   The column name.
++   *
++   * @return string|null
++   *   The name of the sequence or NULL if it does not exist.
++   */
++  public function getSequenceName(string $table, string $column): ?string {
++    return $this->connection
++      ->query("SELECT pg_get_serial_sequence(:table, :column)", [
++        ':table' => $this->connection->getPrefix() . $table,
++        ':column' => $column,
++      ])
++      ->fetchField();
++  }
++
++  /**
++   * Checks if a sequence exists.
++   *
++   * @param string $name
++   *   The fully-qualified sequence name.
++   *
++   * @return bool
++   *   TRUE if the sequence exists by the name.
++   *
++   * @see \Drupal\Core\Database\Connection::makeSequenceName()
++   */
++  public function sequenceExists(string $name): bool {
++    return (bool) $this->connection
++      ->query("SELECT c.relname FROM pg_class as c WHERE c.relkind = 'S' AND c.relname = :name", [':name' => $name])
++      ->fetchField();
++  }
++
++  /**
++   * Retrieves the sequence owner object.
++   *
++   * @return object|bool
++   *   Returns the sequence owner object or bool if it does not exist.
++   */
++  public function getSequenceOwner(string $table, string $field): object|bool {
++    $seq_name = $this->getSequenceName($table, $field);
++    return $this->connection->query("SELECT d.refobjid::regclass as table_name, a.attname as field_name
++      FROM pg_depend d
++      JOIN pg_attribute a ON a.attrelid = d.refobjid AND a.attnum = d.refobjsubid
++      WHERE d.objid = :seq_name::regclass
++      AND d.refobjsubid > 0
++      AND d.classid = 'pg_class'::regclass", [':seq_name' => $seq_name])->fetchObject();
++  }
++
+ }
+ 
+ /**
+diff --git a/core/modules/pgsql/tests/fixtures/update/drupal-9.pgsql-orphan-sequence.php b/core/modules/pgsql/tests/fixtures/update/drupal-9.pgsql-orphan-sequence.php
+new file mode 100644
+index 0000000000..8115669a7e
+--- /dev/null
++++ b/core/modules/pgsql/tests/fixtures/update/drupal-9.pgsql-orphan-sequence.php
+@@ -0,0 +1,43 @@
++<?php
++// @codingStandardsIgnoreFile
++
++use Drupal\Core\Database\Database;
++
++$connection = Database::getConnection();
++$db_type = $connection->databaseType();
++
++// Creates a table, then adds a sequence without ownership to simulate tables
++// that were altered from integer to serial columns.
++$connection
++  ->schema()
++  ->createTable('pgsql_sequence_test', [
++    'fields' => [
++      'sequence_field' => [
++        'type' => 'int',
++        'not null' => TRUE,
++        'unsigned' => TRUE,
++      ],
++    ],
++    'primary key' => ['sequence_field'],
++  ]);
++$seq = $connection
++  ->makeSequenceName('pgsql_sequence_test', 'sequence_field');
++$connection->query('CREATE SEQUENCE ' . $seq);
++
++// Enables the pgsql_test module so that the pgsql_sequence_test schema will
++// be available.
++$extensions = $connection
++  ->query("SELECT data FROM {config} where name = 'core.extension'")
++  ->fetchField();
++$extensions = unserialize($extensions);
++$extensions['module']['pgsql_test'] = 1;
++
++$connection
++  ->update('config')
++  ->fields(['data' => serialize($extensions)])
++  ->condition('name', 'core.extension')
++  ->execute();
++$connection
++  ->delete('cache_config')
++  ->condition('cid', 'core.extension')
++  ->execute();
+diff --git a/core/modules/pgsql/tests/src/Functional/Database/PostgreSqlSequenceUpdateTest.php b/core/modules/pgsql/tests/src/Functional/Database/PostgreSqlSequenceUpdateTest.php
+new file mode 100644
+index 0000000000..9613a580ca
+--- /dev/null
++++ b/core/modules/pgsql/tests/src/Functional/Database/PostgreSqlSequenceUpdateTest.php
+@@ -0,0 +1,65 @@
++<?php
++
++namespace Drupal\Tests\pgsql\Functional\Database;
++
++use Drupal\FunctionalTests\Update\UpdatePathTestBase;
++use Drupal\Core\Database\Database;
++use Drupal\jsonapi\JsonApiResource\Data;
++
++/**
++ * Tests that any unowned sequences created previously have a table owner.
++ *
++ * The update path only applies to Drupal sites using the pgsql driver.
++ *
++ * @group Database
++ */
++class PostgreSqlSequenceUpdateTest extends UpdatePathTestBase {
++
++  /**
++   * The database connection to use.
++   *
++   * @var \Drupal\Core\Database\Connection
++   */
++  protected $connection;
++
++
++  /**
++   * {@inheritdoc}
++   */
++  protected function runDbTasks() {
++    parent::runDbTasks();
++    $this->connection = Database::getConnection();
++    if ($this->connection->driver() !== 'pgsql') {
++      $this->markTestSkipped('This test only works with the pgsql driver');
++    }
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  protected function setDatabaseDumpFiles() {
++    $this->databaseDumpFiles = [
++      __DIR__ . '/../../../../../system/tests/fixtures/update/drupal-9.4.0.bare.standard.php.gz',
++      __DIR__ . '/../../../fixtures/update/drupal-9.pgsql-orphan-sequence.php',
++    ];
++  }
++
++  /**
++   * Asserts that a newly created sequence has the correct ownership.
++   */
++  public function testPostgreSqlSequenceUpdate() {
++    $schema = $this->connection->schema();
++    $this->assertFalse($schema->getSequenceOwner('pgsql_sequence_test', 'sequence_field'));
++
++    // Run the updates.
++    $this->runUpdates();
++
++    $schema = $this->connection->schema();
++    $seq_owner = $schema->getSequenceOwner('pgsql_sequence_test', 'sequence_field');
++    if ($seq_owner) {
++      $this->assertEquals($this->connection->getPrefix() . 'pgsql_sequence_test', $seq_owner->table_name);
++      $this->assertEquals('sequence_field', $seq_owner->field_name, 'Sequence is owned by the table and column.');
++    }
++  }
++
++}
+diff --git a/core/modules/pgsql/tests/src/Kernel/pgsql/SchemaTest.php b/core/modules/pgsql/tests/src/Kernel/pgsql/SchemaTest.php
+index b7fee8694a..740cf6fe45 100644
+--- a/core/modules/pgsql/tests/src/Kernel/pgsql/SchemaTest.php
++++ b/core/modules/pgsql/tests/src/Kernel/pgsql/SchemaTest.php
+@@ -243,4 +243,49 @@ public function testPgsqlExtensionExists(): void {
+     $this->assertTrue($this->schema->extensionExists('pg_trgm'));
+   }
+ 
++  /**
++   * @covers \Drupal\Core\Database\Driver\pgsql\Schema::getSequenceOwner
++   * @covers \Drupal\Core\Database\Driver\pgsql\Schema::getSequenceName
++   * @covers \Drupal\Core\Database\Driver\pgsql\Schema::sequenceExists
++   */
++  public function testPgsqlSequences(): void {
++    $table_specification = [
++      'description' => 'A test table with an ANSI reserved keywords for naming.',
++      'fields' => [
++        'uid' => [
++          'description' => 'Simple unique ID.',
++          'type' => 'serial',
++          'not null' => TRUE,
++        ],
++        'update' => [
++          'description' => 'A column with reserved name.',
++          'type' => 'varchar',
++          'length' => 255,
++        ],
++      ],
++      'primary key' => ['uid'],
++      'unique keys' => [
++        'having' => ['update'],
++      ],
++      'indexes' => [
++        'in' => ['uid', 'update'],
++      ],
++    ];
++
++    // Creating a table.
++    $table_name = 'sequence_test';
++    $this->schema->createTable($table_name, $table_specification);
++    $this->assertTrue($this->schema->tableExists($table_name));
++
++    // @todo replace 'public.' with defaultSchema when issue https://www.drupal.org/i/1060476 lands.
++    $this->assertEquals('public.' . $this->connection->getPrefix() . 'sequence_test_uid_seq', $this->schema->getSequenceName('sequence_test', 'uid'));
++
++    $this->assertTrue($this->schema->sequenceExists($this->connection->getPrefix() . 'sequence_test_uid_seq'));
++
++    $seq_owner = $this->schema->getSequenceOwner('sequence_test', 'uid');
++    $this->assertEquals($this->connection->getPrefix() . 'sequence_test', $seq_owner->table_name);
++    $this->assertEquals('uid', $seq_owner->field_name, 'New sequence is owned by its table.');
++
++  }
++
+ }
+diff --git a/core/modules/system/system.install b/core/modules/system/system.install
+index a896ba9897..321dd5c863 100644
+--- a/core/modules/system/system.install
++++ b/core/modules/system/system.install
+@@ -1757,3 +1757,22 @@ function system_update_10100(&$sandbox = NULL) {
+   }
+ 
+ }
++
++/**
++ * Change the {batch} table [bid] field to serial.
++ */
++function system_update_10101(&$sandbox = NULL) {
++  $connection = \Drupal::database();
++  $schema = $connection->schema();
++
++  // Update batch table.
++  if ($schema->tableExists('batch')) {
++    $schema->changeField('batch', 'bid', 'bid', [
++      'description' => 'Primary Key: Unique batch ID.',
++      'type' => 'serial',
++      'unsigned' => TRUE,
++      'not null' => TRUE,
++    ]);
++  }
++  return implode('<br/>', $connection->xyx);
++}
+diff --git a/core/modules/system/tests/modules/pgsql_test/pgsql_test.info.yml b/core/modules/system/tests/modules/pgsql_test/pgsql_test.info.yml
+new file mode 100644
+index 0000000000..d31c1cbc27
+--- /dev/null
++++ b/core/modules/system/tests/modules/pgsql_test/pgsql_test.info.yml
+@@ -0,0 +1,5 @@
++name: 'PostgreSQL Tests'
++type: module
++description: 'Supports testing pgsql driver.'
++package: Testing
++version: VERSION
+diff --git a/core/modules/system/tests/modules/pgsql_test/pgsql_test.install b/core/modules/system/tests/modules/pgsql_test/pgsql_test.install
+new file mode 100644
+index 0000000000..e9f1577e09
+--- /dev/null
++++ b/core/modules/system/tests/modules/pgsql_test/pgsql_test.install
+@@ -0,0 +1,24 @@
++<?php
++
++/**
++ * @file
++ * Install, update and uninstall functions for the pgsql_test module.
++ */
++
++/**
++ * Implements hook_schema().
++ */
++function pgsql_test_schema() {
++  $schema['pgsql_sequence_test'] = [
++    'description' => 'Test sequence changes on pgsql driver.',
++    'fields' => [
++      'sequence_field' => [
++        'type' => 'serial',
++        'not null' => TRUE,
++        'description' => 'Primary Key: A serial integer field.',
++      ],
++    ],
++    'primary key' => ['sequence_field'],
++  ];
++  return $schema;
++}
+diff --git a/core/modules/system/tests/src/Functional/Update/BatchBidSerialUpdateTest.php b/core/modules/system/tests/src/Functional/Update/BatchBidSerialUpdateTest.php
+new file mode 100644
+index 0000000000..3d5418c9cd
+--- /dev/null
++++ b/core/modules/system/tests/src/Functional/Update/BatchBidSerialUpdateTest.php
+@@ -0,0 +1,76 @@
++<?php
++
++namespace Drupal\Tests\system\Functional\Update;
++
++use Drupal\Core\Database\IntegrityConstraintViolationException;
++use Drupal\FunctionalTests\Update\UpdatePathTestBase;
++
++/**
++ * Tests system_update_10101() upgrade path.
++ *
++ * @group system
++ * @group legacy
++ */
++class BatchBidSerialUpdateTest extends UpdatePathTestBase {
++
++  /**
++   * {@inheritdoc}
++   */
++  protected function setDatabaseDumpFiles() {
++    $this->databaseDumpFiles = [
++      __DIR__ . '/../../../../../system/tests/fixtures/update/drupal-9.4.0.bare.standard.php.gz',
++    ];
++  }
++
++  /**
++   * Tests the change of the {batch} table [bid] field to serial.
++   */
++  public function testUpdate(): void {
++    /** @var \Drupal\Core\Database\Connection $connection */
++    $connection = \Drupal::service('database');
++
++    // Before the update, inserting a record in the {batch} table without
++    // passing a value for [bid] should fail, with the exception of the SQLite
++    // database where a NOT NULL integer field that is the primary key is set
++    // to automatic increment anyway.
++    //
++    // @see https://www.drupal.org/project/drupal/issues/2665216#comment-14885361
++    try {
++      $connection->insert('batch')
++        ->fields([
++          'timestamp' => \Drupal::time()->getRequestTime(),
++          'token' => '',
++          'batch' => NULL,
++        ])
++        ->execute();
++      if ($connection->databaseType() !== 'sqlite') {
++        $this->fail('Insert to {batch} without bid should have failed, but it did not');
++      }
++    }
++    catch (\Exception $e) {
++      $this->assertInstanceOf(IntegrityConstraintViolationException::class, $e);
++    }
++
++    $this->runUpdates();
++
++    // $bid should be higher than one, since the update process would have
++    // executed a batch already.
++    $bid = (int) $connection->insert('batch')
++      ->fields([
++        'timestamp' => \Drupal::time()->getRequestTime(),
++        'token' => '',
++        'batch' => NULL,
++      ])
++      ->execute();
++    $this->assertGreaterThan(1, $bid);
++    $this->assertEquals($bid + 1, (int) $connection->insert('batch')
++      ->fields([
++        'timestamp' => \Drupal::time()->getRequestTime(),
++        'token' => '',
++        'batch' => NULL,
++      ])
++      ->execute()
++    );
++  }
++
++}
+diff --git a/core/phpstan-baseline.neon b/core/phpstan-baseline.neon
+index a956663a84..a7ca13875e 100644
+--- a/core/phpstan-baseline.neon
++++ b/core/phpstan-baseline.neon
+@@ -232,7 +232,7 @@ parameters:
+ 
+ 		-
+ 			message: "#^Call to deprecated constant REQUEST_TIME\\: Deprecated in drupal\\:8\\.3\\.0 and is removed from drupal\\:11\\.0\\.0\\. Use \\\\Drupal\\:\\:time\\(\\)\\-\\>getRequestTime\\(\\); $#"
+-			count: 2
++			count: 1
+ 			path: lib/Drupal/Core/Batch/BatchStorage.php
+ 
+ 		-
+@@ -1960,6 +1960,11 @@ parameters:
+ 			count: 1
+ 			path: modules/path_alias/src/AliasManager.php
+ 
++		-
++			message: "#^A file could not be loaded from Drupal\\\\Core\\\\Extension\\\\ModuleHandlerInterface\\:\\:loadInclude$#"
++			count: 1
++			path: modules/pgsql/pgsql.install
++
+ 		-
+ 			message: "#^Variable \\$table_field might not be defined\\.$#"
+ 			count: 1
 diff --git a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificSchemaTestBase.php b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificSchemaTestBase.php
 index de74ae5437..e7ea76af4d 100644
 --- a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificSchemaTestBase.php
