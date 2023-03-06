@@ -1,5 +1,5 @@
 diff --git a/core/modules/views/src/Plugin/views/field/EntityField.php b/core/modules/views/src/Plugin/views/field/EntityField.php
-index 2c1d76ce44..e6d8699d10 100644
+index 2c1d76ce44..310fc02aed 100644
 --- a/core/modules/views/src/Plugin/views/field/EntityField.php
 +++ b/core/modules/views/src/Plugin/views/field/EntityField.php
 @@ -913,7 +913,7 @@ protected function createEntityForGroupBy(EntityInterface $entity, ResultRow $ro
@@ -7,12 +7,12 @@ index 2c1d76ce44..e6d8699d10 100644
        $data = FALSE;
        foreach ($this->group_fields as $field_name => $column) {
 -        if (property_exists($row, $this->aliases[$column])) {
-+        if (property_exists($row, $this->aliases[$column]) || property_exists($row->getData(), $this->aliases[$column])) {
++        if ($row->hasColumn($this->aliases[$column])) {
            $base_value[$field_name] = $row->{$this->aliases[$column]};
            if (isset($base_value[$field_name])) {
              $data = TRUE;
 diff --git a/core/modules/views/src/Plugin/views/query/Sql.php b/core/modules/views/src/Plugin/views/query/Sql.php
-index 14b335b63f..0f03b38254 100644
+index 14b335b63f..4f4cf9b936 100644
 --- a/core/modules/views/src/Plugin/views/query/Sql.php
 +++ b/core/modules/views/src/Plugin/views/query/Sql.php
 @@ -1530,13 +1530,17 @@ public function execute(ViewExecutable $view) {
@@ -20,7 +20,7 @@ index 14b335b63f..0f03b38254 100644
  
          $result = $query->execute();
 -        $result->setFetchMode(\PDO::FETCH_CLASS, 'Drupal\views\ResultRow');
-+        $result->setFetchMode(\PDO::FETCH_OBJ);
++        $result->setFetchMode(\PDO::FETCH_ASSOC);
  
          // Setup the result row objects.
 -        $view->result = iterator_to_array($result);
@@ -29,9 +29,9 @@ index 14b335b63f..0f03b38254 100644
 -        });
 +        $i = 0;
 +        $view->result = [];
-+        foreach ($result as $rowObj) {
++        foreach ($result as $rowData) {
 +          $view->result[] = new ResultRow([
-+            'data' => $rowObj,
++            'data' => $rowData,
 +            'index' => $i++,
 +          ]);
 +        }
@@ -39,7 +39,7 @@ index 14b335b63f..0f03b38254 100644
          $view->pager->postExecute($view->result);
          $view->pager->updatePageInfo();
 diff --git a/core/modules/views/src/ResultRow.php b/core/modules/views/src/ResultRow.php
-index 2399f69983..c98aa6b222 100644
+index 2399f69983..bf5839dc2e 100644
 --- a/core/modules/views/src/ResultRow.php
 +++ b/core/modules/views/src/ResultRow.php
 @@ -5,9 +5,13 @@
@@ -52,17 +52,17 @@ index 2399f69983..c98aa6b222 100644
 +  /**
 +   * Raw row data.
 +   */
-+  protected \stdClass $data;
++  protected array $data;
 +
    /**
     * The entity for this result.
     *
-@@ -38,11 +42,25 @@ class ResultRow {
+@@ -38,11 +42,31 @@ class ResultRow {
     *   (optional) An array of values to add as properties on the object.
     */
    public function __construct(array $values = []) {
 +    if (!isset($values['data'])) {
-+      $this->data = new \stdClass();
++      $this->data = [];
 +    }
 +    else {
 +      $this->data = $values['data'];
@@ -74,73 +74,59 @@ index 2399f69983..c98aa6b222 100644
    }
  
 +  /**
-+   * Returns the raw row data.
++   * Checks if a named column is in the result row.
++   *
++   * @param string $name
++   *   The name of the column to check existence of.
++   *
++   * @return bool
++   *   TRUE if the result row contains a column of the given name.
 +   */
-+  public function getData(): \stdClass {
-+    return $this->data;
++  public function hasColumn(string $name): bool {
++    return array_key_exists($name, $this->data);
 +  }
 +
    /**
     * Resets the _entity and _relationship_entities properties.
     */
-@@ -51,4 +69,55 @@ public function resetEntityData() {
+@@ -51,4 +75,35 @@ public function resetEntityData() {
      $this->_relationship_entities = [];
    }
  
 +  /**
-+   * Implements the magic method for getting object properties.
-+   *
-+   * @param string $name
-+   *   Property name.
-+   *
-+   * @return mixed
-+   *   The value of the property.
++   * {@inheritdoc}
 +   */
 +  public function __get(string $name): mixed {
-+    if (property_exists($this->data, $name)) {
-+      return $this->data->$name;
++    if (array_key_exists($name, $this->data)) {
++      return $this->data[$name];
 +    }
-+    throw new \UnexpectedValueException("Property {$name} does not exist");
++    throw new \UnexpectedValueException("Column '{$name}' does not exist");
 +  }
 +
 +  /**
-+   * Implements the magic method to determine whether a property is set.
-+   *
-+   * @param string $name
-+   *   Property name.
-+   *
-+   * @return bool
-+   *   True if property is set.
++   * {@inheritdoc}
 +   */
 +  public function __isset(string $name): bool {
-+    return isset($this->data->$name);
++    return isset($this->data[$name]);
 +  }
 +
 +  /**
-+   * Implements the magic method to set a property.
-+   *
-+   * @param $name
-+   *   Property name.
-+   * @param mixed $value
-+   *   The value of the property.
++   * {@inheritdoc}
 +   */
 +  public function __set(string $name, mixed $value): void {
-+    $this->data->$name = $value;
++    $this->data[$name] = $value;
 +  }
 +
 +  /**
-+   * Implements the magic method to unset a property.
-+   *
-+   * @param $name
-+   *   Property name.
++   * {@inheritdoc}
 +   */
 +  public function __unset($name): void {
-+    unset($this->data->$name);
++    unset($this->data[$name]);
 +  }
 +
  }
 diff --git a/core/modules/views/src/Tests/ViewResultAssertionTrait.php b/core/modules/views/src/Tests/ViewResultAssertionTrait.php
-index a98c18e647..16dd582afe 100644
+index a98c18e647..b2cbbce3c9 100644
 --- a/core/modules/views/src/Tests/ViewResultAssertionTrait.php
 +++ b/core/modules/views/src/Tests/ViewResultAssertionTrait.php
 @@ -77,7 +77,7 @@ protected function assertIdenticalResultsetHelper($view, $expected_result, $colu
@@ -148,16 +134,16 @@ index a98c18e647..16dd582afe 100644
        $row = [];
        foreach ($column_map as $view_column => $expected_column) {
 -        if (property_exists($value, $view_column)) {
-+        if (property_exists($value, $view_column) || property_exists($value->getData(), $view_column)) {
++        if ($value->hasColumn($view_column)) {
            $row[$expected_column] = (string) $value->$view_column;
          }
          // For entity fields we don't have the raw value. Let's try to fetch it
 diff --git a/core/modules/views/tests/src/Unit/ResultRowTest.php b/core/modules/views/tests/src/Unit/ResultRowTest.php
 new file mode 100644
-index 0000000000..7002a7baa3
+index 0000000000..7971876d97
 --- /dev/null
 +++ b/core/modules/views/tests/src/Unit/ResultRowTest.php
-@@ -0,0 +1,62 @@
+@@ -0,0 +1,60 @@
 +<?php
 +
 +namespace Drupal\Tests\views\Unit;
@@ -193,30 +179,28 @@ index 0000000000..7002a7baa3
 +   * @covers ::__get
 +   * @covers ::__isset
 +   * @covers ::__unset
++   * @covers ::hasColumn
 +   */
 +  public function testMagic(): void {
 +    $this->assertTrue(isset($this->row->index));
 +    $this->assertTrue(isset($this->row->alpha));
 +    $this->assertTrue(isset($this->row->beta));
-+    $this->assertFalse(isset($this->row->getData()->index));
-+    $this->assertTrue(isset($this->row->getData()->alpha));
-+    $this->assertTrue(isset($this->row->getData()->beta));
++    $this->assertFalse($this->row->hasColumn('index'));
++    $this->assertTrue($this->row->hasColumn('alpha'));
++    $this->assertTrue($this->row->hasColumn('beta'));
 +    $this->assertSame(1, $this->row->index);
 +    $this->assertSame('foo', $this->row->alpha);
 +    $this->assertSame('bar', $this->row->beta);
-+    $this->assertSame('foo', $this->row->getData()->alpha);
-+    $this->assertSame('bar', $this->row->getData()->beta);
 +    unset($this->row->beta);
 +    $this->assertFalse(isset($this->row->beta));
-+    $this->assertFalse(isset($this->row->getData()->beta));
++    $this->assertFalse($this->row->hasColumn('beta'));
 +    $this->row->charlie = 'baz';
 +    $this->assertTrue(isset($this->row->charlie));
-+    $this->assertTrue(isset($this->row->getData()->charlie));
++    $this->assertTrue($this->row->hasColumn('charlie'));
 +    $this->assertSame('baz', $this->row->charlie);
-+    $this->assertSame('baz', $this->row->getData()->charlie);
 +    $this->expectException(\UnexpectedValueException::class);
-+    $this->expectExceptionMessage("Property zulu does not exist");
-+    $value =  $this->row->zulu;
++    $this->expectExceptionMessage("Column 'zulu' does not exist");
++    $value = $this->row->zulu;
 +  }
 +
 +}
