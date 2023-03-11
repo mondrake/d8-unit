@@ -617,10 +617,10 @@ index 4381fd1af6..f85b347423 100644
  
 diff --git a/core/lib/Drupal/Core/Database/StatementWrapperIterator.php b/core/lib/Drupal/Core/Database/StatementWrapperIterator.php
 new file mode 100644
-index 0000000000..1c32d02e7f
+index 0000000000..b46405ff93
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/StatementWrapperIterator.php
-@@ -0,0 +1,301 @@
+@@ -0,0 +1,282 @@
 +<?php
 +
 +namespace Drupal\Core\Database;
@@ -788,10 +788,17 @@ index 0000000000..1c32d02e7f
 +   * {@inheritdoc}
 +   */
 +  public function fetchField($index = 0) {
-+    // We use ::fetch(\PDO::FETCH_NUM) here instead of calling fetchColumn()
-+    // on the client statement to avoid calling a PDO-specific method.
-+    $fields = $this->fetch(\PDO::FETCH_NUM);
-+    return $fields === FALSE ? FALSE : ($fields[$index] ?? NULL);
++    // Call \PDOStatement::fetchColumn to fetch the field.
++    $column = $this->clientStatement->fetchColumn($index);
++
++    if ($column) {
++      $this->setResultsetCurrentRow($column);
++    }
++    else {
++      $this->markResultsetFetchingComplete();
++    }
++
++    return $column;
 +  }
 +
 +  /**
@@ -842,17 +849,12 @@ index 0000000000..1c32d02e7f
 +    // Call \PDOStatement::setFetchMode to set fetch mode.
 +    // \PDOStatement is picky about the number of arguments in some cases so we
 +    // need to be pass the exact number of arguments we where given.
-+    switch (func_num_args()) {
-+      case 1:
-+        return $this->clientStatement->setFetchMode($mode);
-+
-+      case 2:
-+        return $this->clientStatement->setFetchMode($mode, $a1);
-+
-+      case 3:
-+      default:
-+        return $this->clientStatement->setFetchMode($mode, $a1, $a2);
-+    }
++    $numArgs = func_num_args();
++    return match($numArgs) {
++      1 => $this->clientStatement->setFetchMode($mode),
++      2 => $this->clientStatement->setFetchMode($mode, $a1),
++      $numArgs >= 3 => $this->clientStatement->setFetchMode($mode, $a1, $a2),
++    };
 +  }
 +
 +  /**
@@ -862,24 +864,13 @@ index 0000000000..1c32d02e7f
 +    // Call \PDOStatement::fetchAll to fetch all rows.
 +    // \PDOStatement is picky about the number of arguments in some cases so we
 +    // need to pass the exact number of arguments we were given.
-+    switch (func_num_args()) {
-+      case 0:
-+        $row = $this->clientStatement->fetch();
-+        break;
-+
-+      case 1:
-+        $row = $this->clientStatement->fetch($mode);
-+        break;
-+
-+      case 2:
-+        $row = $this->clientStatement->fetch($mode, $cursorOrientation);
-+        break;
-+
-+      case 3:
-+      default:
-+        $row = $this->clientStatement->fetch($mode, $cursorOrientation, $cursorOffset);
-+        break;
-+    }
++    $numArgs = func_num_args();
++    $row = match($numArgs) {
++      0 => $this->clientStatement->fetch(),
++      1 => $this->clientStatement->fetch($mode),
++      2 => $this->clientStatement->fetch($mode, $cursorOrientation),
++      $numArgs >= 3 => $this->clientStatement->fetch($mode, $cursorOrientation, $cursorOffset),
++    };
 +
 +    if ($row) {
 +      $this->setResultsetCurrentRow($row);
@@ -898,23 +889,13 @@ index 0000000000..1c32d02e7f
 +    // Call \PDOStatement::fetchAll to fetch all rows.
 +    // \PDOStatement is picky about the number of arguments in some cases so we
 +    // need to be pass the exact number of arguments we where given.
-+    switch (func_num_args()) {
-+      case 0:
-+        $return = $this->clientStatement->fetchAll();
-+        break;
-+
-+      case 1:
-+        $return = $this->clientStatement->fetchAll($mode);
-+        break;
-+
-+      case 2:
-+        $return = $this->clientStatement->fetchAll($mode, $columnIndex);
-+        break;
-+
-+      case 3:
-+      default:
-+        $return = $this->clientStatement->fetchAll($mode, $columnIndex, $constructorArguments);
-+    }
++    $numArgs = func_num_args();
++    $return  = match($numArgs) {
++      0 => $this->clientStatement->fetchAll(),
++      1 => $this->clientStatement->fetchAll($mode),
++      2 => $this->clientStatement->fetchAll($mode, $columnIndex),
++      $numArgs >= 3 => $this->clientStatement->fetchAll($mode, $columnIndex, $constructorArguments),
++    };
 +
 +    $this->markResultsetFetchingComplete();
 +
@@ -944,22 +925,6 @@ index 5062d5ebab..7c9fab2836 100644
  
    /**
     * Flag to indicate if the cleanup function in __destruct() should run.
-diff --git a/core/modules/mysql/tests/src/Unit/ConnectionTest.php b/core/modules/mysql/tests/src/Unit/ConnectionTest.php
-index 878d7672ad..5ebe43b626 100644
---- a/core/modules/mysql/tests/src/Unit/ConnectionTest.php
-+++ b/core/modules/mysql/tests/src/Unit/ConnectionTest.php
-@@ -77,9 +77,9 @@ public function __construct(\PDO $connection) {
-    */
-   public function testVersionAndIsMariaDb(bool $expected_is_mariadb, string $server_version, string $expected_version): void {
-     $this->pdoStatement
--      ->fetchColumn(Argument::any())
-+      ->fetch(Argument::any())
-       ->shouldBeCalled()
--      ->willReturn($server_version);
-+      ->willReturn([$server_version]);
- 
-     $connection = $this->createConnection();
- 
 diff --git a/core/modules/pgsql/src/Driver/Database/pgsql/Connection.php b/core/modules/pgsql/src/Driver/Database/pgsql/Connection.php
 index 8417ed831b..a458b5d4e4 100644
 --- a/core/modules/pgsql/src/Driver/Database/pgsql/Connection.php
@@ -983,7 +948,7 @@ index 8417ed831b..a458b5d4e4 100644
    /**
     * A map of condition operators to PostgreSQL operators.
 diff --git a/core/modules/sqlite/src/Driver/Database/sqlite/Statement.php b/core/modules/sqlite/src/Driver/Database/sqlite/Statement.php
-index 5de75a5dec..a3842b213a 100644
+index 8151108ca5..a3842b213a 100644
 --- a/core/modules/sqlite/src/Driver/Database/sqlite/Statement.php
 +++ b/core/modules/sqlite/src/Driver/Database/sqlite/Statement.php
 @@ -2,8 +2,8 @@
@@ -1023,64 +988,18 @@ index 5de75a5dec..a3842b213a 100644
    }
  
    /**
-@@ -106,45 +106,6 @@ public function execute($args = [], $options = []) {
-       }
-     }
- 
--    // In some weird cases, SQLite will prefix some column names by the name
--    // of the table. We post-process the data, by renaming the column names
--    // using the same convention as MySQL and PostgreSQL.
--    $rename_columns = [];
--    foreach ($this->columnNames as $k => $column) {
--      // In some SQLite versions, SELECT DISTINCT(field) will return "(field)"
--      // instead of "field".
--      if (preg_match("/^\((.*)\)$/", $column, $matches)) {
--        $rename_columns[$column] = $matches[1];
--        $this->columnNames[$k] = $matches[1];
--        $column = $matches[1];
--      }
--
--      // Remove "table." prefixes.
--      if (preg_match("/^.*\.(.*)$/", $column, $matches)) {
--        $rename_columns[$column] = $matches[1];
--        $this->columnNames[$k] = $matches[1];
--      }
--    }
--    if ($rename_columns) {
--      // DatabaseStatementPrefetch already extracted the first row,
--      // put it back into the result set.
--      if (isset($this->currentRow)) {
--        $this->data[0] = &$this->currentRow;
--      }
--
--      // Then rename all the columns across the result set.
--      foreach ($this->data as $k => $row) {
--        foreach ($rename_columns as $old_column => $new_column) {
--          $this->data[$k][$new_column] = $this->data[$k][$old_column];
--          unset($this->data[$k][$old_column]);
--        }
--      }
--
--      // Finally, extract the first row again.
--      $this->currentRow = $this->data[0];
--      unset($this->data[0]);
--    }
--
-     return $return;
-   }
- 
 diff --git a/core/tests/Drupal/KernelTests/Core/Database/FetchTest.php b/core/tests/Drupal/KernelTests/Core/Database/FetchTest.php
-index 9368954cd2..81dff45911 100644
+index 9368954cd2..cda06a3205 100644
 --- a/core/tests/Drupal/KernelTests/Core/Database/FetchTest.php
 +++ b/core/tests/Drupal/KernelTests/Core/Database/FetchTest.php
-@@ -180,6 +180,35 @@ public function testQueryFetchCol() {
+@@ -180,6 +180,71 @@ public function testQueryFetchCol() {
      }
    }
  
 +  /**
 +   * Tests ::fetchAllAssoc().
 +   */
-+  public function testQueryFetchAllAssoc() {
++  public function testQueryFetchAllAssoc(): void {
 +    $expected_result = [
 +      "Singer" => [
 +        "id" => "2",
@@ -1104,6 +1023,42 @@ index 9368954cd2..81dff45911 100644
 +    $result = $statement->fetchAllAssoc('job', \PDO::FETCH_OBJ);
 +    $this->assertEquals((object) $expected_result['Singer'], $result['Singer']);
 +    $this->assertEquals((object) $expected_result['Drummer'], $result['Drummer']);
++  }
++
++  /**
++   * Tests ::fetchField().
++   */
++  public function testQueryFetchField(): void {
++    $this->connection->insert('test')
++      ->fields([
++        'name' => 'Foo',
++        'age' => 0,
++        'job' => 'Dummy',
++      ])
++      ->execute();
++
++    $this->connection->insert('test')
++      ->fields([
++        'name' => 'Kurt',
++        'age' => 27,
++        'job' => 'Singer',
++      ])
++      ->execute();
++
++    $expectedResults = ['25', '27', '28', '26', '0', '27'];
++
++    $query = $this->connection->select('test');
++    $query->addField('age');
++    $query->orderBy('id');
++    $statement = $query->execute();
++
++    $actualResults = [];
++    while ($result = $statement->fetchField()) {
++      $this->assertIsNumeric($result);
++      $actualResults[] = $result;
++    }
++
++    $this->assertSame($expectedResults, $actualResults);
 +  }
 +
    /**
