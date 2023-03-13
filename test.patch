@@ -1,132 +1,3 @@
-diff --git a/core/lib/Drupal/Core/Database/FetchModeTrait.php b/core/lib/Drupal/Core/Database/FetchModeTrait.php
-new file mode 100644
-index 0000000000..473313e310
---- /dev/null
-+++ b/core/lib/Drupal/Core/Database/FetchModeTrait.php
-@@ -0,0 +1,123 @@
-+<?php
-+
-+namespace Drupal\Core\Database;
-+
-+/**
-+ * Provide helper methods for statement fetching.
-+ */
-+trait FetchModeTrait {
-+
-+  /**
-+   * Converts a row of data in FETCH_ASSOC format to FETCH_BOTH.
-+   *
-+   * @param array $rowAssoc
-+   *   A row of data in FETCH_ASSOC format.
-+   *
-+   * @return array
-+   *   The row in FETCH_BOTH format.
-+   */
-+  protected function assocToBoth(array $rowAssoc): array {
-+    // \PDO::FETCH_BOTH returns an array indexed by both the column name
-+    // and the column number.
-+    return $rowAssoc + array_values($rowAssoc);
-+  }
-+
-+  /**
-+   * Converts a row of data in FETCH_ASSOC format to FETCH_NUM.
-+   *
-+   * @param array $rowAssoc
-+   *   A row of data in FETCH_ASSOC format.
-+   *
-+   * @return array
-+   *   The row in FETCH_NUM format.
-+   */
-+  protected function assocToNum(array $rowAssoc): array {
-+    return array_values($rowAssoc);
-+  }
-+
-+  /**
-+   * Converts a row of data in FETCH_ASSOC format to FETCH_OBJ.
-+   *
-+   * @param array $rowAssoc
-+   *   A row of data in FETCH_ASSOC format.
-+   *
-+   * @return \stdClass
-+   *   The row in FETCH_OBJ format.
-+   */
-+  protected function assocToObj(array $rowAssoc): \stdClass {
-+    return (object) $rowAssoc;
-+  }
-+
-+  /**
-+   * Converts a row of data in FETCH_ASSOC format to FETCH_CLASS.
-+   *
-+   * @param array $rowAssoc
-+   *   A row of data in FETCH_ASSOC format.
-+   * @param string $className
-+   *   Name of the created class.
-+   * @param array $constructorArguments
-+   *   Elements of this array are passed to the constructor.
-+   *
-+   * @return object
-+   *   The row in FETCH_CLASS format.
-+   */
-+  protected function assocToClass(array $rowAssoc, string $className, array $constructorArguments): object {
-+    $classObj = new $className(...$constructorArguments);
-+    foreach ($rowAssoc as $column => $value) {
-+        $classObj->$column = $value;
-+    }
-+    return $classObj;
-+  }
-+
-+  /**
-+   * Converts a row of data to FETCH_CLASS | FETCH_CLASSTYPE.
-+   *
-+   * @param array $rowAssoc
-+   *   A row of data in FETCH_ASSOC format.
-+   * @param array $constructorArguments
-+   *   Elements of this array are passed to the constructor.
-+   *
-+   * @return object
-+   *   The row in FETCH_CLASS format.
-+   */
-+  protected function assocToClassType(array $rowAssoc, array $constructorArguments): object {
-+    $className = array_shift($rowAssoc);
-+    return $this->assocToClass($rowAssoc, $className, $constructorArguments);
-+  }
-+
-+  /**
-+   * Fills an object with data from a FETCH_ASSOC row.
-+   *
-+   * @param array $rowAssoc
-+   *   A row of data in FETCH_ASSOC format.
-+   * @param object $object
-+   *   The object receiving the data.
-+   *
-+   * @return object
-+   *   The object receiving the data.
-+   */
-+  protected function assocIntoObject(array $rowAssoc, object $object): object {
-+    foreach ($rowAssoc as $column => $value) {
-+        $object->$column = $value;
-+    }
-+    return $object;
-+  }
-+
-+  /**
-+   * Converts a row of data in FETCH_ASSOC format to FETCH_COLUMN.
-+   *
-+   * @param array $rowAssoc
-+   *   A row of data in FETCH_ASSOC format.
-+   * @param string[] $columnNames
-+   *   The list of the row columns.
-+   * @param int $columnIndex
-+   *   The index of the column to fetch the value of.
-+   *
-+   * @return string|false
-+   *   The value of the column, or FALSE if the column is not defined.
-+   */
-+  protected function assocToColumn(array $rowAssoc, array $columnNames, int $columnIndex): mixed {
-+    return $rowAssoc[$columnNames[$columnIndex]] ?? FALSE;
-+  }
-+
-+}
 diff --git a/core/lib/Drupal/Core/Database/StatementInterface.php b/core/lib/Drupal/Core/Database/StatementInterface.php
 index 09a6b94f50..b4adf3742d 100644
 --- a/core/lib/Drupal/Core/Database/StatementInterface.php
@@ -324,10 +195,10 @@ index 7edbf7b26b..fba5429680 100644
  
 diff --git a/core/lib/Drupal/Core/Database/StatementPrefetchIterator.php b/core/lib/Drupal/Core/Database/StatementPrefetchIterator.php
 new file mode 100644
-index 0000000000..e7d97d487b
+index 0000000000..7954cbdf46
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/StatementPrefetchIterator.php
-@@ -0,0 +1,346 @@
+@@ -0,0 +1,396 @@
 +<?php
 +
 +namespace Drupal\Core\Database;
@@ -345,7 +216,6 @@ index 0000000000..e7d97d487b
 +class StatementPrefetchIterator implements \Iterator, StatementInterface {
 +
 +  use StatementIteratorTrait;
-+  use FetchModeTrait;
 +
 +  /**
 +   * Main data store.
@@ -554,19 +424,70 @@ index 0000000000..e7d97d487b
 +    // Now, format the next prefetched record according to the required fetch
 +    // style.
 +    $rowAssoc = $this->data[$currentKey];
-+    $row = match($fetch_style ?? $this->defaultFetchStyle) {
-+      \PDO::FETCH_ASSOC => $rowAssoc,
-+      \PDO::FETCH_BOTH => $this->assocToBoth($rowAssoc),
-+      \PDO::FETCH_NUM => $this->assocToNum($rowAssoc),
-+      \PDO::FETCH_LAZY, \PDO::FETCH_OBJ => $this->assocToObj($rowAssoc),
-+      \PDO::FETCH_CLASS | \PDO::FETCH_CLASSTYPE => $this->assocToClassType($rowAssoc, $this->fetchOptions['constructor_args']),
-+      \PDO::FETCH_CLASS => $this->assocToClass($rowAssoc, $this->fetchOptions['class'], $this->fetchOptions['constructor_args']),
-+      \PDO::FETCH_INTO => $this->assocIntoObj($rowAssoc, $this->fetchOptions['object']),
-+      \PDO::FETCH_COLUMN => $this->assocToColumn($rowAssoc, $this->columnNames, $this->fetchOptions['column']),
-+      // @todo in Drupal 11, throw an exception if $row is undefined at this
-+      //   point.
-+      default => FALSE,
-+    };
++    switch ($fetch_style ?? $this->defaultFetchStyle) {
++      case \PDO::FETCH_ASSOC:
++        $row = $rowAssoc;
++        break;
++
++      case \PDO::FETCH_BOTH:
++        // \PDO::FETCH_BOTH returns an array indexed by both the column name
++        // and the column number.
++        $row = $rowAssoc + array_values($rowAssoc);
++        break;
++
++      case \PDO::FETCH_NUM:
++        $row = array_values($rowAssoc);
++        break;
++
++      case \PDO::FETCH_LAZY:
++        // We do not do lazy as everything is fetched already. Fallback to
++        // \PDO::FETCH_OBJ.
++      case \PDO::FETCH_OBJ:
++        $row = (object) $rowAssoc;
++        break;
++
++      case \PDO::FETCH_CLASS | \PDO::FETCH_CLASSTYPE:
++        $class_name = array_shift($rowAssoc);
++        // Deliberate no break.
++      case \PDO::FETCH_CLASS:
++        if (!isset($class_name)) {
++          $class_name = $this->fetchOptions['class'];
++        }
++        if (count($this->fetchOptions['constructor_args'])) {
++          $reflector = new \ReflectionClass($class_name);
++          $result = $reflector->newInstanceArgs($this->fetchOptions['constructor_args']);
++        }
++        else {
++          $result = new $class_name();
++        }
++        foreach ($rowAssoc as $k => $v) {
++          $result->$k = $v;
++        }
++        $row = $result;
++        break;
++
++      case \PDO::FETCH_INTO:
++        foreach ($rowAssoc as $k => $v) {
++          $this->fetchOptions['object']->$k = $v;
++        }
++        $row = $this->fetchOptions['object'];
++        break;
++
++      case \PDO::FETCH_COLUMN:
++        if (isset($this->columnNames[$this->fetchOptions['column']])) {
++          $row = $rowAssoc[$this->columnNames[$this->fetchOptions['column']]];
++        }
++        else {
++          return FALSE;
++        }
++        break;
++
++    }
++    // @todo in Drupal 11, throw an exception if $row is undefined at this
++    //   point.
++    if (!isset($row)) {
++      return FALSE;
++    }
 +    $this->setResultsetCurrentRow($row);
 +    return $row;
 +  }
@@ -696,10 +617,10 @@ index 4381fd1af6..f85b347423 100644
  
 diff --git a/core/lib/Drupal/Core/Database/StatementWrapperIterator.php b/core/lib/Drupal/Core/Database/StatementWrapperIterator.php
 new file mode 100644
-index 0000000000..1fd68bcaff
+index 0000000000..1e92c3edeb
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/StatementWrapperIterator.php
-@@ -0,0 +1,279 @@
+@@ -0,0 +1,276 @@
 +<?php
 +
 +namespace Drupal\Core\Database;
@@ -851,14 +772,14 @@ index 0000000000..1fd68bcaff
 +  /**
 +   * {@inheritdoc}
 +   */
-+  public function fetchAllKeyed($keyIndex = 0, $valueIndex = 1) {
++  public function fetchAllKeyed($key_index = 0, $value_index = 1) {
 +    $return = [];
 +    $this->setFetchMode(\PDO::FETCH_NUM);
 +
 +    // Once the foreach loop is completed, the resultset is marked so not to
 +    // allow more fetching.
 +    foreach ($this as $record) {
-+      $return[$record[$keyIndex]] = $record[$valueIndex];
++      $return[$record[$key_index]] = $record[$value_index];
 +    }
 +    return $return;
 +  }
@@ -889,9 +810,9 @@ index 0000000000..1fd68bcaff
 +  /**
 +   * {@inheritdoc}
 +   */
-+  public function fetchObject(string $className = NULL, array $constructorArguments = NULL) {
-+    if ($className) {
-+      $row = $this->clientStatement->fetchObject($className, $constructorArguments);
++  public function fetchObject(string $class_name = NULL, array $constructor_arguments = NULL) {
++    if ($class_name) {
++      $row = $this->clientStatement->fetchObject($class_name, $constructor_arguments);
 +    }
 +    else {
 +      $row = $this->clientStatement->fetchObject();
@@ -926,27 +847,25 @@ index 0000000000..1fd68bcaff
 +    // Call \PDOStatement::setFetchMode to set fetch mode.
 +    // \PDOStatement is picky about the number of arguments in some cases so we
 +    // need to be pass the exact number of arguments we where given.
-+    $numArgs = func_num_args();
-+    return match($numArgs) {
++    return match(func_num_args()) {
 +      1 => $this->clientStatement->setFetchMode($mode),
 +      2 => $this->clientStatement->setFetchMode($mode, $a1),
-+      $numArgs >= 3 => $this->clientStatement->setFetchMode($mode, $a1, $a2),
++      default => $this->clientStatement->setFetchMode($mode, $a1, $a2),
 +    };
 +  }
 +
 +  /**
 +   * {@inheritdoc}
 +   */
-+  public function fetch($mode = NULL, $cursorOrientation = NULL, $cursorOffset = NULL) {
++  public function fetch($mode = NULL, $cursor_orientation = NULL, $cursor_offset = NULL) {
 +    // Call \PDOStatement::fetchAll to fetch all rows.
 +    // \PDOStatement is picky about the number of arguments in some cases so we
 +    // need to pass the exact number of arguments we were given.
-+    $numArgs = func_num_args();
-+    $row = match($numArgs) {
++    $row = match(func_num_args()) {
 +      0 => $this->clientStatement->fetch(),
 +      1 => $this->clientStatement->fetch($mode),
-+      2 => $this->clientStatement->fetch($mode, $cursorOrientation),
-+      $numArgs >= 3 => $this->clientStatement->fetch($mode, $cursorOrientation, $cursorOffset),
++      2 => $this->clientStatement->fetch($mode, $cursor_orientation),
++      default => $this->clientStatement->fetch($mode, $cursor_orientation, $cursor_offset),
 +    };
 +
 +    if ($row === FALSE) {
@@ -961,16 +880,15 @@ index 0000000000..1fd68bcaff
 +  /**
 +   * {@inheritdoc}
 +   */
-+  public function fetchAll($mode = NULL, $columnIndex = NULL, $constructorArguments = NULL) {
++  public function fetchAll($mode = NULL, $column_index = NULL, $constructor_arguments = NULL) {
 +    // Call \PDOStatement::fetchAll to fetch all rows.
 +    // \PDOStatement is picky about the number of arguments in some cases so we
 +    // need to be pass the exact number of arguments we where given.
-+    $numArgs = func_num_args();
-+    $return  = match($numArgs) {
++    $return = match(func_num_args()) {
 +      0 => $this->clientStatement->fetchAll(),
 +      1 => $this->clientStatement->fetchAll($mode),
-+      2 => $this->clientStatement->fetchAll($mode, $columnIndex),
-+      $numArgs >= 3 => $this->clientStatement->fetchAll($mode, $columnIndex, $constructorArguments),
++      2 => $this->clientStatement->fetchAll($mode, $column_index),
++      default => $this->clientStatement->fetchAll($mode, $column_index, $constructor_arguments),
 +    };
 +
 +    $this->markResultsetFetchingComplete();
@@ -1145,13 +1063,34 @@ index 9368954cd2..8704425e2a 100644
     * Tests that rowCount() throws exception on SELECT query.
     */
 diff --git a/core/tests/Drupal/KernelTests/Core/Database/StatementTest.php b/core/tests/Drupal/KernelTests/Core/Database/StatementTest.php
-index eeb2304663..42f308e6f3 100644
+index eeb2304663..7d03ca6640 100644
 --- a/core/tests/Drupal/KernelTests/Core/Database/StatementTest.php
 +++ b/core/tests/Drupal/KernelTests/Core/Database/StatementTest.php
-@@ -43,4 +43,96 @@ public function testRepeatedInsertStatementReuse() {
+@@ -43,4 +43,117 @@ public function testRepeatedInsertStatementReuse() {
      $this->assertSame('31', $this->connection->query('SELECT [age] FROM {test} WHERE [name] = :name', [':name' => 'Curly'])->fetchField());
    }
  
++  /**
++   * Tests statement fetching after a full traversal.
++   */
++  public function testIteratedStatementFetch(): void {
++    $statement = $this->connection->query('SELECT * FROM {test}');
++
++    foreach ($statement as $row) {
++      $this->assertNotNull($row);
++    }
++
++    $this->assertFalse($statement->fetchAll());
++    $this->assertFalse($statement->fetchAllKeyed());
++    $this->assertFalse($statement->fetchAllAssoc());
++    $this->assertFalse($statement->fetchCol());
++
++    $this->assertFalse($statement->fetch());
++    $this->assertFalse($statement->fetchObject());
++    $this->assertFalse($statement->fetchAssoc());
++    $this->assertFalse($statement->fetchField());
++  }
++
 +  /**
 +   * Tests statement rewinding.
 +   */
