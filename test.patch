@@ -56,6 +56,42 @@ index 962f107955..7e3acc4180 100644
  
      $this->renderer->expects($this->never())
        ->method('renderPlain');
+diff --git a/core/modules/migrate/tests/src/Unit/MigrateExecutableMemoryExceededTest.php b/core/modules/migrate/tests/src/Unit/MigrateExecutableMemoryExceededTest.php
+index acf3e64c09..1c1bd3c0c9 100644
+--- a/core/modules/migrate/tests/src/Unit/MigrateExecutableMemoryExceededTest.php
++++ b/core/modules/migrate/tests/src/Unit/MigrateExecutableMemoryExceededTest.php
+@@ -78,20 +78,27 @@ protected function runMemoryExceededTest($message, $memory_exceeded, $memory_usa
+     $this->executable->setMemoryUsage($memory_usage_first ?: $this->memoryLimit, $memory_usage_second ?: $this->memoryLimit);
+     $this->executable->setMemoryThreshold(0.85);
+     if ($message) {
+-      $this->executable->message->expects($this->exactly(2))
+-        ->method('display')
+-        ->withConsecutive(
++      $callSequence = [
++        [
+           [
+             $this->callback(function ($subject) {
+               return mb_stripos((string) $subject, 'reclaiming memory') !== FALSE;
+             }),
+           ],
++        ],
++        [
+           [
+             $this->callback(function ($subject) use ($message) {
+               return mb_stripos((string) $subject, $message) !== FALSE;
+             }),
+           ],
+-        );
++        ],
++      ];
++      $this->executable->message->expects($this->exactly(2))
++        ->method('display')
++        ->willReturnCallback(function (mixed ...$args) use (&$callSequence): void {
++          $this->consecutiveCallsCallback($callSequence, $args);
++        });
+     }
+     else {
+       $this->executable->message->expects($this->never())
 diff --git a/core/modules/migrate/tests/src/Unit/MigrateSqlIdMapEnsureTablesTest.php b/core/modules/migrate/tests/src/Unit/MigrateSqlIdMapEnsureTablesTest.php
 index f4a4dc2596..38b94f9734 100644
 --- a/core/modules/migrate/tests/src/Unit/MigrateSqlIdMapEnsureTablesTest.php
@@ -252,6 +288,184 @@ index 45a017c410..6de2d6b21e 100644
  
      $this->entityNormalizer->setSerializer($serializer);
  
+diff --git a/core/modules/system/tests/src/Kernel/System/CronQueueTest.php b/core/modules/system/tests/src/Kernel/System/CronQueueTest.php
+index 4e2f1e7858..8c66d20e76 100644
+--- a/core/modules/system/tests/src/Kernel/System/CronQueueTest.php
++++ b/core/modules/system/tests/src/Kernel/System/CronQueueTest.php
+@@ -174,23 +174,29 @@ public function testLeaseTime() {
+    * @see \Drupal\cron_queue_test\Plugin\QueueWorker\CronQueueTestException
+    */
+   public function testUncaughtExceptions() {
+-    $this->logger->expects($this->atLeast(2))
+-      ->method('log')
+-      ->withConsecutive(
++    $callSequence = [
++      [
+         [
+-          $this->equalTo(RfcLogLevel::ERROR),
+-          $this->equalTo('%type: @message in %function (line %line of %file).'),
++          RfcLogLevel::ERROR,
++          '%type: @message in %function (line %line of %file).',
+           $this->callback(function ($args) {
+             return $args['@message'] === 'That is not supposed to happen.' &&
+               $args['exception'] instanceof \Exception;
+           }),
+         ],
++      ],
++      [
+         [
+-          $this->equalTo(RfcLogLevel::INFO),
+-          $this->equalTo('Cron run completed.'),
+-          $this->anything(),
++          RfcLogLevel::INFO,
++          'Cron run completed.',
+         ],
+-      );
++      ],
++    ];
++    $this->logger->expects($this->atLeast(2))
++      ->method('log')
++      ->willReturnCallback(function (mixed ...$args) use (&$callSequence): void {
++        $this->consecutiveCallsCallback($callSequence, $args);
++      });
+ 
+     // Get the queue to test the normal Exception.
+     $queue = $this->container->get('queue')->get(CronQueueTestException::PLUGIN_ID);
+@@ -227,22 +233,28 @@ public function testUncaughtExceptions() {
+    * @covers \Drupal\Core\Queue\SuspendQueueException
+    */
+   public function testSuspendQueueException(): void {
+-    $this->logger->expects($this->atLeast(2))
+-      ->method('log')
+-      ->withConsecutive(
++    $callSequence = [
++      [
+         [
+-          $this->equalTo(RfcLogLevel::DEBUG),
+-          $this->equalTo('A worker for @queue queue suspended further processing of the queue.'),
++          RfcLogLevel::DEBUG,
++          'A worker for @queue queue suspended further processing of the queue.',
+           $this->callback(function ($args) {
+             return $args['@queue'] === CronQueueTestSuspendQueue::PLUGIN_ID;
+           }),
+         ],
++      ],
++      [
+         [
+-          $this->equalTo(RfcLogLevel::INFO),
+-          $this->equalTo('Cron run completed.'),
+-          $this->anything(),
++          RfcLogLevel::INFO,
++          'Cron run completed.',
+         ],
+-      );
++      ],
++    ];
++    $this->logger->expects($this->atLeast(2))
++      ->method('log')
++      ->willReturnCallback(function (mixed ...$args) use (&$callSequence): void {
++        $this->consecutiveCallsCallback($callSequence, $args);
++      });
+ 
+     // Get the queue to test the specific SuspendQueueException.
+     $queue = \Drupal::queue(CronQueueTestSuspendQueue::PLUGIN_ID);
+diff --git a/core/tests/Drupal/KernelTests/KernelTestBase.php b/core/tests/Drupal/KernelTests/KernelTestBase.php
+index 32b40913f4..eae11531fd 100644
+--- a/core/tests/Drupal/KernelTests/KernelTestBase.php
++++ b/core/tests/Drupal/KernelTests/KernelTestBase.php
+@@ -24,6 +24,7 @@
+ use Drupal\TestTools\Comparator\MarkupInterfaceComparator;
+ use Drupal\TestTools\Extension\SchemaInspector;
+ use Drupal\TestTools\TestVarDumper;
++use Drupal\TestTools\Trait\MockTrait;
+ use PHPUnit\Framework\Exception;
+ use PHPUnit\Framework\TestCase;
+ use Prophecy\PhpUnit\ProphecyTrait;
+@@ -87,6 +88,7 @@ abstract class KernelTestBase extends TestCase implements ServiceProviderInterfa
+   use RandomGeneratorTrait;
+   use ConfigTestTrait;
+   use ExtensionListTestTrait;
++  use MockTrait;
+   use TestRequirementsTrait;
+   use PhpUnitWarnings;
+   use PhpUnitCompatibilityTrait;
+diff --git a/core/tests/Drupal/TestTools/Trait/MockTrait.php b/core/tests/Drupal/TestTools/Trait/MockTrait.php
+new file mode 100644
+index 0000000000..def9fdf852
+--- /dev/null
++++ b/core/tests/Drupal/TestTools/Trait/MockTrait.php
+@@ -0,0 +1,71 @@
++<?php
++
++namespace Drupal\TestTools\Trait;
++
++use PHPUnit\Framework\AssertionFailedError;
++use PHPUnit\Framework\Constraint\Constraint;
++
++/**
++ * A trait providing helper methods for mocking.
++ */
++trait MockTrait {
++
++  /**
++   * Callback for consecutive calls to mocked objects.
++   *
++   * Since the removal of InvocationMocker::withConsecutive() from PHPUnit, we
++   * can use InvocationMocker::willReturnCallback() instead, passing a stack of
++   * expected calls to mocked methods. This method provides a generic callback
++   * for the purpose, checking actual arguments against expected ones and
++   * returning a value if needed.
++   *
++   * @param array $expectedConsecutiveCalls
++   *   An array of expected arguments and return values for a stack of calls to
++   *   the method. The first element of the array contains the expected call
++   *   arguments, either concrete values or Constraint objects (could be a
++   *   partial list, in which case the actual arguments in excess of the
++   *   expected ones are ignored). The second element, if specified, is
++   *   returned by the callback when the arguments match.
++   * @param array $actualArgs
++   *   The array of arguments actually passed to the mocked object.
++   *
++   * @return mixed
++   *   The value specified by the second array item of
++   *   $expectedConsecutiveCalls. NULL if not specified.
++   */
++  protected function consecutiveCallsCallback(array &$expectedConsecutiveCalls, array $actualArgs): mixed {
++    // Return early if there are no expected calls.
++    if ($expectedConsecutiveCalls === []) {
++      return NULL;
++    }
++
++    // Get the next expected call from the stack.
++    $key = key($expectedConsecutiveCalls);
++    $call = reset($expectedConsecutiveCalls);
++    unset($expectedConsecutiveCalls[$key]);
++    $expectedArgs = $call[0];
++
++    // Check the arguments.
++    for ($i = 0; $i < count($expectedArgs); $i++) {
++      if ($expectedArgs[$i] instanceof Constraint) {
++        try {
++          $expectedArgs[$i]->evaluate($actualArgs[$i]);
++        }
++        catch (AssertionFailedError $e) {
++          throw new AssertionFailedError(sprintf('Failed argument match in consecutive call #%d, argument #%d.', $key + 1, $i + 1), $e->getCode(), $e);
++        }
++      }
++      else {
++        $this->assertEquals($expectedArgs[$i], $actualArgs[$i], sprintf('Failed argument match in consecutive call #%d, argument #%d.', $key + 1, $i + 1));
++      }
++    }
++
++    // Returns with the specified value, if defined.
++    if (array_key_exists(1, $call)) {
++      return $call[1];
++    }
++
++    return NULL;
++  }
++
++}
 diff --git a/core/tests/Drupal/Tests/Core/Cache/CacheCollectorTest.php b/core/tests/Drupal/Tests/Core/Cache/CacheCollectorTest.php
 index 4debf2836a..88e4f70348 100644
 --- a/core/tests/Drupal/Tests/Core/Cache/CacheCollectorTest.php
@@ -277,6 +491,30 @@ index 4debf2836a..88e4f70348 100644
  
      $this->collector->delete($key);
  
+diff --git a/core/tests/Drupal/Tests/Core/Menu/DefaultMenuLinkTreeManipulatorsTest.php b/core/tests/Drupal/Tests/Core/Menu/DefaultMenuLinkTreeManipulatorsTest.php
+index 05bf621082..91bb8a16d8 100644
+--- a/core/tests/Drupal/Tests/Core/Menu/DefaultMenuLinkTreeManipulatorsTest.php
++++ b/core/tests/Drupal/Tests/Core/Menu/DefaultMenuLinkTreeManipulatorsTest.php
+@@ -323,12 +323,15 @@ public function testCheckNodeAccess() {
+     $query->expects($this->once())
+       ->method('accessCheck')
+       ->with(TRUE);
++    $callSequence = [
++      [['nid', [1, 2, 3, 4]]],
++      [['status', NodeInterface::PUBLISHED]],
++    ];
+     $query->expects($this->exactly(2))
+       ->method('condition')
+-      ->withConsecutive(
+-        ['nid', [1, 2, 3, 4]],
+-        ['status', NodeInterface::PUBLISHED],
+-      );
++      ->willReturnCallback(function (mixed ...$args) use (&$callSequence): void {
++        $this->consecutiveCallsCallback($callSequence, $args);
++      });
+     $query->expects($this->once())
+       ->method('execute')
+       ->willReturn([1, 2, 4]);
 diff --git a/core/tests/Drupal/Tests/Core/TempStore/PrivateTempStoreTest.php b/core/tests/Drupal/Tests/Core/TempStore/PrivateTempStoreTest.php
 index efc048cf36..3454ecbb36 100644
 --- a/core/tests/Drupal/Tests/Core/TempStore/PrivateTempStoreTest.php
@@ -417,99 +655,69 @@ index 4df06f7a4c..f5a3aa1440 100644
      $this->keyValue->expects($this->once())
        ->method('delete')
        ->with('test_2');
-diff --git a/core/tests/Drupal/Tests/UnitTestCase.php b/core/tests/Drupal/Tests/UnitTestCase.php
-index 44f46e6bb8..e25d629a7b 100644
---- a/core/tests/Drupal/Tests/UnitTestCase.php
-+++ b/core/tests/Drupal/Tests/UnitTestCase.php
-@@ -11,6 +11,8 @@
- use Drupal\Core\StringTranslation\PluralTranslatableMarkup;
- use Drupal\Tests\Traits\PhpUnitWarnings;
- use Drupal\TestTools\TestVarDumper;
-+use PHPUnit\Framework\AssertionFailedError;
-+use PHPUnit\Framework\Constraint\Constraint;
- use PHPUnit\Framework\TestCase;
- use Prophecy\PhpUnit\ProphecyTrait;
- use Symfony\Component\VarDumper\VarDumper;
-@@ -259,4 +261,62 @@ protected function getClassResolverStub() {
-     return $class_resolver;
-   }
+diff --git a/core/tests/Drupal/Tests/Core/UrlTest.php b/core/tests/Drupal/Tests/Core/UrlTest.php
+index aa0c0cf74e..962dd5d626 100644
+--- a/core/tests/Drupal/Tests/Core/UrlTest.php
++++ b/core/tests/Drupal/Tests/Core/UrlTest.php
+@@ -121,23 +121,25 @@ protected function setUp(): void {
+    * Tests creating a URL from a request.
+    */
+   public function testUrlFromRequest() {
+-    $this->router->expects($this->exactly(3))
+-      ->method('matchRequest')
+-      ->withConsecutive(
++    $callSequence = [
++      [
+         [$this->getRequestConstraint('/node')],
++        [RouteObjectInterface::ROUTE_NAME => 'view.frontpage.page_1', '_raw_variables' => new InputBag()],
++      ],
++      [
+         [$this->getRequestConstraint('/node/1')],
++        [RouteObjectInterface::ROUTE_NAME => 'node_view', '_raw_variables' => new InputBag(['node' => '1'])],
++      ],
++      [
+         [$this->getRequestConstraint('/node/2/edit')],
+-      )
+-      ->willReturnOnConsecutiveCalls([
+-        RouteObjectInterface::ROUTE_NAME => 'view.frontpage.page_1',
+-        '_raw_variables' => new InputBag(),
+-      ], [
+-        RouteObjectInterface::ROUTE_NAME => 'node_view',
+-        '_raw_variables' => new InputBag(['node' => '1']),
+-      ], [
+-        RouteObjectInterface::ROUTE_NAME => 'node_edit',
+-        '_raw_variables' => new InputBag(['node' => '2']),
+-      ]);
++        [RouteObjectInterface::ROUTE_NAME => 'node_edit', '_raw_variables' => new InputBag(['node' => '2'])],
++      ],
++    ];
++    $this->router->expects($this->exactly(3))
++      ->method('matchRequest')
++      ->willReturnCallback(function (mixed ...$args) use (&$callSequence): array {
++        return $this->consecutiveCallsCallback($callSequence, $args);
++      });
  
-+  /**
-+   * Callback for consecutive calls to mocked objects.
-+   *
-+   * Since the removal of InvocationMocker::withConsecutive() from PHPUnit, we
-+   * can use InvocationMocker::willReturnCallback() instead, passing a stack of
-+   * expected calls to mocked methods. This method provides a generic callback
-+   * for the purpose, checking actual arguments against expected ones and
-+   * returning a value if needed.
-+   *
-+   * @param array $expectedConsecutiveCalls
-+   *   An array of expected arguments and return values for a stack of calls to
-+   *   the method. The first element of the array contains the expected call
-+   *   arguments, either concrete values or Constraint objects (could be a
-+   *   partial list, in which case the actual arguments in excess of the
-+   *   expected ones are ignored). The second element, if specified, is
-+   *   returned by the callback when the arguments match.
-+   * @param array $actualArgs
-+   *   The array of arguments actually passed to the mocked object.
-+   *
-+   * @return mixed
-+   *   The value specified by the second array item of
-+   *   $expectedConsecutiveCalls. NULL if not specified.
-+   */
-+  protected function consecutiveCallsCallback(array &$expectedConsecutiveCalls, array $actualArgs): mixed {
-+    // Return early if there are no expected calls.
-+    if ($expectedConsecutiveCalls === []) {
-+      return NULL;
-+    }
+     $urls = [];
+     foreach ($this->map as $index => $values) {
+diff --git a/core/tests/Drupal/Tests/MockTraitTest.php b/core/tests/Drupal/Tests/MockTraitTest.php
+new file mode 100644
+index 0000000000..31ee947187
+--- /dev/null
++++ b/core/tests/Drupal/Tests/MockTraitTest.php
+@@ -0,0 +1,89 @@
++<?php
 +
-+    // Get the next expected call from the stack.
-+    $key = key($expectedConsecutiveCalls);
-+    $call = reset($expectedConsecutiveCalls);
-+    unset($expectedConsecutiveCalls[$key]);
-+    $expectedArgs = $call[0];
++namespace Drupal\Tests;
 +
-+    // Check the arguments.
-+    for ($i = 0; $i < count($expectedArgs); $i++) {
-+      if ($expectedArgs[$i] instanceof Constraint) {
-+        try {
-+          $expectedArgs[$i]->evaluate($actualArgs[$i]);
-+        }
-+        catch (AssertionFailedError $e) {
-+          throw new AssertionFailedError(sprintf('Failed argument match in consecutive call #%d, argument #%d.', $key + 1, $i + 1), $e->getCode(), $e);
-+        }
-+      }
-+      else {
-+        $this->assertEquals($expectedArgs[$i], $actualArgs[$i], sprintf('Failed argument match in consecutive call #%d, argument #%d.', $key + 1, $i + 1));
-+      }
-+    }
-+
-+    // Returns with the specified value, if defined.
-+    if (array_key_exists(1, $call)) {
-+      return $call[1];
-+    }
-+
-+    return NULL;
-+  }
-+
- }
-diff --git a/core/tests/Drupal/Tests/UnitTestCaseTest.php b/core/tests/Drupal/Tests/UnitTestCaseTest.php
-index b5fd12cde8..ca804ad673 100644
---- a/core/tests/Drupal/Tests/UnitTestCaseTest.php
-+++ b/core/tests/Drupal/Tests/UnitTestCaseTest.php
-@@ -2,6 +2,8 @@
- 
- namespace Drupal\Tests;
- 
 +use PHPUnit\Framework\AssertionFailedError;
 +
- /**
-  * Tests for the UnitTestCase class.
-  *
-@@ -53,4 +55,79 @@ public function testVarDumpSeparateProcess() {
-     $this->assertStringContainsString('banana', StreamCapturer::$cache);
-   }
- 
++/**
++ * Tests for the MockTrait trait.
++ *
++ * @group Tests
++ */
++class MockTraitTest extends UnitTestCase {
++
 +  /**
 +   * Tests a successful ::consecutiveCallsCallback loop.
 +   */
@@ -585,4 +793,24 @@ index b5fd12cde8..ca804ad673 100644
 +    $this->assertNull($this->consecutiveCallsCallback($callSequence, ['1:test_2']));
 +  }
 +
- }
++}
+diff --git a/core/tests/Drupal/Tests/UnitTestCase.php b/core/tests/Drupal/Tests/UnitTestCase.php
+index 44f46e6bb8..de304e210c 100644
+--- a/core/tests/Drupal/Tests/UnitTestCase.php
++++ b/core/tests/Drupal/Tests/UnitTestCase.php
+@@ -11,6 +11,7 @@
+ use Drupal\Core\StringTranslation\PluralTranslatableMarkup;
+ use Drupal\Tests\Traits\PhpUnitWarnings;
+ use Drupal\TestTools\TestVarDumper;
++use Drupal\TestTools\Trait\MockTrait;
+ use PHPUnit\Framework\TestCase;
+ use Prophecy\PhpUnit\ProphecyTrait;
+ use Symfony\Component\VarDumper\VarDumper;
+@@ -26,6 +27,7 @@
+  */
+ abstract class UnitTestCase extends TestCase {
+ 
++  use MockTrait;
+   use PhpUnitWarnings;
+   use PhpUnitCompatibilityTrait;
+   use ProphecyTrait;
