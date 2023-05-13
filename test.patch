@@ -1,5 +1,5 @@
 diff --git a/composer.json b/composer.json
-index 204d2aba0d..053dfaad92 100644
+index c00a3ef8b4..542b2dd679 100644
 --- a/composer.json
 +++ b/composer.json
 @@ -29,7 +29,7 @@
@@ -23,7 +23,7 @@ index 204d2aba0d..053dfaad92 100644
          "post-update-cmd": [
              "Drupal\\Composer\\Composer::generateMetapackages",
 diff --git a/core/composer.json b/core/composer.json
-index 316d91db59..577a755d45 100644
+index 8c59f1495a..51df8a14f1 100644
 --- a/core/composer.json
 +++ b/core/composer.json
 @@ -43,7 +43,7 @@
@@ -36,18 +36,10 @@ index 316d91db59..577a755d45 100644
      "conflict": {
          "drush/drush": "<8.1.10"
 diff --git a/core/drupalci.yml b/core/drupalci.yml
-index cd92d8102d..831f23a79e 100644
+index cd92d8102d..0aa42d3a80 100644
 --- a/core/drupalci.yml
 +++ b/core/drupalci.yml
-@@ -3,17 +3,17 @@
- # https://www.drupal.org/drupalorg/docs/drupal-ci/customizing-drupalci-testing
- _phpunit_testgroups_to_execute: &testgroups
-   # Default: all of Drupal core's test suite runs.
--  testgroups: '--all'
-+  testgroups: 'Entity,image,Image,Database,migrate,Build'
-   # Alternative: run only the tests for one particular module.
-   # testgroups: '--module ckeditor5'
- build:
+@@ -10,10 +10,10 @@ build:
    assessment:
      testing:
        # Run code quality checks.
@@ -62,12 +54,6 @@ index cd92d8102d..831f23a79e 100644
        # run_tests task is executed several times in order of performance speeds.
        # halt-on-fail can be set on the run_tests tasks in order to fail fast.
        # suppress-deprecations is false in order to be alerted to usages of
-@@ -48,4 +48,4 @@ build:
-         <<: *testgroups
-       # Run nightwatch testing.
-       # @see https://www.drupal.org/project/drupal/issues/2869825
--      nightwatchjs: {}
-+#      nightwatchjs: {}
 diff --git a/core/lib/Drupal/Core/Composer/Composer.php b/core/lib/Drupal/Core/Composer/Composer.php
 index 87c0d5f81b..6f0cd4eae0 100644
 --- a/core/lib/Drupal/Core/Composer/Composer.php
@@ -111,6 +97,100 @@ index 8847857fb5..019c33b498 100644
      $parameters = [
        'interactive' => FALSE,
        'parameters' => [
+diff --git a/core/lib/Drupal/Core/Test/PhpUnitTestRunner.php b/core/lib/Drupal/Core/Test/PhpUnitTestRunner.php
+index 35d28ccf5d..572803db60 100644
+--- a/core/lib/Drupal/Core/Test/PhpUnitTestRunner.php
++++ b/core/lib/Drupal/Core/Test/PhpUnitTestRunner.php
+@@ -6,6 +6,7 @@
+ use Drupal\Core\DependencyInjection\ContainerInjectionInterface;
+ use Symfony\Component\DependencyInjection\ContainerInterface;
+ use Symfony\Component\Process\PhpExecutableFinder;
++use Symfony\Component\Process\Process;
+ 
+ /**
+  * Run PHPUnit-based tests.
+@@ -105,38 +106,42 @@ public function phpUnitCommand(): string {
+    * @param string[] $output
+    *   (optional) The output by running the phpunit command. If provided, this
+    *   array will contain the lines output by the command.
++   * @param array $environment_variables
++   *   (optional) The environment variables to add to the process run.
+    *
+    * @return string
+    *   The results as returned by exec().
+    *
+    * @internal
+    */
+-  public function runCommand(array $unescaped_test_classnames, string $phpunit_file, int &$status = NULL, array &$output = NULL): string {
++  public function runCommand(array $unescaped_test_classnames, string $phpunit_file, int &$status = NULL, array &$output = NULL, array $environment_variables = []): string {
+     global $base_url;
+     // Setup an environment variable containing the database connection so that
+     // functional tests can connect to the database.
+-    putenv('SIMPLETEST_DB=' . Database::getConnectionInfoAsUrl());
++    $process_environment_variables = array_merge($environment_variables, [
++      'SIMPLETEST_DB' => Database::getConnectionInfoAsUrl(),
++    ]);
+ 
+     // Setup an environment variable containing the base URL, if it is available.
+     // This allows functional tests to browse the site under test. When running
+     // tests via CLI, core/phpunit.xml.dist or core/scripts/run-tests.sh can set
+     // this variable.
+     if ($base_url) {
+-      putenv('SIMPLETEST_BASE_URL=' . $base_url);
+-      putenv('BROWSERTEST_OUTPUT_DIRECTORY=' . $this->workingDirectory);
++      $process_environment_variables['SIMPLETEST_BASE_URL'] = $base_url;
++      $process_environment_variables['BROWSERTEST_OUTPUT_DIRECTORY'] = $this->workingDirectory;
+     }
+     $phpunit_bin = $this->phpUnitCommand();
+ 
+     $command = [
+       $phpunit_bin,
+       '--log-junit',
+-      escapeshellarg($phpunit_file),
++      $phpunit_file,
+     ];
+ 
+     // Optimized for running a single test.
+     if (count($unescaped_test_classnames) == 1) {
+       $class = new \ReflectionClass($unescaped_test_classnames[0]);
+-      $command[] = escapeshellarg($class->getFileName());
++      $command[] = $class->getFileName();
+     }
+     else {
+       // Double escape namespaces so they'll work in a regexp.
+@@ -147,25 +152,17 @@ public function runCommand(array $unescaped_test_classnames, string $phpunit_fil
+       $filter_string = implode("|", $escaped_test_classnames);
+       $command = array_merge($command, [
+         '--filter',
+-        escapeshellarg($filter_string),
++        $filter_string,
+       ]);
+     }
+ 
+-    // Need to change directories before running the command so that we can use
+-    // relative paths in the configuration file's exclusions.
+-    $old_cwd = getcwd();
+-    chdir($this->appRoot . "/core");
++    $process = new Process($command, \Drupal::root() . "/core", $process_environment_variables);
++    $process->setTimeout(300);
++    $process->run();
++    $output = explode("\n", $process->getOutput());
++    $status = $process->getExitCode();
+ 
+-    // exec in a subshell so that the environment is isolated.
+-    $ret = exec(implode(" ", $command), $output, $status);
+-
+-    chdir($old_cwd);
+-    putenv('SIMPLETEST_DB=');
+-    if ($base_url) {
+-      putenv('SIMPLETEST_BASE_URL=');
+-      putenv('BROWSERTEST_OUTPUT_DIRECTORY=');
+-    }
+-    return $ret;
++    return '';
+   }
+ 
+   /**
 diff --git a/core/lib/Drupal/Core/Test/TestDiscovery.php b/core/lib/Drupal/Core/Test/TestDiscovery.php
 index 9e394a4342..9c741d60af 100644
 --- a/core/lib/Drupal/Core/Test/TestDiscovery.php
@@ -235,10 +315,10 @@ index e3f011c554..181d966c0d 100644
        // Wait for all requests to finish. It is possible that an AJAX request is
        // still on-going.
 diff --git a/core/tests/Drupal/KernelTests/KernelTestBase.php b/core/tests/Drupal/KernelTests/KernelTestBase.php
-index 32b40913f4..636228c7a3 100644
+index 7f56b8794a..fc12c20ec2 100644
 --- a/core/tests/Drupal/KernelTests/KernelTestBase.php
 +++ b/core/tests/Drupal/KernelTests/KernelTestBase.php
-@@ -88,10 +88,10 @@ abstract class KernelTestBase extends TestCase implements ServiceProviderInterfa
+@@ -90,10 +90,10 @@ abstract class KernelTestBase extends TestCase implements ServiceProviderInterfa
    use ConfigTestTrait;
    use ExtensionListTestTrait;
    use TestRequirementsTrait;
@@ -662,7 +742,7 @@ index 9ef1913ab6..5f88f7a6b7 100644
        $this->htmlOutputDirectory = DRUPAL_ROOT . '/sites/simpletest/browser_output';
        // Do not use the file_system service so this method can be called before
 diff --git a/core/tests/Drupal/Tests/BrowserTestBase.php b/core/tests/Drupal/Tests/BrowserTestBase.php
-index c2846c7042..c3315a69d9 100644
+index afc09febca..d5c759b76d 100644
 --- a/core/tests/Drupal/Tests/BrowserTestBase.php
 +++ b/core/tests/Drupal/Tests/BrowserTestBase.php
 @@ -4,6 +4,7 @@
@@ -673,7 +753,7 @@ index c2846c7042..c3315a69d9 100644
  use Behat\Mink\Mink;
  use Behat\Mink\Selector\SelectorsHandler;
  use Behat\Mink\Session;
-@@ -68,9 +69,9 @@ abstract class BrowserTestBase extends TestCase {
+@@ -69,9 +70,9 @@ abstract class BrowserTestBase extends TestCase {
      createUser as drupalCreateUser;
    }
    use XdebugRequestTrait;
@@ -685,7 +765,7 @@ index c2846c7042..c3315a69d9 100644
    use ExtensionListTestTrait;
  
    /**
-@@ -366,6 +367,7 @@ protected function setUp(): void {
+@@ -367,6 +368,7 @@ protected function setUp(): void {
      $this->installDrupal();
  
      // Setup Mink.
@@ -794,7 +874,7 @@ index 4bdfa54e00..fe62a3e623 100644
  
  /**
 diff --git a/core/tests/Drupal/Tests/Traits/PhpUnitWarnings.php b/core/tests/Drupal/Tests/Traits/PhpUnitWarnings.php
-index cdb3150f2e..89724557f4 100644
+index 9b92762e1b..5786b91c32 100644
 --- a/core/tests/Drupal/Tests/Traits/PhpUnitWarnings.php
 +++ b/core/tests/Drupal/Tests/Traits/PhpUnitWarnings.php
 @@ -8,6 +8,8 @@
@@ -807,10 +887,10 @@ index cdb3150f2e..89724557f4 100644
   */
  trait PhpUnitWarnings {
 diff --git a/core/tests/Drupal/Tests/UnitTestCase.php b/core/tests/Drupal/Tests/UnitTestCase.php
-index 44f46e6bb8..0dc96fe438 100644
+index d47eef9373..f336e43e94 100644
 --- a/core/tests/Drupal/Tests/UnitTestCase.php
 +++ b/core/tests/Drupal/Tests/UnitTestCase.php
-@@ -26,10 +26,10 @@
+@@ -26,7 +26,7 @@
   */
  abstract class UnitTestCase extends TestCase {
  
@@ -818,11 +898,7 @@ index 44f46e6bb8..0dc96fe438 100644
 +//  use PhpUnitWarnings;
    use PhpUnitCompatibilityTrait;
    use ProphecyTrait;
--  use ExpectDeprecationTrait;
-+//  use ExpectDeprecationTrait;
- 
-   /**
-    * The random generator.
+   use ExpectDeprecationTrait;
 diff --git a/core/tests/bootstrap.php b/core/tests/bootstrap.php
 index 34778e39cf..8fcbf4f967 100644
 --- a/core/tests/bootstrap.php
