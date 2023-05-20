@@ -1,5 +1,801 @@
+diff --git a/composer.json b/composer.json
+index 25aa74dfea..dee4faf4fd 100644
+--- a/composer.json
++++ b/composer.json
+@@ -29,7 +29,7 @@
+         "phpstan/extension-installer": "^1.1",
+         "phpstan/phpstan": "^1.10.1",
+         "phpstan/phpstan-phpunit": "^1.3.11",
+-        "phpunit/phpunit": "^9.5",
++        "phpunit/phpunit": "^9.5 || ^10.2",
+         "symfony/browser-kit": "^6.3",
+         "symfony/css-selector": "^6.3",
+         "symfony/dom-crawler": "^6.3",
+@@ -106,7 +106,9 @@
+         "pre-autoload-dump": "Drupal\\Core\\Composer\\Composer::preAutoloadDump",
+         "drupal-phpunit-upgrade-check": "Drupal\\Core\\Composer\\Composer::upgradePHPUnit",
+         "drupal-phpunit-upgrade": [
+-            "@composer update phpunit/phpunit --with-dependencies --no-progress"
++            "@composer remove phpspec/prophecy-phpunit phpspec/prophecy phunit/phpunit --dev",
++            "@composer require -W phpunit/phpunit:^10.2 --no-progress",
++            "@composer require -W phpspec/prophecy-phpunit:dev-master --no-progress"
+         ],
+         "post-update-cmd": [
+             "Drupal\\Composer\\Composer::generateMetapackages",
+diff --git a/core/composer.json b/core/composer.json
+index 47cf2763b3..644d690ee8 100644
+--- a/core/composer.json
++++ b/core/composer.json
+@@ -43,7 +43,7 @@
+         "pear/archive_tar": "^1.4.14",
+         "psr/log": "^3.0",
+         "mck89/peast": "^1.14",
+-        "sebastian/diff": "^4"
++        "sebastian/diff": "^4 || ^5"
+     },
+     "conflict": {
+         "drush/drush": "<8.1.10"
+diff --git a/core/drupalci.yml b/core/drupalci.yml
+index cd92d8102d..b8ea4d8a97 100644
+--- a/core/drupalci.yml
++++ b/core/drupalci.yml
+@@ -9,11 +9,16 @@ _phpunit_testgroups_to_execute: &testgroups
+ build:
+   assessment:
+     testing:
+-      # Run code quality checks.
+-      container_command.commit-checks:
++      # Patching for the phpunit-bridge.
++      container_command.phpunit-bridge:
+         commands:
+-          - "core/scripts/dev/commit-code-check.sh --drupalci"
++          - "curl https://patch-diff.githubusercontent.com/raw/symfony/symfony/pull/50371.patch | patch -d vendor/symfony/phpunit-bridge -p5"
+         halt-on-fail: true
++      # Run code quality checks.
++#      container_command.commit-checks:
++#        commands:
++#          - "core/scripts/dev/commit-code-check.sh --drupalci"
++#        halt-on-fail: true
+       # run_tests task is executed several times in order of performance speeds.
+       # halt-on-fail can be set on the run_tests tasks in order to fail fast.
+       # suppress-deprecations is false in order to be alerted to usages of
+diff --git a/core/lib/Drupal/Core/Composer/Composer.php b/core/lib/Drupal/Core/Composer/Composer.php
+index 87c0d5f81b..6f0cd4eae0 100644
+--- a/core/lib/Drupal/Core/Composer/Composer.php
++++ b/core/lib/Drupal/Core/Composer/Composer.php
+@@ -122,7 +122,7 @@ public static function upgradePHPUnit(Event $event) {
+    * @internal
+    */
+   public static function upgradePHPUnitCheck($phpunit_version) {
+-    return !(version_compare(PHP_MAJOR_VERSION . '.' . PHP_MINOR_VERSION, '7.4') >= 0 && version_compare($phpunit_version, '9.0') < 0);
++    return !(version_compare(PHP_MAJOR_VERSION . '.' . PHP_MINOR_VERSION, '8.1') >= 0 && version_compare($phpunit_version, '10') < 0);
+   }
+ 
+ }
+diff --git a/core/lib/Drupal/Core/Test/FunctionalTestSetupTrait.php b/core/lib/Drupal/Core/Test/FunctionalTestSetupTrait.php
+index 8847857fb5..019c33b498 100644
+--- a/core/lib/Drupal/Core/Test/FunctionalTestSetupTrait.php
++++ b/core/lib/Drupal/Core/Test/FunctionalTestSetupTrait.php
+@@ -503,7 +503,13 @@ protected function rebuildAll() {
+    *   Array of parameters for use in install_drupal().
+    */
+   protected function installParameters() {
++static $cc = 0;
++static $testPrefix = NULL;
++$cc++;
+     $connection_info = Database::getConnectionInfo();
++// @todo highly inconvenient way of preserving the test database prefix
++// across functional test methods - needs a better solution
++if ($cc === 1) $testPrefix = $connection_info['default']['prefix'];
+     $driver = $connection_info['default']['driver'];
+     unset($connection_info['default']['driver']);
+     unset($connection_info['default']['namespace']);
+@@ -518,6 +524,11 @@ protected function installParameters() {
+       unset($connection_info['default']['host']);
+       unset($connection_info['default']['port']);
+     }
++
++//dump(['installParameters pre*' => [$connection_info['default']['prefix'], $this->databasePrefix]]);
++    $connection_info['default']['prefix'] = $testPrefix;
++//dump(['installParameters post' => [$connection_info['default']['prefix'], $this->databasePrefix]]);
++
+     $parameters = [
+       'interactive' => FALSE,
+       'parameters' => [
+diff --git a/core/lib/Drupal/Core/Test/PhpUnitTestRunner.php b/core/lib/Drupal/Core/Test/PhpUnitTestRunner.php
+index 35d28ccf5d..572803db60 100644
+--- a/core/lib/Drupal/Core/Test/PhpUnitTestRunner.php
++++ b/core/lib/Drupal/Core/Test/PhpUnitTestRunner.php
+@@ -6,6 +6,7 @@
+ use Drupal\Core\DependencyInjection\ContainerInjectionInterface;
+ use Symfony\Component\DependencyInjection\ContainerInterface;
+ use Symfony\Component\Process\PhpExecutableFinder;
++use Symfony\Component\Process\Process;
+ 
+ /**
+  * Run PHPUnit-based tests.
+@@ -105,38 +106,42 @@ public function phpUnitCommand(): string {
+    * @param string[] $output
+    *   (optional) The output by running the phpunit command. If provided, this
+    *   array will contain the lines output by the command.
++   * @param array $environment_variables
++   *   (optional) The environment variables to add to the process run.
+    *
+    * @return string
+    *   The results as returned by exec().
+    *
+    * @internal
+    */
+-  public function runCommand(array $unescaped_test_classnames, string $phpunit_file, int &$status = NULL, array &$output = NULL): string {
++  public function runCommand(array $unescaped_test_classnames, string $phpunit_file, int &$status = NULL, array &$output = NULL, array $environment_variables = []): string {
+     global $base_url;
+     // Setup an environment variable containing the database connection so that
+     // functional tests can connect to the database.
+-    putenv('SIMPLETEST_DB=' . Database::getConnectionInfoAsUrl());
++    $process_environment_variables = array_merge($environment_variables, [
++      'SIMPLETEST_DB' => Database::getConnectionInfoAsUrl(),
++    ]);
+ 
+     // Setup an environment variable containing the base URL, if it is available.
+     // This allows functional tests to browse the site under test. When running
+     // tests via CLI, core/phpunit.xml.dist or core/scripts/run-tests.sh can set
+     // this variable.
+     if ($base_url) {
+-      putenv('SIMPLETEST_BASE_URL=' . $base_url);
+-      putenv('BROWSERTEST_OUTPUT_DIRECTORY=' . $this->workingDirectory);
++      $process_environment_variables['SIMPLETEST_BASE_URL'] = $base_url;
++      $process_environment_variables['BROWSERTEST_OUTPUT_DIRECTORY'] = $this->workingDirectory;
+     }
+     $phpunit_bin = $this->phpUnitCommand();
+ 
+     $command = [
+       $phpunit_bin,
+       '--log-junit',
+-      escapeshellarg($phpunit_file),
++      $phpunit_file,
+     ];
+ 
+     // Optimized for running a single test.
+     if (count($unescaped_test_classnames) == 1) {
+       $class = new \ReflectionClass($unescaped_test_classnames[0]);
+-      $command[] = escapeshellarg($class->getFileName());
++      $command[] = $class->getFileName();
+     }
+     else {
+       // Double escape namespaces so they'll work in a regexp.
+@@ -147,25 +152,17 @@ public function runCommand(array $unescaped_test_classnames, string $phpunit_fil
+       $filter_string = implode("|", $escaped_test_classnames);
+       $command = array_merge($command, [
+         '--filter',
+-        escapeshellarg($filter_string),
++        $filter_string,
+       ]);
+     }
+ 
+-    // Need to change directories before running the command so that we can use
+-    // relative paths in the configuration file's exclusions.
+-    $old_cwd = getcwd();
+-    chdir($this->appRoot . "/core");
++    $process = new Process($command, \Drupal::root() . "/core", $process_environment_variables);
++    $process->setTimeout(300);
++    $process->run();
++    $output = explode("\n", $process->getOutput());
++    $status = $process->getExitCode();
+ 
+-    // exec in a subshell so that the environment is isolated.
+-    $ret = exec(implode(" ", $command), $output, $status);
+-
+-    chdir($old_cwd);
+-    putenv('SIMPLETEST_DB=');
+-    if ($base_url) {
+-      putenv('SIMPLETEST_BASE_URL=');
+-      putenv('BROWSERTEST_OUTPUT_DIRECTORY=');
+-    }
+-    return $ret;
++    return '';
+   }
+ 
+   /**
+diff --git a/core/lib/Drupal/Core/Test/TestDiscovery.php b/core/lib/Drupal/Core/Test/TestDiscovery.php
+index 9e394a4342..9c741d60af 100644
+--- a/core/lib/Drupal/Core/Test/TestDiscovery.php
++++ b/core/lib/Drupal/Core/Test/TestDiscovery.php
+@@ -7,7 +7,7 @@
+ use Drupal\Component\Utility\NestedArray;
+ use Drupal\Core\Extension\ExtensionDiscovery;
+ use Drupal\Core\Test\Exception\MissingGroupException;
+-use Drupal\TestTools\PhpUnitCompatibility\ClassWriter;
++//use Drupal\TestTools\PhpUnitCompatibility\ClassWriter;
+ 
+ /**
+  * Discovers available tests.
+@@ -118,7 +118,7 @@ public function registerTestNamespaces() {
+ 
+     $loader = require __DIR__ . '/../../../../../autoload.php';
+     // Ensure we have a valid TestCase class.
+-    ClassWriter::mutateTestBase($loader);
++//    ClassWriter::mutateTestBase($loader);
+ 
+     return $this->testNamespaces;
+   }
+diff --git a/core/modules/migrate/tests/src/Kernel/MigrateSourceTestBase.php b/core/modules/migrate/tests/src/Kernel/MigrateSourceTestBase.php
+index 0c351aac4b..7d9ae42cb1 100644
+--- a/core/modules/migrate/tests/src/Kernel/MigrateSourceTestBase.php
++++ b/core/modules/migrate/tests/src/Kernel/MigrateSourceTestBase.php
+@@ -6,7 +6,8 @@
+ use Drupal\migrate\Plugin\MigrateIdMapInterface;
+ use Drupal\migrate\Plugin\MigrationInterface;
+ use Drupal\migrate\Row;
+-use PHPUnit\Util\Test;
++//use PHPUnit\Util\Test;
++use PHPUnit\Metadata\Parser\Registry;
+ 
+ /**
+  * Base class for tests of Migrate source plugins.
+@@ -78,6 +79,8 @@ protected function setUp(): void {
+    * @return string
+    */
+   protected function getPluginClass() {
++dump($this->valueObjectForEvents()->metadata());
++dump(Registry::parser()->forClass(static::class));
+     $annotations = Test::parseTestMethodAnnotations(
+       static::class,
+       $this->getName()
+diff --git a/core/phpunit.xml.dist b/core/phpunit.xml.dist
+index 6e014f70d4..0969b69397 100644
+--- a/core/phpunit.xml.dist
++++ b/core/phpunit.xml.dist
+@@ -12,9 +12,9 @@
+          beStrictAboutOutputDuringTests="true"
+          beStrictAboutChangesToGlobalState="true"
+          failOnWarning="true"
+-         printerClass="\Drupal\Tests\Listeners\HtmlOutputPrinter"
+          cacheResult="false"
+-         xsi:noNamespaceSchemaLocation="https://schema.phpunit.de/9.3/phpunit.xsd">
++         cacheDirectory=".phpunit.cache"
++         xsi:noNamespaceSchemaLocation="https://schema.phpunit.de/10.0/phpunit.xsd">
+   <php>
+     <!-- Set error reporting to E_ALL. -->
+     <ini name="error_reporting" value="32767"/>
+@@ -77,12 +77,8 @@
+       <file>./tests/TestSuites/BuildTestSuite.php</file>
+     </testsuite>
+   </testsuites>
+-  <listeners>
+-    <listener class="\Drupal\Tests\Listeners\DrupalListener">
+-    </listener>
+-  </listeners>
+   <!-- Settings for coverage reports. -->
+-  <coverage>
++  <source>
+     <include>
+       <directory>./includes</directory>
+       <directory>./lib</directory>
+@@ -101,5 +97,5 @@
+       <directory suffix=".api.php">./modules/**</directory>
+       <directory suffix=".api.php">../modules/**</directory>
+     </exclude>
+-  </coverage>
++  </source>
+ </phpunit>
+diff --git a/core/scripts/run-tests.sh b/core/scripts/run-tests.sh
+index 699fb9dad2..c3a0695cb8 100755
+--- a/core/scripts/run-tests.sh
++++ b/core/scripts/run-tests.sh
+@@ -25,7 +25,7 @@
+ use Drupal\Core\Test\TestRunnerKernel;
+ use Drupal\Core\Test\TestRunResultsStorageInterface;
+ use Drupal\Core\Test\TestDiscovery;
+-use Drupal\TestTools\PhpUnitCompatibility\ClassWriter;
++//use Drupal\TestTools\PhpUnitCompatibility\ClassWriter;
+ use PHPUnit\Framework\TestCase;
+ use PHPUnit\Runner\Version;
+ use Symfony\Component\Console\Output\ConsoleOutput;
+@@ -160,8 +160,9 @@
+   exit(SIMPLETEST_SCRIPT_EXIT_SUCCESS);
+ }
+ 
++simpletest_script_print("PHP version: " . phpversion() . " - PHPUnit version: " . Version::id() . "\n", SIMPLETEST_SCRIPT_COLOR_PASS);
+ if (!Composer::upgradePHPUnitCheck(Version::id())) {
+-  simpletest_script_print_error("PHPUnit testing framework version 9 or greater is required when running on PHP 7.4 or greater. Run the command 'composer run-script drupal-phpunit-upgrade' in order to fix this.");
++  simpletest_script_print_error("PHPUnit testing framework version 10 or greater is required when running on PHP 8.1 or greater. Run the command 'composer run-script drupal-phpunit-upgrade' in order to fix this.");
+   exit(SIMPLETEST_SCRIPT_EXIT_FAILURE);
+ }
+ 
+@@ -501,7 +502,7 @@ function simpletest_script_init() {
+   $autoloader = require_once __DIR__ . '/../../autoload.php';
+   // The PHPUnit compatibility layer needs to be available to autoload tests.
+   $autoloader->add('Drupal\\TestTools', __DIR__ . '/../tests');
+-  ClassWriter::mutateTestBase($autoloader);
++  //ClassWriter::mutateTestBase($autoloader);
+ 
+   // Get URL from arguments.
+   if (!empty($args['url'])) {
+diff --git a/core/tests/Drupal/FunctionalJavascriptTests/WebDriverTestBase.php b/core/tests/Drupal/FunctionalJavascriptTests/WebDriverTestBase.php
+index e3f011c554..181d966c0d 100644
+--- a/core/tests/Drupal/FunctionalJavascriptTests/WebDriverTestBase.php
++++ b/core/tests/Drupal/FunctionalJavascriptTests/WebDriverTestBase.php
+@@ -4,6 +4,7 @@
+ 
+ use Behat\Mink\Exception\DriverException;
+ use Drupal\Tests\BrowserTestBase;
++use Drupal\TestTools\PhpUnitCompatibility\RunnerVersion;
+ use PHPUnit\Runner\BaseTestRunner;
+ use Symfony\Component\DependencyInjection\ContainerInterface;
+ 
+@@ -92,10 +93,14 @@ protected function initFrontPage() {
+    */
+   protected function tearDown(): void {
+     if ($this->mink) {
+-      $status = $this->getStatus();
+-      if ($status === BaseTestRunner::STATUS_ERROR || $status === BaseTestRunner::STATUS_WARNING || $status === BaseTestRunner::STATUS_FAILURE) {
+-        // Ensure we capture the output at point of failure.
+-        @$this->htmlOutput();
++      // @todo ::getStatus was removed from PHPUnit 10, we probably need to
++      // intercept an event instead.
++      if (RunnerVersion::getMajor() < 10) {
++        $status = $this->getStatus();
++        if ($status === BaseTestRunner::STATUS_ERROR || $status === BaseTestRunner::STATUS_WARNING || $status === BaseTestRunner::STATUS_FAILURE) {
++          // Ensure we capture the output at point of failure.
++          @$this->htmlOutput();
++        }
+       }
+       // Wait for all requests to finish. It is possible that an AJAX request is
+       // still on-going.
+diff --git a/core/tests/Drupal/KernelTests/KernelTestBase.php b/core/tests/Drupal/KernelTests/KernelTestBase.php
+index 7f56b8794a..d45c2e0a71 100644
+--- a/core/tests/Drupal/KernelTests/KernelTestBase.php
++++ b/core/tests/Drupal/KernelTests/KernelTestBase.php
+@@ -90,7 +90,7 @@ abstract class KernelTestBase extends TestCase implements ServiceProviderInterfa
+   use ConfigTestTrait;
+   use ExtensionListTestTrait;
+   use TestRequirementsTrait;
+-  use PhpUnitWarnings;
++//  use PhpUnitWarnings;
+   use PhpUnitCompatibilityTrait;
+   use ProphecyTrait;
+   use ExpectDeprecationTrait;
+diff --git a/core/tests/Drupal/TestTools/Comparator/MarkupInterfaceComparator.php b/core/tests/Drupal/TestTools/Comparator/MarkupInterfaceComparator.php
+index d88b8f859b..a23c71bf33 100644
+--- a/core/tests/Drupal/TestTools/Comparator/MarkupInterfaceComparator.php
++++ b/core/tests/Drupal/TestTools/Comparator/MarkupInterfaceComparator.php
+@@ -13,7 +13,7 @@ class MarkupInterfaceComparator extends Comparator {
+   /**
+    * {@inheritdoc}
+    */
+-  public function accepts($expected, $actual) {
++  public function accepts(mixed $expected, mixed $actual): bool {
+     // If at least one argument is a MarkupInterface object, we take over and
+     // convert to strings before comparing.
+     return ($expected instanceof MarkupInterface && $actual instanceof MarkupInterface) ||
+@@ -24,7 +24,7 @@ public function accepts($expected, $actual) {
+   /**
+    * {@inheritdoc}
+    */
+-  public function assertEquals($expected, $actual, $delta = 0.0, $canonicalize = FALSE, $ignoreCase = FALSE) {
++  public function assertEquals(mixed $expected, mixed $actual, float $delta = 0.0, bool $canonicalize = FALSE, bool $ignoreCase = FALSE): void {
+     if (is_scalar($expected) && is_scalar($actual)) {
+       throw new \LogicException(__METHOD__ . '() should not be called directly. Use TestCase::assertEquals() instead');
+     }
+@@ -37,7 +37,7 @@ public function assertEquals($expected, $actual, $delta = 0.0, $canonicalize = F
+         @trigger_error("Using assert[Not]Equals() to compare markup between MarkupInterface objects and plain strings is deprecated in drupal:10.1.0 and will throw an error from drupal:11.0.0. Expected: '{$expected_safe}' - Actual '{$actual_safe}'. Use assert[Not]Same() and cast objects to string instead. See https://www.drupal.org/node/3334057", E_USER_DEPRECATED);
+       }
+     }
+-    $comparator = $this->factory->getComparatorFor($expected_safe_stripped, $actual_safe_stripped);
++    $comparator = $this->factory()->getComparatorFor($expected_safe_stripped, $actual_safe_stripped);
+     $comparator->assertEquals($expected_safe_stripped, $actual_safe_stripped, $delta, $canonicalize, $ignoreCase);
+   }
+ 
+diff --git a/core/tests/Drupal/TestTools/PhpUnitCompatibility/PhpUnit10/DrupalStandards.php b/core/tests/Drupal/TestTools/PhpUnitCompatibility/PhpUnit10/DrupalStandards.php
+new file mode 100644
+index 0000000000..1466dcdcdb
+--- /dev/null
++++ b/core/tests/Drupal/TestTools/PhpUnitCompatibility/PhpUnit10/DrupalStandards.php
+@@ -0,0 +1,75 @@
++<?php declare(strict_types=1);
++
++namespace Drupal\TestTools\PhpUnitCompatibility\PhpUnit10;
++
++use Drupal\KernelTests\KernelTestBase;
++use Drupal\Tests\BrowserTestBase;
++use Drupal\Tests\UnitTestCase;
++use Drupal\TestTools\PhpUnitCompatibility\PhpUnit10\DrupalStandardsSubscriber\BeforeFirstTestMethodCalledSubscriber;
++use PHPUnit\Event\Facade;
++use PHPUnit\Event\Test\BeforeFirstTestMethodCalled;
++
++/**
++ * @internal
++ */
++final class DrupalStandards {
++
++  /**
++   * The singleton instance.
++   */
++  private static ?self $instance = NULL;
++
++  /**
++   * @throws \PHPUnit\Event\EventFacadeIsSealedException
++   * @throws \PHPUnit\Util\Exception
++   * @throws \PHPUnit\Event\UnknownSubscriberTypeException
++   * @throws \RuntimeException
++   */
++  private function __construct(
++    private readonly Facade $facade,
++  ) {
++    $this->facade->registerSubscriber(new BeforeFirstTestMethodCalledSubscriber($this));
++  }
++
++  /**
++   * @todo
++   *
++   * @throws \PHPUnit\Event\EventFacadeIsSealedException
++   * @throws \PHPUnit\Util\Exception
++   * @throws \PHPUnit\Event\UnknownSubscriberTypeException
++   * @throws \RuntimeException
++   */
++  public static function init(): void {
++    if (self::$instance === NULL) {
++      self::$instance = new self(Facade::instance());
++    }
++  }
++
++  /**
++   * @todo
++   */
++  public static function isEnabled(): bool {
++    return self::$instance !== NULL;
++  }
++
++  /**
++   * @todo
++   */
++  public function beforeFirstTestMethodCalledSubscriber(BeforeFirstTestMethodCalled $event): void {
++    // Reflect the test class.
++    $class = new \ReflectionClass($event->testClassName());
++
++    // Check for component tests extending a core test.
++    if (substr($event->testClassName(), 0, 22) == 'Drupal\Tests\Component') {
++      if ($class instanceof BrowserTestBase || $class instanceof KernelTestBase || $class instanceof UnitTestCase) {
++        throw new \LogicException('Component test ' . $event->testClassName() . ' should not extend a core test base class');
++      }
++    }
++
++    // Check for incorrect visibility of the $modules property.
++    if ($class->hasProperty('modules') && !$class->getProperty('modules')->isProtected()) {
++      throw new \LogicException('The ' . $event->testClassName() . '::$modules property must be declared protected');
++    }
++  }
++
++}
+diff --git a/core/tests/Drupal/TestTools/PhpUnitCompatibility/PhpUnit10/DrupalStandardsSubscriber/BeforeFirstTestMethodCalledSubscriber.php b/core/tests/Drupal/TestTools/PhpUnitCompatibility/PhpUnit10/DrupalStandardsSubscriber/BeforeFirstTestMethodCalledSubscriber.php
+new file mode 100644
+index 0000000000..bb055378ed
+--- /dev/null
++++ b/core/tests/Drupal/TestTools/PhpUnitCompatibility/PhpUnit10/DrupalStandardsSubscriber/BeforeFirstTestMethodCalledSubscriber.php
+@@ -0,0 +1,17 @@
++<?php declare(strict_types=1);
++
++namespace Drupal\TestTools\PhpUnitCompatibility\PhpUnit10\DrupalStandardsSubscriber;
++
++use PHPUnit\Event\Test\BeforeFirstTestMethodCalled;
++use PHPUnit\Event\Test\BeforeFirstTestMethodCalledSubscriber as SubscriberInterface;
++
++/**
++ * @internal
++ */
++final class BeforeFirstTestMethodCalledSubscriber extends Subscriber implements SubscriberInterface {
++
++  public function notify(BeforeFirstTestMethodCalled $event): void {
++    $this->standards()->beforeFirstTestMethodCalledSubscriber($event);
++  }
++
++}
+diff --git a/core/tests/Drupal/TestTools/PhpUnitCompatibility/PhpUnit10/DrupalStandardsSubscriber/Subscriber.php b/core/tests/Drupal/TestTools/PhpUnitCompatibility/PhpUnit10/DrupalStandardsSubscriber/Subscriber.php
+new file mode 100644
+index 0000000000..8eef5dfc2e
+--- /dev/null
++++ b/core/tests/Drupal/TestTools/PhpUnitCompatibility/PhpUnit10/DrupalStandardsSubscriber/Subscriber.php
+@@ -0,0 +1,22 @@
++<?php declare(strict_types=1);
++
++namespace Drupal\TestTools\PhpUnitCompatibility\PhpUnit10\DrupalStandardsSubscriber;
++
++use Drupal\TestTools\PhpUnitCompatibility\PhpUnit10\DrupalStandards;
++
++/**
++ * @internal
++ */
++abstract class Subscriber {
++
++  private DrupalStandards $standards;
++
++  public function __construct(DrupalStandards $standards) {
++    $this->standards = $standards;
++  }
++
++  protected function standards(): DrupalStandards {
++    return $this->standards;
++  }
++
++}
+diff --git a/core/tests/Drupal/TestTools/PhpUnitCompatibility/PhpUnit10/Logging/HtmlOutputLogger.php b/core/tests/Drupal/TestTools/PhpUnitCompatibility/PhpUnit10/Logging/HtmlOutputLogger.php
+new file mode 100644
+index 0000000000..e4d1c936ba
+--- /dev/null
++++ b/core/tests/Drupal/TestTools/PhpUnitCompatibility/PhpUnit10/Logging/HtmlOutputLogger.php
+@@ -0,0 +1,94 @@
++<?php declare(strict_types=1);
++
++namespace Drupal\TestTools\PhpUnitCompatibility\PhpUnit10\Logging;
++
++use Drupal\Component\Utility\Html;
++use Drupal\TestTools\PhpUnitCompatibility\PhpUnit10\Logging\Subscriber\TestRunnerFinishedSubscriber;
++use Drupal\TestTools\PhpUnitCompatibility\PhpUnit10\Logging\Subscriber\TestRunnerStartedSubscriber;
++use PHPUnit\Event\Facade;
++use PHPUnit\Event\TestRunner\Finished as TestRunnerFinished;
++use PHPUnit\Event\TestRunner\Started as TestRunnerStarted;
++
++/**
++ * @internal
++ */
++final class HtmlOutputLogger {
++
++  /**
++   * The singleton instance.
++   */
++  private static ?self $instance = NULL;
++
++  /**
++   * @todo
++   */
++  private static array $links = [];
++
++  /**
++   * @throws \PHPUnit\Event\EventFacadeIsSealedException
++   * @throws \PHPUnit\Util\Exception
++   * @throws \PHPUnit\Event\UnknownSubscriberTypeException
++   * @throws \RuntimeException
++   */
++  private function __construct(
++    private readonly Facade $facade,
++  ) {
++    $this->facade->registerSubscriber(new TestRunnerStartedSubscriber($this));
++    $this->facade->registerSubscriber(new TestRunnerFinishedSubscriber($this));
++  }
++
++  /**
++   * @todo
++   *
++   * @throws \PHPUnit\Event\EventFacadeIsSealedException
++   * @throws \PHPUnit\Util\Exception
++   * @throws \PHPUnit\Event\UnknownSubscriberTypeException
++   * @throws \RuntimeException
++   */
++  public static function init(): void {
++    if (self::$instance === NULL) {
++      self::$instance = new self(Facade::instance());
++    }
++  }
++
++  /**
++   * @todo
++   */
++  public static function isEnabled(): bool {
++    return self::$instance !== NULL;
++  }
++
++  /**
++   * @todo
++   *
++   * @throws \RuntimeException
++   */
++  public static function log(string $logEntry): void {
++    if (!self::isEnabled()) {
++      throw new \RuntimeException("HTML output is not enabled");
++    }
++    self::$links[] = $logEntry;
++  }
++
++  /**
++   * Empties the list of the HTML output created during the test run.
++   */
++  public function testRunnerStarted(TestRunnerStarted $event): void {
++    self::$links = [];
++  }
++
++  /**
++   * Prints the list of HTML output generated during the test.
++   */
++  public function testRunnerFinished(TestRunnerFinished $event): void {
++    if (self::$links) {
++      print "\n";
++      print "HTML output was generated\n";
++      print "\n";
++      foreach (self::$links as $link) {
++        print $link;
++      }
++    }
++  }
++
++}
+diff --git a/core/tests/Drupal/TestTools/PhpUnitCompatibility/PhpUnit10/Logging/Subscriber/Subscriber.php b/core/tests/Drupal/TestTools/PhpUnitCompatibility/PhpUnit10/Logging/Subscriber/Subscriber.php
+new file mode 100644
+index 0000000000..d2a29592b3
+--- /dev/null
++++ b/core/tests/Drupal/TestTools/PhpUnitCompatibility/PhpUnit10/Logging/Subscriber/Subscriber.php
+@@ -0,0 +1,22 @@
++<?php declare(strict_types=1);
++
++namespace Drupal\TestTools\PhpUnitCompatibility\PhpUnit10\Logging\Subscriber;
++
++use Drupal\TestTools\PhpUnitCompatibility\PhpUnit10\Logging\HtmlOutputLogger;
++
++/**
++ * @internal
++ */
++abstract class Subscriber
++{
++  private HtmlOutputLogger $logger;
++
++  public function __construct(HtmlOutputLogger $logger) {
++    $this->logger = $logger;
++  }
++
++  protected function logger(): HtmlOutputLogger {
++    return $this->logger;
++  }
++
++}
+diff --git a/core/tests/Drupal/TestTools/PhpUnitCompatibility/PhpUnit10/Logging/Subscriber/TestRunnerFinishedSubscriber.php b/core/tests/Drupal/TestTools/PhpUnitCompatibility/PhpUnit10/Logging/Subscriber/TestRunnerFinishedSubscriber.php
+new file mode 100644
+index 0000000000..2e870f2955
+--- /dev/null
++++ b/core/tests/Drupal/TestTools/PhpUnitCompatibility/PhpUnit10/Logging/Subscriber/TestRunnerFinishedSubscriber.php
+@@ -0,0 +1,16 @@
++<?php declare(strict_types=1);
++
++namespace Drupal\TestTools\PhpUnitCompatibility\PhpUnit10\Logging\Subscriber;
++
++use PHPUnit\Event\TestRunner\Finished;
++use PHPUnit\Event\TestRunner\FinishedSubscriber;
++
++/**
++ * @internal
++ */
++final class TestRunnerFinishedSubscriber extends Subscriber implements FinishedSubscriber
++{
++  public function notify(Finished $event): void {
++    $this->logger()->testRunnerFinished($event);
++  }
++}
+diff --git a/core/tests/Drupal/TestTools/PhpUnitCompatibility/PhpUnit10/Logging/Subscriber/TestRunnerStartedSubscriber.php b/core/tests/Drupal/TestTools/PhpUnitCompatibility/PhpUnit10/Logging/Subscriber/TestRunnerStartedSubscriber.php
+new file mode 100644
+index 0000000000..503473bb63
+--- /dev/null
++++ b/core/tests/Drupal/TestTools/PhpUnitCompatibility/PhpUnit10/Logging/Subscriber/TestRunnerStartedSubscriber.php
+@@ -0,0 +1,16 @@
++<?php declare(strict_types=1);
++
++namespace Drupal\TestTools\PhpUnitCompatibility\PhpUnit10\Logging\Subscriber;
++
++use PHPUnit\Event\TestRunner\Started;
++use PHPUnit\Event\TestRunner\StartedSubscriber;
++
++/**
++ * @internal
++ */
++final class TestRunnerStartedSubscriber extends Subscriber implements StartedSubscriber
++{
++  public function notify(Started $event): void {
++    $this->logger()->testRunnerStarted($event);
++  }
++}
+diff --git a/core/tests/Drupal/TestTools/PhpUnitCompatibility/PhpUnit10/TestCompatibilityTrait.php b/core/tests/Drupal/TestTools/PhpUnitCompatibility/PhpUnit10/TestCompatibilityTrait.php
+new file mode 100644
+index 0000000000..c759cd0045
+--- /dev/null
++++ b/core/tests/Drupal/TestTools/PhpUnitCompatibility/PhpUnit10/TestCompatibilityTrait.php
+@@ -0,0 +1,9 @@
++<?php
++
++namespace Drupal\TestTools\PhpUnitCompatibility\PhpUnit10;
++
++/**
++ * Drupal's forward compatibility layer with multiple versions of PHPUnit.
++ */
++trait TestCompatibilityTrait {
++}
+diff --git a/core/tests/Drupal/Tests/BrowserHtmlDebugTrait.php b/core/tests/Drupal/Tests/BrowserHtmlDebugTrait.php
+index 9ef1913ab6..5f88f7a6b7 100644
+--- a/core/tests/Drupal/Tests/BrowserHtmlDebugTrait.php
++++ b/core/tests/Drupal/Tests/BrowserHtmlDebugTrait.php
+@@ -4,6 +4,8 @@
+ 
+ use Drupal\Component\Utility\Html;
+ use Drupal\Core\Utility\Error;
++use Drupal\TestTools\PhpUnitCompatibility\PhpUnit10\Logging\HtmlOutputLogger;
++use Drupal\TestTools\PhpUnitCompatibility\RunnerVersion;
+ use Psr\Http\Message\RequestInterface;
+ use Psr\Http\Message\ResponseInterface;
+ 
+@@ -55,6 +57,8 @@ trait BrowserHtmlDebugTrait {
+    * @var string
+    *
+    * @see \Drupal\Tests\Listeners\HtmlOutputPrinter
++   *
++   * @todo Remove when PHPUnit 9 is no longer supported.
+    */
+   protected $htmlOutputFile;
+ 
+@@ -126,7 +130,13 @@ protected function htmlOutput($message = NULL) {
+     // Do not use the file_url_generator service as the module_handler service
+     // might not be available.
+     $uri = $this->htmlOutputBaseUrl . '/sites/simpletest/browser_output/' . $html_output_filename;
+-    file_put_contents($this->htmlOutputFile, $uri . "\n", FILE_APPEND);
++    // @todo Cleanup below when PHPUnit 9 is no longer supported.
++    if (RunnerVersion::getMajor() > 9) {
++      HtmlOutputLogger::log($uri . "\n");
++    }
++    else {
++      file_put_contents($this->htmlOutputFile, $uri . "\n", FILE_APPEND);
++    }
+   }
+ 
+   /**
+@@ -136,11 +146,19 @@ protected function htmlOutput($message = NULL) {
+    * URLs to has been created by \Drupal\Tests\Listeners\HtmlOutputPrinter.
+    */
+   protected function initBrowserOutputFile() {
+-    $browser_output_file = getenv('BROWSERTEST_OUTPUT_FILE');
+-    $this->htmlOutputEnabled = is_file($browser_output_file);
++    // @todo Cleanup below when PHPUnit 9 is no longer supported.
++    if (RunnerVersion::getMajor() > 9) {
++      $this->htmlOutputEnabled = HtmlOutputLogger::isEnabled();
++    }
++    else {
++      $browser_output_file = getenv('BROWSERTEST_OUTPUT_FILE');
++      $this->htmlOutputEnabled = is_file($browser_output_file);
++      if ($this->htmlOutputEnabled) {
++        $this->htmlOutputFile = $browser_output_file;
++      }
++    }
+     $this->htmlOutputBaseUrl = getenv('BROWSERTEST_OUTPUT_BASE_URL') ?: $GLOBALS['base_url'];
+     if ($this->htmlOutputEnabled) {
+-      $this->htmlOutputFile = $browser_output_file;
+       $this->htmlOutputClassName = str_replace("\\", "_", static::class);
+       $this->htmlOutputDirectory = DRUPAL_ROOT . '/sites/simpletest/browser_output';
+       // Do not use the file_system service so this method can be called before
+diff --git a/core/tests/Drupal/Tests/BrowserTestBase.php b/core/tests/Drupal/Tests/BrowserTestBase.php
+index afc09febca..d5aa8d7452 100644
+--- a/core/tests/Drupal/Tests/BrowserTestBase.php
++++ b/core/tests/Drupal/Tests/BrowserTestBase.php
+@@ -4,6 +4,7 @@
+ 
+ use Behat\Mink\Driver\BrowserKitDriver;
+ use Behat\Mink\Element\Element;
++use Behat\Mink\Exception\Exception as MinkException;
+ use Behat\Mink\Mink;
+ use Behat\Mink\Selector\SelectorsHandler;
+ use Behat\Mink\Session;
+@@ -69,7 +70,7 @@ abstract class BrowserTestBase extends TestCase {
+     createUser as drupalCreateUser;
+   }
+   use XdebugRequestTrait;
+-  use PhpUnitWarnings;
++//  use PhpUnitWarnings;
+   use PhpUnitCompatibilityTrait;
+   use ExpectDeprecationTrait;
+   use ExtensionListTestTrait;
+@@ -367,6 +368,7 @@ protected function setUp(): void {
+     $this->installDrupal();
+ 
+     // Setup Mink.
++    $this->registerFailureType(MinkException::class);
+     $this->initMink();
+ 
+     // Set up the browser test output file.
 diff --git a/core/tests/Drupal/Tests/Core/Utility/TokenTest.php b/core/tests/Drupal/Tests/Core/Utility/TokenTest.php
-index d9c102f372..5cd8afdced 100644
+index d9c102f372..9b1c348669 100644
 --- a/core/tests/Drupal/Tests/Core/Utility/TokenTest.php
 +++ b/core/tests/Drupal/Tests/Core/Utility/TokenTest.php
 @@ -339,6 +339,32 @@ public function testScanDeprecation() {
@@ -7,7 +803,7 @@ index d9c102f372..5cd8afdced 100644
    }
  
 +  /**
-+   * Tests passing a non-string value to Token::scan().
++   * should fail because no @legacy for expectDeprecation
 +   */
 +  public function testScanDeprecation0() {
 +    $this->expectDeprecation('Calling Drupal\Core\Utility\Token::scan() with a $text parameter of type other than string is deprecated in drupal:10.1.0, a typehint will be added in drupal:11.0.0. See https://www.drupal.org/node/3334317');
@@ -15,14 +811,14 @@ index d9c102f372..5cd8afdced 100644
 +  }
 +
 +  /**
-+   * Tests passing a non-string value to Token::scan().
++   * should fail because no @legacy
 +   */
 +  public function testScanDeprecation1() {
 +    $this->assertSame([], $this->token->scan(NULL));
 +  }
 +
 +  /**
-+   * Tests passing a non-string value to Token::scan().
++   * should fail because no 'bingo-bongo' gathered
 +   *
 +   * @group legacy
 +   */
@@ -35,3 +831,120 @@ index d9c102f372..5cd8afdced 100644
    /**
     * Sets up the token library to return site tokens.
     */
+diff --git a/core/tests/Drupal/Tests/Listeners/DrupalComponentTestListenerTrait.php b/core/tests/Drupal/Tests/Listeners/DrupalComponentTestListenerTrait.php
+index 6428bae39c..ef5e33a37d 100644
+--- a/core/tests/Drupal/Tests/Listeners/DrupalComponentTestListenerTrait.php
++++ b/core/tests/Drupal/Tests/Listeners/DrupalComponentTestListenerTrait.php
+@@ -1,5 +1,7 @@
+ <?php
+ 
++// @todo Remove this file when PHPUnit 9 is no longer supported.
++
+ namespace Drupal\Tests\Listeners;
+ 
+ use Drupal\KernelTests\KernelTestBase;
+diff --git a/core/tests/Drupal/Tests/Listeners/DrupalListener.php b/core/tests/Drupal/Tests/Listeners/DrupalListener.php
+index ec1eb30ec1..c74ecf6282 100644
+--- a/core/tests/Drupal/Tests/Listeners/DrupalListener.php
++++ b/core/tests/Drupal/Tests/Listeners/DrupalListener.php
+@@ -1,5 +1,7 @@
+ <?php
+ 
++// @todo Remove this file when PHPUnit 9 is no longer supported.
++
+ namespace Drupal\Tests\Listeners;
+ 
+ use PHPUnit\Framework\TestListener;
+diff --git a/core/tests/Drupal/Tests/Listeners/HtmlOutputPrinter.php b/core/tests/Drupal/Tests/Listeners/HtmlOutputPrinter.php
+index 69eae01fd1..6723ebcdc0 100644
+--- a/core/tests/Drupal/Tests/Listeners/HtmlOutputPrinter.php
++++ b/core/tests/Drupal/Tests/Listeners/HtmlOutputPrinter.php
+@@ -1,5 +1,7 @@
+ <?php
+ 
++// @todo Remove this file when PHPUnit 9 is no longer supported.
++
+ namespace Drupal\Tests\Listeners;
+ 
+ use PHPUnit\Framework\TestResult;
+diff --git a/core/tests/Drupal/Tests/Listeners/HtmlOutputPrinterTrait.php b/core/tests/Drupal/Tests/Listeners/HtmlOutputPrinterTrait.php
+index 4bdfa54e00..fe62a3e623 100644
+--- a/core/tests/Drupal/Tests/Listeners/HtmlOutputPrinterTrait.php
++++ b/core/tests/Drupal/Tests/Listeners/HtmlOutputPrinterTrait.php
+@@ -1,5 +1,7 @@
+ <?php
+ 
++// @todo Remove this file when PHPUnit 9 is no longer supported.
++
+ namespace Drupal\Tests\Listeners;
+ 
+ /**
+diff --git a/core/tests/Drupal/Tests/Traits/PhpUnitWarnings.php b/core/tests/Drupal/Tests/Traits/PhpUnitWarnings.php
+index 9b92762e1b..5786b91c32 100644
+--- a/core/tests/Drupal/Tests/Traits/PhpUnitWarnings.php
++++ b/core/tests/Drupal/Tests/Traits/PhpUnitWarnings.php
+@@ -8,6 +8,8 @@
+  * This trait exists to allow Drupal to run tests with multiple versions of
+  * PHPUnit without failing due to PHPUnit's deprecation warnings.
+  *
++ * @todo Remove when PHPUnit 9 is no longer supported.
++ *
+  * @internal
+  */
+ trait PhpUnitWarnings {
+diff --git a/core/tests/Drupal/Tests/UnitTestCase.php b/core/tests/Drupal/Tests/UnitTestCase.php
+index d47eef9373..f336e43e94 100644
+--- a/core/tests/Drupal/Tests/UnitTestCase.php
++++ b/core/tests/Drupal/Tests/UnitTestCase.php
+@@ -26,7 +26,7 @@
+  */
+ abstract class UnitTestCase extends TestCase {
+ 
+-  use PhpUnitWarnings;
++//  use PhpUnitWarnings;
+   use PhpUnitCompatibilityTrait;
+   use ProphecyTrait;
+   use ExpectDeprecationTrait;
+diff --git a/core/tests/bootstrap.php b/core/tests/bootstrap.php
+index 34778e39cf..8fcbf4f967 100644
+--- a/core/tests/bootstrap.php
++++ b/core/tests/bootstrap.php
+@@ -7,7 +7,11 @@
+  * @see phpunit.xml.dist
+  */
+ 
+-use Drupal\TestTools\PhpUnitCompatibility\ClassWriter;
++//use Drupal\TestTools\PhpUnitCompatibility\ClassWriter;
++use Drupal\TestTools\PhpUnitCompatibility\PhpUnit10\DrupalStandards;
++use Drupal\TestTools\PhpUnitCompatibility\PhpUnit10\Logging\HtmlOutputLogger;
++use Drupal\TestTools\PhpUnitCompatibility\RunnerVersion;
++use PHPUnit\Util\Filesystem;
+ 
+ /**
+  * Finds all valid extension directories recursively within a given directory.
+@@ -155,7 +159,7 @@ function drupal_phpunit_populate_class_loader() {
+ $loader = drupal_phpunit_populate_class_loader();
+ class_alias('\Drupal\Tests\DocumentElement', '\Behat\Mink\Element\DocumentElement', TRUE);
+ 
+-ClassWriter::mutateTestBase($loader);
++//ClassWriter::mutateTestBase($loader);
+ 
+ // Set sane locale settings, to ensure consistent string, dates, times and
+ // numbers handling.
+@@ -184,3 +188,16 @@ class_alias('\Drupal\Tests\DocumentElement', '\Behat\Mink\Element\DocumentElemen
+   $deprecation_ignore_filename = realpath(__DIR__ . "/../.deprecation-ignore.txt");
+   putenv("SYMFONY_DEPRECATIONS_HELPER=ignoreFile=$deprecation_ignore_filename");
+ }
++
++if (RunnerVersion::getMajor() > 9) {
++  // Process Drupal standards checks on the tests.
++  DrupalStandards::init();
++
++  // Functional tests HTML output logging.
++  $browserTestOutputDirectory = getenv('BROWSERTEST_OUTPUT_DIRECTORY');
++  if ($browserTestOutputDirectory !== FALSE) {
++    if (Filesystem::createDirectory($browserTestOutputDirectory)) {
++      HtmlOutputLogger::init();
++    }
++  }
++}
