@@ -47,6 +47,29 @@ index fd7f2c80b8..d2c335f0df 100644
 +        use ExpectDeprecationTraitBeforeV8_4;
 +    }
  }
+diff --git a/src/Symfony/Bridge/PhpUnit/Legacy/EventSubscribers/ApplicationFinishedSubscriber.php b/src/Symfony/Bridge/PhpUnit/Legacy/EventSubscribers/ApplicationFinishedSubscriber.php
+new file mode 100644
+index 0000000000..70d0eb7bfd
+--- /dev/null
++++ b/src/Symfony/Bridge/PhpUnit/Legacy/EventSubscribers/ApplicationFinishedSubscriber.php
+@@ -0,0 +1,17 @@
++<?php declare(strict_types=1);
++
++namespace Symfony\Bridge\PhpUnit\Legacy\EventSubscribers;
++
++use PHPUnit\Event\Application\Finished;
++use PHPUnit\Event\Application\FinishedSubscriber;
++
++/**
++ * @internal
++ */
++final class ApplicationFinishedSubscriber extends SubscriberBase implements FinishedSubscriber
++{
++    public function notify(Finished $event): void
++    {
++        $this->collector()->onApplicationFinished($event);
++    }
++}
 diff --git a/src/Symfony/Bridge/PhpUnit/Legacy/EventSubscribers/DeprecationTriggeredSubscriber.php b/src/Symfony/Bridge/PhpUnit/Legacy/EventSubscribers/DeprecationTriggeredSubscriber.php
 new file mode 100644
 index 0000000000..f779611a81
@@ -212,10 +235,10 @@ index 0000000000..cce3ca18b7
 +}
 diff --git a/src/Symfony/Bridge/PhpUnit/Legacy/SymfonyTestEventsCollectorForV10_2.php b/src/Symfony/Bridge/PhpUnit/Legacy/SymfonyTestEventsCollectorForV10_2.php
 new file mode 100644
-index 0000000000..30f257495f
+index 0000000000..a602daae58
 --- /dev/null
 +++ b/src/Symfony/Bridge/PhpUnit/Legacy/SymfonyTestEventsCollectorForV10_2.php
-@@ -0,0 +1,535 @@
+@@ -0,0 +1,549 @@
 +<?php
 +
 +/*
@@ -250,6 +273,7 @@ index 0000000000..30f257495f
 +use Symfony\Bridge\PhpUnit\DeprecationErrorHandler\DeprecationGroup;
 +use Symfony\Bridge\PhpUnit\DnsMock;
 +use Symfony\Bridge\PhpUnit\ExpectDeprecationTrait;
++use Symfony\Bridge\PhpUnit\Legacy\EventSubscribers\ApplicationFinishedSubscriber;
 +use Symfony\Bridge\PhpUnit\Legacy\EventSubscribers\DeprecationTriggeredSubscriber;
 +use Symfony\Bridge\PhpUnit\Legacy\EventSubscribers\PhpDeprecationTriggeredSubscriber;
 +use Symfony\Bridge\PhpUnit\Legacy\EventSubscribers\TestFinishedSubscriber;
@@ -284,6 +308,7 @@ index 0000000000..30f257495f
 +    private array $deprecationGroups = [];
 +    private array $errors = [];
 +    private array $failures = [];
++    private int $bridgeExitStatus = 0;
 +
 +    /**
 +     * @param int|string|false $mode The reporting mode, defaults to not allowing any deprecations
@@ -294,6 +319,7 @@ index 0000000000..30f257495f
 +    public function __construct(int|string|false $mode, array $mockedNamespaces)
 +    {
 +        $facade = Facade::instance();
++        $facade->registerSubscriber(new ApplicationFinishedSubscriber($this));
 +        $facade->registerSubscriber(new DeprecationTriggeredSubscriber($this));
 +        $facade->registerSubscriber(new PhpDeprecationTriggeredSubscriber($this));
 +        $facade->registerSubscriber(new TestFinishedSubscriber($this));
@@ -546,8 +572,6 @@ index 0000000000..30f257495f
 +    // REF - DeprecationErrorHandler::shutdown()
 +    public function onTestRunnerFinished(): void
 +    {
-+dump('');
-+dump(["*** SYMFONY EVENT COLLECTOR STATE ***", $this]);
 +        // REF - SymfonyTestsListenerTrait::__destruct()
 +        if (0 < $this->state) {
 +            file_put_contents($this->skippedFile, '<?php return '.var_export($this->isSkipped, true).';');
@@ -570,22 +594,26 @@ index 0000000000..30f257495f
 +//            echo "\n", self::colorize('THE ERROR HANDLER HAS CHANGED!', true), "\n";
 +//        }
 +
++        if ($this->errors) {
++dump('**** PHPUnit-Bridge ERRORS ****', $this->errors);
++            $this->bridgeExitStatus = $this->bridgeExitStatus < 2 ? 2 : $this->bridgeExitStatus;
++        }
++
++        if ($this->failures) {
++dump('**** PHPUnit-Bridge FAILURES ****', $this->failures);
++            $this->bridgeExitStatus = $this->bridgeExitStatus < 1 ? 1 : $this->bridgeExitStatus;
++        }
++
 +        $groups = array_keys($this->deprecationGroups);
 +
 +        // store failing status
 +        $isFailing = !$configuration->tolerates($this->deprecationGroups);
++        $this->bridgeExitStatus = $isFailing ? ($this->bridgeExitStatus < 1 ? 1 : $this->bridgeExitStatus) : $this->bridgeExitStatus;
 +
 +        $this->displayDeprecations($groups, $configuration);
 +
 +        $this->resetDeprecationGroups();
 +
-+        if ($this->errors) {
-+dump('**** PHPUnit-Bridge ERRORS ****', $this->errors);
-+        }
-+
-+        if ($this->failures) {
-+dump('**** PHPUnit-Bridge FAILURES ****', $this->failures);
-+        }
 +//        register_shutdown_function(function () use ($isFailing, $groups, $configuration) {
 +//            foreach ($this->deprecationGroups as $group) {
 +//                if ($group->count() > 0) {
@@ -605,6 +633,15 @@ index 0000000000..30f257495f
 +//                exit(1);
 +//            }
 +//        });
++    }
++
++    public function onApplicationFinished($event): void
++    {
++dump('');
++dump(["*** SYMFONY EVENT COLLECTOR STATE ***", $this]);
++        if ($event->shellExitCode() < $this->bridgeExitStatus) {
++            exit($this->bridgeExitStatus);
++        }
 +    }
 +
 +    // REF - DeprecationErrorHandler::resetDeprecationGroups()
