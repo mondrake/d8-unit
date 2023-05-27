@@ -1,17 +1,26 @@
 diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
-index 7e405e1b1b..85d91fc069 100644
+index 7e405e1b1b..4420302e04 100644
 --- a/core/lib/Drupal/Core/Database/Connection.php
 +++ b/core/lib/Drupal/Core/Database/Connection.php
-@@ -63,7 +63,7 @@ abstract class Connection {
-    *
-    * @var array
+@@ -54,17 +54,6 @@ abstract class Connection {
     */
--  protected $transactionLayers = [];
-+  public $transactionLayers = [];
+   protected $logger = NULL;
  
+-  /**
+-   * Tracks the number of "layers" of transactions currently active.
+-   *
+-   * On many databases transactions cannot nest.  Instead, we track
+-   * nested calls to transactions and collapse them into a single
+-   * transaction.
+-   *
+-   * @var array
+-   */
+-  protected $transactionLayers = [];
+-
    /**
     * Index of what driver-specific class to use for various operations.
-@@ -226,6 +226,11 @@ abstract class Connection {
+    *
+@@ -226,6 +215,11 @@ abstract class Connection {
     */
    private array $enabledEvents = [];
  
@@ -23,7 +32,24 @@ index 7e405e1b1b..85d91fc069 100644
    /**
     * Constructs a Connection object.
     *
-@@ -1301,7 +1306,7 @@ public function escapeLike($string) {
+@@ -255,6 +249,16 @@ public function __construct(object $connection, array $connection_options) {
+     $this->connectionOptions = $connection_options;
+   }
+ 
++  /**
++   * {@inheritdoc}
++   */
++  public function __get(string $name) {
++    if ($name === 'transactionLayers') {
++      @trigger_error('Accessing directly ' . __CLASS__ . '::$' . $name . 'is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Instead, @todo. See https://www.drupal.org/node/5555555', E_USER_DEPRECATED);
++      return $this->transactionManager()->nestingLayers();
++    }
++  }
++
+   /**
+    * Opens a client connection.
+    *
+@@ -1301,7 +1305,7 @@ public function escapeLike($string) {
     *   TRUE if we're currently in a transaction, FALSE otherwise.
     */
    public function inTransaction() {
@@ -32,7 +58,7 @@ index 7e405e1b1b..85d91fc069 100644
    }
  
    /**
-@@ -1311,9 +1316,23 @@ public function inTransaction() {
+@@ -1311,9 +1315,23 @@ public function inTransaction() {
     *   The current transaction depth.
     */
    public function transactionDepth() {
@@ -56,7 +82,7 @@ index 7e405e1b1b..85d91fc069 100644
    /**
     * Returns a new DatabaseTransaction object on this connection.
     *
-@@ -1326,8 +1345,7 @@ public function transactionDepth() {
+@@ -1326,8 +1344,7 @@ public function transactionDepth() {
     * @see \Drupal\Core\Database\Transaction
     */
    public function startTransaction($name = '') {
@@ -66,6 +92,111 @@ index 7e405e1b1b..85d91fc069 100644
    }
  
    /**
+@@ -1350,7 +1367,7 @@ public function rollBack($savepoint_name = 'drupal_transaction') {
+     }
+     // A previous rollback to an earlier savepoint may mean that the savepoint
+     // in question has already been accidentally committed.
+-    if (!isset($this->transactionLayers[$savepoint_name])) {
++    if (!isset($this->transactionManager()->nestingLayers()[$savepoint_name])) {
+       throw new TransactionNoActiveException();
+     }
+ 
+@@ -1358,12 +1375,17 @@ public function rollBack($savepoint_name = 'drupal_transaction') {
+     // before are no longer needed. If we rolled back other active savepoints,
+     // we need to throw an exception.
+     $rolled_back_other_active_savepoints = FALSE;
+-    while ($savepoint = array_pop($this->transactionLayers)) {
++    while ($savepoint = array_pop($this->transactionManager()->nestingLayers())) {
++      //// TEMP
++      $tmp = $this->transactionManager()->nestingLayers();
++      $x = array_pop($tmp);
++      $this->transactionManager()->setNestingLayers($tmp);
++      //// TEMP
+       if ($savepoint == $savepoint_name) {
+         // If it is the last the transaction in the stack, then it is not a
+         // savepoint, it is the transaction itself so we will need to roll back
+         // the transaction rather than a savepoint.
+-        if (empty($this->transactionLayers)) {
++        if ($this->transactionManager()->currentNestingDepth() === 0) {
+           break;
+         }
+         $this->query('ROLLBACK TO SAVEPOINT ' . $savepoint);
+@@ -1404,7 +1426,7 @@ public function rollBack($savepoint_name = 'drupal_transaction') {
+    * @see \Drupal\Core\Database\Transaction
+    */
+   public function pushTransaction($name) {
+-    if (isset($this->transactionLayers[$name])) {
++    if (isset($this->transactionManager()->nestingLayers()[$name])) {
+       throw new TransactionNameNonUniqueException($name . " is already in use.");
+     }
+     // If we're already in a transaction then we want to create a savepoint
+@@ -1415,7 +1437,12 @@ public function pushTransaction($name) {
+     else {
+       $this->connection->beginTransaction();
+     }
+-    $this->transactionLayers[$name] = $name;
++    //// TEMP
++    // $this->nestingLayers[$name] = $name;
++    $tmp = $this->transactionManager()->nestingLayers();
++    $tmp[$name] = $name;
++    $this->transactionManager()->setNestingLayers($tmp);
++    //// TEMP
+   }
+ 
+   /**
+@@ -1438,12 +1465,17 @@ public function popTransaction($name) {
+     // need to do. If this transaction was part of an earlier out-of-order
+     // rollback, an exception would already have been thrown by
+     // Database::rollBack().
+-    if (!isset($this->transactionLayers[$name])) {
++    if (!isset($this->transactionManager()->nestingLayers()[$name])) {
+       return;
+     }
+ 
+     // Mark this layer as committable.
+-    $this->transactionLayers[$name] = FALSE;
++    //// TEMP
++    // $this->nestingLayers[$name] = FALSE;
++    $tmp = $this->transactionManager()->nestingLayers();
++    $tmp[$name] = FALSE;
++    $this->transactionManager()->setNestingLayers($tmp);
++    //// TEMP
+     $this->popCommittableTransactions();
+   }
+ 
+@@ -1469,7 +1501,7 @@ public function popTransaction($name) {
+    * @see \Drupal\Core\Database\Connection::doCommit()
+    */
+   public function addRootTransactionEndCallback(callable $callback) {
+-    if (!$this->transactionLayers) {
++    if ($this->transactionManager()->currentNestingDepth() === 0) {
+       throw new \LogicException('Root transaction end callbacks can only be added when there is an active transaction.');
+     }
+     $this->rootTransactionEndCallbacks[] = $callback;
+@@ -1482,15 +1514,20 @@ public function addRootTransactionEndCallback(callable $callback) {
+    */
+   protected function popCommittableTransactions() {
+     // Commit all the committable layers.
+-    foreach (array_reverse($this->transactionLayers) as $name => $active) {
++    foreach (array_reverse($this->transactionManager()->nestingLayers()) as $name => $active) {
+       // Stop once we found an active transaction.
+       if ($active) {
+         break;
+       }
+ 
+       // If there are no more layers left then we should commit.
+-      unset($this->transactionLayers[$name]);
+-      if (empty($this->transactionLayers)) {
++      //// TEMP
++      // unset($this->nestingLayers[$name]);;
++      $tmp = $this->transactionManager()->nestingLayers();
++      unset($tmp[$name]) = FALSE;
++      $this->transactionManager()->setNestingLayers($tmp);
++      //// TEMP
++      if ($this->transactionManager()->currentNestingDepth() === 0) {
+         $this->doCommit();
+       }
+       else {
 diff --git a/core/lib/Drupal/Core/Database/Transaction.php b/core/lib/Drupal/Core/Database/Transaction.php
 index 76d5fc8f5f..1b68a79c6c 100644
 --- a/core/lib/Drupal/Core/Database/Transaction.php
@@ -81,10 +212,10 @@ index 76d5fc8f5f..1b68a79c6c 100644
      // Within transactions, savepoints are used. Each savepoint requires a
 diff --git a/core/lib/Drupal/Core/Database/TransactionManager.php b/core/lib/Drupal/Core/Database/TransactionManager.php
 new file mode 100644
-index 0000000000..b1bf183618
+index 0000000000..f2501102dc
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/TransactionManager.php
-@@ -0,0 +1,58 @@
+@@ -0,0 +1,81 @@
 +<?php
 +
 +namespace Drupal\Core\Database;
@@ -94,9 +225,19 @@ index 0000000000..b1bf183618
 + */
 +class TransactionManager {
 +
-+  private int $currentNestingDepth = 0;
 +  private Transaction $rootTransaction;
 +  private Transaction $currentTransaction;
++
++  /**
++   * Tracks the number of "layers" of transactions currently active.
++   *
++   * On many databases transactions cannot nest.  Instead, we track
++   * nested calls to transactions and collapse them into a single
++   * transaction.
++   *
++   * @var array
++   */
++  private array $nestingLayers = [];
 +
 +  /**
 +   * @param Connection $connection
@@ -114,7 +255,7 @@ index 0000000000..b1bf183618
 +   *   TRUE if we're currently in a transaction, FALSE otherwise.
 +   */
 +  public function inTransaction(): bool {
-+    return count($this->connection->transactionLayers) > 0;
++    return $this->currentNestingDepth() > 0;
 +  }
 +
 +  /**
@@ -133,13 +274,26 @@ index 0000000000..b1bf183618
 +  }
 +
 +  /**
++   * Returns the transaction nesting layers.
++   *
++   * @return int
++   *   The transaction nesting layers.
++   */
++  public function nestingLayers(): array {
++    return $this->nestingLayers;
++  }
++  public function setNestingLayers(array $layers): void {
++    $this->nestingLayers = $layers;
++  }
++
++  /**
 +   * Returns the current depth of the transaction nesting.
 +   *
 +   * @return int
 +   *   The current depth of the transaction nesting.
 +   */
 +  public function currentNestingDepth(): int {
-+    return count($this->connection->transactionLayers);
++    return count($this->nestingLayers());
 +  }
 +
 +}
