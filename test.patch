@@ -1,5 +1,5 @@
 diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
-index 7e405e1b1b..20c9fd9204 100644
+index 7e405e1b1b..f66e9250fc 100644
 --- a/core/lib/Drupal/Core/Database/Connection.php
 +++ b/core/lib/Drupal/Core/Database/Connection.php
 @@ -54,17 +54,6 @@ abstract class Connection {
@@ -42,7 +42,7 @@ index 7e405e1b1b..20c9fd9204 100644
 +  public function __get(string $name) {
 +    if ($name === 'transactionLayers') {
 +      @trigger_error('Accessing directly ' . __CLASS__ . '::$' . $name . 'is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Instead, @todo. See https://www.drupal.org/node/5555555', E_USER_DEPRECATED);
-+      return $this->transactionManager()->nestingLayers();
++      return $this->transactionManager()->stack();
 +    }
 +  }
 +
@@ -88,7 +88,7 @@ index 7e405e1b1b..20c9fd9204 100644
    public function startTransaction($name = '') {
 -    $class = $this->getDriverClass('Transaction');
 -    return new $class($this, $name);
-+    return $this->transactionManager()->startTransaction($name);
++    return $this->transactionManager()->start($this, $name);
 +  }
 +
 +  /**
@@ -109,7 +109,7 @@ index 7e405e1b1b..20c9fd9204 100644
      // A previous rollback to an earlier savepoint may mean that the savepoint
      // in question has already been accidentally committed.
 -    if (!isset($this->transactionLayers[$savepoint_name])) {
-+    if (!isset($this->transactionManager()->nestingLayers()[$savepoint_name])) {
++    if (!isset($this->transactionManager()->stack()[$savepoint_name])) {
        throw new TransactionNoActiveException();
      }
  
@@ -118,12 +118,12 @@ index 7e405e1b1b..20c9fd9204 100644
      // we need to throw an exception.
      $rolled_back_other_active_savepoints = FALSE;
 -    while ($savepoint = array_pop($this->transactionLayers)) {
-+    $XX = $this->transactionManager()->nestingLayers();
++    $XX = $this->transactionManager()->stack();
 +    while ($savepoint = array_pop($XX)) {
 +      //// TEMP
-+      $tmp = $this->transactionManager()->nestingLayers();
++      $tmp = $this->transactionManager()->stack();
 +      $x = array_pop($tmp);
-+      $this->transactionManager()->setNestingLayers($tmp);
++      $this->transactionManager()->setStack($tmp);
 +      $XX = $tmp;
 +      //// TEMP
        if ($savepoint == $savepoint_name) {
@@ -155,32 +155,26 @@ index 7e405e1b1b..20c9fd9204 100644
    }
  
    /**
-@@ -1434,16 +1459,22 @@ public function pushTransaction($name) {
+@@ -1434,17 +1459,7 @@ public function pushTransaction($name) {
     * @see \Drupal\Core\Database\Transaction
     */
    public function popTransaction($name) {
-+    @trigger_error(__METHOD__ . '() is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Instead, @todo. See https://www.drupal.org/node/5555555', E_USER_DEPRECATED);
-     // The transaction has already been committed earlier. There is nothing we
-     // need to do. If this transaction was part of an earlier out-of-order
-     // rollback, an exception would already have been thrown by
-     // Database::rollBack().
+-    // The transaction has already been committed earlier. There is nothing we
+-    // need to do. If this transaction was part of an earlier out-of-order
+-    // rollback, an exception would already have been thrown by
+-    // Database::rollBack().
 -    if (!isset($this->transactionLayers[$name])) {
-+    if (!isset($this->transactionManager()->nestingLayers()[$name])) {
-       return;
-     }
- 
-     // Mark this layer as committable.
+-      return;
+-    }
+-
+-    // Mark this layer as committable.
 -    $this->transactionLayers[$name] = FALSE;
-+    //// TEMP
-+    // $this->nestingLayers[$name] = FALSE;
-+    $tmp = $this->transactionManager()->nestingLayers();
-+    $tmp[$name] = FALSE;
-+    $this->transactionManager()->setNestingLayers($tmp);
-+    //// TEMP
-     $this->popCommittableTransactions();
+-    $this->popCommittableTransactions();
++    @trigger_error(__METHOD__ . '() is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Instead, @todo. See https://www.drupal.org/node/5555555', E_USER_DEPRECATED);
    }
  
-@@ -1469,7 +1500,7 @@ public function popTransaction($name) {
+   /**
+@@ -1469,7 +1484,7 @@ public function popTransaction($name) {
     * @see \Drupal\Core\Database\Connection::doCommit()
     */
    public function addRootTransactionEndCallback(callable $callback) {
@@ -189,12 +183,15 @@ index 7e405e1b1b..20c9fd9204 100644
        throw new \LogicException('Root transaction end callbacks can only be added when there is an active transaction.');
      }
      $this->rootTransactionEndCallbacks[] = $callback;
-@@ -1482,15 +1513,20 @@ public function addRootTransactionEndCallback(callable $callback) {
+@@ -1480,17 +1495,22 @@ public function addRootTransactionEndCallback(callable $callback) {
+    *
+    * @internal
     */
-   protected function popCommittableTransactions() {
+-  protected function popCommittableTransactions() {
++  public function popCommittableTransactions() {
      // Commit all the committable layers.
 -    foreach (array_reverse($this->transactionLayers) as $name => $active) {
-+    foreach (array_reverse($this->transactionManager()->nestingLayers()) as $name => $active) {
++    foreach (array_reverse($this->transactionManager()->stack()) as $name => $active) {
        // Stop once we found an active transaction.
        if ($active) {
          break;
@@ -204,10 +201,10 @@ index 7e405e1b1b..20c9fd9204 100644
 -      unset($this->transactionLayers[$name]);
 -      if (empty($this->transactionLayers)) {
 +      //// TEMP
-+      // unset($this->nestingLayers[$name]);;
-+      $tmp = $this->transactionManager()->nestingLayers();
++      // unset($this->stack[$name]);;
++      $tmp = $this->transactionManager()->stack();
 +      unset($tmp[$name]);
-+      $this->transactionManager()->setNestingLayers($tmp);
++      $this->transactionManager()->setStack($tmp);
 +      //// TEMP
 +      if ($this->transactionManager()->currentNestingDepth() === 0) {
          $this->doCommit();
@@ -257,6 +254,127 @@ index 0000000000..813acbfc6c
 + * Exception for when rollbacks are called with no active transaction.
 + */
 +class TransactionNoActiveException extends TransactionException {}
+diff --git a/core/lib/Drupal/Core/Database/ManagedTransaction.php b/core/lib/Drupal/Core/Database/ManagedTransaction.php
+new file mode 100644
+index 0000000000..8fb5c3f248
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/ManagedTransaction.php
+@@ -0,0 +1,115 @@
++<?php
++
++namespace Drupal\Core\Database;
++
++/**
++ * A wrapper class for creating and managing database transactions.
++ *
++ * Not all databases or database configurations support transactions. For
++ * example, MySQL MyISAM tables do not. It is also easy to begin a transaction
++ * and then forget to commit it, which can lead to connection errors when
++ * another transaction is started.
++ *
++ * This class acts as a wrapper for transactions. To begin a transaction,
++ * simply instantiate it. When the object goes out of scope and is destroyed
++ * it will automatically commit. It also will check to see if the specified
++ * connection supports transactions. If not, it will simply skip any transaction
++ * commands, allowing user-space code to proceed normally. The only difference
++ * is that rollbacks won't actually do anything.
++ *
++ * In the vast majority of cases, you should not instantiate this class
++ * directly. Instead, call ->startTransaction(), from the appropriate connection
++ * object.
++ */
++class ManagedTransaction extends Transaction {
++
++  /**
++   * The connection object for this transaction.
++   *
++   * @var \Drupal\Core\Database\Connection
++   */
++  protected $connection;
++
++  /**
++   * A boolean value to indicate whether this transaction has been rolled back.
++   *
++   * @var bool
++   */
++  protected $rolledBack = FALSE;
++
++  /**
++   * The name of the transaction.
++   *
++   * This is used to label the transaction savepoint. It will be overridden to
++   * 'drupal_transaction' if there is no transaction depth.
++   *
++   * @var string
++   */
++  protected $name;
++
++  public function __construct(
++    Connection $connection,
++    $name = NULL,
++    protected readonly int $depth = 0,
++  ) {
++    $this->connection = $connection;
++    $this->name = $name;
++  }
++
++  public function __destruct() {
++    // If we rolled back then the transaction would have already been popped.
++    if (!$this->rolledBack) {
++      // The transaction has already been committed earlier. There is nothing we
++      // need to do. If this transaction was part of an earlier out-of-order
++      // rollback, an exception would already have been thrown by
++      // Database::rollBack().
++      if (!isset($this->connection->transactionManager()->stack()[$this->name])) {
++        return;
++      }
++
++      // Mark this layer as committable.
++      //// TEMP
++      // $this->stack[$name] = FALSE;
++      $tmp = $this->connection->transactionManager()->stack();
++      $tmp[$name] = FALSE;
++      $this->connection->transactionManager()->setStack($tmp);
++      //// TEMP
++      $this->connection->popCommittableTransactions();
++    }
++  }
++
++  public function initialize(): static {
++    // If we're already in a Drupal transaction then we want to create a
++    // database savepoint, rather than try to begin another database
++    // transaction.
++    if ($this->depth !== 0) {
++      $this->connection->query('SAVEPOINT ' . $this->name);
++    }
++    $this->connection->beginTransaction();
++
++    return $this;
++  }
++
++  /**
++   * Retrieves the name of the transaction or savepoint.
++   */
++  public function name() {
++    return $this->name;
++  }
++
++  /**
++   * Rolls back the current transaction.
++   *
++   * This is just a wrapper method to rollback whatever transaction stack we are
++   * currently in, which is managed by the connection object itself. Note that
++   * logging needs to happen after a transaction has been rolled back or the log
++   * messages will be rolled back too.
++   *
++   * @see \Drupal\Core\Database\Connection::rollBack()
++   */
++  public function rollBack() {
++    $this->rolledBack = TRUE;
++    $this->connection->rollBack($this->name);
++  }
++
++}
 diff --git a/core/lib/Drupal/Core/Database/Transaction.php b/core/lib/Drupal/Core/Database/Transaction.php
 index 76d5fc8f5f..6def1b0168 100644
 --- a/core/lib/Drupal/Core/Database/Transaction.php
@@ -314,10 +432,10 @@ index c0380da549..9b580308e1 100644
   */
 diff --git a/core/lib/Drupal/Core/Database/TransactionManager.php b/core/lib/Drupal/Core/Database/TransactionManager.php
 new file mode 100644
-index 0000000000..836d06cab9
+index 0000000000..dc6a28aee1
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/TransactionManager.php
-@@ -0,0 +1,112 @@
+@@ -0,0 +1,126 @@
 +<?php
 +
 +namespace Drupal\Core\Database;
@@ -338,11 +456,11 @@ index 0000000000..836d06cab9
 +   *
 +   * @var array
 +   */
-+  private array $nestingLayers = [];
++  private array $stack = [];
 +
 +  /**
-+   * @param Connection $connection
-+   *   An object of the client class representing a database connection.
++   * @param \Drupal\Core\Database\Connection $connection
++   *   The database connection.
 +   */
 +  public function __construct(
 +    protected readonly Connection $connection,
@@ -362,15 +480,17 @@ index 0000000000..836d06cab9
 +  /**
 +   * Returns a new Transaction object on the database connection.
 +   *
++   * @param \Drupal\Core\Database\Connection $connection
++   *   The database connection.
 +   * @param string $name
 +   *   (optional) The name of the savepoint.
 +   *
 +   * @return \Drupal\Core\Database\Transaction
 +   *   A Transaction object.
 +   *
-+   * @see \Drupal\Core\Database\Transaction
++   * @see \Drupal\Core\Database\ManagedTransaction
 +   */
-+  public function startTransaction(string $name = ''): Transaction {
++  public function start(Connection $connection, string $name = '') {
 +    // If there is no transaction depth, then no transaction has started. Name
 +    // the transaction 'drupal_transaction'.
 +    if ($this->currentNestingDepth() === 0) {
@@ -381,8 +501,7 @@ index 0000000000..836d06cab9
 +    elseif (!$name) {
 +      $name = 'savepoint_' . $this->currentNestingDepth();
 +    }
-+    $transaction = new Transaction($this->connection, $name, $this->currentNestingDepth());
-+    $transaction->initialize();
++    $transaction = (new ManagedTransaction($connection, $name, $this->currentNestingDepth()))->initialize();
 +    $this->push($name);
 +    return $transaction;
 +  }
@@ -393,11 +512,11 @@ index 0000000000..836d06cab9
 +   * @return int
 +   *   The transaction nesting layers.
 +   */
-+  public function nestingLayers(): array {
-+    return $this->nestingLayers;
++  public function stack(): array {
++    return $this->stack;
 +  }
-+  public function setNestingLayers(array $layers): void {
-+    $this->nestingLayers = $layers;
++  public function setStack(array $layers): void {
++    $this->stack = $layers;
 +  }
 +
 +  /**
@@ -407,7 +526,20 @@ index 0000000000..836d06cab9
 +   *   The current depth of the transaction nesting.
 +   */
 +  public function currentNestingDepth(): int {
-+    return count($this->nestingLayers());
++    return count($this->stack());
++  }
++
++  /**
++   * Checks if a named transaction is active.
++   *
++   * @param string $name
++   *   The name of the transaction.
++   *
++   * @return bool
++   *   TRUE if the transaction is active, FALSE otherwise.
++   */
++  protected function has(string $name): bool {
++    return isset($this->stack()[$name]);
 +  }
 +
 +  /**
@@ -423,10 +555,10 @@ index 0000000000..836d06cab9
 +   * @see \Drupal\Core\Database\Transaction
 +   */
 +  protected function push(string $name): void {
-+    if (isset($this->nestingLayers()[$name])) {
++    if ($this->has($name)) {
 +      throw new TransactionNameNonUniqueException($name . " is already in use.");
 +    }
-+    $this->nestingLayers[$name] = $name;
++    $this->stack[$name] = $name;
 +  }
 +
 +}
