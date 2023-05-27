@@ -185,7 +185,7 @@ index 0000000000..9366bf046a
 +
 +}
 diff --git a/core/modules/image/src/Controller/ImageStyleDownloadController.php b/core/modules/image/src/Controller/ImageStyleDownloadController.php
-index 1df6ef1d42..b103f6274f 100644
+index 1df6ef1d42..6fd77baefd 100644
 --- a/core/modules/image/src/Controller/ImageStyleDownloadController.php
 +++ b/core/modules/image/src/Controller/ImageStyleDownloadController.php
 @@ -9,6 +9,7 @@
@@ -236,7 +236,7 @@ index 1df6ef1d42..b103f6274f 100644
      );
    }
  
-@@ -107,12 +119,30 @@ public static function create(ContainerInterface $container) {
+@@ -107,6 +119,18 @@ public static function create(ContainerInterface $container) {
     *   Thrown when the file is still being generated.
     */
    public function deliver(Request $request, $scheme, ImageStyleInterface $image_style) {
@@ -252,27 +252,33 @@ index 1df6ef1d42..b103f6274f 100644
 +      throw new NotFoundHttpException();
 +    }
 +
-+    // Check that the source image file exists. If the image style converts
-+    // the image format, the new format extension has been added to the original
-+    // filename, resulting in filenames like image.png.jpeg. So to find the real
-+    // source image, we remove the extension and check if that image exists.
      $target = $request->query->get('file');
      $image_uri = $scheme . '://' . $target;
      $image_uri = $this->streamWrapperManager->normalizeUri($image_uri);
-+dump(['A', $scheme, $target, $image_uri]);
- 
-     if ($this->streamWrapperManager->isValidScheme($scheme)) {
-       $normalized_target = $this->streamWrapperManager->getTarget($image_uri);
-+dump(['B', $image_uri, $normalized_target]);
-       if ($normalized_target !== FALSE) {
-         if (!in_array($scheme, Settings::get('file_sa_core_2023_005_schemes', []))) {
-           $parts = explode('/', $normalized_target);
-@@ -123,8 +153,11 @@ public function deliver(Request $request, $scheme, ImageStyleInterface $image_st
+@@ -123,8 +147,29 @@ public function deliver(Request $request, $scheme, ImageStyleInterface $image_st
        }
      }
  
 -    // Check that the style is defined and the scheme is valid.
 -    $valid = !empty($image_style) && $this->streamWrapperManager->isValidScheme($scheme);
++    // Don't try to generate file if source is missing.
++    if (!$this->sourceImageExists($image_uri, $token_is_valid)) {
++      // If the image style converted the extension, it has been added to the
++      // original file, resulting in filenames like image.png.jpeg. So to find
++      // the actual source image, we remove the extension and check if that
++      // image exists.
++      $path_info = pathinfo(StreamWrapperManager::getTarget($image_uri));
++      $converted_image_uri = sprintf('%s://%s%s%s', $this->streamWrapperManager->getScheme($derivative_uri), $path_info['dirname'], DIRECTORY_SEPARATOR, $path_info['filename']);
++      if (!$this->sourceImageExists($converted_image_uri, $token_is_valid)) {
++        $this->logger->notice('Source image at %source_image_path not found while trying to generate derivative image at %derivative_path.', ['%source_image_path' => $image_uri, '%derivative_path' => $derivative_uri]);
++        return new Response($this->t('Error generating image, missing source file.'), 404);
++      }
++      else {
++        // The converted file does exist, use it as the source.
++        $image_uri = $converted_image_uri;
++      }
++    }
++
 +    // Create an image process pipeline.
 +    $pipeline = $this->imageProcessor->createInstance('derivative');
 +    $pipeline
@@ -281,7 +287,7 @@ index 1df6ef1d42..b103f6274f 100644
  
      // Also validate the derivative token. Sites which require image
      // derivatives to be generated without a token can set the
-@@ -136,9 +169,9 @@ public function deliver(Request $request, $scheme, ImageStyleInterface $image_st
+@@ -136,9 +181,9 @@ public function deliver(Request $request, $scheme, ImageStyleInterface $image_st
      // The $target variable for a derivative of a style has
      // styles/<style_name>/... as structure, so we check if the $target variable
      // starts with styles/.
@@ -293,7 +299,7 @@ index 1df6ef1d42..b103f6274f 100644
      if (!$this->config('image.settings')->get('allow_insecure_derivatives') || str_starts_with(ltrim($target, '\/'), 'styles/')) {
        $valid = $valid && $token_is_valid;
      }
-@@ -151,7 +184,7 @@ public function deliver(Request $request, $scheme, ImageStyleInterface $image_st
+@@ -151,7 +196,7 @@ public function deliver(Request $request, $scheme, ImageStyleInterface $image_st
        throw new NotFoundHttpException();
      }
  
@@ -302,7 +308,7 @@ index 1df6ef1d42..b103f6274f 100644
      $derivative_scheme = $this->streamWrapperManager->getScheme($derivative_uri);
  
      if ($token_is_valid) {
-@@ -207,7 +240,11 @@ public function deliver(Request $request, $scheme, ImageStyleInterface $image_st
+@@ -207,7 +252,11 @@ public function deliver(Request $request, $scheme, ImageStyleInterface $image_st
  
      // Try to generate the image, unless another thread just did it while we
      // were acquiring the lock.
