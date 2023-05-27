@@ -1,5 +1,5 @@
 diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
-index 7e405e1b1b..683728ab82 100644
+index 7e405e1b1b..bd9f501ee5 100644
 --- a/core/lib/Drupal/Core/Database/Connection.php
 +++ b/core/lib/Drupal/Core/Database/Connection.php
 @@ -54,17 +54,6 @@ abstract class Connection {
@@ -82,17 +82,29 @@ index 7e405e1b1b..683728ab82 100644
    /**
     * Returns a new DatabaseTransaction object on this connection.
     *
-@@ -1326,8 +1344,7 @@ public function transactionDepth() {
+@@ -1326,8 +1344,19 @@ public function transactionDepth() {
     * @see \Drupal\Core\Database\Transaction
     */
    public function startTransaction($name = '') {
 -    $class = $this->getDriverClass('Transaction');
 -    return new $class($this, $name);
 +    return $this->transactionManager()->startTransaction($name);
++  }
++
++  /**
++   * Begins a transaction on the client connection.
++   *
++   * @return bool
++   *   Returns TRUE on success or FALSE on failure.
++   *
++   * @internal
++   */
++  public function beginTransaction(): bool {
++    return $this->connection->beginTransaction();
    }
  
    /**
-@@ -1350,7 +1367,7 @@ public function rollBack($savepoint_name = 'drupal_transaction') {
+@@ -1350,7 +1379,7 @@ public function rollBack($savepoint_name = 'drupal_transaction') {
      }
      // A previous rollback to an earlier savepoint may mean that the savepoint
      // in question has already been accidentally committed.
@@ -101,7 +113,7 @@ index 7e405e1b1b..683728ab82 100644
        throw new TransactionNoActiveException();
      }
  
-@@ -1358,12 +1375,19 @@ public function rollBack($savepoint_name = 'drupal_transaction') {
+@@ -1358,12 +1387,19 @@ public function rollBack($savepoint_name = 'drupal_transaction') {
      // before are no longer needed. If we rolled back other active savepoints,
      // we need to throw an exception.
      $rolled_back_other_active_savepoints = FALSE;
@@ -123,30 +135,27 @@ index 7e405e1b1b..683728ab82 100644
            break;
          }
          $this->query('ROLLBACK TO SAVEPOINT ' . $savepoint);
-@@ -1404,7 +1428,7 @@ public function rollBack($savepoint_name = 'drupal_transaction') {
+@@ -1404,18 +1440,7 @@ public function rollBack($savepoint_name = 'drupal_transaction') {
     * @see \Drupal\Core\Database\Transaction
     */
    public function pushTransaction($name) {
 -    if (isset($this->transactionLayers[$name])) {
-+    if (isset($this->transactionManager()->nestingLayers()[$name])) {
-       throw new TransactionNameNonUniqueException($name . " is already in use.");
-     }
-     // If we're already in a transaction then we want to create a savepoint
-@@ -1415,7 +1439,12 @@ public function pushTransaction($name) {
-     else {
-       $this->connection->beginTransaction();
-     }
+-      throw new TransactionNameNonUniqueException($name . " is already in use.");
+-    }
+-    // If we're already in a transaction then we want to create a savepoint
+-    // rather than try to create another transaction.
+-    if ($this->inTransaction()) {
+-      $this->query('SAVEPOINT ' . $name);
+-    }
+-    else {
+-      $this->connection->beginTransaction();
+-    }
 -    $this->transactionLayers[$name] = $name;
-+    //// TEMP
-+    // $this->nestingLayers[$name] = $name;
-+    $tmp = $this->transactionManager()->nestingLayers();
-+    $tmp[$name] = $name;
-+    $this->transactionManager()->setNestingLayers($tmp);
-+    //// TEMP
++    @trigger_error(__METHOD__ . '() is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Instead, @todo. See https://www.drupal.org/node/5555555', E_USER_DEPRECATED);
    }
  
    /**
-@@ -1438,12 +1467,17 @@ public function popTransaction($name) {
+@@ -1438,12 +1463,17 @@ public function popTransaction($name) {
      // need to do. If this transaction was part of an earlier out-of-order
      // rollback, an exception would already have been thrown by
      // Database::rollBack().
@@ -166,7 +175,7 @@ index 7e405e1b1b..683728ab82 100644
      $this->popCommittableTransactions();
    }
  
-@@ -1469,7 +1503,7 @@ public function popTransaction($name) {
+@@ -1469,7 +1499,7 @@ public function popTransaction($name) {
     * @see \Drupal\Core\Database\Connection::doCommit()
     */
    public function addRootTransactionEndCallback(callable $callback) {
@@ -175,7 +184,7 @@ index 7e405e1b1b..683728ab82 100644
        throw new \LogicException('Root transaction end callbacks can only be added when there is an active transaction.');
      }
      $this->rootTransactionEndCallbacks[] = $callback;
-@@ -1482,15 +1516,20 @@ public function addRootTransactionEndCallback(callable $callback) {
+@@ -1482,15 +1512,20 @@ public function addRootTransactionEndCallback(callable $callback) {
     */
    protected function popCommittableTransactions() {
      // Commit all the committable layers.
@@ -199,36 +208,108 @@ index 7e405e1b1b..683728ab82 100644
          $this->doCommit();
        }
        else {
+diff --git a/core/lib/Drupal/Core/Database/Exception/TransactionException.php b/core/lib/Drupal/Core/Database/Exception/TransactionException.php
+new file mode 100644
+index 0000000000..c1f042bcf7
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/Exception/TransactionException.php
+@@ -0,0 +1,10 @@
++<?php
++
++namespace Drupal\Core\Database\Exception;
++
++use Drupal\Core\Database\DatabaseException;
++
++/**
++ * Exception thrown by an error in a database transaction.
++ */
++class TransactionException extends \RuntimeException implements DatabaseException {}
+diff --git a/core/lib/Drupal/Core/Database/Exception/TransactionNameNonUniqueException.php b/core/lib/Drupal/Core/Database/Exception/TransactionNameNonUniqueException.php
+new file mode 100644
+index 0000000000..c29666497b
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/Exception/TransactionNameNonUniqueException.php
+@@ -0,0 +1,10 @@
++<?php
++
++namespace Drupal\Core\Database\Exception;
++
++use Drupal\Core\Database\DatabaseException;
++
++/**
++ * Exception thrown when a savepoint or transaction name occurs twice.
++ */
++class TransactionNameNonUniqueException extends TransactionException implements DatabaseException {}
 diff --git a/core/lib/Drupal/Core/Database/Transaction.php b/core/lib/Drupal/Core/Database/Transaction.php
-index 76d5fc8f5f..1b68a79c6c 100644
+index 76d5fc8f5f..943b5b6215 100644
 --- a/core/lib/Drupal/Core/Database/Transaction.php
 +++ b/core/lib/Drupal/Core/Database/Transaction.php
-@@ -51,7 +51,7 @@ public function __construct(Connection $connection, $name = NULL) {
+@@ -47,22 +47,22 @@ class Transaction {
+    */
+   protected $name;
+ 
+-  public function __construct(Connection $connection, $name = NULL) {
++  public function __construct(
++    Connection $connection,
++    $name = NULL,
++    protected readonly int $depth = 0,
++  ) {
      $this->connection = $connection;
-     // If there is no transaction depth, then no transaction has started. Name
-     // the transaction 'drupal_transaction'.
+-    // If there is no transaction depth, then no transaction has started. Name
+-    // the transaction 'drupal_transaction'.
 -    if (!$depth = $connection->transactionDepth()) {
-+    if (!$depth = $connection->transactionManager()->currentNestingDepth()) {
-       $this->name = 'drupal_transaction';
+-      $this->name = 'drupal_transaction';
+-    }
+-    // Within transactions, savepoints are used. Each savepoint requires a
+-    // name. So if no name is present we need to create one.
+-    elseif (!$name) {
+-      $this->name = 'savepoint_' . $depth;
+-    }
+-    else {
+-      $this->name = $name;
++    $this->name = $name;
++  }
++
++  public function initialize(): bool {
++    // If we're already in a transaction then we want to create a savepoint
++    // rather than try to create another transaction.
++    if ($this->depth !== 0) {
++      return (bool) $this->connection->query('SAVEPOINT ' . $name);
      }
-     // Within transactions, savepoints are used. Each savepoint requires a
+-    $this->connection->pushTransaction($this->name);
++    return $this->connection->beginTransaction();
+   }
+ 
+   public function __destruct() {
+diff --git a/core/lib/Drupal/Core/Database/TransactionException.php b/core/lib/Drupal/Core/Database/TransactionException.php
+index c0380da549..9b580308e1 100644
+--- a/core/lib/Drupal/Core/Database/TransactionException.php
++++ b/core/lib/Drupal/Core/Database/TransactionException.php
+@@ -2,6 +2,8 @@
+ 
+ namespace Drupal\Core\Database;
+ 
++// @trigger_error('Drupal\\Core\\Database\\TransactionException is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Instead, @todo. See https://www.drupal.org/node/5555555', E_USER_DEPRECATED);
++
+ /**
+  * Exception thrown by an error in a database transaction.
+  */
 diff --git a/core/lib/Drupal/Core/Database/TransactionManager.php b/core/lib/Drupal/Core/Database/TransactionManager.php
 new file mode 100644
-index 0000000000..f2501102dc
+index 0000000000..836d06cab9
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/TransactionManager.php
-@@ -0,0 +1,81 @@
+@@ -0,0 +1,112 @@
 +<?php
 +
 +namespace Drupal\Core\Database;
++
++use Drupal\Core\Database\Exception\TransactionNameNonUniqueException;
 +
 +/**
 + * @todo
 + */
 +class TransactionManager {
-+
-+  private Transaction $rootTransaction;
-+  private Transaction $currentTransaction;
 +
 +  /**
 +   * Tracks the number of "layers" of transactions currently active.
@@ -272,7 +353,20 @@ index 0000000000..f2501102dc
 +   * @see \Drupal\Core\Database\Transaction
 +   */
 +  public function startTransaction(string $name = ''): Transaction {
-+    return new Transaction($this->connection, $name);
++    // If there is no transaction depth, then no transaction has started. Name
++    // the transaction 'drupal_transaction'.
++    if ($this->currentNestingDepth() === 0) {
++      $name = 'drupal_transaction';
++    }
++    // Within transactions, savepoints are used. Each savepoint requires a
++    // name. So if no name is present we need to create one.
++    elseif (!$name) {
++      $name = 'savepoint_' . $this->currentNestingDepth();
++    }
++    $transaction = new Transaction($this->connection, $name, $this->currentNestingDepth());
++    $transaction->initialize();
++    $this->push($name);
++    return $transaction;
 +  }
 +
 +  /**
@@ -298,7 +392,39 @@ index 0000000000..f2501102dc
 +    return count($this->nestingLayers());
 +  }
 +
++  /**
++   * Pushes the transaction on the stack.
++   *
++   * This increases the depth of transaction nesting.
++   *
++   * @param string $name
++   *   The name of the transaction.
++   *
++   * @throws \Drupal\Core\Database\Exception\TransactionNameNonUniqueException
++   *
++   * @see \Drupal\Core\Database\Transaction
++   */
++  protected function push(string $name): void {
++    if (isset($this->nestingLayers()[$name])) {
++      throw new TransactionNameNonUniqueException($name . " is already in use.");
++    }
++    $this->nestingLayers[$name] = $name;
++  }
++
 +}
+diff --git a/core/lib/Drupal/Core/Database/TransactionNameNonUniqueException.php b/core/lib/Drupal/Core/Database/TransactionNameNonUniqueException.php
+index 8265620b25..e74039500a 100644
+--- a/core/lib/Drupal/Core/Database/TransactionNameNonUniqueException.php
++++ b/core/lib/Drupal/Core/Database/TransactionNameNonUniqueException.php
+@@ -2,6 +2,8 @@
+ 
+ namespace Drupal\Core\Database;
+ 
++@trigger_error('Drupal\\Core\\Database\\TransactionNameNonUniqueException is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Instead, @todo. See https://www.drupal.org/node/5555555', E_USER_DEPRECATED);
++
+ /**
+  * Exception thrown when a savepoint or transaction name occurs twice.
+  */
 diff --git a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
 index ebbf60826a..47e718c3df 100644
 --- a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
