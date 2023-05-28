@@ -1,69 +1,70 @@
 diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
-index 7e405e1b1b..beb614c21b 100644
+index 7e405e1b1b..d310f75932 100644
 --- a/core/lib/Drupal/Core/Database/Connection.php
 +++ b/core/lib/Drupal/Core/Database/Connection.php
-@@ -54,17 +54,6 @@ abstract class Connection {
-    */
-   protected $logger = NULL;
- 
--  /**
--   * Tracks the number of "layers" of transactions currently active.
--   *
--   * On many databases transactions cannot nest.  Instead, we track
--   * nested calls to transactions and collapse them into a single
--   * transaction.
--   *
--   * @var array
--   */
--  protected $transactionLayers = [];
--
-   /**
-    * Index of what driver-specific class to use for various operations.
+@@ -62,6 +62,11 @@ abstract class Connection {
+    * transaction.
     *
-@@ -226,6 +215,11 @@ abstract class Connection {
+    * @var array
++   *
++   * @deprecated in drupal:10.0.2 and is removed from drupal:11.0.0. The
++   *   transaction stack is now managed by TransactionManager.
++   *
++   * @see https://www.drupal.org/node/5555555
+    */
+   protected $transactionLayers = [];
+ 
+@@ -204,8 +209,13 @@ abstract class Connection {
+    * Post-root (non-nested) transaction commit callbacks.
+    *
+    * @var callable[]
++   *
++   * @deprecated in drupal:10.0.2 and is removed from drupal:11.0.0. The
++   *   transaction end callbacks are now managed by TransactionRoot.
++   *
++   * @see https://www.drupal.org/node/5555555
+    */
+-  protected $rootTransactionEndCallbacks = [];
++  public $rootTransactionEndCallbacks = [];
+ 
+   /**
+    * The identifier quote characters for the database type.
+@@ -226,6 +236,11 @@ abstract class Connection {
     */
    private array $enabledEvents = [];
  
 +  /**
 +   * The transaction manager.
 +   */
-+  private TransactionManager $transactionManager;
++  protected TransactionManager $transactionManager;
 +
    /**
     * Constructs a Connection object.
     *
-@@ -255,6 +249,16 @@ public function __construct(object $connection, array $connection_options) {
-     $this->connectionOptions = $connection_options;
+@@ -276,6 +291,21 @@ public function __destruct() {
+     $this->connection = NULL;
    }
  
 +  /**
-+   * {@inheritdoc}
++   * Returns the client-level database connection object.
++   *
++   * This method should normally be used only within database driver code. Not
++   * doing so is a risk of introducing code that is not database independent.
++   *
++   * @return object
++   *   The client-level database connection, for example \PDO.
++   *
++   * @internal
 +   */
-+  public function __get(string $name) {
-+    if ($name === 'transactionLayers') {
-+      @trigger_error('Accessing directly ' . __CLASS__ . '::$' . $name . 'is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Instead, @todo. See https://www.drupal.org/node/5555555', E_USER_DEPRECATED);
-+      return $this->transactionManager()->stack();
-+    }
++  public function getClientConnection(): object {
++    return $this->connection;
 +  }
 +
    /**
-    * Opens a client connection.
+    * Returns the default query options for any given query.
     *
-@@ -1301,7 +1305,7 @@ public function escapeLike($string) {
-    *   TRUE if we're currently in a transaction, FALSE otherwise.
-    */
-   public function inTransaction() {
--    return ($this->transactionDepth() > 0);
-+    return $this->transactionManager()->inTransaction();
-   }
- 
-   /**
-@@ -1311,9 +1315,23 @@ public function inTransaction() {
-    *   The current transaction depth.
-    */
-   public function transactionDepth() {
-+    @trigger_error(__METHOD__ . '() is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Instead, @todo. See https://www.drupal.org/node/5555555', E_USER_DEPRECATED);
-     return count($this->transactionLayers);
+@@ -1294,6 +1324,19 @@ public function escapeLike($string) {
+     return addcslashes($string, '\%_');
    }
  
 +  /**
@@ -80,31 +81,36 @@ index 7e405e1b1b..beb614c21b 100644
 +  }
 +
    /**
-    * Returns a new DatabaseTransaction object on this connection.
+    * Determines if there is an active transaction open.
     *
-@@ -1326,8 +1344,19 @@ public function transactionDepth() {
+@@ -1301,7 +1344,7 @@ public function escapeLike($string) {
+    *   TRUE if we're currently in a transaction, FALSE otherwise.
+    */
+   public function inTransaction() {
+-    return ($this->transactionDepth() > 0);
++    return $this->transactionManager()->inTransaction();
+   }
+ 
+   /**
+@@ -1311,6 +1354,7 @@ public function inTransaction() {
+    *   The current transaction depth.
+    */
+   public function transactionDepth() {
++    @trigger_error(__METHOD__ . '() is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Instead, @todo. See https://www.drupal.org/node/5555555', E_USER_DEPRECATED);
+     return count($this->transactionLayers);
+   }
+ 
+@@ -1326,8 +1370,7 @@ public function transactionDepth() {
     * @see \Drupal\Core\Database\Transaction
     */
    public function startTransaction($name = '') {
 -    $class = $this->getDriverClass('Transaction');
 -    return new $class($this, $name);
 +    return $this->transactionManager()->start($this, $name);
-+  }
-+
-+  /**
-+   * Begins a transaction on the client connection.
-+   *
-+   * @return bool
-+   *   Returns TRUE on success or FALSE on failure.
-+   *
-+   * @internal
-+   */
-+  public function beginTransaction(): bool {
-+    return $this->connection->beginTransaction();
    }
  
    /**
-@@ -1350,7 +1379,7 @@ public function rollBack($savepoint_name = 'drupal_transaction') {
+@@ -1350,7 +1393,7 @@ public function rollBack($savepoint_name = 'drupal_transaction') {
      }
      // A previous rollback to an earlier savepoint may mean that the savepoint
      // in question has already been accidentally committed.
@@ -113,7 +119,7 @@ index 7e405e1b1b..beb614c21b 100644
        throw new TransactionNoActiveException();
      }
  
-@@ -1358,12 +1387,19 @@ public function rollBack($savepoint_name = 'drupal_transaction') {
+@@ -1358,16 +1401,23 @@ public function rollBack($savepoint_name = 'drupal_transaction') {
      // before are no longer needed. If we rolled back other active savepoints,
      // we need to throw an exception.
      $rolled_back_other_active_savepoints = FALSE;
@@ -135,7 +141,12 @@ index 7e405e1b1b..beb614c21b 100644
            break;
          }
          $this->query('ROLLBACK TO SAVEPOINT ' . $savepoint);
-@@ -1404,18 +1440,7 @@ public function rollBack($savepoint_name = 'drupal_transaction') {
+-        $this->popCommittableTransactions();
++        $this->transactionManager()->popCommittableTransactions();
+         if ($rolled_back_other_active_savepoints) {
+           throw new TransactionOutOfOrderException();
+         }
+@@ -1404,18 +1454,7 @@ public function rollBack($savepoint_name = 'drupal_transaction') {
     * @see \Drupal\Core\Database\Transaction
     */
    public function pushTransaction($name) {
@@ -155,7 +166,7 @@ index 7e405e1b1b..beb614c21b 100644
    }
  
    /**
-@@ -1434,17 +1459,7 @@ public function pushTransaction($name) {
+@@ -1434,17 +1473,7 @@ public function pushTransaction($name) {
     * @see \Drupal\Core\Database\Transaction
     */
    public function popTransaction($name) {
@@ -174,7 +185,7 @@ index 7e405e1b1b..beb614c21b 100644
    }
  
    /**
-@@ -1469,7 +1484,7 @@ public function popTransaction($name) {
+@@ -1469,7 +1498,7 @@ public function popTransaction($name) {
     * @see \Drupal\Core\Database\Connection::doCommit()
     */
    public function addRootTransactionEndCallback(callable $callback) {
@@ -183,34 +194,72 @@ index 7e405e1b1b..beb614c21b 100644
        throw new \LogicException('Root transaction end callbacks can only be added when there is an active transaction.');
      }
      $this->rootTransactionEndCallbacks[] = $callback;
-@@ -1480,17 +1495,23 @@ public function addRootTransactionEndCallback(callable $callback) {
-    *
+@@ -1481,22 +1510,7 @@ public function addRootTransactionEndCallback(callable $callback) {
     * @internal
     */
--  protected function popCommittableTransactions() {
-+  public function popCommittableTransactions() {
-+//dump([__METHOD__, $this->transactionManager()->stack(), array_reverse($this->transactionManager()->stack())]);
-     // Commit all the committable layers.
+   protected function popCommittableTransactions() {
+-    // Commit all the committable layers.
 -    foreach (array_reverse($this->transactionLayers) as $name => $active) {
-+    foreach (array_reverse($this->transactionManager()->stack()) as $name => $active) {
-       // Stop once we found an active transaction.
-       if ($active) {
-         break;
-       }
- 
-       // If there are no more layers left then we should commit.
+-      // Stop once we found an active transaction.
+-      if ($active) {
+-        break;
+-      }
+-
+-      // If there are no more layers left then we should commit.
 -      unset($this->transactionLayers[$name]);
 -      if (empty($this->transactionLayers)) {
-+      //// TEMP
-+      // unset($this->stack[$name]);;
-+      $tmp = $this->transactionManager()->stack();
-+      unset($tmp[$name]);
-+      $this->transactionManager()->setStack($tmp);
-+      //// TEMP
-+      if ($this->transactionManager()->stackDepth() === 0) {
-         $this->doCommit();
-       }
-       else {
+-        $this->doCommit();
+-      }
+-      else {
+-        $this->query('RELEASE SAVEPOINT ' . $name);
+-      }
+-    }
++    @trigger_error(__METHOD__ . '() is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Instead, @todo. See https://www.drupal.org/node/5555555', E_USER_DEPRECATED);
+   }
+ 
+   /**
+@@ -1505,18 +1519,7 @@ protected function popCommittableTransactions() {
+    * @internal
+    */
+   protected function doCommit() {
+-    $success = $this->connection->commit();
+-    if (!empty($this->rootTransactionEndCallbacks)) {
+-      $callbacks = $this->rootTransactionEndCallbacks;
+-      $this->rootTransactionEndCallbacks = [];
+-      foreach ($callbacks as $callback) {
+-        call_user_func($callback, $success);
+-      }
+-    }
+-
+-    if (!$success) {
+-      throw new TransactionCommitFailedException();
+-    }
++    @trigger_error(__METHOD__ . '() is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Instead, @todo. See https://www.drupal.org/node/5555555', E_USER_DEPRECATED);
+   }
+ 
+   /**
+@@ -1644,6 +1647,7 @@ abstract public function mapConditionOperator($operator);
+    * @see \Drupal\Core\Database\Transaction
+    */
+   public function commit() {
++    @trigger_error(__METHOD__ . '() is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Instead, @todo. See https://www.drupal.org/node/5555555', E_USER_DEPRECATED);
+     throw new TransactionExplicitCommitNotAllowedException();
+   }
+ 
+diff --git a/core/lib/Drupal/Core/Database/Exception/TransactionCommitFailedException.php b/core/lib/Drupal/Core/Database/Exception/TransactionCommitFailedException.php
+new file mode 100644
+index 0000000000..e82da8603b
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/Exception/TransactionCommitFailedException.php
+@@ -0,0 +1,8 @@
++<?php
++
++namespace Drupal\Core\Database\Exception;
++
++/**
++ * Exception thrown when a commit() function fails.
++ */
++class TransactionCommitFailedException extends TransactionException {}
 diff --git a/core/lib/Drupal/Core/Database/Exception/TransactionException.php b/core/lib/Drupal/Core/Database/Exception/TransactionException.php
 new file mode 100644
 index 0000000000..c1f042bcf7
@@ -267,29 +316,56 @@ index 76d5fc8f5f..187a010337 100644
      $this->connection = $connection;
      // If there is no transaction depth, then no transaction has started. Name
      // the transaction 'drupal_transaction'.
+diff --git a/core/lib/Drupal/Core/Database/TransactionCommitFailedException.php b/core/lib/Drupal/Core/Database/TransactionCommitFailedException.php
+index f1dbf95654..11ce62b5b0 100644
+--- a/core/lib/Drupal/Core/Database/TransactionCommitFailedException.php
++++ b/core/lib/Drupal/Core/Database/TransactionCommitFailedException.php
+@@ -2,6 +2,8 @@
+ 
+ namespace Drupal\Core\Database;
+ 
++@trigger_error('Drupal\\Core\\Database\\TransactionCommitFailedException is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Instead, @todo. See https://www.drupal.org/node/5555555', E_USER_DEPRECATED);
++
+ /**
+  * Exception thrown when a commit() function fails.
+  */
 diff --git a/core/lib/Drupal/Core/Database/TransactionException.php b/core/lib/Drupal/Core/Database/TransactionException.php
-index c0380da549..9b580308e1 100644
+index c0380da549..56b9f99099 100644
 --- a/core/lib/Drupal/Core/Database/TransactionException.php
 +++ b/core/lib/Drupal/Core/Database/TransactionException.php
 @@ -2,6 +2,8 @@
  
  namespace Drupal\Core\Database;
  
-+// @trigger_error('Drupal\\Core\\Database\\TransactionException is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Instead, @todo. See https://www.drupal.org/node/5555555', E_USER_DEPRECATED);
++@trigger_error('Drupal\\Core\\Database\\TransactionException is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Instead, @todo. See https://www.drupal.org/node/5555555', E_USER_DEPRECATED);
 +
  /**
   * Exception thrown by an error in a database transaction.
   */
+diff --git a/core/lib/Drupal/Core/Database/TransactionExplicitCommitNotAllowedException.php b/core/lib/Drupal/Core/Database/TransactionExplicitCommitNotAllowedException.php
+index 5d3434228a..b4d9426b9b 100644
+--- a/core/lib/Drupal/Core/Database/TransactionExplicitCommitNotAllowedException.php
++++ b/core/lib/Drupal/Core/Database/TransactionExplicitCommitNotAllowedException.php
+@@ -2,6 +2,8 @@
+ 
+ namespace Drupal\Core\Database;
+ 
++@trigger_error('Drupal\\Core\\Database\\TransactionExplicitCommitNotAllowedException is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Instead, @todo. See https://www.drupal.org/node/5555555', E_USER_DEPRECATED);
++
+ /**
+  * Exception to deny attempts to explicitly manage transactions.
+  *
 diff --git a/core/lib/Drupal/Core/Database/TransactionManager.php b/core/lib/Drupal/Core/Database/TransactionManager.php
 new file mode 100644
-index 0000000000..205851da33
+index 0000000000..4b9b4f3753
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/TransactionManager.php
-@@ -0,0 +1,128 @@
+@@ -0,0 +1,168 @@
 +<?php
 +
 +namespace Drupal\Core\Database;
 +
++use Drupal\Core\Database\Exception\TransactionCommitFailedException;
 +use Drupal\Core\Database\Exception\TransactionNameNonUniqueException;
 +
 +/**
@@ -413,6 +489,45 @@ index 0000000000..205851da33
 +    }
 +  }
 +
++  public function popCommittableTransactions() {
++    // Commit all the committable layers.
++    foreach (array_reverse($this->stack()) as $name => $active) {
++      // Stop once we found an active transaction.
++      if ($active) {
++        break;
++      }
++
++      // If there are no more layers left then we should commit.
++      unset($this->stack[$name]);
++      if ($this->stackDepth() === 0) {
++        $this->doCommit();
++      }
++      else {
++        $this->connection->query('RELEASE SAVEPOINT ' . $name);
++      }
++    }
++  }
++
++  /**
++   * Do the actual commit, invoke post-commit callbacks.
++   *
++   * @internal
++   */
++  private function doCommit() {
++    $success = $this->connection->getClientConnection()->commit();
++    if (!empty($this->connection->rootTransactionEndCallbacks)) {
++      $callbacks = $this->connection->rootTransactionEndCallbacks;
++      $this->connection->rootTransactionEndCallbacks = [];
++      foreach ($callbacks as $callback) {
++        call_user_func($callback, $success);
++      }
++    }
++
++    if (!$success) {
++      throw new TransactionCommitFailedException();
++    }
++  }
++
 +}
 diff --git a/core/lib/Drupal/Core/Database/TransactionNameNonUniqueException.php b/core/lib/Drupal/Core/Database/TransactionNameNonUniqueException.php
 index 8265620b25..e74039500a 100644
@@ -440,12 +555,25 @@ index b868a3d155..f1638b4881 100644
  /**
   * Exception for when popTransaction() is called with no active transaction.
   */
+diff --git a/core/lib/Drupal/Core/Database/TransactionOutOfOrderException.php b/core/lib/Drupal/Core/Database/TransactionOutOfOrderException.php
+index d7b07df3ea..689c964ceb 100644
+--- a/core/lib/Drupal/Core/Database/TransactionOutOfOrderException.php
++++ b/core/lib/Drupal/Core/Database/TransactionOutOfOrderException.php
+@@ -2,6 +2,8 @@
+ 
+ namespace Drupal\Core\Database;
+ 
++@trigger_error('Drupal\\Core\\Database\\TransactionOutOfOrderException is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Instead, @todo. See https://www.drupal.org/node/5555555', E_USER_DEPRECATED);
++
+ /**
+  * Exception thrown when a rollBack() resulted in other active transactions being rolled-back.
+  */
 diff --git a/core/lib/Drupal/Core/Database/TransactionRoot.php b/core/lib/Drupal/Core/Database/TransactionRoot.php
 new file mode 100644
-index 0000000000..1d807f5057
+index 0000000000..4c65407ff3
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/TransactionRoot.php
-@@ -0,0 +1,85 @@
+@@ -0,0 +1,95 @@
 +<?php
 +
 +namespace Drupal\Core\Database;
@@ -496,7 +624,7 @@ index 0000000000..1d807f5057
 +
 +      // Mark this layer as committable.
 +      $this->connection->transactionManager()->markCommittable($this->name);
-+      $this->connection->popCommittableTransactions();
++      $this->connection->transactionManager()->popCommittableTransactions();
 +    }
 +  }
 +
@@ -509,10 +637,20 @@ index 0000000000..1d807f5057
 +      $this->connection->query('SAVEPOINT ' . $this->name);
 +    }
 +    else {
-+      $this->connection->beginTransaction();
++      $this->beginTransaction();
 +    }
 +
 +    return $this;
++  }
++
++  /**
++   * Begins a transaction on the client connection.
++   *
++   * @return bool
++   *   Returns TRUE on success or FALSE on failure.
++   */
++  protected function beginTransaction(): bool {
++    return $this->connection->getClientConnection()->beginTransaction();
 +  }
 +
 +  /**
@@ -531,19 +669,6 @@ index 0000000000..1d807f5057
 +  }
 +
 +}
-diff --git a/core/modules/mysql/src/Driver/Database/mysql/Connection.php b/core/modules/mysql/src/Driver/Database/mysql/Connection.php
-index 73239a4536..5e40c71cdf 100644
---- a/core/modules/mysql/src/Driver/Database/mysql/Connection.php
-+++ b/core/modules/mysql/src/Driver/Database/mysql/Connection.php
-@@ -401,7 +401,7 @@ public function nextIdDelete() {
-   /**
-    * Overridden to work around issues to MySQL not supporting transactional DDL.
-    */
--  protected function popCommittableTransactions() {
-+  public function popCommittableTransactions() {
-     // Commit all the committable layers.
-     foreach (array_reverse($this->transactionLayers) as $name => $active) {
-       // Stop once we found an active transaction.
 diff --git a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
 index ebbf60826a..fd7ccd8edc 100644
 --- a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
