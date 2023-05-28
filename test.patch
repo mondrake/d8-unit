@@ -1,5 +1,5 @@
 diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
-index 7e405e1b1b..86eca52c70 100644
+index 7e405e1b1b..beb614c21b 100644
 --- a/core/lib/Drupal/Core/Database/Connection.php
 +++ b/core/lib/Drupal/Core/Database/Connection.php
 @@ -54,17 +54,6 @@ abstract class Connection {
@@ -131,7 +131,7 @@ index 7e405e1b1b..86eca52c70 100644
          // savepoint, it is the transaction itself so we will need to roll back
          // the transaction rather than a savepoint.
 -        if (empty($this->transactionLayers)) {
-+        if ($this->transactionManager()->currentNestingDepth() === 0) {
++        if ($this->transactionManager()->stackDepth() === 0) {
            break;
          }
          $this->query('ROLLBACK TO SAVEPOINT ' . $savepoint);
@@ -179,7 +179,7 @@ index 7e405e1b1b..86eca52c70 100644
     */
    public function addRootTransactionEndCallback(callable $callback) {
 -    if (!$this->transactionLayers) {
-+    if ($this->transactionManager()->currentNestingDepth() === 0) {
++    if ($this->transactionManager()->stackDepth() === 0) {
        throw new \LogicException('Root transaction end callbacks can only be added when there is an active transaction.');
      }
      $this->rootTransactionEndCallbacks[] = $callback;
@@ -207,7 +207,7 @@ index 7e405e1b1b..86eca52c70 100644
 +      unset($tmp[$name]);
 +      $this->transactionManager()->setStack($tmp);
 +      //// TEMP
-+      if ($this->transactionManager()->currentNestingDepth() === 0) {
++      if ($this->transactionManager()->stackDepth() === 0) {
          $this->doCommit();
        }
        else {
@@ -255,11 +255,196 @@ index 0000000000..813acbfc6c
 + * Exception for when rollbacks are called with no active transaction.
 + */
 +class TransactionNoActiveException extends TransactionException {}
-diff --git a/core/lib/Drupal/Core/Database/ManagedTransaction.php b/core/lib/Drupal/Core/Database/ManagedTransaction.php
+diff --git a/core/lib/Drupal/Core/Database/Transaction.php b/core/lib/Drupal/Core/Database/Transaction.php
+index 76d5fc8f5f..187a010337 100644
+--- a/core/lib/Drupal/Core/Database/Transaction.php
++++ b/core/lib/Drupal/Core/Database/Transaction.php
+@@ -48,6 +48,7 @@ class Transaction {
+   protected $name;
+ 
+   public function __construct(Connection $connection, $name = NULL) {
++    @trigger_error(__CLASS__ . ' is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Instead, @todo. See https://www.drupal.org/node/5555555', E_USER_DEPRECATED);
+     $this->connection = $connection;
+     // If there is no transaction depth, then no transaction has started. Name
+     // the transaction 'drupal_transaction'.
+diff --git a/core/lib/Drupal/Core/Database/TransactionException.php b/core/lib/Drupal/Core/Database/TransactionException.php
+index c0380da549..9b580308e1 100644
+--- a/core/lib/Drupal/Core/Database/TransactionException.php
++++ b/core/lib/Drupal/Core/Database/TransactionException.php
+@@ -2,6 +2,8 @@
+ 
+ namespace Drupal\Core\Database;
+ 
++// @trigger_error('Drupal\\Core\\Database\\TransactionException is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Instead, @todo. See https://www.drupal.org/node/5555555', E_USER_DEPRECATED);
++
+ /**
+  * Exception thrown by an error in a database transaction.
+  */
+diff --git a/core/lib/Drupal/Core/Database/TransactionManager.php b/core/lib/Drupal/Core/Database/TransactionManager.php
 new file mode 100644
-index 0000000000..1ad3d59368
+index 0000000000..205851da33
 --- /dev/null
-+++ b/core/lib/Drupal/Core/Database/ManagedTransaction.php
++++ b/core/lib/Drupal/Core/Database/TransactionManager.php
+@@ -0,0 +1,128 @@
++<?php
++
++namespace Drupal\Core\Database;
++
++use Drupal\Core\Database\Exception\TransactionNameNonUniqueException;
++
++/**
++ * @todo
++ */
++class TransactionManager {
++
++  /**
++   * Tracks the number of "layers" of transactions currently active.
++   *
++   * On many databases transactions cannot nest.  Instead, we track
++   * nested calls to transactions and collapse them into a single
++   * transaction.
++   *
++   * @var array
++   */
++  private array $stack = [];
++
++  /**
++   * @param \Drupal\Core\Database\Connection $connection
++   *   The database connection.
++   */
++  public function __construct(
++    protected readonly Connection $connection,
++  ) {
++  }
++
++  /**
++   * Determines if there is an active transaction open.
++   *
++   * @return bool
++   *   TRUE if we're currently in a transaction, FALSE otherwise.
++   */
++  public function inTransaction(): bool {
++    return $this->stackDepth() > 0;
++  }
++
++  /**
++   * Returns a new Transaction object on the database connection.
++   *
++   * @param \Drupal\Core\Database\Connection $connection
++   *   The database connection.
++   * @param string $name
++   *   (optional) The name of the savepoint.
++   *
++   * @return \Drupal\Core\Database\TransactionRoot|\Drupal\Core\Database\TransactionSavepoint
++   *   A Transaction object.
++   *
++   * @throws \Drupal\Core\Database\Exception\TransactionNameNonUniqueException
++   */
++  public function start(Connection $connection, string $name = '') {
++    // If there is no transaction depth, then no transaction has started. Name
++    // the transaction 'drupal_transaction'.
++    if ($this->stackDepth() === 0) {
++      $name = 'drupal_transaction';
++    }
++    // Within transactions, savepoints are used. Each savepoint requires a
++    // name. So if no name is present we need to create one.
++    elseif (!$name) {
++      $name = 'savepoint_' . $this->stackDepth();
++    }
++
++    if ($this->has($name)) {
++      throw new TransactionNameNonUniqueException($name . " is already in use.");
++    }
++
++    $transaction = (new TransactionRoot($connection, $name, $this->stackDepth()))->initialize();
++
++    // Push the transaction on the stack, increasing the depth of transaction
++    // nesting.
++    $this->stack[$name] = $name;
++
++    return $transaction;
++  }
++
++  /**
++   * Returns the transaction nesting layers.
++   *
++   * @return int
++   *   The transaction nesting layers.
++   */
++  public function stack(): array {
++    return $this->stack;
++  }
++  public function setStack(array $layers): void {
++    $this->stack = $layers;
++  }
++
++  /**
++   * Returns the current depth of the transaction nesting.
++   *
++   * @return int
++   *   The current depth of the transaction nesting.
++   */
++  public function stackDepth(): int {
++    return count($this->stack());
++  }
++
++  /**
++   * Checks if a named transaction is active.
++   *
++   * @param string $name
++   *   The name of the transaction.
++   *
++   * @return bool
++   *   TRUE if the transaction is active, FALSE otherwise.
++   */
++  public function has(string $name): bool {
++    return isset($this->stack()[$name]);
++  }
++
++  /**
++   * Marks a named transaction as committable.
++   *
++   * @param string $name
++   *   The name of the transaction.
++   */
++  public function markCommittable(string $name): void {
++    if ($this->has($name)) {
++      $this->stack[$name] = FALSE;
++    }
++  }
++
++}
+diff --git a/core/lib/Drupal/Core/Database/TransactionNameNonUniqueException.php b/core/lib/Drupal/Core/Database/TransactionNameNonUniqueException.php
+index 8265620b25..e74039500a 100644
+--- a/core/lib/Drupal/Core/Database/TransactionNameNonUniqueException.php
++++ b/core/lib/Drupal/Core/Database/TransactionNameNonUniqueException.php
+@@ -2,6 +2,8 @@
+ 
+ namespace Drupal\Core\Database;
+ 
++@trigger_error('Drupal\\Core\\Database\\TransactionNameNonUniqueException is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Instead, @todo. See https://www.drupal.org/node/5555555', E_USER_DEPRECATED);
++
+ /**
+  * Exception thrown when a savepoint or transaction name occurs twice.
+  */
+diff --git a/core/lib/Drupal/Core/Database/TransactionNoActiveException.php b/core/lib/Drupal/Core/Database/TransactionNoActiveException.php
+index b868a3d155..f1638b4881 100644
+--- a/core/lib/Drupal/Core/Database/TransactionNoActiveException.php
++++ b/core/lib/Drupal/Core/Database/TransactionNoActiveException.php
+@@ -2,6 +2,8 @@
+ 
+ namespace Drupal\Core\Database;
+ 
++@trigger_error('Drupal\\Core\\Database\\TransactionNoActiveException is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Instead, @todo. See https://www.drupal.org/node/5555555', E_USER_DEPRECATED);
++
+ /**
+  * Exception for when popTransaction() is called with no active transaction.
+  */
+diff --git a/core/lib/Drupal/Core/Database/TransactionRoot.php b/core/lib/Drupal/Core/Database/TransactionRoot.php
+new file mode 100644
+index 0000000000..1d807f5057
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/TransactionRoot.php
 @@ -0,0 +1,85 @@
 +<?php
 +
@@ -286,7 +471,7 @@ index 0000000000..1ad3d59368
 + * directly. Instead, call ->startTransaction(), from the appropriate connection
 + * object.
 + */
-+class ManagedTransaction extends Transaction {
++class TransactionRoot extends Transaction {
 +
 +  public function __construct(
 +    Connection $connection,
@@ -346,201 +531,6 @@ index 0000000000..1ad3d59368
 +  }
 +
 +}
-diff --git a/core/lib/Drupal/Core/Database/Transaction.php b/core/lib/Drupal/Core/Database/Transaction.php
-index 76d5fc8f5f..187a010337 100644
---- a/core/lib/Drupal/Core/Database/Transaction.php
-+++ b/core/lib/Drupal/Core/Database/Transaction.php
-@@ -48,6 +48,7 @@ class Transaction {
-   protected $name;
- 
-   public function __construct(Connection $connection, $name = NULL) {
-+    @trigger_error(__CLASS__ . ' is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Instead, @todo. See https://www.drupal.org/node/5555555', E_USER_DEPRECATED);
-     $this->connection = $connection;
-     // If there is no transaction depth, then no transaction has started. Name
-     // the transaction 'drupal_transaction'.
-diff --git a/core/lib/Drupal/Core/Database/TransactionException.php b/core/lib/Drupal/Core/Database/TransactionException.php
-index c0380da549..9b580308e1 100644
---- a/core/lib/Drupal/Core/Database/TransactionException.php
-+++ b/core/lib/Drupal/Core/Database/TransactionException.php
-@@ -2,6 +2,8 @@
- 
- namespace Drupal\Core\Database;
- 
-+// @trigger_error('Drupal\\Core\\Database\\TransactionException is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Instead, @todo. See https://www.drupal.org/node/5555555', E_USER_DEPRECATED);
-+
- /**
-  * Exception thrown by an error in a database transaction.
-  */
-diff --git a/core/lib/Drupal/Core/Database/TransactionManager.php b/core/lib/Drupal/Core/Database/TransactionManager.php
-new file mode 100644
-index 0000000000..828a10ec42
---- /dev/null
-+++ b/core/lib/Drupal/Core/Database/TransactionManager.php
-@@ -0,0 +1,138 @@
-+<?php
-+
-+namespace Drupal\Core\Database;
-+
-+use Drupal\Core\Database\Exception\TransactionNameNonUniqueException;
-+
-+/**
-+ * @todo
-+ */
-+class TransactionManager {
-+
-+  /**
-+   * Tracks the number of "layers" of transactions currently active.
-+   *
-+   * On many databases transactions cannot nest.  Instead, we track
-+   * nested calls to transactions and collapse them into a single
-+   * transaction.
-+   *
-+   * @var array
-+   */
-+  private array $stack = [];
-+
-+  /**
-+   * @param \Drupal\Core\Database\Connection $connection
-+   *   The database connection.
-+   */
-+  public function __construct(
-+    protected readonly Connection $connection,
-+  ) {
-+  }
-+
-+  /**
-+   * Determines if there is an active transaction open.
-+   *
-+   * @return bool
-+   *   TRUE if we're currently in a transaction, FALSE otherwise.
-+   */
-+  public function inTransaction(): bool {
-+    return $this->currentNestingDepth() > 0;
-+  }
-+
-+  /**
-+   * Returns a new Transaction object on the database connection.
-+   *
-+   * @param \Drupal\Core\Database\Connection $connection
-+   *   The database connection.
-+   * @param string $name
-+   *   (optional) The name of the savepoint.
-+   *
-+   * @return \Drupal\Core\Database\Transaction
-+   *   A Transaction object.
-+   *
-+   * @see \Drupal\Core\Database\ManagedTransaction
-+   */
-+  public function start(Connection $connection, string $name = '') {
-+    // If there is no transaction depth, then no transaction has started. Name
-+    // the transaction 'drupal_transaction'.
-+    if ($this->currentNestingDepth() === 0) {
-+      $name = 'drupal_transaction';
-+    }
-+    // Within transactions, savepoints are used. Each savepoint requires a
-+    // name. So if no name is present we need to create one.
-+    elseif (!$name) {
-+      $name = 'savepoint_' . $this->currentNestingDepth();
-+    }
-+    $transaction = (new ManagedTransaction($connection, $name, $this->currentNestingDepth()))->initialize();
-+    $this->push($name);
-+    return $transaction;
-+  }
-+
-+  /**
-+   * Returns the transaction nesting layers.
-+   *
-+   * @return int
-+   *   The transaction nesting layers.
-+   */
-+  public function stack(): array {
-+    return $this->stack;
-+  }
-+  public function setStack(array $layers): void {
-+    $this->stack = $layers;
-+  }
-+
-+  /**
-+   * Returns the current depth of the transaction nesting.
-+   *
-+   * @return int
-+   *   The current depth of the transaction nesting.
-+   */
-+  public function currentNestingDepth(): int {
-+    return count($this->stack());
-+  }
-+
-+  /**
-+   * Checks if a named transaction is active.
-+   *
-+   * @param string $name
-+   *   The name of the transaction.
-+   *
-+   * @return bool
-+   *   TRUE if the transaction is active, FALSE otherwise.
-+   */
-+  public function has(string $name): bool {
-+    return isset($this->stack()[$name]);
-+  }
-+
-+  /**
-+   * Marks a named transaction as committable.
-+   *
-+   * @param string $name
-+   *   The name of the transaction.
-+   */
-+  public function markCommittable(string $name): void {
-+    if ($this->has($name)) {
-+      $this->stack[$name] = FALSE;
-+    }
-+  }
-+
-+  /**
-+   * Pushes the transaction on the stack.
-+   *
-+   * This increases the depth of transaction nesting.
-+   *
-+   * @param string $name
-+   *   The name of the transaction.
-+   *
-+   * @throws \Drupal\Core\Database\Exception\TransactionNameNonUniqueException
-+   *
-+   * @see \Drupal\Core\Database\Transaction
-+   */
-+  protected function push(string $name): void {
-+    if ($this->has($name)) {
-+      throw new TransactionNameNonUniqueException($name . " is already in use.");
-+    }
-+    $this->stack[$name] = $name;
-+  }
-+
-+}
-diff --git a/core/lib/Drupal/Core/Database/TransactionNameNonUniqueException.php b/core/lib/Drupal/Core/Database/TransactionNameNonUniqueException.php
-index 8265620b25..e74039500a 100644
---- a/core/lib/Drupal/Core/Database/TransactionNameNonUniqueException.php
-+++ b/core/lib/Drupal/Core/Database/TransactionNameNonUniqueException.php
-@@ -2,6 +2,8 @@
- 
- namespace Drupal\Core\Database;
- 
-+@trigger_error('Drupal\\Core\\Database\\TransactionNameNonUniqueException is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Instead, @todo. See https://www.drupal.org/node/5555555', E_USER_DEPRECATED);
-+
- /**
-  * Exception thrown when a savepoint or transaction name occurs twice.
-  */
-diff --git a/core/lib/Drupal/Core/Database/TransactionNoActiveException.php b/core/lib/Drupal/Core/Database/TransactionNoActiveException.php
-index b868a3d155..f1638b4881 100644
---- a/core/lib/Drupal/Core/Database/TransactionNoActiveException.php
-+++ b/core/lib/Drupal/Core/Database/TransactionNoActiveException.php
-@@ -2,6 +2,8 @@
- 
- namespace Drupal\Core\Database;
- 
-+@trigger_error('Drupal\\Core\\Database\\TransactionNoActiveException is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Instead, @todo. See https://www.drupal.org/node/5555555', E_USER_DEPRECATED);
-+
- /**
-  * Exception for when popTransaction() is called with no active transaction.
-  */
 diff --git a/core/modules/mysql/src/Driver/Database/mysql/Connection.php b/core/modules/mysql/src/Driver/Database/mysql/Connection.php
 index 73239a4536..5e40c71cdf 100644
 --- a/core/modules/mysql/src/Driver/Database/mysql/Connection.php
@@ -555,7 +545,7 @@ index 73239a4536..5e40c71cdf 100644
      foreach (array_reverse($this->transactionLayers) as $name => $active) {
        // Stop once we found an active transaction.
 diff --git a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
-index ebbf60826a..47e718c3df 100644
+index ebbf60826a..fd7ccd8edc 100644
 --- a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
 +++ b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
 @@ -57,7 +57,7 @@ class DriverSpecificTransactionTestBase extends DriverSpecificDatabaseTestBase {
@@ -563,7 +553,7 @@ index ebbf60826a..47e718c3df 100644
     */
    protected function transactionOuterLayer($suffix, $rollback = FALSE, $ddl_statement = FALSE) {
 -    $depth = $this->connection->transactionDepth();
-+    $depth = $this->connection->transactionManager()->currentNestingDepth();
++    $depth = $this->connection->transactionManager()->stackDepth();
      $txn = $this->connection->startTransaction();
  
      // Insert a single row into the testing table.
@@ -572,7 +562,7 @@ index ebbf60826a..47e718c3df 100644
        // This rollback should propagate to the last savepoint.
        $txn->rollBack();
 -      $this->assertSame($depth, $this->connection->transactionDepth(), 'Transaction has rolled back to the last savepoint after calling rollBack().');
-+      $this->assertSame($depth, $this->connection->transactionManager()->currentNestingDepth(), 'Transaction has rolled back to the last savepoint after calling rollBack().');
++      $this->assertSame($depth, $this->connection->transactionManager()->stackDepth(), 'Transaction has rolled back to the last savepoint after calling rollBack().');
      }
    }
  
@@ -581,7 +571,7 @@ index ebbf60826a..47e718c3df 100644
     */
    protected function transactionInnerLayer($suffix, $rollback = FALSE, $ddl_statement = FALSE) {
 -    $depth = $this->connection->transactionDepth();
-+    $depth = $this->connection->transactionManager()->currentNestingDepth();
++    $depth = $this->connection->transactionManager()->stackDepth();
      // Start a transaction. If we're being called from ->transactionOuterLayer,
      // then we're already in a transaction. Normally, that would make starting
      // a transaction here dangerous, but the database API handles this problem
@@ -589,7 +579,7 @@ index ebbf60826a..47e718c3df 100644
      $txn = $this->connection->startTransaction();
  
 -    $depth2 = $this->connection->transactionDepth();
-+    $depth2 = $this->connection->transactionManager()->currentNestingDepth();
++    $depth2 = $this->connection->transactionManager()->stackDepth();
      $this->assertGreaterThan($depth, $depth2, 'Transaction depth has increased with new transaction.');
  
      // Insert a single row into the testing table.
@@ -598,7 +588,7 @@ index ebbf60826a..47e718c3df 100644
        // This rollback should propagate to the last savepoint.
        $txn->rollBack();
 -      $this->assertSame($depth, $this->connection->transactionDepth(), 'Transaction has rolled back to the last savepoint after calling rollBack().');
-+      $this->assertSame($depth, $this->connection->transactionManager()->currentNestingDepth(), 'Transaction has rolled back to the last savepoint after calling rollBack().');
++      $this->assertSame($depth, $this->connection->transactionManager()->stackDepth(), 'Transaction has rolled back to the last savepoint after calling rollBack().');
      }
    }
  
