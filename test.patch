@@ -387,15 +387,14 @@ index 5d3434228a..b4d9426b9b 100644
   *
 diff --git a/core/lib/Drupal/Core/Database/TransactionManager.php b/core/lib/Drupal/Core/Database/TransactionManager.php
 new file mode 100644
-index 0000000000..a4bed73e98
+index 0000000000..158cb19512
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/TransactionManager.php
-@@ -0,0 +1,210 @@
+@@ -0,0 +1,171 @@
 +<?php
 +
 +namespace Drupal\Core\Database;
 +
-+use Drupal\Core\Database\Exception\TransactionCommitFailedException;
 +use Drupal\Core\Database\Exception\TransactionNameNonUniqueException;
 +use Drupal\Core\Database\Exception\TransactionNoActiveException;
 +use Drupal\Core\Database\Exception\TransactionOutOfOrderException;
@@ -450,7 +449,7 @@ index 0000000000..a4bed73e98
 +   * @param string $name
 +   *   (optional) The name of the savepoint.
 +   *
-+   * @return \Drupal\Core\Database\TransactionRoot|\Drupal\Core\Database\TransactionSavepoint
++   * @return \Drupal\Core\Database\TransactionInterface
 +   *   A Transaction object.
 +   *
 +   * @throws \Drupal\Core\Database\Exception\TransactionNameNonUniqueException
@@ -471,8 +470,7 @@ index 0000000000..a4bed73e98
 +      throw new TransactionNameNonUniqueException($name . " is already in use.");
 +    }
 +
-+    // Push the transaction on the stack, increasing the depth of transaction
-+    // nesting.
++    // Push the transaction on the stack, increasing its depth.
 +    $transaction = (new TransactionRoot($connection, $name, $this->stackDepth()))->initialize();
 +    $this->stack[$name] = $name;
 +
@@ -480,10 +478,10 @@ index 0000000000..a4bed73e98
 +  }
 +
 +  /**
-+   * Returns the current depth of the transaction nesting.
++   * Returns the current depth of the transaction stack.
 +   *
 +   * @return int
-+   *   The current depth of the transaction nesting.
++   *   The current depth of the transaction stack.
 +   */
 +  public function stackDepth(): int {
 +    return count($this->stack);
@@ -496,61 +494,24 @@ index 0000000000..a4bed73e98
 +   *   The name of the transaction.
 +   *
 +   * @return bool
-+   *   TRUE if the transaction is active, FALSE otherwise.
++   *   TRUE if the named transaction is active, FALSE otherwise.
 +   */
 +  public function has(string $name): bool {
 +    return isset($this->stack[$name]);
 +  }
 +
 +  /**
-+   * Marks a named transaction as committable.
++   * Removes a transaction from the stack.
++   *
++   * This method should not be called outside of TransactionInterface objects.
 +   *
 +   * @param string $name
 +   *   The name of the transaction.
-+   */
-+  public function markCommittable(string $name): void {
-+    if ($this->has($name)) {
-+      $this->stack[$name] = FALSE;
-+    }
-+  }
-+
-+  public function popCommittableTransactions() {
-+    // Commit all the committable layers.
-+    foreach (array_reverse($this->stack) as $name => $active) {
-+      // Stop once we found an active transaction.
-+      if ($active) {
-+        break;
-+      }
-+
-+      // If there are no more layers left then we should commit.
-+      unset($this->stack[$name]);
-+      if ($this->stackDepth() === 0) {
-+        $this->doCommit();
-+      }
-+      else {
-+        $this->connection->query('RELEASE SAVEPOINT ' . $name);
-+      }
-+    }
-+  }
-+
-+  /**
-+   * Do the actual commit, invoke post-commit callbacks.
 +   *
 +   * @internal
 +   */
-+  private function doCommit() {
-+    $success = $this->connection->getClientConnection()->commit();
-+    if (!empty($this->connection->rootTransactionEndCallbacks)) {
-+      $callbacks = $this->connection->rootTransactionEndCallbacks;
-+      $this->connection->rootTransactionEndCallbacks = [];
-+      foreach ($callbacks as $callback) {
-+        call_user_func($callback, $success);
-+      }
-+    }
-+
-+    if (!$success) {
-+      throw new TransactionCommitFailedException();
-+    }
++  public function pop(string $name): void {
++    unset($this->stack[$name]);
 +  }
 +
 +  public function rollBack($savepoint_name = 'drupal_transaction') {
@@ -657,13 +618,17 @@ index d7b07df3ea..689c964ceb 100644
   */
 diff --git a/core/lib/Drupal/Core/Database/TransactionRoot.php b/core/lib/Drupal/Core/Database/TransactionRoot.php
 new file mode 100644
-index 0000000000..07d0a9f378
+index 0000000000..26c3e229cf
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/TransactionRoot.php
-@@ -0,0 +1,95 @@
+@@ -0,0 +1,122 @@
 +<?php
 +
 +namespace Drupal\Core\Database;
++
++use Drupal\Core\Database\Exception\TransactionCommitFailedException;
++use Drupal\Core\Database\Exception\TransactionNoActiveException;
++use Drupal\Core\Database\Exception\TransactionOutOfOrderException;
 +
 +// dump(\Drupal\Core\Utility\Error::formatBacktrace(debug_backtrace()));
 +
@@ -698,25 +663,48 @@ index 0000000000..07d0a9f378
 +  }
 +
 +  public function __destruct() {
-+// global $yyy; if ($yyy) dump([__METHOD__, $this->name, $this->depth]);
 +    // If we rolled back then the transaction would have already been popped.
-+    if (!$this->rolledBack) {
-+      // The transaction has already been committed earlier. There is nothing we
-+      // need to do. If this transaction was part of an earlier out-of-order
-+      // rollback, an exception would already have been thrown by
-+      // Database::rollBack().
-+      if (!$this->connection->transactionManager()->has($this->name)) {
-+        return;
-+      }
++    if ($this->rolledBack) {
++      return;
++    }
 +
-+      // Mark this layer as committable.
-+      $this->connection->transactionManager()->markCommittable($this->name);
-+      $this->connection->transactionManager()->popCommittableTransactions();
++    // Check destruction is inorder.
++    if (!$this->connection->transactionManager()->has($this->name)) {
++      throw new TransactionOutOfOrderException();
++    }
++    if ($this->depth !== $this->connection->transactionManager()->stackDepth() - 1) {
++      throw new TransactionOutOfOrderException();
++    }
++
++    if ($this->stackDepth() === 0) {
++      $this->doCommit();
++    }
++    else {
++      $this->connection->query('RELEASE SAVEPOINT ' . $this->name);
++    }
++
++    $this->connection->transactionManager()->pop($this->name);
++  }
++
++  /**
++   * Do the actual commit, invoke post-commit callbacks.
++   */
++  private function doCommit() {
++    $success = $this->connection->getClientConnection()->commit();
++    if (!empty($this->connection->rootTransactionEndCallbacks)) {
++      $callbacks = $this->connection->rootTransactionEndCallbacks;
++      $this->connection->rootTransactionEndCallbacks = [];
++      foreach ($callbacks as $callback) {
++        call_user_func($callback, $success);
++      }
++    }
++
++    if (!$success) {
++      throw new TransactionCommitFailedException();
 +    }
 +  }
 +
 +  public function initialize(): static {
-+// global $yyy; if ($yyy) dump([__METHOD__, $this->name, $this->depth]);
 +    // If we're already in a Drupal transaction then we want to create a
 +    // database savepoint, rather than try to begin another database
 +    // transaction.
