@@ -1,5 +1,5 @@
 diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
-index 7e405e1b1b..1ccb5ca2aa 100644
+index 7e405e1b1b..fdde055fcc 100644
 --- a/core/lib/Drupal/Core/Database/Connection.php
 +++ b/core/lib/Drupal/Core/Database/Connection.php
 @@ -62,6 +62,11 @@ abstract class Connection {
@@ -20,7 +20,7 @@ index 7e405e1b1b..1ccb5ca2aa 100644
     * @var callable[]
 +   *
 +   * @deprecated in drupal:10.0.2 and is removed from drupal:11.0.0. The
-+   *   transaction end callbacks are now managed by TransactionRoot.
++   *   transaction end callbacks are now managed by TransactionManager.
 +   *
 +   * @see https://www.drupal.org/node/5555555
     */
@@ -92,14 +92,16 @@ index 7e405e1b1b..1ccb5ca2aa 100644
    }
  
    /**
-@@ -1311,6 +1354,7 @@ public function inTransaction() {
+@@ -1311,7 +1354,8 @@ public function inTransaction() {
     *   The current transaction depth.
     */
    public function transactionDepth() {
+-    return count($this->transactionLayers);
 +    @trigger_error(__METHOD__ . '() is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Instead, @todo. See https://www.drupal.org/node/5555555', E_USER_DEPRECATED);
-     return count($this->transactionLayers);
++    $this->transactionManager()->stackDepth();
    }
  
+   /**
 @@ -1326,8 +1370,7 @@ public function transactionDepth() {
     * @see \Drupal\Core\Database\Transaction
     */
@@ -277,7 +279,7 @@ index 76d5fc8f5f..187a010337 100644
      // the transaction 'drupal_transaction'.
 diff --git a/core/lib/Drupal/Core/Database/TransactionBuddy.php b/core/lib/Drupal/Core/Database/TransactionBuddy.php
 new file mode 100644
-index 0000000000..cb97c3c56c
+index 0000000000..94e5de6e20
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/TransactionBuddy.php
 @@ -0,0 +1,22 @@
@@ -285,7 +287,7 @@ index 0000000000..cb97c3c56c
 +
 +namespace Drupal\Core\Database;
 +
-+class TransactionBuddy extends Transaction implements TransactionInterface {
++class TransactionBuddy extends Transaction {
 +
 +  public function __construct(
 +    protected readonly TransactionManager $transactionManager,
@@ -295,7 +297,7 @@ index 0000000000..cb97c3c56c
 +  }
 +
 +  public function __destruct() {
-+    $this->transactionManager->ravanate($this->name);
++    $this->transactionManager->pop($this->name);
 +  }
 +
 +  public function rollBack() {
@@ -303,34 +305,15 @@ index 0000000000..cb97c3c56c
 +  }
 +
 +}
-diff --git a/core/lib/Drupal/Core/Database/TransactionInterface.php b/core/lib/Drupal/Core/Database/TransactionInterface.php
-new file mode 100644
-index 0000000000..dca25b7c2f
---- /dev/null
-+++ b/core/lib/Drupal/Core/Database/TransactionInterface.php
-@@ -0,0 +1,9 @@
-+<?php
-+
-+namespace Drupal\Core\Database;
-+
-+/**
-+ * @todo
-+ */
-+interface TransactionInterface {
-+}
 diff --git a/core/lib/Drupal/Core/Database/TransactionManager.php b/core/lib/Drupal/Core/Database/TransactionManager.php
 new file mode 100644
-index 0000000000..9c48fc3082
+index 0000000000..bb2bd85fc0
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/TransactionManager.php
-@@ -0,0 +1,182 @@
+@@ -0,0 +1,168 @@
 +<?php
 +
 +namespace Drupal\Core\Database;
-+
-+use Drupal\Core\Database\TransactionNameNonUniqueException;
-+use Drupal\Core\Database\TransactionNoActiveException;
-+use Drupal\Core\Database\TransactionOutOfOrderException;
 +
 +/**
 + * @todo
@@ -389,7 +372,7 @@ index 0000000000..9c48fc3082
 +   * @param string $name
 +   *   (optional) The name of the savepoint.
 +   *
-+   * @return \Drupal\Core\Database\TransactionInterface
++   * @return \Drupal\Core\Database\Transaction
 +   *   A Transaction object.
 +   *
 +   * @throws \Drupal\Core\Database\TransactionNameNonUniqueException
@@ -411,7 +394,7 @@ index 0000000000..9c48fc3082
 +    }
 +
 +    // Push the transaction on the stack, increasing its depth.
-+    $this->stack[$name] = (new TransactionRoot($connection, $name, $this->stackDepth()))->initialize();
++    $this->stack[$name] = (new TransactionStackItem($connection, $name, $this->stackDepth()))->initialize();
 +
 +    return new TransactionBuddy($this, $name);
 +  }
@@ -439,22 +422,12 @@ index 0000000000..9c48fc3082
 +    return isset($this->stack[$name]);
 +  }
 +
-+  public function ravanate(string $name): bool {
-+    return $this->stack[$name]->ravanate();
-+    unset($this->stack[$name]);
-+  }
++  public function pop(string $name): bool {
++    if (!$this->has($this->has($name)) {
++      throw new TransactionOutOfOrderException();
++    }
 +
-+  /**
-+   * Removes a transaction from the stack.
-+   *
-+   * This method should not be called outside of TransactionInterface objects.
-+   *
-+   * @param string $name
-+   *   The name of the transaction.
-+   *
-+   * @internal
-+   */
-+  public function pop(string $name): void {
++    $this->stack[$name]->ravanate();
 +    unset($this->stack[$name]);
 +  }
 +
@@ -521,19 +494,15 @@ index 0000000000..cb793d7abe
 + */
 +interface TransactionManagerInterface {
 +}
-diff --git a/core/lib/Drupal/Core/Database/TransactionRoot.php b/core/lib/Drupal/Core/Database/TransactionRoot.php
+diff --git a/core/lib/Drupal/Core/Database/TransactionStackItem.php b/core/lib/Drupal/Core/Database/TransactionStackItem.php
 new file mode 100644
-index 0000000000..4c6e2b33d3
+index 0000000000..86a0e8e73b
 --- /dev/null
-+++ b/core/lib/Drupal/Core/Database/TransactionRoot.php
-@@ -0,0 +1,122 @@
++++ b/core/lib/Drupal/Core/Database/TransactionStackItem.php
+@@ -0,0 +1,118 @@
 +<?php
 +
 +namespace Drupal\Core\Database;
-+
-+use Drupal\Core\Database\TransactionCommitFailedException;
-+use Drupal\Core\Database\TransactionNoActiveException;
-+use Drupal\Core\Database\TransactionOutOfOrderException;
 +
 +// dump(\Drupal\Core\Utility\Error::formatBacktrace(debug_backtrace()));
 +
@@ -556,7 +525,7 @@ index 0000000000..4c6e2b33d3
 + * directly. Instead, call ->startTransaction(), from the appropriate connection
 + * object.
 + */
-+class TransactionRoot extends Transaction implements TransactionInterface {
++class TransactionStackItem extends Transaction implements TransactionStackItemInterface {
 +
 +  public function __construct(
 +    Connection $connection,
@@ -574,12 +543,12 @@ index 0000000000..4c6e2b33d3
 +    }
 +
 +    // Check destruction is inorder.
-+    if (!$this->connection->transactionManager()->has($this->name)) {
++/*    if (!$this->connection->transactionManager()->has($this->name)) {
 +      throw new TransactionOutOfOrderException();
 +    }
 +    if ($this->depth !== $this->connection->transactionManager()->stackDepth() - 1) {
 +      throw new TransactionOutOfOrderException();
-+    }
++    }*/
 +
 +    if ($this->connection->transactionManager()->stackDepth() === 1) {
 +      $this->doCommit();
@@ -649,51 +618,18 @@ index 0000000000..4c6e2b33d3
 +  }
 +
 +}
-diff --git a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
-index ebbf60826a..fd7ccd8edc 100644
---- a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
-+++ b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
-@@ -57,7 +57,7 @@ class DriverSpecificTransactionTestBase extends DriverSpecificDatabaseTestBase {
-    *   Whether to execute a DDL statement during the inner transaction.
-    */
-   protected function transactionOuterLayer($suffix, $rollback = FALSE, $ddl_statement = FALSE) {
--    $depth = $this->connection->transactionDepth();
-+    $depth = $this->connection->transactionManager()->stackDepth();
-     $txn = $this->connection->startTransaction();
- 
-     // Insert a single row into the testing table.
-@@ -80,7 +80,7 @@ protected function transactionOuterLayer($suffix, $rollback = FALSE, $ddl_statem
-       // Roll back the transaction, if requested.
-       // This rollback should propagate to the last savepoint.
-       $txn->rollBack();
--      $this->assertSame($depth, $this->connection->transactionDepth(), 'Transaction has rolled back to the last savepoint after calling rollBack().');
-+      $this->assertSame($depth, $this->connection->transactionManager()->stackDepth(), 'Transaction has rolled back to the last savepoint after calling rollBack().');
-     }
-   }
- 
-@@ -98,14 +98,14 @@ protected function transactionOuterLayer($suffix, $rollback = FALSE, $ddl_statem
-    *   Whether to execute a DDL statement during the transaction.
-    */
-   protected function transactionInnerLayer($suffix, $rollback = FALSE, $ddl_statement = FALSE) {
--    $depth = $this->connection->transactionDepth();
-+    $depth = $this->connection->transactionManager()->stackDepth();
-     // Start a transaction. If we're being called from ->transactionOuterLayer,
-     // then we're already in a transaction. Normally, that would make starting
-     // a transaction here dangerous, but the database API handles this problem
-     // for us by tracking the nesting and avoiding the danger.
-     $txn = $this->connection->startTransaction();
- 
--    $depth2 = $this->connection->transactionDepth();
-+    $depth2 = $this->connection->transactionManager()->stackDepth();
-     $this->assertGreaterThan($depth, $depth2, 'Transaction depth has increased with new transaction.');
- 
-     // Insert a single row into the testing table.
-@@ -138,7 +138,7 @@ protected function transactionInnerLayer($suffix, $rollback = FALSE, $ddl_statem
-       // Roll back the transaction, if requested.
-       // This rollback should propagate to the last savepoint.
-       $txn->rollBack();
--      $this->assertSame($depth, $this->connection->transactionDepth(), 'Transaction has rolled back to the last savepoint after calling rollBack().');
-+      $this->assertSame($depth, $this->connection->transactionManager()->stackDepth(), 'Transaction has rolled back to the last savepoint after calling rollBack().');
-     }
-   }
- 
+diff --git a/core/lib/Drupal/Core/Database/TransactionStackItemInterface.php b/core/lib/Drupal/Core/Database/TransactionStackItemInterface.php
+new file mode 100644
+index 0000000000..9a3c03ddf7
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/TransactionStackItemInterface.php
+@@ -0,0 +1,9 @@
++<?php
++
++namespace Drupal\Core\Database;
++
++/**
++ * @todo
++ */
++interface TransactionStackItemInterface {
++}
