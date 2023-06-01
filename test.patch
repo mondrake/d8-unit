@@ -306,10 +306,10 @@ index 76d5fc8f5f..799dcfabf5 100644
    }
 diff --git a/core/lib/Drupal/Core/Database/Transaction/ManagerStackItem.php b/core/lib/Drupal/Core/Database/Transaction/ManagerStackItem.php
 new file mode 100644
-index 0000000000..1f7a9813ca
+index 0000000000..2473b2dc8c
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/Transaction/ManagerStackItem.php
-@@ -0,0 +1,16 @@
+@@ -0,0 +1,28 @@
 +<?php
 +
 +namespace Drupal\Core\Database\Transaction;
@@ -317,7 +317,12 @@ index 0000000000..1f7a9813ca
 +/**
 + * @todo
 + */
-+class ManagerStackItem {
++final class ManagerStackItem {
++
++  /**
++   * A boolean value to indicate whether this transaction has been rolled back.
++   */
++  private bool $rolledBack = FALSE;
 +
 +  public function __construct(
 +    public readonly string $name,
@@ -325,13 +330,20 @@ index 0000000000..1f7a9813ca
 +  ) {
 +  }
 +
++  public function markRolledback(): void {
++    $this->rolledBack = TRUE;
++  }
++
++  public function isRolledback(): bool {
++    return $this->rolledBack;
++  }
 +}
 diff --git a/core/lib/Drupal/Core/Database/TransactionManager.php b/core/lib/Drupal/Core/Database/TransactionManager.php
 new file mode 100644
-index 0000000000..e1a91a12e1
+index 0000000000..558664baaf
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/TransactionManager.php
-@@ -0,0 +1,272 @@
+@@ -0,0 +1,274 @@
 +<?php
 +
 +namespace Drupal\Core\Database;
@@ -502,11 +514,13 @@ index 0000000000..e1a91a12e1
 +      // If it is the last Drupal transaction open, we can rollback the client
 +      // transaction.
 +      $this->rollbackClientTransaction();
++      $this->stack[$name]->markRolledback();
 +      $this->connectionTransactionState = static::CONNECTION_ROLLED_BACK;
 +    }
 +    else {
 +      if ($this->stack[$name]->type === static::ITEM_SAVEPOINT) {
 +        $this->releaseClientSavepoint($name);
++        $this->stack[$name]->markRolledback();
 +      }
 +    }
 +  }
@@ -619,3 +633,21 @@ index 0000000000..cb793d7abe
 + */
 +interface TransactionManagerInterface {
 +}
+diff --git a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
+index ebbf60826a..6699b43e18 100644
+--- a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
++++ b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
+@@ -395,11 +395,11 @@ public function testTransactionStacking() {
+     // Now rollback the inner transaction.
+     $transaction2->rollBack();
+     unset($transaction2);
+-    $this->assertTrue($this->connection->inTransaction(), 'Still in a transaction after popping the outer transaction');
++    $this->assertTrue($this->connection->inTransaction(), 'Still in a transaction after rolling back the outer transaction');
+     // Pop the outer transaction, it should commit.
+     $this->insertRow('outer-after-inner-rollback');
+     unset($transaction);
+-    $this->assertFalse($this->connection->inTransaction(), 'Transaction closed after popping the inner transaction');
++    $this->assertFalse($this->connection->inTransaction(), 'Transaction closed after rolling back the inner transaction');
+     $this->assertRowPresent('outer');
+     $this->assertRowAbsent('inner');
+     $this->assertRowPresent('outer-after-inner-rollback');
