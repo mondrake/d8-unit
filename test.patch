@@ -1,5 +1,5 @@
 diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
-index 7e405e1b1b..81212cfe9d 100644
+index 7e405e1b1b..bfee12cdc9 100644
 --- a/core/lib/Drupal/Core/Database/Connection.php
 +++ b/core/lib/Drupal/Core/Database/Connection.php
 @@ -62,6 +62,11 @@ abstract class Connection {
@@ -107,7 +107,7 @@ index 7e405e1b1b..81212cfe9d 100644
    public function startTransaction($name = '') {
 -    $class = $this->getDriverClass('Transaction');
 -    return new $class($this, $name);
-+    return $this->transactionManager()->start($this, $name);
++    return $this->transactionManager()->start($name);
    }
  
    /**
@@ -306,10 +306,10 @@ index 76d5fc8f5f..799dcfabf5 100644
    }
 diff --git a/core/lib/Drupal/Core/Database/TransactionManager.php b/core/lib/Drupal/Core/Database/TransactionManager.php
 new file mode 100644
-index 0000000000..07e51b9afe
+index 0000000000..15bac50863
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/TransactionManager.php
-@@ -0,0 +1,181 @@
+@@ -0,0 +1,257 @@
 +<?php
 +
 +namespace Drupal\Core\Database;
@@ -343,13 +343,36 @@ index 0000000000..07e51b9afe
 +  }
 +
 +  /**
++   * Checks if a named transaction is active.
++   *
++   * @param string $name
++   *   The name of the transaction.
++   *
++   * @return bool
++   *   TRUE if the named transaction is active, FALSE otherwise.
++   */
++  public function has(string $name): bool {
++    return isset($this->stack[$name]);
++  }
++
++  /**
++   * Returns the current depth of the transaction stack.
++   *
++   * @return int
++   *   The current depth of the transaction stack.
++   */
++  public function stackDepth(): int {
++    return count($this->stack);
++  }
++
++  /**
 +   * Determines if there is an active transaction open.
 +   *
 +   * @return bool
 +   *   TRUE if we're currently in a transaction, FALSE otherwise.
 +   */
 +  public function inTransaction(): bool {
-+    return $this->stackDepth() > 0;
++    return (bool) $this->stackDepth();
 +  }
 +
 +  public function root() {
@@ -369,8 +392,6 @@ index 0000000000..07e51b9afe
 +  /**
 +   * Returns a new Transaction object on the database connection.
 +   *
-+   * @param \Drupal\Core\Database\Connection $connection
-+   *   The database connection.
 +   * @param string $name
 +   *   (optional) The name of the savepoint.
 +   *
@@ -379,10 +400,10 @@ index 0000000000..07e51b9afe
 +   *
 +   * @throws \Drupal\Core\Database\TransactionNameNonUniqueException
 +   */
-+  public function start(Connection $connection, string $name = '') {
++  public function start(string $name = '') {
 +    // If there is no transaction depth, then no transaction has started. Name
 +    // the transaction 'drupal_transaction'.
-+    if ($this->stackDepth() === 0) {
++    if (!$this->inTransaction()) {
 +      $name = 'drupal_transaction';
 +    }
 +    // Within transactions, savepoints are used. Each savepoint requires a
@@ -395,33 +416,70 @@ index 0000000000..07e51b9afe
 +      throw new TransactionNameNonUniqueException($name . " is already in use.");
 +    }
 +
++    // Do the client-level processing.
++    // If we're already in a Drupal transaction then we want to create a
++    // database savepoint, rather than try to begin another database
++    // transaction.
++    if ($this->stackDepth() === 0) {
++      $this->beginClientTransaction();
++    }
++    else {
++      $this->addClientSavepoint($name);
++    }
++
 +    // Push the transaction on the stack, increasing its depth.
-+    $this->stack[$name] = (new TransactionStackItem($connection, $name))->initialize();
++    $this->stack[$name] = new TransactionStackItem($connection, $name);
 +
 +    return new Transaction($connection, $name);
 +  }
 +
 +  /**
-+   * Returns the current depth of the transaction stack.
++   * Begins a transaction on the client connection.
 +   *
-+   * @return int
-+   *   The current depth of the transaction stack.
++   * @return bool
++   *   Returns TRUE on success or FALSE on failure.
 +   */
-+  public function stackDepth(): int {
-+    return count($this->stack);
++  protected function beginClientTransaction(): bool {
++    return $this->connection->getClientConnection()->beginTransaction();
 +  }
 +
 +  /**
-+   * Checks if a named transaction is active.
++   * Adds a savepoint on the client transaction.
 +   *
 +   * @param string $name
-+   *   The name of the transaction.
++   *   The name of the savepoint.
 +   *
 +   * @return bool
-+   *   TRUE if the named transaction is active, FALSE otherwise.
++   *   Returns TRUE on success or FALSE on failure.
 +   */
-+  public function has(string $name): bool {
-+    return isset($this->stack[$name]);
++  protected function addClientSavepoint(string $name): bool {
++    $this->connection->query('SAVEPOINT ' . $name);
++    return TRUE;
++  }
++
++  /**
++   * Releases a savepoint on the client transaction.
++   *
++   * @param string $name
++   *   The name of the savepoint.
++   *
++   * @return bool
++   *   Returns TRUE on success or FALSE on failure.
++   */
++  protected function releaseClientSavepoint(string $name): bool {
++    $this->connection->query('RELEASE SAVEPOINT ' . $name);
++    return TRUE;
++  }
++
++  /**
++   * Commits a client transaction.
++   *
++   * @return bool
++   *   Returns TRUE on success or FALSE on failure.
++   */
++  protected function commitClientTransaction(): bool {
++    $this->doCommit();
++    return TRUE;
 +  }
 +
 +  public function pop(string $name): bool {
@@ -429,18 +487,36 @@ index 0000000000..07e51b9afe
 +      throw new TransactionOutOfOrderException();
 +    }
 +
-+    // If we are popping an item that is not at the end of the stack, then we
-+    // no longer need the items pushed after that, since we will be releasing
-+    // a savepoint or committing for the popped item.
-+/*    while (($last = array_key_last($this->stack)) !== $name) {
-+      unset($this->stack[$last]);
-+    }*/
++    // Do the client-level processing.
++    if ($this->stackDepth() === 1) {
++      $this->commitClientTransaction();
++    }
++    else {
++      $this->releaseClientSavepoint($name);
++    }
 +
 +    // Release the savepoint or commit the item, then remove it from the stack.
-+    $this->stack[$name]->ravanate();
 +    unset($this->stack[$name]);
 +
 +    return TRUE;
++  }
++
++  /**
++   * Do the actual commit, invoke post-commit callbacks.
++   */
++  private function doCommit() {
++    $success = $this->connection->getClientConnection()->commit();
++    if (!empty($this->connection->rootTransactionEndCallbacks)) {
++      $callbacks = $this->connection->rootTransactionEndCallbacks;
++      $this->connection->rootTransactionEndCallbacks = [];
++      foreach ($callbacks as $callback) {
++        call_user_func($callback, $success);
++      }
++    }
++
++    if (!$success) {
++      throw new TransactionCommitFailedException();
++    }
 +  }
 +
 +  public function rollBack($savepoint_name = 'drupal_transaction') {
@@ -508,10 +584,10 @@ index 0000000000..cb793d7abe
 +}
 diff --git a/core/lib/Drupal/Core/Database/TransactionStackItem.php b/core/lib/Drupal/Core/Database/TransactionStackItem.php
 new file mode 100644
-index 0000000000..bda37014e8
+index 0000000000..7b4789fce8
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/TransactionStackItem.php
-@@ -0,0 +1,117 @@
+@@ -0,0 +1,68 @@
 +<?php
 +
 +namespace Drupal\Core\Database;
@@ -537,7 +613,7 @@ index 0000000000..bda37014e8
 + * directly. Instead, call ->startTransaction(), from the appropriate connection
 + * object.
 + */
-+class TransactionStackItem extends Transaction implements TransactionStackItemInterface {
++class TransactionStackItem extends Transaction {
 +
 +  public function __construct(Connection $connection, $name = NULL) {
 +    $this->connection = $connection;
@@ -561,56 +637,7 @@ index 0000000000..bda37014e8
 +      throw new TransactionOutOfOrderException();
 +    }*/
 +
-+    if ($this->connection->transactionManager()->stackDepth() === 1) {
-+      $this->doCommit();
-+    }
-+    else {
-+      $this->connection->query('RELEASE SAVEPOINT ' . $this->name);
-+    }
-+
 +    return TRUE;
-+  }
-+
-+  /**
-+   * Do the actual commit, invoke post-commit callbacks.
-+   */
-+  private function doCommit() {
-+    $success = $this->connection->getClientConnection()->commit();
-+    if (!empty($this->connection->rootTransactionEndCallbacks)) {
-+      $callbacks = $this->connection->rootTransactionEndCallbacks;
-+      $this->connection->rootTransactionEndCallbacks = [];
-+      foreach ($callbacks as $callback) {
-+        call_user_func($callback, $success);
-+      }
-+    }
-+
-+    if (!$success) {
-+      throw new TransactionCommitFailedException();
-+    }
-+  }
-+
-+  public function initialize(): static {
-+    // If we're already in a Drupal transaction then we want to create a
-+    // database savepoint, rather than try to begin another database
-+    // transaction.
-+    if ($this->connection->transactionManager()->stackDepth() !== 0) {
-+      $this->connection->query('SAVEPOINT ' . $this->name);
-+    }
-+    else {
-+      $this->beginTransaction();
-+    }
-+
-+    return $this;
-+  }
-+
-+  /**
-+   * Begins a transaction on the client connection.
-+   *
-+   * @return bool
-+   *   Returns TRUE on success or FALSE on failure.
-+   */
-+  protected function beginTransaction(): bool {
-+    return $this->connection->getClientConnection()->beginTransaction();
 +  }
 +
 +  /**
@@ -628,19 +655,4 @@ index 0000000000..bda37014e8
 +    $this->connection->transactionManager()->rollBack($this->name);
 +  }
 +
-+}
-diff --git a/core/lib/Drupal/Core/Database/TransactionStackItemInterface.php b/core/lib/Drupal/Core/Database/TransactionStackItemInterface.php
-new file mode 100644
-index 0000000000..9a3c03ddf7
---- /dev/null
-+++ b/core/lib/Drupal/Core/Database/TransactionStackItemInterface.php
-@@ -0,0 +1,9 @@
-+<?php
-+
-+namespace Drupal\Core\Database;
-+
-+/**
-+ * @todo
-+ */
-+interface TransactionStackItemInterface {
 +}
