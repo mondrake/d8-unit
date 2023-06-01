@@ -266,51 +266,50 @@ index 7e405e1b1b..81212cfe9d 100644
    }
  
 diff --git a/core/lib/Drupal/Core/Database/Transaction.php b/core/lib/Drupal/Core/Database/Transaction.php
-index 76d5fc8f5f..187a010337 100644
+index 76d5fc8f5f..799dcfabf5 100644
 --- a/core/lib/Drupal/Core/Database/Transaction.php
 +++ b/core/lib/Drupal/Core/Database/Transaction.php
-@@ -48,6 +48,7 @@ class Transaction {
+@@ -48,6 +48,12 @@ class Transaction {
    protected $name;
  
    public function __construct(Connection $connection, $name = NULL) {
++    if ($connection->transactionManager()->enabled) {
++      $this->connection = $connection;
++      $this->name = $name;
++      return;
++    }
 +    @trigger_error(__CLASS__ . ' is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Instead, @todo. See https://www.drupal.org/node/5555555', E_USER_DEPRECATED);
      $this->connection = $connection;
      // If there is no transaction depth, then no transaction has started. Name
      // the transaction 'drupal_transaction'.
-diff --git a/core/lib/Drupal/Core/Database/TransactionBuddy.php b/core/lib/Drupal/Core/Database/TransactionBuddy.php
-new file mode 100644
-index 0000000000..94e5de6e20
---- /dev/null
-+++ b/core/lib/Drupal/Core/Database/TransactionBuddy.php
-@@ -0,0 +1,22 @@
-+<?php
-+
-+namespace Drupal\Core\Database;
-+
-+class TransactionBuddy extends Transaction {
-+
-+  public function __construct(
-+    protected readonly TransactionManager $transactionManager,
-+    string $name = NULL,
-+  ) {
-+    $this->name = $name;
-+  }
-+
-+  public function __destruct() {
-+    $this->transactionManager->pop($this->name);
-+  }
-+
-+  public function rollBack() {
-+    $this->transactionManager->rollback($this->name);
-+  }
-+
-+}
+@@ -66,6 +72,10 @@ public function __construct(Connection $connection, $name = NULL) {
+   }
+ 
+   public function __destruct() {
++    if ($this->connection->transactionManager()->enabled) {
++      $this->connection->transactionManager()->pop($this->name);
++      return;
++    }
+     // If we rolled back then the transaction would have already been popped.
+     if (!$this->rolledBack) {
+       $this->connection->popTransaction($this->name);
+@@ -90,6 +100,10 @@ public function name() {
+    * @see \Drupal\Core\Database\Connection::rollBack()
+    */
+   public function rollBack() {
++    if ($this->connection->transactionManager()->enabled) {
++      $this->connection->transactionManager()->rollback($this->name);
++      return;
++    }
+     $this->rolledBack = TRUE;
+     $this->connection->rollBack($this->name);
+   }
 diff --git a/core/lib/Drupal/Core/Database/TransactionManager.php b/core/lib/Drupal/Core/Database/TransactionManager.php
 new file mode 100644
-index 0000000000..309118b3dd
+index 0000000000..a318290ac9
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/TransactionManager.php
-@@ -0,0 +1,178 @@
+@@ -0,0 +1,180 @@
 +<?php
 +
 +namespace Drupal\Core\Database;
@@ -319,6 +318,8 @@ index 0000000000..309118b3dd
 + * @todo
 + */
 +class TransactionManager implements TransactionManagerInterface {
++
++  public readonly bool $enabled = TRUE;
 +
 +  /**
 +   * Tracks the number of "layers" of transactions currently active.
@@ -394,9 +395,9 @@ index 0000000000..309118b3dd
 +    }
 +
 +    // Push the transaction on the stack, increasing its depth.
-+    $this->stack[$name] = (new TransactionStackItem($connection, $name, $this->stackDepth()))->initialize();
++    $this->stack[$name] = (new TransactionStackItem($connection, $name))->initialize();
 +
-+    return new TransactionBuddy($this, $name);
++    return new Transaction($connection, $name);
 +  }
 +
 +  /**
@@ -430,9 +431,9 @@ index 0000000000..309118b3dd
 +    // If we are popping an item that is not at the end of the stack, then we
 +    // no longer need the items pushed after that, since we will be releasing
 +    // a savepoint or committing for the popped item.
-+    while (($last = array_key_last($this->stack)) !== $name) {
++/*    while (($last = array_key_last($this->stack)) !== $name) {
 +      unset($this->stack[$last]);
-+    }
++    }*/
 +
 +    // Release the savepoint or commit the item, then remove it from the stack.
 +    $this->stack[$name]->ravanate();
@@ -506,10 +507,10 @@ index 0000000000..cb793d7abe
 +}
 diff --git a/core/lib/Drupal/Core/Database/TransactionStackItem.php b/core/lib/Drupal/Core/Database/TransactionStackItem.php
 new file mode 100644
-index 0000000000..b454e79b09
+index 0000000000..cd932d8b97
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/TransactionStackItem.php
-@@ -0,0 +1,121 @@
+@@ -0,0 +1,117 @@
 +<?php
 +
 +namespace Drupal\Core\Database;
@@ -537,11 +538,7 @@ index 0000000000..b454e79b09
 + */
 +class TransactionStackItem extends Transaction implements TransactionStackItemInterface {
 +
-+  public function __construct(
-+    Connection $connection,
-+    $name = NULL,
-+    protected readonly int $depth = 0,
-+  ) {
++  public function __construct(Connection $connection, $name = NULL) {
 +    $this->connection = $connection;
 +    $this->name = $name;
 +  }
@@ -595,7 +592,7 @@ index 0000000000..b454e79b09
 +    // If we're already in a Drupal transaction then we want to create a
 +    // database savepoint, rather than try to begin another database
 +    // transaction.
-+    if ($this->depth !== 0) {
++    if ($this->transactionManager()->stackDepth() !== 0) {
 +      $this->connection->query('SAVEPOINT ' . $this->name);
 +    }
 +    else {
