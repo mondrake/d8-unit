@@ -306,10 +306,10 @@ index 76d5fc8f5f..799dcfabf5 100644
    }
 diff --git a/core/lib/Drupal/Core/Database/TransactionManager.php b/core/lib/Drupal/Core/Database/TransactionManager.php
 new file mode 100644
-index 0000000000..21aa785612
+index 0000000000..449d486b9c
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/TransactionManager.php
-@@ -0,0 +1,257 @@
+@@ -0,0 +1,273 @@
 +<?php
 +
 +namespace Drupal\Core\Database;
@@ -319,7 +319,15 @@ index 0000000000..21aa785612
 + */
 +class TransactionManager implements TransactionManagerInterface {
 +
++  const ITEM_ROOT = 0;
++  const ITEM_SAVEPOINT = 1;
++
++  const CONNECTION_ACTIVE = 0;
++  const CONNECTION_COMMITTED = 1;
++  const CONNECTION_ROLLED_BACK = 2;
++
 +  public readonly bool $enabled;
++  protected int $connectionTransactionState;
 +
 +  /**
 +   * Tracks the number of "layers" of transactions currently active.
@@ -417,20 +425,94 @@ index 0000000000..21aa785612
 +    }
 +
 +    // Do the client-level processing.
-+    // If we're already in a Drupal transaction then we want to create a
-+    // database savepoint, rather than try to begin another database
-+    // transaction.
 +    if ($this->stackDepth() === 0) {
 +      $this->beginClientTransaction();
++      $type = static::ITEM_ROOT;
++      $this->connectionTransactionState = static::CONNECTION_ACTIVE;
 +    }
 +    else {
++      // If we're already in a Drupal transaction then we want to create a
++      // database savepoint, rather than try to begin another database
++      // transaction.
 +      $this->addClientSavepoint($name);
++      $type = static::ITEM_SAVEPOINT;
 +    }
 +
 +    // Push the transaction on the stack, increasing its depth.
-+    $this->stack[$name] = new TransactionStackItem($this->connection, $name);
++    $this->stack[$name] = new TransactionStackItem($this->connection, $name, $type);
 +
 +    return new Transaction($this->connection, $name);
++  }
++
++  public function pop(string $name): bool {
++    if (!$this->has($name)) {
++      throw new TransactionOutOfOrderException();
++    }
++
++    // Do the client-level processing.
++    if ($this->stackDepth() === 1) {
++      // If it is the last Drupal transaction open, we can commit the client
++      // transaction.
++      $this->commitClientTransaction();
++      $this->connectionTransactionState = static::CONNECTION_COMMITTED;
++    }
++    else {
++      if ($this->stack['name']->type === static::ITEM_SAVEPOINT) {
++        $this->releaseClientSavepoint($name);
++      }
++    }
++
++    // Release the savepoint or commit the item, then remove it from the stack.
++    unset($this->stack[$name]);
++
++    return TRUE;
++  }
++
++  public function rollBack($savepoint_name = 'drupal_transaction') {
++    if (!$this->inTransaction()) {
++      throw new TransactionNoActiveException();
++    }
++    // A previous rollback to an earlier savepoint may mean that the savepoint
++    // in question has already been accidentally committed.
++    if (!isset($this->stack[$savepoint_name])) {
++      throw new TransactionNoActiveException();
++    }
++
++    // We need to find the point we're rolling back to, all other savepoints
++    // before are no longer needed. If we rolled back other active savepoints,
++    // we need to throw an exception.
++    $rolled_back_other_active_savepoints = FALSE;
++    while ($savepoint = array_pop($this->stack)) {
++      if ($savepoint == $savepoint_name) {
++        // If it is the last the transaction in the stack, then it is not a
++        // savepoint, it is the transaction itself so we will need to roll back
++        // the transaction rather than a savepoint.
++        if ($this->stackDepth() === 0) {
++          break;
++        }
++        $this->connection->query('ROLLBACK TO SAVEPOINT ' . $savepoint);
++        $this->pop($savepoint_name);
++        if ($rolled_back_other_active_savepoints) {
++          throw new TransactionOutOfOrderException();
++        }
++        return;
++      }
++      else {
++        $rolled_back_other_active_savepoints = TRUE;
++      }
++    }
++
++    // Notify the callbacks about the rollback.
++    $callbacks = $this->connection->rootTransactionEndCallbacks;
++    $this->connection->rootTransactionEndCallbacks = [];
++    foreach ($callbacks as $callback) {
++      call_user_func($callback, FALSE);
++    }
++
++    $this->connection->getClientConnection()->rollBack();
++    if ($rolled_back_other_active_savepoints) {
++      throw new TransactionOutOfOrderException();
++    }
 +  }
 +
 +  /**
@@ -482,25 +564,6 @@ index 0000000000..21aa785612
 +    return TRUE;
 +  }
 +
-+  public function pop(string $name): bool {
-+    if (!$this->has($name)) {
-+      throw new TransactionOutOfOrderException();
-+    }
-+
-+    // Do the client-level processing.
-+    if ($this->stackDepth() === 1) {
-+      $this->commitClientTransaction();
-+    }
-+    else {
-+      $this->releaseClientSavepoint($name);
-+    }
-+
-+    // Release the savepoint or commit the item, then remove it from the stack.
-+    unset($this->stack[$name]);
-+
-+    return TRUE;
-+  }
-+
 +  /**
 +   * Do the actual commit, invoke post-commit callbacks.
 +   */
@@ -516,53 +579,6 @@ index 0000000000..21aa785612
 +
 +    if (!$success) {
 +      throw new TransactionCommitFailedException();
-+    }
-+  }
-+
-+  public function rollBack($savepoint_name = 'drupal_transaction') {
-+    if (!$this->inTransaction()) {
-+      throw new TransactionNoActiveException();
-+    }
-+    // A previous rollback to an earlier savepoint may mean that the savepoint
-+    // in question has already been accidentally committed.
-+    if (!isset($this->stack[$savepoint_name])) {
-+      throw new TransactionNoActiveException();
-+    }
-+
-+    // We need to find the point we're rolling back to, all other savepoints
-+    // before are no longer needed. If we rolled back other active savepoints,
-+    // we need to throw an exception.
-+    $rolled_back_other_active_savepoints = FALSE;
-+    while ($savepoint = array_pop($this->stack)) {
-+      if ($savepoint == $savepoint_name) {
-+        // If it is the last the transaction in the stack, then it is not a
-+        // savepoint, it is the transaction itself so we will need to roll back
-+        // the transaction rather than a savepoint.
-+        if ($this->stackDepth() === 0) {
-+          break;
-+        }
-+        $this->connection->query('ROLLBACK TO SAVEPOINT ' . $savepoint);
-+        $this->pop($savepoint_name);
-+        if ($rolled_back_other_active_savepoints) {
-+          throw new TransactionOutOfOrderException();
-+        }
-+        return;
-+      }
-+      else {
-+        $rolled_back_other_active_savepoints = TRUE;
-+      }
-+    }
-+
-+    // Notify the callbacks about the rollback.
-+    $callbacks = $this->connection->rootTransactionEndCallbacks;
-+    $this->connection->rootTransactionEndCallbacks = [];
-+    foreach ($callbacks as $callback) {
-+      call_user_func($callback, FALSE);
-+    }
-+
-+    $this->connection->getClientConnection()->rollBack();
-+    if ($rolled_back_other_active_savepoints) {
-+      throw new TransactionOutOfOrderException();
 +    }
 +  }
 +
@@ -584,10 +600,10 @@ index 0000000000..cb793d7abe
 +}
 diff --git a/core/lib/Drupal/Core/Database/TransactionStackItem.php b/core/lib/Drupal/Core/Database/TransactionStackItem.php
 new file mode 100644
-index 0000000000..7b4789fce8
+index 0000000000..15dda596b3
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/TransactionStackItem.php
-@@ -0,0 +1,68 @@
+@@ -0,0 +1,49 @@
 +<?php
 +
 +namespace Drupal\Core\Database;
@@ -613,31 +629,13 @@ index 0000000000..7b4789fce8
 + * directly. Instead, call ->startTransaction(), from the appropriate connection
 + * object.
 + */
-+class TransactionStackItem extends Transaction {
++class TransactionStackItem {
 +
-+  public function __construct(Connection $connection, $name = NULL) {
-+    $this->connection = $connection;
-+    $this->name = $name;
-+  }
-+
-+  public function __destruct() {
-+  }
-+
-+  public function ravanate(): bool {
-+    // If we rolled back then the transaction would have already been popped.
-+    if ($this->rolledBack) {
-+      return TRUE;
-+    }
-+
-+    // Check destruction is inorder.
-+/*    if (!$this->connection->transactionManager()->has($this->name)) {
-+      throw new TransactionOutOfOrderException();
-+    }
-+    if ($this->depth !== $this->connection->transactionManager()->stackDepth() - 1) {
-+      throw new TransactionOutOfOrderException();
-+    }*/
-+
-+    return TRUE;
++  public function __construct(
++    protected readonly Connection $connection,
++    public readonly string $name,
++    public readonly int $type,
++  ) {
 +  }
 +
 +  /**
@@ -651,7 +649,6 @@ index 0000000000..7b4789fce8
 +   * @see \Drupal\Core\Database\Connection::rollBack()
 +   */
 +  public function rollBack() {
-+    $this->rolledBack = TRUE;
 +    $this->connection->transactionManager()->rollBack($this->name);
 +  }
 +
