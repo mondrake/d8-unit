@@ -257,7 +257,7 @@ index 7e405e1b1b..bfee12cdc9 100644
    }
  
    /**
-@@ -1644,6 +1598,7 @@ public function supportsTransactionalDDL() {
+@@ -1644,6 +1598,7 @@ abstract public function mapConditionOperator($operator);
     * @see \Drupal\Core\Database\Transaction
     */
    public function commit() {
@@ -306,10 +306,10 @@ index 76d5fc8f5f..799dcfabf5 100644
    }
 diff --git a/core/lib/Drupal/Core/Database/Transaction/ManagerStackItem.php b/core/lib/Drupal/Core/Database/Transaction/ManagerStackItem.php
 new file mode 100644
-index 0000000000..2473b2dc8c
+index 0000000000..f5a359fb84
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/Transaction/ManagerStackItem.php
-@@ -0,0 +1,28 @@
+@@ -0,0 +1,29 @@
 +<?php
 +
 +namespace Drupal\Core\Database\Transaction;
@@ -326,7 +326,7 @@ index 0000000000..2473b2dc8c
 +
 +  public function __construct(
 +    public readonly string $name,
-+    public readonly int $type,
++    public readonly ManagerStackItemType $type,
 +  ) {
 +  }
 +
@@ -337,26 +337,44 @@ index 0000000000..2473b2dc8c
 +  public function isRolledback(): bool {
 +    return $this->rolledBack;
 +  }
++
++}
+diff --git a/core/lib/Drupal/Core/Database/Transaction/ManagerStackItemType.php b/core/lib/Drupal/Core/Database/Transaction/ManagerStackItemType.php
+new file mode 100644
+index 0000000000..df8ed754e0
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/Transaction/ManagerStackItemType.php
+@@ -0,0 +1,13 @@
++<?php
++
++namespace Drupal\Core\Database\Transaction;
++
++/**
++ * @todo
++ */
++enum ManagerStackItemType {
++
++  case Root;
++  case Savepoint;
++
 +}
 diff --git a/core/lib/Drupal/Core/Database/TransactionManager.php b/core/lib/Drupal/Core/Database/TransactionManager.php
 new file mode 100644
-index 0000000000..43b22c393e
+index 0000000000..c1cf127118
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/TransactionManager.php
-@@ -0,0 +1,285 @@
+@@ -0,0 +1,288 @@
 +<?php
 +
 +namespace Drupal\Core\Database;
 +
 +use Drupal\Core\Database\Transaction\ManagerStackItem;
++use Drupal\Core\Database\Transaction\ManagerStackItemType;
 +
 +/**
 + * @todo
 + */
 +class TransactionManager implements TransactionManagerInterface {
-+
-+  const ITEM_ROOT = 0;
-+  const ITEM_SAVEPOINT = 1;
 +
 +  const CONNECTION_ACTIVE = 0;
 +  const CONNECTION_COMMITTED = 1;
@@ -463,7 +481,7 @@ index 0000000000..43b22c393e
 +    // Do the client-level processing.
 +    if ($this->stackDepth() === 0) {
 +      $this->beginClientTransaction();
-+      $type = static::ITEM_ROOT;
++      $type = ManagerStackItemType::Root;
 +      $this->connectionTransactionState = static::CONNECTION_ACTIVE;
 +    }
 +    else {
@@ -471,7 +489,7 @@ index 0000000000..43b22c393e
 +      // database savepoint, rather than try to begin another database
 +      // transaction.
 +      $this->addClientSavepoint($name);
-+      $type = static::ITEM_SAVEPOINT;
++      $type = ManagerStackItemType::Savepoint;
 +    }
 +
 +    // Push the transaction on the stack, increasing its depth.
@@ -499,7 +517,7 @@ index 0000000000..43b22c393e
 +      $this->connectionTransactionState = static::CONNECTION_COMMITTED;
 +    }
 +    else {
-+      if ($this->stack[$name]->type === static::ITEM_SAVEPOINT) {
++      if ($this->stack[$name]->type === ManagerStackItemType::Savepoint) {
 +        $this->releaseClientSavepoint($name);
 +      }
 +    }
@@ -514,6 +532,11 @@ index 0000000000..43b22c393e
 +      throw new TransactionNoActiveException();
 +    }
 +
++    // Rolled back item should match the last one in stack.
++    if ($name !== array_key_last($this->stack)) {
++      throw new TransactionOutOfOrderException();
++    }
++
 +    // Do the client-level processing.
 +/*    if ($this->stackDepth() === 1) {
 +      // If it is the last Drupal transaction open, we can rollback the client
@@ -523,7 +546,7 @@ index 0000000000..43b22c393e
 +      $this->connectionTransactionState = static::CONNECTION_ROLLED_BACK;
 +    }
 +    else {*/
-+      if ($this->stack[$name]->type === static::ITEM_SAVEPOINT) {
++      if ($this->stack[$name]->type === ManagerStackItemType::Savepoint) {
 +        $this->rollbackClientSavepoint($name);
 +        $this->stack[$name]->markRolledback();
 +      }
