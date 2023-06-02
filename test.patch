@@ -313,6 +313,26 @@ index 76d5fc8f5f..799dcfabf5 100644
      $this->rolledBack = TRUE;
      $this->connection->rollBack($this->name);
    }
+diff --git a/core/lib/Drupal/Core/Database/Transaction/ClientConnectionTransactionState.php b/core/lib/Drupal/Core/Database/Transaction/ClientConnectionTransactionState.php
+new file mode 100644
+index 0000000000..c0b5f32eed
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/Transaction/ClientConnectionTransactionState.php
+@@ -0,0 +1,14 @@
++<?php
++
++namespace Drupal\Core\Database\Transaction;
++
++/**
++ * @todo
++ */
++enum ClientConnectionTransactionState {
++
++  case Active;
++  case Committed;
++  case Rolledback;
++
++}
 diff --git a/core/lib/Drupal/Core/Database/Transaction/ManagerStackItem.php b/core/lib/Drupal/Core/Database/Transaction/ManagerStackItem.php
 new file mode 100644
 index 0000000000..d7184bd4a6
@@ -337,7 +357,7 @@ index 0000000000..d7184bd4a6
 +}
 diff --git a/core/lib/Drupal/Core/Database/Transaction/ManagerStackItemType.php b/core/lib/Drupal/Core/Database/Transaction/ManagerStackItemType.php
 new file mode 100644
-index 0000000000..dff7876fe1
+index 0000000000..df8ed754e0
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/Transaction/ManagerStackItemType.php
 @@ -0,0 +1,13 @@
@@ -348,18 +368,18 @@ index 0000000000..dff7876fe1
 +/**
 + * @todo
 + */
-+enum ManagerStackItemType: string {
++enum ManagerStackItemType {
 +
-+  case Root = 'root';
-+  case Savepoint = 'savepoint';
++  case Root;
++  case Savepoint;
 +
 +}
 diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManager.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManager.php
 new file mode 100644
-index 0000000000..b5b714eb2b
+index 0000000000..edf09c67b4
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManager.php
-@@ -0,0 +1,302 @@
+@@ -0,0 +1,298 @@
 +<?php
 +
 +namespace Drupal\Core\Database\Transaction;
@@ -377,19 +397,15 @@ index 0000000000..b5b714eb2b
 + */
 +class TransactionManager implements TransactionManagerInterface {
 +
-+  const CONNECTION_ACTIVE = 0;
-+  const CONNECTION_COMMITTED = 1;
-+  const CONNECTION_ROLLED_BACK = 2;
-+
 +  public readonly bool $enabled;
-+  protected int $connectionTransactionState;
++
++  protected ClientConnectionTransactionState $connectionTransactionState;
 +
 +  /**
-+   * Tracks the number of "layers" of transactions currently active.
++   * Tracks the stack of Drupal transactions currently active.
 +   *
-+   * On many databases transactions cannot nest.  Instead, we track
-+   * nested calls to transactions and collapse them into a single
-+   * transaction.
++   * On many databases transactions cannot nest. Instead, we track nested calls
++   * to transactions and collapse them into a single client transaction.
 +   *
 +   * @var array<string,ManagerStackItem>
 +   */
@@ -411,13 +427,13 @@ index 0000000000..b5b714eb2b
 +  }
 +
 +  /**
-+   * Checks if a named transaction is active.
++   * Checks if a named Drupal transaction is active.
 +   *
 +   * @param string $name
 +   *   The name of the transaction.
 +   *
 +   * @return bool
-+   *   TRUE if the named transaction is active, FALSE otherwise.
++   *   TRUE if the transaction is active, FALSE otherwise.
 +   */
 +  public function has(string $name): bool {
 +    return isset($this->stack[$name]);
@@ -488,7 +504,7 @@ index 0000000000..b5b714eb2b
 +    if ($this->stackDepth() === 0) {
 +      $this->beginClientTransaction();
 +      $type = ManagerStackItemType::Root;
-+      $this->connectionTransactionState = static::CONNECTION_ACTIVE;
++      $this->connectionTransactionState = ClientConnectionTransactionState::Active;
 +    }
 +    else {
 +      // If we're already in a Drupal transaction then we want to create a
@@ -505,11 +521,11 @@ index 0000000000..b5b714eb2b
 +  }
 +
 +  public function pop(string $name): bool {
-+    // Already rolled back Drupal transaction, do nothing on the client
-+    // connection, housekeep the list of transactions rolled back.
++    // If an already rolled back Drupal transaction, do nothing on the client
++    // connection, just housekeep the list of transactions rolled back.
 +    if (isset($this->rolledback[$name])) {
-+        unset($this->rolledback[$name]);
-+        return TRUE;
++      unset($this->rolledback[$name]);
++      return TRUE;
 +    }
 +
 +    if (!$this->has($name)) {
@@ -521,7 +537,7 @@ index 0000000000..b5b714eb2b
 +      // If it is the last Drupal transaction open, we can commit the client
 +      // transaction.
 +      $this->commitClientTransaction();
-+      $this->connectionTransactionState = static::CONNECTION_COMMITTED;
++      $this->connectionTransactionState = ClientConnectionTransactionState::Committed;
 +    }
 +    else {
 +      if ($this->stack[$name]->type === ManagerStackItemType::Savepoint) {
@@ -550,7 +566,7 @@ index 0000000000..b5b714eb2b
 +    switch ($this->stack[$name]->type) {
 +      case ManagerStackItemType::Root:
 +        $this->rollbackClientTransaction();
-+        $this->connectionTransactionState = static::CONNECTION_ROLLED_BACK;
++        $this->connectionTransactionState = ClientConnectionTransactionState::Rolledback;
 +        break;
 +
 +      case ManagerStackItemType::Savepoint:
