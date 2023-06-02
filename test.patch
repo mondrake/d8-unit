@@ -315,10 +315,10 @@ index 76d5fc8f5f..799dcfabf5 100644
    }
 diff --git a/core/lib/Drupal/Core/Database/Transaction/ManagerStackItem.php b/core/lib/Drupal/Core/Database/Transaction/ManagerStackItem.php
 new file mode 100644
-index 0000000000..f5a359fb84
+index 0000000000..d7184bd4a6
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/Transaction/ManagerStackItem.php
-@@ -0,0 +1,29 @@
+@@ -0,0 +1,16 @@
 +<?php
 +
 +namespace Drupal\Core\Database\Transaction;
@@ -328,23 +328,10 @@ index 0000000000..f5a359fb84
 + */
 +final class ManagerStackItem {
 +
-+  /**
-+   * A boolean value to indicate whether this transaction has been rolled back.
-+   */
-+  private bool $rolledBack = FALSE;
-+
 +  public function __construct(
 +    public readonly string $name,
 +    public readonly ManagerStackItemType $type,
 +  ) {
-+  }
-+
-+  public function markRolledback(): void {
-+    $this->rolledBack = TRUE;
-+  }
-+
-+  public function isRolledback(): bool {
-+    return $this->rolledBack;
 +  }
 +
 +}
@@ -369,10 +356,10 @@ index 0000000000..df8ed754e0
 +}
 diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManager.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManager.php
 new file mode 100644
-index 0000000000..0af29e177e
+index 0000000000..b5b714eb2b
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManager.php
-@@ -0,0 +1,295 @@
+@@ -0,0 +1,302 @@
 +<?php
 +
 +namespace Drupal\Core\Database\Transaction;
@@ -404,9 +391,14 @@ index 0000000000..0af29e177e
 +   * nested calls to transactions and collapse them into a single
 +   * transaction.
 +   *
-+   * @var array
++   * @var array<string,ManagerStackItem>
 +   */
 +  private array $stack = [];
++
++  /**
++   * @var array<string,true>
++   */
++  private array $rolledback = [];
 +
 +  /**
 +   * @param \Drupal\Core\Database\Connection $connection
@@ -466,7 +458,7 @@ index 0000000000..0af29e177e
 +  }
 +
 +  /**
-+   * Returns a new Transaction object on the database connection.
++   * Starts a new Drupal transaction on the database connection.
 +   *
 +   * @param string $name
 +   *   (optional) The name of the savepoint.
@@ -513,14 +505,15 @@ index 0000000000..0af29e177e
 +  }
 +
 +  public function pop(string $name): bool {
-+    if (!$this->has($name)) {
-+      throw new TransactionOutOfOrderException();
++    // Already rolled back Drupal transaction, do nothing on the client
++    // connection, housekeep the list of transactions rolled back.
++    if (isset($this->rolledback[$name])) {
++        unset($this->rolledback[$name]);
++        return TRUE;
 +    }
 +
-+    // Already rolled back Drupal transaction, do nothing.
-+    if ($this->stack[$name]->isRolledback() && $this->stackDepth() > 1) {
-+      unset($this->stack[$name]);
-+      return TRUE;
++    if (!$this->has($name)) {
++      throw new TransactionOutOfOrderException();
 +    }
 +
 +    // Do the client-level processing.
@@ -566,7 +559,8 @@ index 0000000000..0af29e177e
 +
 +    }
 +
-+    $this->stack[$name]->markRolledback();
++    $this->rolledback[$name] = TRUE;
++    unset($this->stack[$name]);
 +  }
 +
 +  /**
