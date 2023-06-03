@@ -1,5 +1,5 @@
 diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
-index 7e405e1b1b..b88d5927c4 100644
+index 7e405e1b1b..acdbc1f6ed 100644
 --- a/core/lib/Drupal/Core/Database/Connection.php
 +++ b/core/lib/Drupal/Core/Database/Connection.php
 @@ -13,6 +13,8 @@
@@ -23,7 +23,7 @@ index 7e405e1b1b..b88d5927c4 100644
     */
    protected $transactionLayers = [];
  
-@@ -204,8 +211,13 @@ abstract class Connection {
+@@ -204,6 +211,11 @@ abstract class Connection {
     * Post-root (non-nested) transaction commit callbacks.
     *
     * @var callable[]
@@ -33,11 +33,8 @@ index 7e405e1b1b..b88d5927c4 100644
 +   *
 +   * @see https://www.drupal.org/node/5555555
     */
--  protected $rootTransactionEndCallbacks = [];
-+  public $rootTransactionEndCallbacks = [];
+   protected $rootTransactionEndCallbacks = [];
  
-   /**
-    * The identifier quote characters for the database type.
 @@ -226,6 +238,11 @@ abstract class Connection {
     */
    private array $enabledEvents = [];
@@ -50,7 +47,7 @@ index 7e405e1b1b..b88d5927c4 100644
    /**
     * Constructs a Connection object.
     *
-@@ -276,6 +293,21 @@ public function __destruct() {
+@@ -276,6 +293,20 @@ public function __destruct() {
      $this->connection = NULL;
    }
  
@@ -58,12 +55,11 @@ index 7e405e1b1b..b88d5927c4 100644
 +   * Returns the client-level database connection object.
 +   *
 +   * This method should normally be used only within database driver code. Not
-+   * doing so is a risk of introducing code that is not database independent.
++   * doing so constitutes a risk of introducing code that is not database
++   * independent.
 +   *
 +   * @return object
 +   *   The client-level database connection, for example \PDO.
-+   *
-+   * @internal
 +   */
 +  public function getClientConnection(): object {
 +    return $this->connection;
@@ -72,7 +68,7 @@ index 7e405e1b1b..b88d5927c4 100644
    /**
     * Returns the default query options for any given query.
     *
-@@ -1294,6 +1326,19 @@ public function escapeLike($string) {
+@@ -1294,6 +1325,19 @@ public function escapeLike($string) {
      return addcslashes($string, '\%_');
    }
  
@@ -92,35 +88,37 @@ index 7e405e1b1b..b88d5927c4 100644
    /**
     * Determines if there is an active transaction open.
     *
-@@ -1301,7 +1346,7 @@ public function escapeLike($string) {
+@@ -1301,6 +1345,9 @@ public function escapeLike($string) {
     *   TRUE if we're currently in a transaction, FALSE otherwise.
     */
    public function inTransaction() {
--    return ($this->transactionDepth() > 0);
-+    return $this->transactionManager()->inTransaction();
++    if (method_exists($this, 'transactionManager') && $this->connection->transactionManager()->enabled) {
++      return $this->transactionManager()->inTransaction();
++    }
+     return ($this->transactionDepth() > 0);
    }
  
-   /**
-@@ -1311,7 +1356,7 @@ public function inTransaction() {
+@@ -1311,6 +1358,9 @@ public function inTransaction() {
     *   The current transaction depth.
     */
    public function transactionDepth() {
--    return count($this->transactionLayers);
-+    return $this->transactionManager()->stackDepth();
++    if (method_exists($this, 'transactionManager') && $this->connection->transactionManager()->enabled) {
++      return $this->transactionManager()->stackDepth();
++    }
+     return count($this->transactionLayers);
    }
  
-   /**
-@@ -1326,8 +1371,7 @@ public function transactionDepth() {
+@@ -1326,6 +1376,9 @@ public function transactionDepth() {
     * @see \Drupal\Core\Database\Transaction
     */
    public function startTransaction($name = '') {
--    $class = $this->getDriverClass('Transaction');
--    return new $class($this, $name);
-+    return $this->transactionManager()->start($name);
++    if (method_exists($this, 'transactionManager') && $this->connection->transactionManager()->enabled) {
++      return $this->transactionManager()->push($name);
++    }
+     $class = $this->getDriverClass('Transaction');
+     return new $class($this, $name);
    }
- 
-   /**
-@@ -1345,50 +1389,8 @@ public function startTransaction($name = '') {
+@@ -1345,50 +1398,8 @@ public function startTransaction($name = '') {
     * @see \Drupal\Core\Database\Transaction::rollBack()
     */
    public function rollBack($savepoint_name = 'drupal_transaction') {
@@ -173,7 +171,7 @@ index 7e405e1b1b..b88d5927c4 100644
    }
  
    /**
-@@ -1404,18 +1406,7 @@ public function rollBack($savepoint_name = 'drupal_transaction') {
+@@ -1404,18 +1415,7 @@ public function rollBack($savepoint_name = 'drupal_transaction') {
     * @see \Drupal\Core\Database\Transaction
     */
    public function pushTransaction($name) {
@@ -193,7 +191,7 @@ index 7e405e1b1b..b88d5927c4 100644
    }
  
    /**
-@@ -1434,17 +1425,7 @@ public function pushTransaction($name) {
+@@ -1434,17 +1434,7 @@ public function pushTransaction($name) {
     * @see \Drupal\Core\Database\Transaction
     */
    public function popTransaction($name) {
@@ -212,16 +210,19 @@ index 7e405e1b1b..b88d5927c4 100644
    }
  
    /**
-@@ -1469,7 +1450,7 @@ public function popTransaction($name) {
+@@ -1469,10 +1459,7 @@ public function popTransaction($name) {
     * @see \Drupal\Core\Database\Connection::doCommit()
     */
    public function addRootTransactionEndCallback(callable $callback) {
 -    if (!$this->transactionLayers) {
-+    if ($this->transactionManager()->stackDepth() === 0) {
-       throw new \LogicException('Root transaction end callbacks can only be added when there is an active transaction.');
-     }
-     $this->rootTransactionEndCallbacks[] = $callback;
-@@ -1481,22 +1462,7 @@ public function addRootTransactionEndCallback(callable $callback) {
+-      throw new \LogicException('Root transaction end callbacks can only be added when there is an active transaction.');
+-    }
+-    $this->rootTransactionEndCallbacks[] = $callback;
++    $this->transactionManager()->addPostTransactionCallback($callback);
+   }
+ 
+   /**
+@@ -1481,22 +1468,7 @@ public function addRootTransactionEndCallback(callable $callback) {
     * @internal
     */
    protected function popCommittableTransactions() {
@@ -245,7 +246,7 @@ index 7e405e1b1b..b88d5927c4 100644
    }
  
    /**
-@@ -1505,18 +1471,7 @@ protected function popCommittableTransactions() {
+@@ -1505,18 +1477,7 @@ protected function popCommittableTransactions() {
     * @internal
     */
    protected function doCommit() {
@@ -265,7 +266,7 @@ index 7e405e1b1b..b88d5927c4 100644
    }
  
    /**
-@@ -1644,6 +1599,7 @@ abstract public function mapConditionOperator($operator);
+@@ -1644,6 +1605,7 @@ abstract public function mapConditionOperator($operator);
     * @see \Drupal\Core\Database\Transaction
     */
    public function commit() {
@@ -274,7 +275,7 @@ index 7e405e1b1b..b88d5927c4 100644
    }
  
 diff --git a/core/lib/Drupal/Core/Database/Transaction.php b/core/lib/Drupal/Core/Database/Transaction.php
-index 76d5fc8f5f..799dcfabf5 100644
+index 76d5fc8f5f..f76b03e627 100644
 --- a/core/lib/Drupal/Core/Database/Transaction.php
 +++ b/core/lib/Drupal/Core/Database/Transaction.php
 @@ -48,6 +48,12 @@ class Transaction {
@@ -295,7 +296,7 @@ index 76d5fc8f5f..799dcfabf5 100644
  
    public function __destruct() {
 +    if ($this->connection->transactionManager()->enabled) {
-+      $this->connection->transactionManager()->pop($this->name);
++      $this->connection->transactionManager()->unpile($this->name);
 +      return;
 +    }
      // If we rolled back then the transaction would have already been popped.
@@ -377,10 +378,10 @@ index 0000000000..f0fb4939ac
 +}
 diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManager.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManager.php
 new file mode 100644
-index 0000000000..9e54951676
+index 0000000000..a7bb797f60
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManager.php
-@@ -0,0 +1,303 @@
+@@ -0,0 +1,328 @@
 +<?php
 +
 +namespace Drupal\Core\Database\Transaction;
@@ -415,6 +416,13 @@ index 0000000000..9e54951676
 +   * @var array<string,true>
 +   */
 +  private array $rollbacks = [];
++
++  /**
++   * Post-transaction callbacks.
++   *
++   * @var callable[]
++   */
++  private array postTransactionCallbacks = [];
 +
 +  /**
 +   * @param \Drupal\Core\Database\Connection $connection
@@ -459,22 +467,11 @@ index 0000000000..9e54951676
 +    return (bool) $this->stackDepth() && $this->connectionTransactionState === ClientConnectionTransactionState::Active;
 +  }
 +
-+  public function root() {
-+    if (!$this->inTransaction()) {
-+      throw new TransactionNoActiveException();
-+    }
-+    return $this->stack[array_key_first($this->stack)];
-+  }
-+
-+  public function current() {
-+    if (!$this->inTransaction()) {
-+      throw new TransactionNoActiveException();
-+    }
-+    return $this->stack[array_key_last($this->stack)];
-+  }
-+
 +  /**
-+   * Starts a new Drupal transaction on the database connection.
++   * Pushes a new Drupal transaction on the stack.
++   *
++   * This begins a client connection transaction if there is not one active,
++   * or adds a savepoint to the active one.
 +   *
 +   * @param string $name
 +   *   (optional) The name of the savepoint.
@@ -484,7 +481,7 @@ index 0000000000..9e54951676
 +   *
 +   * @throws \Drupal\Core\Database\TransactionNameNonUniqueException
 +   */
-+  public function start(string $name = '') {
++  public function push(string $name = ''): Transaction {
 +    if (!$this->inTransaction()) {
 +      // If there is no transaction active, name the transaction
 +      // 'drupal_transaction'.
@@ -520,7 +517,7 @@ index 0000000000..9e54951676
 +    return new Transaction($this->connection, $name);
 +  }
 +
-+  public function pop(string $name): bool {
++  public function unpile(string $name): bool {
 +    // If an already rolled back Drupal transaction, do nothing on the client
 +    // connection, just cleanup the list of transactions rolled back.
 +    if (isset($this->rollbacks[$name])) {
@@ -583,6 +580,35 @@ index 0000000000..9e54951676
 +      $this->commitClientTransaction();
 +      $this->connectionTransactionState = ClientConnectionTransactionState::Committed;
 +    }
++  }
++
++  /**
++   * Adds a root transaction end callback.
++   *
++   * These callbacks are invoked immediately after the client transaction has
++   * been committed or rolled back.
++   *
++   * It can for example be used to avoid deadlocks on write-heavy tables that
++   * do not need to be part of the transaction, like cache tag invalidations.
++   *
++   * Another use case is that services using alternative backends like Redis and
++   * Memcache cache implementations can replicate the transaction-behavior of
++   * the database cache backend and avoid race conditions.
++   *
++   * An argument is passed to the callbacks that indicates whether the
++   * transaction was successful or not.
++   *
++   * @param callable $callback
++   *   The callback to invoke.
++   *
++   * @throws \LogicException
++   *   When a callback addition is attempted but no transaction is active.
++   */
++  public function addPostTransactionCallback(callable $callback): void {
++    if (!$this->inTransaction()) {
++      throw new \LogicException('Root transaction end callbacks can only be added when there is an active transaction.');
++    }
++    $this->postTransactionCallbacks[] = $callback;
 +  }
 +
 +  /**
@@ -670,9 +696,9 @@ index 0000000000..9e54951676
 +   */
 +  private function doCommit() {
 +    $success = $this->connection->getClientConnection()->commit();
-+    if (!empty($this->connection->rootTransactionEndCallbacks)) {
-+      $callbacks = $this->connection->rootTransactionEndCallbacks;
-+      $this->connection->rootTransactionEndCallbacks = [];
++    if (!empty($this->postTransactionCallbacks)) {
++      $callbacks = $this->postTransactionCallbacks;
++      $this->postTransactionCallbacks = [];
 +      foreach ($callbacks as $callback) {
 +        call_user_func($callback, $success);
 +      }
