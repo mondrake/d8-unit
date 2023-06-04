@@ -314,10 +314,10 @@ index 0000000000..763a758a9f
 +}
 diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
 new file mode 100644
-index 0000000000..aad4ae7b54
+index 0000000000..d7d3ab8a72
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
-@@ -0,0 +1,356 @@
+@@ -0,0 +1,365 @@
 +<?php
 +
 +namespace Drupal\Core\Database\Transaction;
@@ -366,7 +366,7 @@ index 0000000000..aad4ae7b54
 +  /**
 +   * The state of the underlying client connection transaction.
 +   */
-+  protected ClientConnectionTransactionState $connectionTransactionState;
++  private ClientConnectionTransactionState $connectionTransactionState;
 +
 +  /**
 +   * Constructor.
@@ -500,8 +500,18 @@ index 0000000000..aad4ae7b54
 +    // If this was the last Drupal transaction open, we can commit the client
 +    // transaction.
 +    if ($this->stackDepth() === 0 && $this->connectionTransactionState === ClientConnectionTransactionState::Active) {
-+      $this->commitClientTransaction();
-+      $this->connectionTransactionState = ClientConnectionTransactionState::Committed;
++
++      $clientCommit = $this->commitClientTransaction();
++
++      $this->connectionTransactionState = $clientCommit ?
++        ClientConnectionTransactionState::Committed :
++        ClientConnectionTransactionState::CommitFailed;
++
++      $this->processPostTransactionCallbacks();
++
++      if (!$clientCommit) {
++        throw new TransactionCommitFailedException();
++      }
 +    }
 +  }
 +
@@ -513,8 +523,15 @@ index 0000000000..aad4ae7b54
 +    // Do the client-level processing.
 +    switch ($this->stack[$name]->type) {
 +      case ManagerStackItemType::Root:
-+        $this->rollbackClientTransaction();
-+        $this->connectionTransactionState = ClientConnectionTransactionState::RolledBack;
++
++        $clientRollback = $this->rollbackClientTransaction();
++
++        $this->connectionTransactionState = $clientRollback ?
++          ClientConnectionTransactionState::RolledBack :
++          ClientConnectionTransactionState::RollbackFailed;
++
++        $this->processPostTransactionCallbacks();
++
 +        break;
 +
 +      case ManagerStackItemType::Savepoint:
@@ -534,14 +551,13 @@ index 0000000000..aad4ae7b54
 +    // If this was the last Drupal transaction open, we can commit the client
 +    // transaction.
 +    if ($this->stackDepth() === 0 && $this->connectionTransactionState === ClientConnectionTransactionState::Active) {
-+      $this->commitClientTransaction();
-+      $this->connectionTransactionState = ClientConnectionTransactionState::Committed;
-+
-+      // Notify the callbacks about the rollback.
-+      $callbacks = $this->postTransactionCallbacks;
-+      $this->postTransactionCallbacks = [];
-+      foreach ($callbacks as $callback) {
-+        call_user_func($callback, FALSE);
++      $clientCommit = $this->commitClientTransaction();
++      $this->connectionTransactionState = $clientCommit ?
++        ClientConnectionTransactionState::Committed :
++        ClientConnectionTransactionState::CommitFailed;
++      $this->processPostTransactionCallbacks();
++      if (!$clientCommit) {
++        throw new TransactionCommitFailedException();
 +      }
 +    }
 +  }
@@ -582,7 +598,7 @@ index 0000000000..aad4ae7b54
 +   *   Returns TRUE on success or FALSE on failure.
 +   */
 +  protected function beginClientTransaction(): bool {
-+    // dump([__METHOD__]);
++    dump([__METHOD__, count($this->postTransactionCallbacks), $this->stack]);
 +    return $this->connection->getClientConnection()->beginTransaction();
 +  }
 +
@@ -638,9 +654,8 @@ index 0000000000..aad4ae7b54
 +   *   Returns TRUE on success or FALSE on failure.
 +   */
 +  protected function rollbackClientTransaction(): bool {
-+    // dump([__METHOD__]);
-+    $this->connection->getClientConnection()->rollBack();
-+    return TRUE;
++    dump([__METHOD__, count($this->postTransactionCallbacks), $this->stack]);
++    return $this->connection->getClientConnection()->rollBack();
 +  }
 +
 +  /**
@@ -650,26 +665,20 @@ index 0000000000..aad4ae7b54
 +   *   Returns TRUE on success or FALSE on failure.
 +   */
 +  protected function commitClientTransaction(): bool {
-+    // dump([__METHOD__]);
-+    $this->doCommit();
-+    return TRUE;
++    dump([__METHOD__, count($this->postTransactionCallbacks), $this->stack]);
++    return $this->connection->getClientConnection()->commit();
 +  }
 +
 +  /**
-+   * Do the actual commit, invoke post-commit callbacks.
++   * Processes the post-transaction callbacks.
 +   */
-+  private function doCommit() {
-+    $success = $this->connection->getClientConnection()->commit();
++  private function processPostTransactionCallbacks(): void {
 +    if (!empty($this->postTransactionCallbacks)) {
 +      $callbacks = $this->postTransactionCallbacks;
 +      $this->postTransactionCallbacks = [];
 +      foreach ($callbacks as $callback) {
-+        call_user_func($callback, $success);
++        call_user_func($callback, $this->connectionTransactionState === ClientConnectionTransactionState::Committed);
 +      }
-+    }
-+
-+    if (!$success) {
-+      throw new TransactionCommitFailedException();
 +    }
 +  }
 +
@@ -690,7 +699,7 @@ index 0000000000..29635fdba0
 +interface TransactionManagerInterface {
 +}
 diff --git a/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php b/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php
-index 72a0cb5b68..07bcc48991 100644
+index 72a0cb5b68..8e0d8e46cf 100644
 --- a/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php
 +++ b/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php
 @@ -7,6 +7,7 @@
@@ -720,9 +729,9 @@ index 72a0cb5b68..07bcc48991 100644
 +  /**
 +   * {@inheritdoc}
 +   */
-+/*  protected function driverTransactionManager(): TransactionManagerInterface {
++  protected function driverTransactionManager(): TransactionManagerInterface {
 +    return new TransactionManager($this);
-+  }*/
++  }
 +
    /**
     * {@inheritdoc}
@@ -744,3 +753,23 @@ index 0000000000..5bf7a6c5d5
 + */
 +class TransactionManager extends TransactionManagerBase {
 +}
+diff --git a/core/tests/Drupal/KernelTests/Core/Cache/EndOfTransactionQueriesTest.php b/core/tests/Drupal/KernelTests/Core/Cache/EndOfTransactionQueriesTest.php
+index 46f5a37638..28a22bdb98 100644
+--- a/core/tests/Drupal/KernelTests/Core/Cache/EndOfTransactionQueriesTest.php
++++ b/core/tests/Drupal/KernelTests/Core/Cache/EndOfTransactionQueriesTest.php
+@@ -103,6 +103,7 @@ public function testEntitySave(): void {
+    * Tests an entity save rollback.
+    */
+   public function testEntitySaveRollback(): void {
++dump([__METHOD__, '***1']);
+     \Drupal::cache()
+       ->set('test_cache_pretransaction_entity_test_list', 'something', Cache::PERMANENT, ['entity_test_list']);
+     \Drupal::cache()
+@@ -122,6 +123,7 @@ public function testEntitySaveRollback(): void {
+     $this->assertNotEmpty(\Drupal::cache()->get('test_cache_pretransaction_entity_test_list'));
+     $this->assertNotEmpty(\Drupal::cache()->get('test_cache_pretransaction_user_list'));
+ 
++dump([__METHOD__, '***2']);
+     // Save a user, that should invalidate the cache tagged with user_list but
+     // not the one with entity_test_list.
+     User::create([
