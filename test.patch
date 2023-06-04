@@ -1,5 +1,5 @@
 diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
-index 7e405e1b1b..1abae18787 100644
+index 7e405e1b1b..56e60c46af 100644
 --- a/core/lib/Drupal/Core/Database/Connection.php
 +++ b/core/lib/Drupal/Core/Database/Connection.php
 @@ -13,6 +13,8 @@
@@ -130,18 +130,17 @@ index 7e405e1b1b..1abae18787 100644
      return count($this->transactionLayers);
    }
  
-@@ -1326,6 +1398,10 @@ public function transactionDepth() {
+@@ -1326,6 +1398,9 @@ public function transactionDepth() {
     * @see \Drupal\Core\Database\Transaction
     */
    public function startTransaction($name = '') {
 +    if ($this->transactionManager()) {
 +      return $this->transactionManager()->push($name);
 +    }
-+dump([__METHOD__, $name, count($this->rootTransactionEndCallbacks), $this->transactionLayers]);
      $class = $this->getDriverClass('Transaction');
      return new $class($this, $name);
    }
-@@ -1345,6 +1421,10 @@ public function startTransaction($name = '') {
+@@ -1345,6 +1420,10 @@ public function startTransaction($name = '') {
     * @see \Drupal\Core\Database\Transaction::rollBack()
     */
    public function rollBack($savepoint_name = 'drupal_transaction') {
@@ -152,21 +151,7 @@ index 7e405e1b1b..1abae18787 100644
      if (!$this->inTransaction()) {
        throw new TransactionNoActiveException();
      }
-@@ -1379,11 +1459,13 @@ public function rollBack($savepoint_name = 'drupal_transaction') {
-     }
- 
-     // Notify the callbacks about the rollback.
-+dump([__METHOD__, $savepoint_name, count($this->rootTransactionEndCallbacks), $this->transactionLayers]);
-     $callbacks = $this->rootTransactionEndCallbacks;
-     $this->rootTransactionEndCallbacks = [];
-     foreach ($callbacks as $callback) {
-       call_user_func($callback, FALSE);
-     }
-+dump([__METHOD__, $savepoint_name, count($this->rootTransactionEndCallbacks), $this->transactionLayers]);
- 
-     $this->connection->rollBack();
-     if ($rolled_back_other_active_savepoints) {
-@@ -1469,6 +1551,10 @@ public function popTransaction($name) {
+@@ -1469,6 +1548,10 @@ public function popTransaction($name) {
     * @see \Drupal\Core\Database\Connection::doCommit()
     */
    public function addRootTransactionEndCallback(callable $callback) {
@@ -177,15 +162,7 @@ index 7e405e1b1b..1abae18787 100644
      if (!$this->transactionLayers) {
        throw new \LogicException('Root transaction end callbacks can only be added when there is an active transaction.');
      }
-@@ -1506,6 +1592,7 @@ protected function popCommittableTransactions() {
-    */
-   protected function doCommit() {
-     $success = $this->connection->commit();
-+dump([__METHOD__, count($this->rootTransactionEndCallbacks), $this->transactionLayers]);
-     if (!empty($this->rootTransactionEndCallbacks)) {
-       $callbacks = $this->rootTransactionEndCallbacks;
-       $this->rootTransactionEndCallbacks = [];
-@@ -1644,6 +1731,7 @@ abstract public function mapConditionOperator($operator);
+@@ -1644,6 +1727,7 @@ abstract public function mapConditionOperator($operator);
     * @see \Drupal\Core\Database\Transaction
     */
    public function commit() {
@@ -314,10 +291,10 @@ index 0000000000..763a758a9f
 +}
 diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
 new file mode 100644
-index 0000000000..d7d3ab8a72
+index 0000000000..0686122968
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
-@@ -0,0 +1,365 @@
+@@ -0,0 +1,367 @@
 +<?php
 +
 +namespace Drupal\Core\Database\Transaction;
@@ -475,6 +452,8 @@ index 0000000000..d7d3ab8a72
 +   *
 +   * @throws \Drupal\Core\Database\TransactionOutOfOrderException
 +   *   If a Drupal Transaction with the specified name does not exist.
++   * @throws \Drupal\Core\Database\TransactionCommitFailedException
++   *   If the commit of the root transaction failed.
 +   */
 +  public function unpile(string $name): void {
 +    // If an already rolled back Drupal transaction, do nothing on the client
@@ -592,13 +571,26 @@ index 0000000000..d7d3ab8a72
 +  }
 +
 +  /**
++   * Processes the post-transaction callbacks.
++   */
++  private function processPostTransactionCallbacks(): void {
++    if (!empty($this->postTransactionCallbacks)) {
++      $callbacks = $this->postTransactionCallbacks;
++      $this->postTransactionCallbacks = [];
++      foreach ($callbacks as $callback) {
++        call_user_func($callback, $this->connectionTransactionState === ClientConnectionTransactionState::Committed);
++      }
++    }
++  }
++
++  /**
 +   * Begins a transaction on the client connection.
 +   *
 +   * @return bool
 +   *   Returns TRUE on success or FALSE on failure.
 +   */
 +  protected function beginClientTransaction(): bool {
-+    dump([__METHOD__, count($this->postTransactionCallbacks), $this->stack]);
++    // dump([__METHOD__, count($this->postTransactionCallbacks), $this->stack]);
 +    return $this->connection->getClientConnection()->beginTransaction();
 +  }
 +
@@ -654,7 +646,7 @@ index 0000000000..d7d3ab8a72
 +   *   Returns TRUE on success or FALSE on failure.
 +   */
 +  protected function rollbackClientTransaction(): bool {
-+    dump([__METHOD__, count($this->postTransactionCallbacks), $this->stack]);
++    // dump([__METHOD__, count($this->postTransactionCallbacks), $this->stack]);
 +    return $this->connection->getClientConnection()->rollBack();
 +  }
 +
@@ -665,21 +657,8 @@ index 0000000000..d7d3ab8a72
 +   *   Returns TRUE on success or FALSE on failure.
 +   */
 +  protected function commitClientTransaction(): bool {
-+    dump([__METHOD__, count($this->postTransactionCallbacks), $this->stack]);
++    // dump([__METHOD__, count($this->postTransactionCallbacks), $this->stack]);
 +    return $this->connection->getClientConnection()->commit();
-+  }
-+
-+  /**
-+   * Processes the post-transaction callbacks.
-+   */
-+  private function processPostTransactionCallbacks(): void {
-+    if (!empty($this->postTransactionCallbacks)) {
-+      $callbacks = $this->postTransactionCallbacks;
-+      $this->postTransactionCallbacks = [];
-+      foreach ($callbacks as $callback) {
-+        call_user_func($callback, $this->connectionTransactionState === ClientConnectionTransactionState::Committed);
-+      }
-+    }
 +  }
 +
 +}
@@ -753,23 +732,3 @@ index 0000000000..5bf7a6c5d5
 + */
 +class TransactionManager extends TransactionManagerBase {
 +}
-diff --git a/core/tests/Drupal/KernelTests/Core/Cache/EndOfTransactionQueriesTest.php b/core/tests/Drupal/KernelTests/Core/Cache/EndOfTransactionQueriesTest.php
-index 46f5a37638..28a22bdb98 100644
---- a/core/tests/Drupal/KernelTests/Core/Cache/EndOfTransactionQueriesTest.php
-+++ b/core/tests/Drupal/KernelTests/Core/Cache/EndOfTransactionQueriesTest.php
-@@ -103,6 +103,7 @@ public function testEntitySave(): void {
-    * Tests an entity save rollback.
-    */
-   public function testEntitySaveRollback(): void {
-+dump([__METHOD__, '***1']);
-     \Drupal::cache()
-       ->set('test_cache_pretransaction_entity_test_list', 'something', Cache::PERMANENT, ['entity_test_list']);
-     \Drupal::cache()
-@@ -122,6 +123,7 @@ public function testEntitySaveRollback(): void {
-     $this->assertNotEmpty(\Drupal::cache()->get('test_cache_pretransaction_entity_test_list'));
-     $this->assertNotEmpty(\Drupal::cache()->get('test_cache_pretransaction_user_list'));
- 
-+dump([__METHOD__, '***2']);
-     // Save a user, that should invalidate the cache tagged with user_list but
-     // not the one with entity_test_list.
-     User::create([
