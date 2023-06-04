@@ -290,10 +290,10 @@ index 0000000000..763a758a9f
 +}
 diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
 new file mode 100644
-index 0000000000..5bd6e8d12f
+index 0000000000..167128ae8b
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
-@@ -0,0 +1,322 @@
+@@ -0,0 +1,330 @@
 +<?php
 +
 +namespace Drupal\Core\Database\Transaction;
@@ -510,18 +510,26 @@ index 0000000000..5bd6e8d12f
 +    return isset($this->stack[$name]);
 +  }
 +
++  protected function setConnectionTransactionState($state) {
++    $this->connectionTransactionState = $state;
++  }
++  protected function getConnectionTransactionState() {
++    return $this->connectionTransactionState;
++  }
++
 +  /**
 +   * Processes the transaction commit.
 +   *
 +   * @throws \Drupal\Core\Database\TransactionCommitFailedException
 +   *   If the commit of the root transaction failed.
 +   */
-+  private function processCommit(): void {
++  protected function processCommit(): void {
 +    $clientCommit = $this->commitClientTransaction();
 +
-+    $this->connectionTransactionState = $clientCommit ?
++    $this->setConnectionTransactionState($clientCommit ?
 +      ClientConnectionTransactionState::Committed :
-+      ClientConnectionTransactionState::CommitFailed;
++      ClientConnectionTransactionState::CommitFailed
++    );
 +
 +    $this->processPostTransactionCallbacks();
 +
@@ -533,7 +541,7 @@ index 0000000000..5bd6e8d12f
 +  /**
 +   * Processes the post-transaction callbacks.
 +   */
-+  private function processPostTransactionCallbacks(): void {
++  protected function processPostTransactionCallbacks(): void {
 +    if (!empty($this->postTransactionCallbacks)) {
 +      $callbacks = $this->postTransactionCallbacks;
 +      $this->postTransactionCallbacks = [];
@@ -780,10 +788,10 @@ index 73239a4536..75438263f4 100644
      // exception in this case as all statements have been committed.
 diff --git a/core/modules/mysql/src/Driver/Database/mysql/TransactionManager.php b/core/modules/mysql/src/Driver/Database/mysql/TransactionManager.php
 new file mode 100644
-index 0000000000..7c9fd42f03
+index 0000000000..bc7a6cafbe
 --- /dev/null
 +++ b/core/modules/mysql/src/Driver/Database/mysql/TransactionManager.php
-@@ -0,0 +1,11 @@
+@@ -0,0 +1,54 @@
 +<?php
 +
 +namespace Drupal\mysql\Driver\Database\mysql;
@@ -794,7 +802,51 @@ index 0000000000..7c9fd42f03
 + * MySql implementation of TransactionManagerInterface.
 + */
 +class TransactionManager extends TransactionManagerBase {
++
++  protected function processCommit(): void {
++    if ($this->connection->inTransaction()) {
++      $clientCommit = $this->commitClientTransaction();
++    }
++    else {
++      $clientCommit = TRUE;
++    }
++
++    $this->setConnectionTransactionState($clientCommit ?
++      ClientConnectionTransactionState::Committed :
++      ClientConnectionTransactionState::CommitFailed
++    );
++
++    $this->processPostTransactionCallbacks();
++
++    if (!$clientCommit) {
++      throw new TransactionCommitFailedException();
++    }
++  }
++
 +}
++
++
++/*if ($this->connection->inTransaction()) {
++    // On PHP 7 $this->connection->inTransaction() will return TRUE and
++    // $this->connection->commit() does not throw an exception.
++    $success = parent::doCommit();
++  }
++  else {
++    // Process the post-root (non-nested) transaction commit callbacks. The
++    // following code is copied from
++    // \Drupal\Core\Database\Connection::doCommit()
++    $success = TRUE;
++    if (!empty($this->rootTransactionEndCallbacks)) {
++      $callbacks = $this->rootTransactionEndCallbacks;
++      $this->rootTransactionEndCallbacks = [];
++      foreach ($callbacks as $callback) {
++        call_user_func($callback, $success);
++      }
++    }
++  }
++  return $success;
++*/
+\ No newline at end of file
 diff --git a/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php b/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php
 index 72a0cb5b68..8e0d8e46cf 100644
 --- a/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php
