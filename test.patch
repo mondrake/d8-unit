@@ -1,5 +1,5 @@
 diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
-index 7e405e1b1b..b84bd94495 100644
+index 7e405e1b1b..8e9d4bd8ce 100644
 --- a/core/lib/Drupal/Core/Database/Connection.php
 +++ b/core/lib/Drupal/Core/Database/Connection.php
 @@ -13,6 +13,8 @@
@@ -42,7 +42,7 @@ index 7e405e1b1b..b84bd94495 100644
 +  /**
 +   * The transaction manager.
 +   */
-+  protected TransactionManager $transactionManager;
++  protected TransactionManager|FALSE $transactionManager;
 +
    /**
     * Constructs a Connection object.
@@ -68,79 +68,101 @@ index 7e405e1b1b..b84bd94495 100644
    /**
     * Returns the default query options for any given query.
     *
-@@ -1294,6 +1325,19 @@ public function escapeLike($string) {
+@@ -1294,6 +1325,41 @@ public function escapeLike($string) {
      return addcslashes($string, '\%_');
    }
  
 +  /**
 +   * Returns the transaction manager.
 +   *
-+   * @return \Drupal\Core\Database\Transaction\TransactionManagerInterface
-+   *   The transaction manager.
++   * @return \Drupal\Core\Database\Transaction\TransactionManagerInterface|false
++   *   The transaction manager, or FALSE if not available.
 +   */
-+  public function transactionManager(): TransactionManagerInterface {
++  public function transactionManager(): TransactionManagerInterface|FALSE {
 +    if (!isset($this->transactionManager)) {
-+      $this->transactionManager = new TransactionManager($this);
++      try {
++        $this->transactionManager = $this->driverTransactionManager();
++      }
++      catch (\LogicException $e) {
++        $this->transactionManager = FALSE;
++      }
 +    }
 +    return $this->transactionManager;
++  }
++
++  /**
++   * Returns the driver's transaction manager.
++   *
++   * Database drivers must implement their own class extending from
++   * \Drupal\Core\Database\Transaction\TransactionManagerBase, and instantiate
++   * it here.
++   *
++   * @return \Drupal\Core\Database\Transaction\TransactionManagerInterface
++   *   The transaction manager.
++   *
++   * @throws \LogicException
++   *   If the transaction manager is undefined or unavailable.
++   */
++  protected function driverTransactionManager(): TransactionManagerInterface {
++    throw new \LogicException('The database driver has no TransactionManager implementation');
 +  }
 +
    /**
     * Determines if there is an active transaction open.
     *
-@@ -1301,6 +1345,9 @@ public function escapeLike($string) {
+@@ -1301,6 +1367,9 @@ public function escapeLike($string) {
     *   TRUE if we're currently in a transaction, FALSE otherwise.
     */
    public function inTransaction() {
-+    if (method_exists($this, 'transactionManager') && $this->transactionManager()->enabled()) {
++    if ($this->transactionManager()) {
 +      return $this->transactionManager()->inTransaction();
 +    }
      return ($this->transactionDepth() > 0);
    }
  
-@@ -1311,6 +1358,9 @@ public function inTransaction() {
+@@ -1311,6 +1380,9 @@ public function inTransaction() {
     *   The current transaction depth.
     */
    public function transactionDepth() {
-+    if (method_exists($this, 'transactionManager') && $this->transactionManager()->enabled()) {
++    if ($this->transactionManager()) {
 +      return $this->transactionManager()->stackDepth();
 +    }
      return count($this->transactionLayers);
    }
  
-@@ -1326,6 +1376,9 @@ public function transactionDepth() {
+@@ -1326,6 +1398,9 @@ public function transactionDepth() {
     * @see \Drupal\Core\Database\Transaction
     */
    public function startTransaction($name = '') {
-+    if (method_exists($this, 'transactionManager') && $this->transactionManager()->enabled()) {
++    if ($this->transactionManager()) {
 +      return $this->transactionManager()->push($name);
 +    }
      $class = $this->getDriverClass('Transaction');
      return new $class($this, $name);
    }
-@@ -1345,6 +1398,10 @@ public function startTransaction($name = '') {
+@@ -1345,6 +1420,10 @@ public function startTransaction($name = '') {
     * @see \Drupal\Core\Database\Transaction::rollBack()
     */
    public function rollBack($savepoint_name = 'drupal_transaction') {
-+    if (method_exists($this, 'transactionManager') && $this->transactionManager()->enabled()) {
++    if ($this->transactionManager()) {
 +      $this->transactionManager()->rollback($savepoint_name);
 +      return;
 +    }
      if (!$this->inTransaction()) {
        throw new TransactionNoActiveException();
      }
-@@ -1469,6 +1526,10 @@ public function popTransaction($name) {
+@@ -1469,6 +1548,10 @@ public function popTransaction($name) {
     * @see \Drupal\Core\Database\Connection::doCommit()
     */
    public function addRootTransactionEndCallback(callable $callback) {
-+    if (method_exists($this, 'transactionManager') && $this->transactionManager()->enabled()) {
++    if ($this->transactionManager()) {
 +      $this->transactionManager()->addPostTransactionCallback($callback);
 +      return;
 +    }
      if (!$this->transactionLayers) {
        throw new \LogicException('Root transaction end callbacks can only be added when there is an active transaction.');
      }
-@@ -1644,6 +1705,7 @@ abstract public function mapConditionOperator($operator);
+@@ -1644,6 +1727,7 @@ abstract public function mapConditionOperator($operator);
     * @see \Drupal\Core\Database\Transaction
     */
    public function commit() {
@@ -149,14 +171,14 @@ index 7e405e1b1b..b84bd94495 100644
    }
  
 diff --git a/core/lib/Drupal/Core/Database/Transaction.php b/core/lib/Drupal/Core/Database/Transaction.php
-index 76d5fc8f5f..9a64e92f08 100644
+index 76d5fc8f5f..b03b2ca24a 100644
 --- a/core/lib/Drupal/Core/Database/Transaction.php
 +++ b/core/lib/Drupal/Core/Database/Transaction.php
 @@ -48,6 +48,11 @@ class Transaction {
    protected $name;
  
    public function __construct(Connection $connection, $name = NULL) {
-+    if (method_exists($connection, 'transactionManager') && $connection->transactionManager()->enabled()) {
++    if ($connection->transactionManager()) {
 +      $this->connection = $connection;
 +      $this->name = $name;
 +      return;
@@ -168,7 +190,7 @@ index 76d5fc8f5f..9a64e92f08 100644
    }
  
    public function __destruct() {
-+    if (method_exists($this->connection, 'transactionManager') && $this->connection->transactionManager()->enabled()) {
++    if ($this->connection->transactionManager()) {
 +      $this->connection->transactionManager()->unpile($this->name);
 +      return;
 +    }
@@ -179,7 +201,7 @@ index 76d5fc8f5f..9a64e92f08 100644
     * @see \Drupal\Core\Database\Connection::rollBack()
     */
    public function rollBack() {
-+    if (method_exists($this->connection, 'transactionManager') && $this->connection->transactionManager()->enabled()) {
++    if ($this->connection->transactionManager()) {
 +      $this->connection->transactionManager()->rollback($this->name);
 +      return;
 +    }
@@ -267,11 +289,11 @@ index 0000000000..763a758a9f
 +  case Savepoint;
 +
 +}
-diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManager.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManager.php
+diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
 new file mode 100644
-index 0000000000..826da9c86d
+index 0000000000..2ce363acb9
 --- /dev/null
-+++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManager.php
++++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
 @@ -0,0 +1,351 @@
 +<?php
 +
@@ -290,7 +312,7 @@ index 0000000000..826da9c86d
 + * On many databases transactions cannot nest. Instead, we track nested calls
 + * to transactions and collapse them into a single client transaction.
 + */
-+class TransactionManager implements TransactionManagerInterface {
++abstract class TransactionManagerBase implements TransactionManagerInterface {
 +
 +  /**
 +   * The stack of Drupal transactions currently active.
@@ -640,7 +662,7 @@ index 0000000000..29635fdba0
 +interface TransactionManagerInterface {
 +}
 diff --git a/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php b/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php
-index 72a0cb5b68..699847ce87 100644
+index 72a0cb5b68..8e0d8e46cf 100644
 --- a/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php
 +++ b/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php
 @@ -7,6 +7,7 @@
@@ -663,18 +685,15 @@ index 72a0cb5b68..699847ce87 100644
     */
    protected $willRollback;
  
-@@ -448,6 +454,16 @@ public function nextId($existing_id = 0) {
+@@ -448,6 +454,13 @@ public function nextId($existing_id = 0) {
      return $this->query('SELECT [value] FROM {sequences}')->fetchField();
    }
  
 +  /**
 +   * {@inheritdoc}
 +   */
-+  public function transactionManager(): TransactionManagerInterface {
-+    if (!isset($this->transactionManager)) {
-+      $this->transactionManager = new TransactionManager($this);
-+    }
-+    return $this->transactionManager;
++  protected function driverTransactionManager(): TransactionManagerInterface {
++    return new TransactionManager($this);
 +  }
 +
    /**
@@ -682,23 +701,18 @@ index 72a0cb5b68..699847ce87 100644
     */
 diff --git a/core/modules/sqlite/src/Driver/Database/sqlite/TransactionManager.php b/core/modules/sqlite/src/Driver/Database/sqlite/TransactionManager.php
 new file mode 100644
-index 0000000000..f25fa7be74
+index 0000000000..5bf7a6c5d5
 --- /dev/null
 +++ b/core/modules/sqlite/src/Driver/Database/sqlite/TransactionManager.php
-@@ -0,0 +1,16 @@
+@@ -0,0 +1,11 @@
 +<?php
 +
 +namespace Drupal\sqlite\Driver\Database\sqlite;
 +
-+use Drupal\Core\Database\Transaction\TransactionManager as BaseTransactionManager;
++use Drupal\Core\Database\Transaction\TransactionManagerBase;
 +
 +/**
 + * @todo
 + */
-+class TransactionManager extends BaseTransactionManager {
-+
-+  public function enabled(): bool {
-+    return TRUE;
-+  }
-+
++class TransactionManager extends TransactionManagerBase {
 +}
