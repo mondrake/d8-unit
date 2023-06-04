@@ -1,5 +1,5 @@
 diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
-index 7e405e1b1b..56e60c46af 100644
+index 7e405e1b1b..53bd48e302 100644
 --- a/core/lib/Drupal/Core/Database/Connection.php
 +++ b/core/lib/Drupal/Core/Database/Connection.php
 @@ -13,6 +13,8 @@
@@ -91,7 +91,7 @@ index 7e405e1b1b..56e60c46af 100644
 +  }
 +
 +  /**
-+   * Returns the driver's transaction manager.
++   * Returns a new instance of the driver's transaction manager.
 +   *
 +   * Database drivers must implement their own class extending from
 +   * \Drupal\Core\Database\Transaction\TransactionManagerBase, and instantiate
@@ -291,10 +291,10 @@ index 0000000000..763a758a9f
 +}
 diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
 new file mode 100644
-index 0000000000..0686122968
+index 0000000000..5bd6e8d12f
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
-@@ -0,0 +1,367 @@
+@@ -0,0 +1,322 @@
 +<?php
 +
 +namespace Drupal\Core\Database\Transaction;
@@ -357,19 +357,6 @@ index 0000000000..0686122968
 +  }
 +
 +  /**
-+   * Checks if a named Drupal transaction is active.
-+   *
-+   * @param string $name
-+   *   The name of the transaction.
-+   *
-+   * @return bool
-+   *   TRUE if the transaction is active, FALSE otherwise.
-+   */
-+  protected function has(string $name): bool {
-+    return isset($this->stack[$name]);
-+  }
-+
-+  /**
 +   * Returns the current depth of the transaction stack.
 +   *
 +   * @return int
@@ -382,29 +369,14 @@ index 0000000000..0686122968
 +  }
 +
 +  /**
-+   * Determines if there is an active transaction open.
-+   *
-+   * @return bool
-+   *   TRUE if we're currently in a transaction, FALSE otherwise.
++   * {@inheritdoc}
 +   */
 +  public function inTransaction(): bool {
 +    return (bool) $this->stackDepth() && $this->connectionTransactionState === ClientConnectionTransactionState::Active;
 +  }
 +
 +  /**
-+   * Pushes a new Drupal transaction on the stack.
-+   *
-+   * This begins a client connection transaction if there is not one active,
-+   * or adds a savepoint to the active one.
-+   *
-+   * @param string $name
-+   *   (optional) The name of the savepoint.
-+   *
-+   * @return \Drupal\Core\Database\Transaction
-+   *   A Transaction object.
-+   *
-+   * @throws \Drupal\Core\Database\TransactionNameNonUniqueException
-+   *   If a Drupal Transaction with the specified name exists already.
++   * {@inheritdoc}
 +   */
 +  public function push(string $name = ''): Transaction {
 +    if (!$this->inTransaction()) {
@@ -443,17 +415,7 @@ index 0000000000..0686122968
 +  }
 +
 +  /**
-+   * Removes a Drupal transaction from the stack.
-+   *
-+   * The unpiled item does not necessarily need to be the last on the stack.
-+   *
-+   * @param string $name
-+   *   (optional) The name of the savepoint.
-+   *
-+   * @throws \Drupal\Core\Database\TransactionOutOfOrderException
-+   *   If a Drupal Transaction with the specified name does not exist.
-+   * @throws \Drupal\Core\Database\TransactionCommitFailedException
-+   *   If the commit of the root transaction failed.
++   * {@inheritdoc}
 +   */
 +  public function unpile(string $name): void {
 +    // If an already rolled back Drupal transaction, do nothing on the client
@@ -479,22 +441,14 @@ index 0000000000..0686122968
 +    // If this was the last Drupal transaction open, we can commit the client
 +    // transaction.
 +    if ($this->stackDepth() === 0 && $this->connectionTransactionState === ClientConnectionTransactionState::Active) {
-+
-+      $clientCommit = $this->commitClientTransaction();
-+
-+      $this->connectionTransactionState = $clientCommit ?
-+        ClientConnectionTransactionState::Committed :
-+        ClientConnectionTransactionState::CommitFailed;
-+
-+      $this->processPostTransactionCallbacks();
-+
-+      if (!$clientCommit) {
-+        throw new TransactionCommitFailedException();
-+      }
++      $this->processCommit();
 +    }
 +  }
 +
-+  public function rollback(string $name) {
++  /**
++   * {@inheritdoc}
++   */
++  public function rollback(string $name): void {
 +    if (!$this->inTransaction()) {
 +      throw new TransactionNoActiveException();
 +    }
@@ -530,44 +484,51 @@ index 0000000000..0686122968
 +    // If this was the last Drupal transaction open, we can commit the client
 +    // transaction.
 +    if ($this->stackDepth() === 0 && $this->connectionTransactionState === ClientConnectionTransactionState::Active) {
-+      $clientCommit = $this->commitClientTransaction();
-+      $this->connectionTransactionState = $clientCommit ?
-+        ClientConnectionTransactionState::Committed :
-+        ClientConnectionTransactionState::CommitFailed;
-+      $this->processPostTransactionCallbacks();
-+      if (!$clientCommit) {
-+        throw new TransactionCommitFailedException();
-+      }
++      $this->processCommit();
 +    }
 +  }
 +
 +  /**
-+   * Adds a root transaction end callback.
-+   *
-+   * These callbacks are invoked immediately after the client transaction has
-+   * been committed or rolled back.
-+   *
-+   * It can for example be used to avoid deadlocks on write-heavy tables that
-+   * do not need to be part of the transaction, like cache tag invalidations.
-+   *
-+   * Another use case is that services using alternative backends like Redis and
-+   * Memcache cache implementations can replicate the transaction-behavior of
-+   * the database cache backend and avoid race conditions.
-+   *
-+   * An argument is passed to the callbacks that indicates whether the
-+   * transaction was successful or not.
-+   *
-+   * @param callable $callback
-+   *   The callback to invoke.
-+   *
-+   * @throws \LogicException
-+   *   When a callback addition is attempted but no transaction is active.
++   * {@inheritdoc}
 +   */
 +  public function addPostTransactionCallback(callable $callback): void {
 +    if (!$this->inTransaction()) {
 +      throw new \LogicException('Root transaction end callbacks can only be added when there is an active transaction.');
 +    }
 +    $this->postTransactionCallbacks[] = $callback;
++  }
++
++  /**
++   * Checks if a named Drupal transaction is active.
++   *
++   * @param string $name
++   *   The name of the transaction.
++   *
++   * @return bool
++   *   TRUE if the transaction is active, FALSE otherwise.
++   */
++  private function has(string $name): bool {
++    return isset($this->stack[$name]);
++  }
++
++  /**
++   * Processes the transaction commit.
++   *
++   * @throws \Drupal\Core\Database\TransactionCommitFailedException
++   *   If the commit of the root transaction failed.
++   */
++  private function processCommit(): void {
++    $clientCommit = $this->commitClientTransaction();
++
++    $this->connectionTransactionState = $clientCommit ?
++      ClientConnectionTransactionState::Committed :
++      ClientConnectionTransactionState::CommitFailed;
++
++    $this->processPostTransactionCallbacks();
++
++    if (!$clientCommit) {
++      throw new TransactionCommitFailedException();
++    }
 +  }
 +
 +  /**
@@ -590,7 +551,6 @@ index 0000000000..0686122968
 +   *   Returns TRUE on success or FALSE on failure.
 +   */
 +  protected function beginClientTransaction(): bool {
-+    // dump([__METHOD__, count($this->postTransactionCallbacks), $this->stack]);
 +    return $this->connection->getClientConnection()->beginTransaction();
 +  }
 +
@@ -604,7 +564,6 @@ index 0000000000..0686122968
 +   *   Returns TRUE on success or FALSE on failure.
 +   */
 +  protected function addClientSavepoint(string $name): bool {
-+    // dump([__METHOD__, $name]);
 +    $this->connection->query('SAVEPOINT ' . $name);
 +    return TRUE;
 +  }
@@ -619,7 +578,6 @@ index 0000000000..0686122968
 +   *   Returns TRUE on success or FALSE on failure.
 +   */
 +  protected function rollbackClientSavepoint(string $name): bool {
-+    // dump([__METHOD__, $name]);
 +    $this->connection->query('ROLLBACK TO SAVEPOINT ' . $name);
 +    return TRUE;
 +  }
@@ -634,7 +592,6 @@ index 0000000000..0686122968
 +   *   Returns TRUE on success or FALSE on failure.
 +   */
 +  protected function releaseClientSavepoint(string $name): bool {
-+    // dump([__METHOD__, $name]);
 +    $this->connection->query('RELEASE SAVEPOINT ' . $name);
 +    return TRUE;
 +  }
@@ -646,7 +603,6 @@ index 0000000000..0686122968
 +   *   Returns TRUE on success or FALSE on failure.
 +   */
 +  protected function rollbackClientTransaction(): bool {
-+    // dump([__METHOD__, count($this->postTransactionCallbacks), $this->stack]);
 +    return $this->connection->getClientConnection()->rollBack();
 +  }
 +
@@ -657,25 +613,114 @@ index 0000000000..0686122968
 +   *   Returns TRUE on success or FALSE on failure.
 +   */
 +  protected function commitClientTransaction(): bool {
-+    // dump([__METHOD__, count($this->postTransactionCallbacks), $this->stack]);
 +    return $this->connection->getClientConnection()->commit();
 +  }
 +
 +}
 diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php
 new file mode 100644
-index 0000000000..29635fdba0
+index 0000000000..4af1908750
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php
-@@ -0,0 +1,9 @@
+@@ -0,0 +1,99 @@
 +<?php
 +
 +namespace Drupal\Core\Database\Transaction;
 +
++use Drupal\Core\Database\Transaction;
++
 +/**
-+ * @todo
++ * Interface for the database transaction manager classes.
 + */
 +interface TransactionManagerInterface {
++
++  /**
++   * Determines if there is an active transaction open.
++   *
++   * @return bool
++   *   TRUE if we're currently in a transaction, FALSE otherwise.
++   */
++  public function inTransaction(): bool;
++
++  /**
++   * Pushes a new Drupal transaction on the stack.
++   *
++   * This begins a client connection transaction if there is not one active,
++   * or adds a savepoint to the active one.
++   *
++   * @param string $name
++   *   (optional) The name of the savepoint.
++   *
++   * @return \Drupal\Core\Database\Transaction
++   *   A Transaction object.
++   *
++   * @throws \Drupal\Core\Database\TransactionNameNonUniqueException
++   *   If a Drupal Transaction with the specified name exists already.
++   */
++  public function push(string $name = ''): Transaction;
++
++  /**
++   * Removes a Drupal transaction from the stack.
++   *
++   * The unpiled item does not necessarily need to be the last on the stack.
++   * This method should only be called by a Transaction object going out of
++   * scope.
++   *
++   * @param string $name
++   *   (optional) The name of the savepoint.
++   *
++   * @throws \Drupal\Core\Database\TransactionOutOfOrderException
++   *   If a Drupal Transaction with the specified name does not exist.
++   * @throws \Drupal\Core\Database\TransactionCommitFailedException
++   *   If the commit of the root transaction failed.
++   */
++  public function unpile(string $name): void;
++
++  /**
++   * Rolls back a Drupal transaction.
++   *
++   * Rollbacks for nested transactions need to occur in reverse order to the
++   * pushes to the stack. Rolling back the last active Drupal transaction leads
++   * to rolling back the client connection (or to committing it in the edge
++   * case when the root was unpiled earlier).
++   *
++   * @param string $name
++   *   (optional) The name of the savepoint.
++   *
++   * @throws \Drupal\Core\Database\TransactionNoActiveException
++   *   If there is no active client connection.
++   * @throws \Drupal\Core\Database\TransactionOutOfOrderException
++   *   If the order of rollback is not in reverse sequence against the pushes
++   *   to the stack.
++   * @throws \Drupal\Core\Database\TransactionCommitFailedException
++   *   If the commit of the root transaction failed.
++   */
++  public function rollback(string $name): void;
++
++  /**
++   * Adds a root transaction end callback.
++   *
++   * These callbacks are invoked immediately after the client transaction has
++   * been committed or rolled back.
++   *
++   * It can for example be used to avoid deadlocks on write-heavy tables that
++   * do not need to be part of the transaction, like cache tag invalidations.
++   *
++   * Another use case is that services using alternative backends like Redis
++   * and Memcache cache implementations can replicate the transaction-behavior
++   * of the database cache backend and avoid race conditions.
++   *
++   * An argument is passed to the callbacks that indicates whether the
++   * transaction was successful or not.
++   *
++   * @param callable $callback
++   *   The callback to invoke.
++   *
++   * @throws \LogicException
++   *   When a callback addition is attempted but no transaction is active.
++   */
++  public function addPostTransactionCallback(callable $callback): void;
++
 +}
 diff --git a/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php b/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php
 index 72a0cb5b68..8e0d8e46cf 100644
