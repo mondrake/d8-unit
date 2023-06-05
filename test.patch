@@ -209,10 +209,10 @@ index 76d5fc8f5f..b03b2ca24a 100644
    }
 diff --git a/core/lib/Drupal/Core/Database/Transaction/ClientConnectionTransactionState.php b/core/lib/Drupal/Core/Database/Transaction/ClientConnectionTransactionState.php
 new file mode 100644
-index 0000000000..b5a5127736
+index 0000000000..8650809869
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/Transaction/ClientConnectionTransactionState.php
-@@ -0,0 +1,21 @@
+@@ -0,0 +1,26 @@
 +<?php
 +
 +/**
@@ -232,6 +232,11 @@ index 0000000000..b5a5127736
 +  case RollbackFailed;
 +  case Committed;
 +  case CommitFailed;
++
++  // In some cases (example, MySql when a DDL statement is executed during a
++  // transaction) the active transaction can be autocommitted by the database
++  // server. We track such cases with 'Voided' when we can detect them.
++  case Voided;
 +
 +}
 diff --git a/core/lib/Drupal/Core/Database/Transaction/ManagerStackItem.php b/core/lib/Drupal/Core/Database/Transaction/ManagerStackItem.php
@@ -290,10 +295,10 @@ index 0000000000..763a758a9f
 +}
 diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
 new file mode 100644
-index 0000000000..167128ae8b
+index 0000000000..e769093141
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
-@@ -0,0 +1,330 @@
+@@ -0,0 +1,323 @@
 +<?php
 +
 +namespace Drupal\Core\Database\Transaction;
@@ -371,7 +376,7 @@ index 0000000000..167128ae8b
 +   * {@inheritdoc}
 +   */
 +  public function inTransaction(): bool {
-+    return (bool) $this->stackDepth() && $this->connectionTransactionState === ClientConnectionTransactionState::Active;
++    return (bool) $this->stackDepth() && $this->getConnectionTransactionState() === ClientConnectionTransactionState::Active;
 +  }
 +
 +  /**
@@ -397,7 +402,7 @@ index 0000000000..167128ae8b
 +    if ($this->stackDepth() === 0) {
 +      $this->beginClientTransaction();
 +      $type = ManagerStackItemType::Root;
-+      $this->connectionTransactionState = ClientConnectionTransactionState::Active;
++      $this->setConnectionTransactionState(ClientConnectionTransactionState::Active);
 +    }
 +    else {
 +      // If we're already in a Drupal transaction then we want to create a
@@ -430,7 +435,7 @@ index 0000000000..167128ae8b
 +
 +    // Release the client transaction savepoint in case the Drupal transaction
 +    // is not a root one.
-+    if ($this->stack[$name]->type === ManagerStackItemType::Savepoint && $this->connectionTransactionState === ClientConnectionTransactionState::Active) {
++    if ($this->stack[$name]->type === ManagerStackItemType::Savepoint && $this->getConnectionTransactionState() === ClientConnectionTransactionState::Active) {
 +      $this->releaseClientSavepoint($name);
 +    }
 +
@@ -439,8 +444,8 @@ index 0000000000..167128ae8b
 +
 +    // If this was the last Drupal transaction open, we can commit the client
 +    // transaction.
-+    if ($this->stackDepth() === 0 && $this->connectionTransactionState === ClientConnectionTransactionState::Active) {
-+      $this->processCommit();
++    if ($this->stackDepth() === 0 && $this->getConnectionTransactionState() === ClientConnectionTransactionState::Active) {
++      $this->processRootCommit();
 +    }
 +  }
 +
@@ -453,24 +458,10 @@ index 0000000000..167128ae8b
 +    }
 +
 +    // Do the client-level processing.
-+    switch ($this->stack[$name]->type) {
-+      case ManagerStackItemType::Root:
-+
-+        $clientRollback = $this->rollbackClientTransaction();
-+
-+        $this->connectionTransactionState = $clientRollback ?
-+          ClientConnectionTransactionState::RolledBack :
-+          ClientConnectionTransactionState::RollbackFailed;
-+
-+        $this->processPostTransactionCallbacks();
-+
-+        break;
-+
-+      case ManagerStackItemType::Savepoint:
-+        $this->rollbackClientSavepoint($name);
-+        break;
-+
-+    }
++    match ($this->stack[$name]->type) {
++      ManagerStackItemType::Root => $this->processRootRollback(),
++      ManagerStackItemType::Savepoint => $this->rollbackClientSavepoint($name),
++    };
 +
 +    // Rolled back item should match the last one in stack.
 +    if ($name !== array_key_last($this->stack)) {
@@ -482,8 +473,8 @@ index 0000000000..167128ae8b
 +
 +    // If this was the last Drupal transaction open, we can commit the client
 +    // transaction.
-+    if ($this->stackDepth() === 0 && $this->connectionTransactionState === ClientConnectionTransactionState::Active) {
-+      $this->processCommit();
++    if ($this->stackDepth() === 0 && $this->getConnectionTransactionState() === ClientConnectionTransactionState::Active) {
++      $this->processRootCommit();
 +    }
 +  }
 +
@@ -498,15 +489,9 @@ index 0000000000..167128ae8b
 +  }
 +
 +  /**
-+   * Checks if a named Drupal transaction is active.
-+   *
-+   * @param string $name
-+   *   The name of the transaction.
-+   *
-+   * @return bool
-+   *   TRUE if the transaction is active, FALSE otherwise.
++   * {@inheritdoc}
 +   */
-+  private function has(string $name): bool {
++  public function has(string $name): bool {
 +    return isset($this->stack[$name]);
 +  }
 +
@@ -518,21 +503,22 @@ index 0000000000..167128ae8b
 +  }
 +
 +  /**
-+   * Processes the transaction commit.
++   * Processes the root transaction rollback.
++   */
++  protected function processRootRollback(): void {
++    $this->rollbackClientTransaction();
++    $this->processPostTransactionCallbacks();
++  }
++
++  /**
++   * Processes the root transaction commit.
 +   *
 +   * @throws \Drupal\Core\Database\TransactionCommitFailedException
 +   *   If the commit of the root transaction failed.
 +   */
-+  protected function processCommit(): void {
++  protected function processRootCommit(): void {
 +    $clientCommit = $this->commitClientTransaction();
-+
-+    $this->setConnectionTransactionState($clientCommit ?
-+      ClientConnectionTransactionState::Committed :
-+      ClientConnectionTransactionState::CommitFailed
-+    );
-+
 +    $this->processPostTransactionCallbacks();
-+
 +    if (!$clientCommit) {
 +      throw new TransactionCommitFailedException();
 +    }
@@ -546,7 +532,7 @@ index 0000000000..167128ae8b
 +      $callbacks = $this->postTransactionCallbacks;
 +      $this->postTransactionCallbacks = [];
 +      foreach ($callbacks as $callback) {
-+        call_user_func($callback, $this->connectionTransactionState === ClientConnectionTransactionState::Committed);
++        call_user_func($callback, $this->getConnectionTransactionState() === ClientConnectionTransactionState::Committed);
 +      }
 +    }
 +  }
@@ -610,8 +596,15 @@ index 0000000000..167128ae8b
 +   *   Returns TRUE on success or FALSE on failure.
 +   */
 +  protected function rollbackClientTransaction(): bool {
-+    return $this->connection->getClientConnection()->rollBack();
-+  }
++    $clientRollback = $this->connection->getClientConnection()->rollBack();
++    $this->setConnectionTransactionState($clientRollback ?
++      ClientConnectionTransactionState::RolledBack :
++      ClientConnectionTransactionState::RollbackFailed
++    );
++    return $clientRollback;
++  );
++
++}
 +
 +  /**
 +   * Commits a client transaction.
@@ -620,16 +613,21 @@ index 0000000000..167128ae8b
 +   *   Returns TRUE on success or FALSE on failure.
 +   */
 +  protected function commitClientTransaction(): bool {
-+    return $this->connection->getClientConnection()->commit();
++    $clientCommit = $this->connection->getClientConnection()->commit();
++    $this->setConnectionTransactionState($clientCommit ?
++      ClientConnectionTransactionState::Committed :
++      ClientConnectionTransactionState::CommitFailed
++    );
++    return $clientCommit;
 +  }
 +
 +}
 diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php
 new file mode 100644
-index 0000000000..4af1908750
+index 0000000000..d6dc96ed29
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php
-@@ -0,0 +1,99 @@
+@@ -0,0 +1,110 @@
 +<?php
 +
 +namespace Drupal\Core\Database\Transaction;
@@ -648,6 +646,17 @@ index 0000000000..4af1908750
 +   *   TRUE if we're currently in a transaction, FALSE otherwise.
 +   */
 +  public function inTransaction(): bool;
++
++  /**
++   * Checks if a named Drupal transaction is active.
++   *
++   * @param string $name
++   *   The name of the transaction.
++   *
++   * @return bool
++   *   TRUE if the transaction is active, FALSE otherwise.
++   */
++  public function has(string $name): bool;
 +
 +  /**
 +   * Pushes a new Drupal transaction on the stack.
@@ -788,10 +797,10 @@ index 73239a4536..75438263f4 100644
      // exception in this case as all statements have been committed.
 diff --git a/core/modules/mysql/src/Driver/Database/mysql/TransactionManager.php b/core/modules/mysql/src/Driver/Database/mysql/TransactionManager.php
 new file mode 100644
-index 0000000000..d31130ac95
+index 0000000000..1b4711dbae
 --- /dev/null
 +++ b/core/modules/mysql/src/Driver/Database/mysql/TransactionManager.php
-@@ -0,0 +1,55 @@
+@@ -0,0 +1,31 @@
 +<?php
 +
 +namespace Drupal\mysql\Driver\Database\mysql;
@@ -804,49 +813,25 @@ index 0000000000..d31130ac95
 + */
 +class TransactionManager extends TransactionManagerBase {
 +
-+  protected function processCommit(): void {
++  /**
++   * {@inheritdoc}
++   */
++  protected function commitClientTransaction(): bool {
 +    if ($this->connection->getClientConnection()->inTransaction()) {
 +      $clientCommit = $this->commitClientTransaction();
++      $this->setConnectionTransactionState($clientCommit ?
++        ClientConnectionTransactionState::Committed :
++        ClientConnectionTransactionState::CommitFailed
++      );
 +    }
 +    else {
 +      $clientCommit = TRUE;
++      $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
 +    }
-+
-+    $this->setConnectionTransactionState($clientCommit ?
-+      ClientConnectionTransactionState::Committed :
-+      ClientConnectionTransactionState::CommitFailed
-+    );
-+
-+    $this->processPostTransactionCallbacks();
-+
-+    if (!$clientCommit) {
-+      throw new TransactionCommitFailedException();
-+    }
++    return $clientCommit;
 +  }
 +
 +}
-+
-+
-+/*if ($this->connection->inTransaction()) {
-+    // On PHP 7 $this->connection->inTransaction() will return TRUE and
-+    // $this->connection->commit() does not throw an exception.
-+    $success = parent::doCommit();
-+  }
-+  else {
-+    // Process the post-root (non-nested) transaction commit callbacks. The
-+    // following code is copied from
-+    // \Drupal\Core\Database\Connection::doCommit()
-+    $success = TRUE;
-+    if (!empty($this->rootTransactionEndCallbacks)) {
-+      $callbacks = $this->rootTransactionEndCallbacks;
-+      $this->rootTransactionEndCallbacks = [];
-+      foreach ($callbacks as $callback) {
-+        call_user_func($callback, $success);
-+      }
-+    }
-+  }
-+  return $success;
-+*/
 \ No newline at end of file
 diff --git a/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php b/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php
 index 72a0cb5b68..8e0d8e46cf 100644
