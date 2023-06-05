@@ -209,10 +209,10 @@ index 76d5fc8f5f..b03b2ca24a 100644
    }
 diff --git a/core/lib/Drupal/Core/Database/Transaction/ClientConnectionTransactionState.php b/core/lib/Drupal/Core/Database/Transaction/ClientConnectionTransactionState.php
 new file mode 100644
-index 0000000000..8650809869
+index 0000000000..b545d6b2de
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/Transaction/ClientConnectionTransactionState.php
-@@ -0,0 +1,26 @@
+@@ -0,0 +1,27 @@
 +<?php
 +
 +/**
@@ -233,9 +233,10 @@ index 0000000000..8650809869
 +  case Committed;
 +  case CommitFailed;
 +
-+  // In some cases (example, MySql when a DDL statement is executed during a
-+  // transaction) the active transaction can be autocommitted by the database
-+  // server. We track such cases with 'Voided' when we can detect them.
++  // In some cases the active transaction can be automatically committed by
++  // the database server (for example, MySql when a DDL statement is executed
++  // during a transaction). We track such cases with 'Voided' when we can
++  // detect them.
 +  case Voided;
 +
 +}
@@ -295,10 +296,10 @@ index 0000000000..763a758a9f
 +}
 diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
 new file mode 100644
-index 0000000000..ad31544ef4
+index 0000000000..677139ea18
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
-@@ -0,0 +1,321 @@
+@@ -0,0 +1,346 @@
 +<?php
 +
 +namespace Drupal\Core\Database\Transaction;
@@ -346,6 +347,10 @@ index 0000000000..ad31544ef4
 +
 +  /**
 +   * The state of the underlying client connection transaction.
++   *
++   * Note that this is a proxy of the actual state on the database server,
++   * best determined through calls to methods in this class. The actual
++   * state on the database server could be different.
 +   */
 +  private ClientConnectionTransactionState $connectionTransactionState;
 +
@@ -495,10 +500,31 @@ index 0000000000..ad31544ef4
 +    return isset($this->stack[$name]);
 +  }
 +
-+  protected function setConnectionTransactionState($state) {
++  /**
++   * Sets the state of the client connection transaction.
++   *
++   * Note that this is a proxy of the actual state on the database server,
++   * best determined through calls to methods in this class. The actual
++   * state on the database server could be different.
++   *
++   * @param \Drupal\Core\Database\Transaction\ClientConnectionTransactionState $state
++   *   The state of the client connection.
++   */
++  protected function setConnectionTransactionState(ClientConnectionTransactionState $state): void {
 +    $this->connectionTransactionState = $state;
 +  }
-+  protected function getConnectionTransactionState() {
++
++  /**
++   * Gets the state of the client connection transaction.
++   *
++   * Note that this is a proxy of the actual state on the database server,
++   * best determined through calls to methods in this class. The actual
++   * state on the database server could be different.
++   *
++   * @return \Drupal\Core\Database\Transaction\ClientConnectionTransactionState
++   *   The state of the client connection.
++   */
++  protected function getConnectionTransactionState(): ClientConnectionTransactionState {
 +    return $this->connectionTransactionState;
 +  }
 +
@@ -737,7 +763,7 @@ index 0000000000..d6dc96ed29
 +
 +}
 diff --git a/core/modules/mysql/src/Driver/Database/mysql/Connection.php b/core/modules/mysql/src/Driver/Database/mysql/Connection.php
-index 73239a4536..75438263f4 100644
+index 73239a4536..50a892002c 100644
 --- a/core/modules/mysql/src/Driver/Database/mysql/Connection.php
 +++ b/core/modules/mysql/src/Driver/Database/mysql/Connection.php
 @@ -11,6 +11,7 @@
@@ -748,7 +774,7 @@ index 73239a4536..75438263f4 100644
  use Drupal\Core\Database\TransactionNoActiveException;
  
  /**
-@@ -398,10 +399,18 @@ public function nextIdDelete() {
+@@ -398,11 +399,19 @@ public function nextIdDelete() {
      }
    }
  
@@ -763,11 +789,21 @@ index 73239a4536..75438263f4 100644
     * Overridden to work around issues to MySQL not supporting transactional DDL.
     */
    protected function popCommittableTransactions() {
+-    // Commit all the committable layers.
 +    @trigger_error(__METHOD__ . '() is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Instead, @todo. See https://www.drupal.org/node/5555555', E_USER_DEPRECATED);
-     // Commit all the committable layers.
++/*    // Commit all the committable layers.
      foreach (array_reverse($this->transactionLayers) as $name => $active) {
        // Stop once we found an active transaction.
-@@ -447,7 +456,8 @@ protected function popCommittableTransactions() {
+       if ($active) {
+@@ -440,14 +449,15 @@ protected function popCommittableTransactions() {
+           }
+         }
+       }
+-    }
++    }*/
+   }
+ 
+   /**
     * {@inheritdoc}
     */
    public function rollBack($savepoint_name = 'drupal_transaction') {
@@ -777,7 +813,7 @@ index 73239a4536..75438263f4 100644
      // created (DDL transactions are not supported). Prevent triggering an
      // exception to ensure that the error that has caused the rollback is
      // properly reported.
-@@ -470,13 +480,14 @@ public function rollBack($savepoint_name = 'drupal_transaction') {
+@@ -470,17 +480,18 @@ public function rollBack($savepoint_name = 'drupal_transaction') {
        trigger_error('Rollback attempted when there is no active transaction. This can cause data integrity issues.', E_USER_WARNING);
        return;
      }
@@ -793,18 +829,33 @@ index 73239a4536..75438263f4 100644
      // MySQL will automatically commit transactions when tables are altered or
      // created (DDL transactions are not supported). Prevent triggering an
      // exception in this case as all statements have been committed.
+-    if ($this->connection->inTransaction()) {
++/*    if ($this->connection->inTransaction()) {
+       // On PHP 7 $this->connection->inTransaction() will return TRUE and
+       // $this->connection->commit() does not throw an exception.
+       $success = parent::doCommit();
+@@ -498,7 +509,7 @@ protected function doCommit() {
+         }
+       }
+     }
+-    return $success;
++    return $success;*/
+   }
+ 
+ }
 diff --git a/core/modules/mysql/src/Driver/Database/mysql/TransactionManager.php b/core/modules/mysql/src/Driver/Database/mysql/TransactionManager.php
 new file mode 100644
-index 0000000000..1b4711dbae
+index 0000000000..5fef0cd9ab
 --- /dev/null
 +++ b/core/modules/mysql/src/Driver/Database/mysql/TransactionManager.php
-@@ -0,0 +1,31 @@
+@@ -0,0 +1,65 @@
 +<?php
 +
 +namespace Drupal\mysql\Driver\Database\mysql;
 +
 +use Drupal\Core\Database\Transaction\ClientConnectionTransactionState;
 +use Drupal\Core\Database\Transaction\TransactionManagerBase;
++use Drupal\Core\Database\TransactionNoActiveException;
 +
 +/**
 + * MySql implementation of TransactionManagerInterface.
@@ -815,22 +866,54 @@ index 0000000000..1b4711dbae
 +   * {@inheritdoc}
 +   */
 +  protected function commitClientTransaction(): bool {
-+    if ($this->connection->getClientConnection()->inTransaction()) {
++    if (!$this->connection->getClientConnection()->inTransaction()) {
++      $clientCommit = TRUE;
++      $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
++    }
++    else {
 +      $clientCommit = $this->commitClientTransaction();
 +      $this->setConnectionTransactionState($clientCommit ?
 +        ClientConnectionTransactionState::Committed :
 +        ClientConnectionTransactionState::CommitFailed
 +      );
 +    }
-+    else {
-+      $clientCommit = TRUE;
-+      $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
-+    }
 +    return $clientCommit;
 +  }
 +
++  /**
++   * {@inheritdoc}
++   */
++  protected function rollbackClientTransaction(): bool {
++    if (!$this->connection->getClientConnection()->inTransaction()) {
++      $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
++
++      // On PHP 7 $this->connection->inTransaction() will return TRUE and
++      // $this->connection->rollback() does not throw an exception; the
++      // following code is unreachable.
++
++      // If \Drupal\Core\Database\Connection::rollBack() would throw an
++      // exception then continue to throw an exception.
++      if (!$this->inTransaction()) {
++        throw new TransactionNoActiveException();
++      }
++      // A previous rollback to an earlier savepoint may mean that the savepoint
++      // in question has already been accidentally committed.
++/*      if (!$this->has($savepoint_name)) {
++        throw new TransactionNoActiveException();
++      }*/
++
++      trigger_error('Rollback attempted when there is no active transaction. This can cause data integrity issues.', E_USER_WARNING);
++      return FALSE;
++    }
++    $clientRollback = $this->connection->getClientConnection()->rollBack();
++    $this->setConnectionTransactionState($clientRollback ?
++      ClientConnectionTransactionState::RolledBack :
++      ClientConnectionTransactionState::RollbackFailed
++    );
++    return $clientRollback;
++  }
++
 +}
-\ No newline at end of file
 diff --git a/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php b/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php
 index 72a0cb5b68..8e0d8e46cf 100644
 --- a/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php
