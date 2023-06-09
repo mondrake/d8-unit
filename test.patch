@@ -1,275 +1,1057 @@
-diff --git a/core/modules/comment/tests/src/Unit/CommentLinkBuilderTest.php b/core/modules/comment/tests/src/Unit/CommentLinkBuilderTest.php
-index 1b00a4ff02..c83c1b26ea 100644
---- a/core/modules/comment/tests/src/Unit/CommentLinkBuilderTest.php
-+++ b/core/modules/comment/tests/src/Unit/CommentLinkBuilderTest.php
-@@ -5,10 +5,12 @@
- use Drupal\comment\CommentLinkBuilder;
- use Drupal\comment\Plugin\Field\FieldType\CommentItemInterface;
- use Drupal\Core\Entity\EntityTypeManagerInterface;
-+use Drupal\Core\Field\FieldDefinitionInterface;
- use Drupal\Core\Url;
- use Drupal\node\NodeInterface;
- use Drupal\Tests\Traits\Core\GeneratePermutationsTrait;
- use Drupal\Tests\UnitTestCase;
-+use Prophecy\Prophet;
+diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
+index f38ac642cd..04eb6d9b43 100644
+--- a/core/lib/Drupal/Core/Database/Connection.php
++++ b/core/lib/Drupal/Core/Database/Connection.php
+@@ -13,6 +13,7 @@
+ use Drupal\Core\Database\Query\Truncate;
+ use Drupal\Core\Database\Query\Update;
+ use Drupal\Core\Database\Query\Upsert;
++use Drupal\Core\Database\Transaction\TransactionManagerInterface;
+ use Drupal\Core\Pager\PagerManagerInterface;
  
  /**
-  * @coversDefaultClass \Drupal\comment\CommentLinkBuilder
-@@ -55,10 +57,8 @@ class CommentLinkBuilderTest extends UnitTestCase {
- 
-   /**
-    * Timestamp used in test.
--   *
--   * @var int
-    */
--  protected $timestamp;
-+  protected static int $timestamp;
- 
-   /**
-    * @var \Drupal\comment\CommentLinkBuilderInterface
-@@ -131,6 +131,7 @@ public function testCommentLinkBuilder(NodeInterface $node, $context, $has_acces
-     $this->currentUser->expects($this->any())
-       ->method('isAnonymous')
-       ->willReturn($is_anonymous);
-+
-     $links = $this->commentLinkBuilder->buildCommentedEntityLinks($node, $context);
-     if (!empty($expected)) {
-       if (!empty($links)) {
-@@ -159,11 +160,11 @@ public function testCommentLinkBuilder(NodeInterface $node, $context, $has_acces
-   /**
-    * Data provider for ::testCommentLinkBuilder.
-    */
--  public function getLinkCombinations() {
-+  public static function getLinkCombinations() {
-     $cases = [];
-     // No links should be created if the entity doesn't have the field.
-     $cases[] = [
--      $this->getMockNode(FALSE, CommentItemInterface::OPEN, CommentItemInterface::FORM_BELOW, 1),
-+      static::getMockNode(FALSE, CommentItemInterface::OPEN, CommentItemInterface::FORM_BELOW, 1),
-       ['view_mode' => 'teaser'],
-       TRUE,
-       TRUE,
-@@ -174,7 +175,7 @@ public function getLinkCombinations() {
-     foreach (['search_result', 'search_index', 'print'] as $view_mode) {
-       // Nothing should be output in these view modes.
-       $cases[] = [
--        $this->getMockNode(TRUE, CommentItemInterface::OPEN, CommentItemInterface::FORM_BELOW, 1),
-+        static::getMockNode(TRUE, CommentItemInterface::OPEN, CommentItemInterface::FORM_BELOW, 1),
-         ['view_mode' => $view_mode],
-         TRUE,
-         TRUE,
-@@ -200,10 +201,10 @@ public function getLinkCombinations() {
-         'teaser', 'rss', 'full',
-       ],
-     ];
--    $permutations = $this->generatePermutations($combinations);
-+    $permutations = static::generatePermutations($combinations);
-     foreach ($permutations as $combination) {
-       $case = [
--        $this->getMockNode(TRUE, $combination['comments'], $combination['form_location'], $combination['comment_count']),
-+        static::getMockNode(TRUE, $combination['comments'], $combination['form_location'], $combination['comment_count']),
-         ['view_mode' => $combination['view_mode']],
-         $combination['has_access_comments'],
-         $combination['history_exists'],
-@@ -267,11 +268,40 @@ public function getLinkCombinations() {
-    * @param int $comment_count
-    *   Number of comments against the field.
+@@ -62,6 +63,11 @@ abstract class Connection {
+    * transaction.
     *
--   * @return \Drupal\node\NodeInterface|\PHPUnit\Framework\MockObject\MockObject
-+   * @return \Drupal\node\NodeInterface
-    *   Mock node for testing.
+    * @var array
++   *
++   * @deprecated in drupal:10.0.2 and is removed from drupal:11.0.0. The
++   *   transaction stack is now managed by TransactionManager.
++   *
++   * @see https://www.drupal.org/node/5555555
     */
--  protected function getMockNode($has_field, $comment_status, $form_location, $comment_count) {
--    $node = $this->createMock('\Drupal\node\NodeInterface');
-+  protected static function getMockNode($has_field, $comment_status, $form_location, $comment_count) {
-+    $prophet = new Prophet();
-+
-+    $node = $prophet->prophesize(NodeInterface::class);
-+    $node->hasField()->willReturn($has_field);
-+
-+    if (!isset(static::$timestamp)) {
-+      static::$timestamp = time();
-+    }
-+    $field_item = (object) [
-+      'status' => $comment_status,
-+      'comment_count' => $comment_count,
-+      'last_comment_timestamp' => static::$timestamp,
-+    ];
-+    $node->get('comment')->willReturn($field_item);
-+
-+    $field_definition = $prophet->prophesize(FieldDefinitionInterface::class);
-+    $field_definition->getSetting('form_location')->willReturn($form_location);
-+    $field_definition->reveal();
-+
-+    $node->getFieldDefinition('comment')->willReturn($field_definition);
-+    $node->language()->willReturn('und');
-+    $node->getEntityTypeId()->willReturn('node');
-+    $node->id()->willReturn(1);
-+
-+    $url = Url::fromRoute('node.view');
-+    $node->toUrl()->willReturn($url);
-+
-+    return $node->reveal();
-+
-+/*    $node = $this->createMock('\Drupal\node\NodeInterface');
-     $node->expects($this->any())
-       ->method('hasField')
-       ->willReturn($has_field);
-@@ -314,9 +344,8 @@ protected function getMockNode($has_field, $comment_status, $form_location, $com
-     $url = Url::fromRoute('node.view');
-     $node->expects($this->any())
-       ->method('toUrl')
--      ->willReturn($url);
+   protected $transactionLayers = [];
  
--    return $node;
-+      ->willReturn($url);*/
+@@ -204,6 +210,11 @@ abstract class Connection {
+    * Post-root (non-nested) transaction commit callbacks.
+    *
+    * @var callable[]
++   *
++   * @deprecated in drupal:10.0.2 and is removed from drupal:11.0.0. The
++   *   transaction end callbacks are now managed by TransactionManager.
++   *
++   * @see https://www.drupal.org/node/5555555
+    */
+   protected $rootTransactionEndCallbacks = [];
+ 
+@@ -226,6 +237,11 @@ abstract class Connection {
+    */
+   private array $enabledEvents = [];
+ 
++  /**
++   * The transaction manager.
++   */
++  protected TransactionManagerInterface|FALSE $transactionManager;
++
+   /**
+    * Constructs a Connection object.
+    *
+@@ -276,6 +292,20 @@ public function __destruct() {
+     $this->connection = NULL;
    }
  
- }
-diff --git a/core/modules/config_translation/tests/src/Unit/ConfigMapperManagerTest.php b/core/modules/config_translation/tests/src/Unit/ConfigMapperManagerTest.php
-index 329647f2df..6aad4e192d 100644
---- a/core/modules/config_translation/tests/src/Unit/ConfigMapperManagerTest.php
-+++ b/core/modules/config_translation/tests/src/Unit/ConfigMapperManagerTest.php
-@@ -3,11 +3,13 @@
- namespace Drupal\Tests\config_translation\Unit;
++  /**
++   * Returns the client-level database connection object.
++   *
++   * This method should normally be used only within database driver code. Not
++   * doing so constitutes a risk of introducing code that is not database
++   * independent.
++   *
++   * @return object
++   *   The client-level database connection, for example \PDO.
++   */
++  public function getClientConnection(): object {
++    return $this->connection;
++  }
++
+   /**
+    * Returns the default query options for any given query.
+    *
+@@ -1294,6 +1324,41 @@ public function escapeLike($string) {
+     return addcslashes($string, '\%_');
+   }
  
- use Drupal\config_translation\ConfigMapperManager;
-+use Drupal\Core\Config\Schema\Mapping;
- use Drupal\Core\Language\Language;
- use Drupal\Core\Language\LanguageInterface;
- use Drupal\Core\TypedData\TypedDataInterface;
- use Drupal\Tests\UnitTestCase;
- use Drupal\Core\TypedData\DataDefinition;
-+use Prophecy\Prophet;
++  /**
++   * Returns the transaction manager.
++   *
++   * @return \Drupal\Core\Database\Transaction\TransactionManagerInterface|false
++   *   The transaction manager, or FALSE if not available.
++   */
++  public function transactionManager(): TransactionManagerInterface|FALSE {
++    if (!isset($this->transactionManager)) {
++      try {
++        $this->transactionManager = $this->driverTransactionManager();
++      }
++      catch (\LogicException $e) {
++        $this->transactionManager = FALSE;
++      }
++    }
++    return $this->transactionManager;
++  }
++
++  /**
++   * Returns a new instance of the driver's transaction manager.
++   *
++   * Database drivers must implement their own class extending from
++   * \Drupal\Core\Database\Transaction\TransactionManagerBase, and instantiate
++   * it here.
++   *
++   * @return \Drupal\Core\Database\Transaction\TransactionManagerInterface
++   *   The transaction manager.
++   *
++   * @throws \LogicException
++   *   If the transaction manager is undefined or unavailable.
++   */
++  protected function driverTransactionManager(): TransactionManagerInterface {
++    throw new \LogicException('The database driver has no TransactionManager implementation');
++  }
++
+   /**
+    * Determines if there is an active transaction open.
+    *
+@@ -1301,6 +1366,9 @@ public function escapeLike($string) {
+    *   TRUE if we're currently in a transaction, FALSE otherwise.
+    */
+   public function inTransaction() {
++    if ($this->transactionManager()) {
++      return $this->transactionManager()->inTransaction();
++    }
+     return ($this->transactionDepth() > 0);
+   }
+ 
+@@ -1311,6 +1379,9 @@ public function inTransaction() {
+    *   The current transaction depth.
+    */
+   public function transactionDepth() {
++    if ($this->transactionManager()) {
++      return $this->transactionManager()->stackDepth();
++    }
+     return count($this->transactionLayers);
+   }
+ 
+@@ -1326,6 +1397,9 @@ public function transactionDepth() {
+    * @see \Drupal\Core\Database\Transaction
+    */
+   public function startTransaction($name = '') {
++    if ($this->transactionManager()) {
++      return $this->transactionManager()->push($name);
++    }
+     $class = $this->getDriverClass('Transaction');
+     return new $class($this, $name);
+   }
+@@ -1345,6 +1419,10 @@ public function startTransaction($name = '') {
+    * @see \Drupal\Core\Database\Transaction::rollBack()
+    */
+   public function rollBack($savepoint_name = 'drupal_transaction') {
++    if ($this->transactionManager()) {
++      $this->transactionManager()->rollback($savepoint_name);
++      return;
++    }
+     if (!$this->inTransaction()) {
+       throw new TransactionNoActiveException();
+     }
+@@ -1469,6 +1547,10 @@ public function popTransaction($name) {
+    * @see \Drupal\Core\Database\Connection::doCommit()
+    */
+   public function addRootTransactionEndCallback(callable $callback) {
++    if ($this->transactionManager()) {
++      $this->transactionManager()->addPostTransactionCallback($callback);
++      return;
++    }
+     if (!$this->transactionLayers) {
+       throw new \LogicException('Root transaction end callbacks can only be added when there is an active transaction.');
+     }
+@@ -1644,6 +1726,7 @@ abstract public function mapConditionOperator($operator);
+    * @see \Drupal\Core\Database\Transaction
+    */
+   public function commit() {
++    @trigger_error(__METHOD__ . '() is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Instead, @todo. See https://www.drupal.org/node/5555555', E_USER_DEPRECATED);
+     throw new TransactionExplicitCommitNotAllowedException();
+   }
+ 
+diff --git a/core/lib/Drupal/Core/Database/Transaction.php b/core/lib/Drupal/Core/Database/Transaction.php
+index 76d5fc8f5f..b03b2ca24a 100644
+--- a/core/lib/Drupal/Core/Database/Transaction.php
++++ b/core/lib/Drupal/Core/Database/Transaction.php
+@@ -48,6 +48,11 @@ class Transaction {
+   protected $name;
+ 
+   public function __construct(Connection $connection, $name = NULL) {
++    if ($connection->transactionManager()) {
++      $this->connection = $connection;
++      $this->name = $name;
++      return;
++    }
+     $this->connection = $connection;
+     // If there is no transaction depth, then no transaction has started. Name
+     // the transaction 'drupal_transaction'.
+@@ -66,6 +71,10 @@ public function __construct(Connection $connection, $name = NULL) {
+   }
+ 
+   public function __destruct() {
++    if ($this->connection->transactionManager()) {
++      $this->connection->transactionManager()->unpile($this->name);
++      return;
++    }
+     // If we rolled back then the transaction would have already been popped.
+     if (!$this->rolledBack) {
+       $this->connection->popTransaction($this->name);
+@@ -90,6 +99,10 @@ public function name() {
+    * @see \Drupal\Core\Database\Connection::rollBack()
+    */
+   public function rollBack() {
++    if ($this->connection->transactionManager()) {
++      $this->connection->transactionManager()->rollback($this->name);
++      return;
++    }
+     $this->rolledBack = TRUE;
+     $this->connection->rollBack($this->name);
+   }
+diff --git a/core/lib/Drupal/Core/Database/Transaction/ClientConnectionTransactionState.php b/core/lib/Drupal/Core/Database/Transaction/ClientConnectionTransactionState.php
+new file mode 100644
+index 0000000000..b545d6b2de
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/Transaction/ClientConnectionTransactionState.php
+@@ -0,0 +1,27 @@
++<?php
++
++/**
++ * @file
++ * Enumeration of the possible states of a client connection transaction.
++ */
++
++namespace Drupal\Core\Database\Transaction;
++
++/**
++ * Enumeration of the possible states of a client connection transaction.
++ */
++enum ClientConnectionTransactionState {
++
++  case Active;
++  case RolledBack;
++  case RollbackFailed;
++  case Committed;
++  case CommitFailed;
++
++  // In some cases the active transaction can be automatically committed by
++  // the database server (for example, MySql when a DDL statement is executed
++  // during a transaction). We track such cases with 'Voided' when we can
++  // detect them.
++  case Voided;
++
++}
+diff --git a/core/lib/Drupal/Core/Database/Transaction/ManagerStackItem.php b/core/lib/Drupal/Core/Database/Transaction/ManagerStackItem.php
+new file mode 100644
+index 0000000000..5edca7915d
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/Transaction/ManagerStackItem.php
+@@ -0,0 +1,24 @@
++<?php
++
++namespace Drupal\Core\Database\Transaction;
++
++/**
++ * A representation of a Drupal transaction on the TransactionManager stack.
++ */
++final class ManagerStackItem {
++
++  /**
++   * Constructor.
++   *
++   * @param string $name
++   *   The name of the Drupal transaction.
++   * @param \Drupal\Core\Database\Transaction\ManagerStackItemType $type
++   *   The type of the Drupal transaction, root or savepoint.
++   */
++  public function __construct(
++    public readonly string $name,
++    public readonly ManagerStackItemType $type,
++  ) {
++  }
++
++}
+diff --git a/core/lib/Drupal/Core/Database/Transaction/ManagerStackItemType.php b/core/lib/Drupal/Core/Database/Transaction/ManagerStackItemType.php
+new file mode 100644
+index 0000000000..763a758a9f
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/Transaction/ManagerStackItemType.php
+@@ -0,0 +1,18 @@
++<?php
++
++/**
++ * @file
++ * Enumeration of the types of items in the Drupal transaction stack.
++ */
++
++namespace Drupal\Core\Database\Transaction;
++
++/**
++ * Enumeration of the types of items in the Drupal transaction stack.
++ */
++enum ManagerStackItemType {
++
++  case Root;
++  case Savepoint;
++
++}
+diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
+new file mode 100644
+index 0000000000..c4a5958561
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
+@@ -0,0 +1,354 @@
++<?php
++
++namespace Drupal\Core\Database\Transaction;
++
++use Drupal\Core\Database\Connection;
++use Drupal\Core\Database\Transaction;
++use Drupal\Core\Database\TransactionCommitFailedException;
++use Drupal\Core\Database\TransactionNameNonUniqueException;
++use Drupal\Core\Database\TransactionNoActiveException;
++use Drupal\Core\Database\TransactionOutOfOrderException;
++
++/**
++ * The database transaction manager base class.
++ *
++ * On many databases transactions cannot nest. Instead, we track nested calls
++ * to transactions and collapse them into a single client transaction.
++ *
++ * Database drivers must implement their own class extending from this, and
++ * instantiate it via their Connection::driverTransactionManager() method.
++ *
++ * @see \Drupal\Core\Database\Connection::driverTransactionManager()
++ */
++abstract class TransactionManagerBase implements TransactionManagerInterface {
++
++  /**
++   * The stack of Drupal transactions currently active.
++   *
++   * @var array<string,ManagerStackItem>
++   */
++  private array $stack = [];
++
++  /**
++   * A list of Drupal transactions rolled back but not yet unpiled.
++   *
++   * @var array<string,true>
++   */
++  private array $rollbacks = [];
++
++  /**
++   * A list of post-transaction callbacks.
++   *
++   * @var callable[]
++   */
++  private array $postTransactionCallbacks = [];
++
++  /**
++   * The state of the underlying client connection transaction.
++   *
++   * Note that this is a proxy of the actual state on the database server,
++   * best determined through calls to methods in this class. The actual
++   * state on the database server could be different.
++   */
++  private ClientConnectionTransactionState $connectionTransactionState;
++
++  /**
++   * Constructor.
++   *
++   * @param \Drupal\Core\Database\Connection $connection
++   *   The database connection.
++   */
++  public function __construct(
++    protected readonly Connection $connection,
++  ) {
++  }
++
++  /**
++   * Returns the current depth of the transaction stack.
++   *
++   * @return int
++   *   The current depth of the transaction stack.
++   *
++   * @todo consider making this function protected.
++   */
++  public function stackDepth(): int {
++    return count($this->stack());
++  }
++
++  protected function stack(): array {
++    return $this->stack;
++  }
++
++  protected function resetStack(): void {
++    $this->stack = [];
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function inTransaction(): bool {
++    return (bool) $this->stackDepth() && $this->getConnectionTransactionState() === ClientConnectionTransactionState::Active;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function push(string $name = ''): Transaction {
++    if (!$this->inTransaction()) {
++      // If there is no transaction active, name the transaction
++      // 'drupal_transaction'.
++      $name = 'drupal_transaction';
++    }
++    elseif (!$name) {
++      // Within transactions, savepoints are used. Each savepoint requires a
++      // name. So if no name is present we need to create one.
++      $name = 'savepoint_' . $this->stackDepth();
++    }
++
++    if ($this->has($name)) {
++      throw new TransactionNameNonUniqueException($name . " is already in use.");
++    }
++
++    // Do the client-level processing.
++    if ($this->stackDepth() === 0) {
++      $this->beginClientTransaction();
++      $type = ManagerStackItemType::Root;
++      $this->setConnectionTransactionState(ClientConnectionTransactionState::Active);
++    }
++    else {
++      // If we're already in a Drupal transaction then we want to create a
++      // database savepoint, rather than try to begin another database
++      // transaction.
++      $this->addClientSavepoint($name);
++      $type = ManagerStackItemType::Savepoint;
++    }
++
++    // Push the transaction on the stack, increasing its depth.
++    $this->stack[$name] = new ManagerStackItem($name, $type);
++
++    return new Transaction($this->connection, $name);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function unpile(string $name): void {
++    // If an already rolled back Drupal transaction, do nothing on the client
++    // connection, just cleanup the list of transactions rolled back.
++    if (isset($this->rollbacks[$name])) {
++      unset($this->rollbacks[$name]);
++      return;
++    }
++
++    if (!$this->has($name)) {
++      throw new TransactionOutOfOrderException();
++    }
++
++    // Release the client transaction savepoint in case the Drupal transaction
++    // is not a root one.
++    if ($this->stack()[$name]->type === ManagerStackItemType::Savepoint && $this->getConnectionTransactionState() === ClientConnectionTransactionState::Active) {
++      $this->releaseClientSavepoint($name);
++    }
++
++    // Remove the transaction from the stack.
++    unset($this->stack[$name]);
++
++    // If this was the last Drupal transaction open, we can commit the client
++    // transaction.
++    if ($this->stackDepth() === 0 && $this->getConnectionTransactionState() === ClientConnectionTransactionState::Active) {
++      $this->processRootCommit();
++    }
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function rollback(string $name): void {
++    if (!$this->inTransaction()) {
++      throw new TransactionNoActiveException();
++    }
++
++    // Do the client-level processing.
++    match ($this->stack()[$name]->type) {
++      ManagerStackItemType::Root => $this->processRootRollback(),
++      ManagerStackItemType::Savepoint => $this->rollbackClientSavepoint($name),
++    };
++
++    // Rolled back item should match the last one in stack.
++    if ($name !== array_key_last($this->stack())) {
++      throw new TransactionOutOfOrderException();
++    }
++
++    $this->rollbacks[$name] = TRUE;
++    unset($this->stack[$name]);
++
++    // If this was the last Drupal transaction open, we can commit the client
++    // transaction.
++    if ($this->stackDepth() === 0 && $this->getConnectionTransactionState() === ClientConnectionTransactionState::Active) {
++      $this->processRootCommit();
++    }
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function addPostTransactionCallback(callable $callback): void {
++    if (!$this->inTransaction()) {
++      throw new \LogicException('Root transaction end callbacks can only be added when there is an active transaction.');
++    }
++    $this->postTransactionCallbacks[] = $callback;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function has(string $name): bool {
++    return isset($this->stack()[$name]);
++  }
++
++  /**
++   * Sets the state of the client connection transaction.
++   *
++   * Note that this is a proxy of the actual state on the database server,
++   * best determined through calls to methods in this class. The actual
++   * state on the database server could be different.
++   *
++   * @param \Drupal\Core\Database\Transaction\ClientConnectionTransactionState $state
++   *   The state of the client connection.
++   */
++  protected function setConnectionTransactionState(ClientConnectionTransactionState $state): void {
++    $this->connectionTransactionState = $state;
++  }
++
++  /**
++   * Gets the state of the client connection transaction.
++   *
++   * Note that this is a proxy of the actual state on the database server,
++   * best determined through calls to methods in this class. The actual
++   * state on the database server could be different.
++   *
++   * @return \Drupal\Core\Database\Transaction\ClientConnectionTransactionState
++   *   The state of the client connection.
++   */
++  protected function getConnectionTransactionState(): ClientConnectionTransactionState {
++    return $this->connectionTransactionState;
++  }
++
++  /**
++   * Processes the root transaction rollback.
++   */
++  protected function processRootRollback(): void {
++    $this->rollbackClientTransaction();
++    $this->processPostTransactionCallbacks();
++  }
++
++  /**
++   * Processes the root transaction commit.
++   *
++   * @throws \Drupal\Core\Database\TransactionCommitFailedException
++   *   If the commit of the root transaction failed.
++   */
++  protected function processRootCommit(): void {
++    $clientCommit = $this->commitClientTransaction();
++    $this->processPostTransactionCallbacks();
++    if (!$clientCommit) {
++      throw new TransactionCommitFailedException();
++    }
++  }
++
++  /**
++   * Processes the post-transaction callbacks.
++   */
++  protected function processPostTransactionCallbacks(): void {
++    if (!empty($this->postTransactionCallbacks)) {
++      $callbacks = $this->postTransactionCallbacks;
++      $this->postTransactionCallbacks = [];
++      foreach ($callbacks as $callback) {
++        call_user_func($callback, $this->getConnectionTransactionState() === ClientConnectionTransactionState::Committed);
++      }
++    }
++  }
++
++  /**
++   * Begins a transaction on the client connection.
++   *
++   * @return bool
++   *   Returns TRUE on success or FALSE on failure.
++   */
++  protected function beginClientTransaction(): bool {
++    return $this->connection->getClientConnection()->beginTransaction();
++  }
++
++  /**
++   * Adds a savepoint on the client transaction.
++   *
++   * @param string $name
++   *   The name of the savepoint.
++   *
++   * @return bool
++   *   Returns TRUE on success or FALSE on failure.
++   */
++  protected function addClientSavepoint(string $name): bool {
++    $this->connection->query('SAVEPOINT ' . $name);
++    return TRUE;
++  }
++
++  /**
++   * Rolls back to a savepoint on the client transaction.
++   *
++   * @param string $name
++   *   The name of the savepoint.
++   *
++   * @return bool
++   *   Returns TRUE on success or FALSE on failure.
++   */
++  protected function rollbackClientSavepoint(string $name): bool {
++    $this->connection->query('ROLLBACK TO SAVEPOINT ' . $name);
++    return TRUE;
++  }
++
++  /**
++   * Releases a savepoint on the client transaction.
++   *
++   * @param string $name
++   *   The name of the savepoint.
++   *
++   * @return bool
++   *   Returns TRUE on success or FALSE on failure.
++   */
++  protected function releaseClientSavepoint(string $name): bool {
++    $this->connection->query('RELEASE SAVEPOINT ' . $name);
++    return TRUE;
++  }
++
++  /**
++   * Rolls back a client transaction.
++   *
++   * @return bool
++   *   Returns TRUE on success or FALSE on failure.
++   */
++  protected function rollbackClientTransaction(): bool {
++    $clientRollback = $this->connection->getClientConnection()->rollBack();
++    $this->setConnectionTransactionState($clientRollback ?
++      ClientConnectionTransactionState::RolledBack :
++      ClientConnectionTransactionState::RollbackFailed
++    );
++    return $clientRollback;
++  }
++
++  /**
++   * Commits a client transaction.
++   *
++   * @return bool
++   *   Returns TRUE on success or FALSE on failure.
++   */
++  protected function commitClientTransaction(): bool {
++    $clientCommit = $this->connection->getClientConnection()->commit();
++    $this->setConnectionTransactionState($clientCommit ?
++      ClientConnectionTransactionState::Committed :
++      ClientConnectionTransactionState::CommitFailed
++    );
++    return $clientCommit;
++  }
++
++}
+diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php
+new file mode 100644
+index 0000000000..d6dc96ed29
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php
+@@ -0,0 +1,110 @@
++<?php
++
++namespace Drupal\Core\Database\Transaction;
++
++use Drupal\Core\Database\Transaction;
++
++/**
++ * Interface for the database transaction manager classes.
++ */
++interface TransactionManagerInterface {
++
++  /**
++   * Determines if there is an active transaction open.
++   *
++   * @return bool
++   *   TRUE if we're currently in a transaction, FALSE otherwise.
++   */
++  public function inTransaction(): bool;
++
++  /**
++   * Checks if a named Drupal transaction is active.
++   *
++   * @param string $name
++   *   The name of the transaction.
++   *
++   * @return bool
++   *   TRUE if the transaction is active, FALSE otherwise.
++   */
++  public function has(string $name): bool;
++
++  /**
++   * Pushes a new Drupal transaction on the stack.
++   *
++   * This begins a client connection transaction if there is not one active,
++   * or adds a savepoint to the active one.
++   *
++   * @param string $name
++   *   (optional) The name of the savepoint.
++   *
++   * @return \Drupal\Core\Database\Transaction
++   *   A Transaction object.
++   *
++   * @throws \Drupal\Core\Database\TransactionNameNonUniqueException
++   *   If a Drupal Transaction with the specified name exists already.
++   */
++  public function push(string $name = ''): Transaction;
++
++  /**
++   * Removes a Drupal transaction from the stack.
++   *
++   * The unpiled item does not necessarily need to be the last on the stack.
++   * This method should only be called by a Transaction object going out of
++   * scope.
++   *
++   * @param string $name
++   *   (optional) The name of the savepoint.
++   *
++   * @throws \Drupal\Core\Database\TransactionOutOfOrderException
++   *   If a Drupal Transaction with the specified name does not exist.
++   * @throws \Drupal\Core\Database\TransactionCommitFailedException
++   *   If the commit of the root transaction failed.
++   */
++  public function unpile(string $name): void;
++
++  /**
++   * Rolls back a Drupal transaction.
++   *
++   * Rollbacks for nested transactions need to occur in reverse order to the
++   * pushes to the stack. Rolling back the last active Drupal transaction leads
++   * to rolling back the client connection (or to committing it in the edge
++   * case when the root was unpiled earlier).
++   *
++   * @param string $name
++   *   (optional) The name of the savepoint.
++   *
++   * @throws \Drupal\Core\Database\TransactionNoActiveException
++   *   If there is no active client connection.
++   * @throws \Drupal\Core\Database\TransactionOutOfOrderException
++   *   If the order of rollback is not in reverse sequence against the pushes
++   *   to the stack.
++   * @throws \Drupal\Core\Database\TransactionCommitFailedException
++   *   If the commit of the root transaction failed.
++   */
++  public function rollback(string $name): void;
++
++  /**
++   * Adds a root transaction end callback.
++   *
++   * These callbacks are invoked immediately after the client transaction has
++   * been committed or rolled back.
++   *
++   * It can for example be used to avoid deadlocks on write-heavy tables that
++   * do not need to be part of the transaction, like cache tag invalidations.
++   *
++   * Another use case is that services using alternative backends like Redis
++   * and Memcache cache implementations can replicate the transaction-behavior
++   * of the database cache backend and avoid race conditions.
++   *
++   * An argument is passed to the callbacks that indicates whether the
++   * transaction was successful or not.
++   *
++   * @param callable $callback
++   *   The callback to invoke.
++   *
++   * @throws \LogicException
++   *   When a callback addition is attempted but no transaction is active.
++   */
++  public function addPostTransactionCallback(callable $callback): void;
++
++}
+diff --git a/core/modules/mysql/src/Driver/Database/mysql/Connection.php b/core/modules/mysql/src/Driver/Database/mysql/Connection.php
+index 9ff1fdf84d..50657bc468 100644
+--- a/core/modules/mysql/src/Driver/Database/mysql/Connection.php
++++ b/core/modules/mysql/src/Driver/Database/mysql/Connection.php
+@@ -11,6 +11,7 @@
+ use Drupal\Core\Database\Connection as DatabaseConnection;
+ use Drupal\Core\Database\DatabaseConnectionRefusedException;
+ use Drupal\Core\Database\SupportsTemporaryTablesInterface;
++use Drupal\Core\Database\Transaction\TransactionManagerInterface;
+ use Drupal\Core\Database\TransactionNoActiveException;
  
  /**
-  * Tests the functionality provided by configuration translation mapper manager.
-@@ -87,54 +89,54 @@ public function testHasTranslatable(TypedDataInterface $element, $expected) {
-    *   to test as the first key and the expected result of
-    *   ConfigMapperManager::hasTranslatable() as the second key.
+@@ -408,11 +409,19 @@ public function nextIdDelete() {
+     }
+   }
+ 
++  /**
++   * {@inheritdoc}
++   */
++  protected function driverTransactionManager(): TransactionManagerInterface {
++    return new TransactionManager($this);
++  }
++
+   /**
+    * Overridden to work around issues to MySQL not supporting transactional DDL.
     */
--  public function providerTestHasTranslatable() {
-+  public static function providerTestHasTranslatable() {
-     return [
--      [$this->getElement([]), FALSE],
--      [$this->getElement(['aaa' => 'bbb']), FALSE],
--      [$this->getElement(['translatable' => FALSE]), FALSE],
--      [$this->getElement(['translatable' => TRUE]), TRUE],
--      [$this->getNestedElement([$this->getElement([])]), FALSE],
--      [$this->getNestedElement([$this->getElement(['translatable' => TRUE])]), TRUE],
-+      [static::getElement([]), FALSE],
-+      [static::getElement(['aaa' => 'bbb']), FALSE],
-+      [static::getElement(['translatable' => FALSE]), FALSE],
-+      [static::getElement(['translatable' => TRUE]), TRUE],
-+      [static::getNestedElement([static::getElement([])]), FALSE],
-+      [static::getNestedElement([static::getElement(['translatable' => TRUE])]), TRUE],
-       [
--        $this->getNestedElement([
--          $this->getElement(['aaa' => 'bbb']),
--          $this->getElement(['ccc' => 'ddd']),
--          $this->getElement(['eee' => 'fff']),
-+        static::getNestedElement([
-+          static::getElement(['aaa' => 'bbb']),
-+          static::getElement(['ccc' => 'ddd']),
-+          static::getElement(['eee' => 'fff']),
-         ]),
-         FALSE,
-       ],
-       [
--        $this->getNestedElement([
--          $this->getElement(['aaa' => 'bbb']),
--          $this->getElement(['ccc' => 'ddd']),
--          $this->getElement(['translatable' => TRUE]),
-+        static::getNestedElement([
-+          static::getElement(['aaa' => 'bbb']),
-+          static::getElement(['ccc' => 'ddd']),
-+          static::getElement(['translatable' => TRUE]),
-         ]),
-         TRUE,
-       ],
-       [
--        $this->getNestedElement([
--          $this->getElement(['aaa' => 'bbb']),
--          $this->getNestedElement([
--            $this->getElement(['ccc' => 'ddd']),
--            $this->getElement(['eee' => 'fff']),
-+        static::getNestedElement([
-+          static::getElement(['aaa' => 'bbb']),
-+          static::getNestedElement([
-+            static::getElement(['ccc' => 'ddd']),
-+            static::getElement(['eee' => 'fff']),
-           ]),
--          $this->getNestedElement([
--            $this->getElement(['ggg' => 'hhh']),
--            $this->getElement(['iii' => 'jjj']),
-+          static::getNestedElement([
-+            static::getElement(['ggg' => 'hhh']),
-+            static::getElement(['iii' => 'jjj']),
-           ]),
-         ]),
-         FALSE,
-       ],
-       [
--        $this->getNestedElement([
--          $this->getElement(['aaa' => 'bbb']),
--          $this->getNestedElement([
--            $this->getElement(['ccc' => 'ddd']),
--            $this->getElement(['eee' => 'fff']),
-+        static::getNestedElement([
-+          static::getElement(['aaa' => 'bbb']),
-+          static::getNestedElement([
-+            static::getElement(['ccc' => 'ddd']),
-+            static::getElement(['eee' => 'fff']),
-           ]),
--          $this->getNestedElement([
--            $this->getElement(['ggg' => 'hhh']),
--            $this->getElement(['translatable' => TRUE]),
-+          static::getNestedElement([
-+            static::getElement(['ggg' => 'hhh']),
-+            static::getElement(['translatable' => TRUE]),
-           ]),
-         ]),
-         TRUE,
-@@ -151,13 +153,11 @@ public function providerTestHasTranslatable() {
-    * @return \Drupal\Core\Config\Schema\Element
-    *   The mocked schema element.
-    */
--  protected function getElement(array $definition) {
-+  protected static function getElement(array $definition) {
-     $data_definition = new DataDefinition($definition);
--    $element = $this->createMock('Drupal\Core\TypedData\TypedDataInterface');
--    $element->expects($this->any())
--      ->method('getDataDefinition')
--      ->willReturn($data_definition);
--    return $element;
-+    $element = (new Prophet())->prophesize(TypedDataInterface::class);
-+    $element->getDataDefinition()->willReturn($data_definition);
-+    return $element->reveal();
+   protected function popCommittableTransactions() {
+-    // Commit all the committable layers.
++    @trigger_error(__METHOD__ . '() is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Instead, @todo. See https://www.drupal.org/node/5555555', E_USER_DEPRECATED);
++/*    // Commit all the committable layers.
+     foreach (array_reverse($this->transactionLayers) as $name => $active) {
+       // Stop once we found an active transaction.
+       if ($active) {
+@@ -450,14 +459,15 @@ protected function popCommittableTransactions() {
+           }
+         }
+       }
+-    }
++    }*/
    }
  
    /**
-@@ -169,20 +169,16 @@ protected function getElement(array $definition) {
-    * @return \Drupal\Core\Config\Schema\Mapping
-    *   A nested schema element, containing the passed-in elements.
+    * {@inheritdoc}
     */
--  protected function getNestedElement(array $elements) {
-+  protected static function getNestedElement(array $elements) {
-     // ConfigMapperManager::findTranslatable() checks for
-     // \Drupal\Core\TypedData\TraversableTypedDataInterface, but mocking that
-     // directly does not work, because we need to implement \IteratorAggregate
-     // in order for getIterator() to be called. Therefore we need to mock
-     // \Drupal\Core\Config\Schema\ArrayElement, but that is abstract, so we
-     // need to mock one of the subclasses of it.
--    $nested_element = $this->getMockBuilder('Drupal\Core\Config\Schema\Mapping')
--      ->disableOriginalConstructor()
--      ->getMock();
--    $nested_element->expects($this->once())
--      ->method('getIterator')
--      ->willReturn(new \ArrayIterator($elements));
--    return $nested_element;
-+    $nested_element = (new Prophet())->prophesize(Mapping::class);
-+    $nested_element->getIterator()->shouldBeCalledTimes(1)->willReturn(new \ArrayIterator($elements));
-+    return $nested_element->reveal();
+   public function rollBack($savepoint_name = 'drupal_transaction') {
+-    // MySQL will automatically commit transactions when tables are altered or
++    $this->transactionManager()->rollback($savepoint_name);
++/*    // MySQL will automatically commit transactions when tables are altered or
+     // created (DDL transactions are not supported). Prevent triggering an
+     // exception to ensure that the error that has caused the rollback is
+     // properly reported.
+@@ -480,17 +490,18 @@ public function rollBack($savepoint_name = 'drupal_transaction') {
+       trigger_error('Rollback attempted when there is no active transaction. This can cause data integrity issues.', E_USER_WARNING);
+       return;
+     }
+-    return parent::rollBack($savepoint_name);
++    return parent::rollBack($savepoint_name);*/
+   }
+ 
+   /**
+    * {@inheritdoc}
+    */
+   protected function doCommit() {
++    @trigger_error(__METHOD__ . '() is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Instead, @todo. See https://www.drupal.org/node/5555555', E_USER_DEPRECATED);
+     // MySQL will automatically commit transactions when tables are altered or
+     // created (DDL transactions are not supported). Prevent triggering an
+     // exception in this case as all statements have been committed.
+-    if ($this->connection->inTransaction()) {
++/*    if ($this->connection->inTransaction()) {
+       // On PHP 7 $this->connection->inTransaction() will return TRUE and
+       // $this->connection->commit() does not throw an exception.
+       $success = parent::doCommit();
+@@ -508,7 +519,7 @@ protected function doCommit() {
+         }
+       }
+     }
+-    return $success;
++    return $success;*/
    }
  
  }
+diff --git a/core/modules/mysql/src/Driver/Database/mysql/TransactionManager.php b/core/modules/mysql/src/Driver/Database/mysql/TransactionManager.php
+new file mode 100644
+index 0000000000..7a8d8ee3ed
+--- /dev/null
++++ b/core/modules/mysql/src/Driver/Database/mysql/TransactionManager.php
+@@ -0,0 +1,107 @@
++<?php
++
++namespace Drupal\mysql\Driver\Database\mysql;
++
++use Drupal\Core\Database\Transaction\ClientConnectionTransactionState;
++use Drupal\Core\Database\Transaction\TransactionManagerBase;
++use Drupal\Core\Database\TransactionNoActiveException;
++
++/**
++ * MySql implementation of TransactionManagerInterface.
++ */
++class TransactionManager extends TransactionManagerBase {
++
++  /**
++   * {@inheritdoc}
++   */
++  protected function rollbackClientSavepoint(string $name): bool {
++    if (!$this->connection->getClientConnection()->inTransaction()) {
++dump([__METHOD__, '*** VOIDED']);
++      $this->resetStack();
++      $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
++      return TRUE;
++    }
++dump([__METHOD__, '--> parent']);
++    return parent::rollbackClientSavepoint($name);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  protected function releaseClientSavepoint(string $name): bool {
++    if (!$this->connection->getClientConnection()->inTransaction()) {
++dump([__METHOD__, '*** VOIDED']);
++      $this->resetStack();
++      $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
++      return TRUE;
++    }
++dump([__METHOD__, '--> parent']);
++    return parent::releaseClientSavepoint($name);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  protected function commitClientTransaction(): bool {
++    if (!$this->connection->getClientConnection()->inTransaction()) {
++dump([__METHOD__, '*** VOIDED']);
++      $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
++      return TRUE;
++    }
++dump([__METHOD__, '--> parent']);
++    return parent::commitClientTransaction();
++    /*
++      $clientCommit = TRUE;
++      $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
++    }
++    else {
++      $clientCommit = $this->commitClientTransaction();
++      $this->setConnectionTransactionState($clientCommit ?
++        ClientConnectionTransactionState::Committed :
++        ClientConnectionTransactionState::CommitFailed
++      );
++    }
++    return $clientCommit;*/
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  protected function rollbackClientTransaction(): bool {
++    if (!$this->connection->getClientConnection()->inTransaction()) {
++dump([__METHOD__, '*** VOIDED']);
++      $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
++      throw new \Exception('xxx');
++    }
++dump([__METHOD__, '--> parent']);
++    return parent::rollbackClientTransaction();
++/*    if (!$this->connection->getClientConnection()->inTransaction()) {
++      $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
++
++      // On PHP 7 $this->connection->inTransaction() will return TRUE and
++      // $this->connection->rollback() does not throw an exception; the
++      // following code is unreachable.
++
++      // If \Drupal\Core\Database\Connection::rollBack() would throw an
++      // exception then continue to throw an exception.
++      if (!$this->inTransaction()) {
++        throw new TransactionNoActiveException();
++      }
++      // A previous rollback to an earlier savepoint may mean that the savepoint
++      // in question has already been accidentally committed.
++/*      if (!$this->has($savepoint_name)) {
++        throw new TransactionNoActiveException();
++      }*/
++
++/*      trigger_error('Rollback attempted when there is no active transaction. This can cause data integrity issues.', E_USER_WARNING);
++      return FALSE;
++    }
++    $clientRollback = $this->connection->getClientConnection()->rollBack();
++    $this->setConnectionTransactionState($clientRollback ?
++      ClientConnectionTransactionState::RolledBack :
++      ClientConnectionTransactionState::RollbackFailed
++    );
++    return $clientRollback;*/
++  }
++
++}
+diff --git a/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php b/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php
+index c46dc1bce6..efde7ee933 100644
+--- a/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php
++++ b/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php
+@@ -7,6 +7,7 @@
+ use Drupal\Core\Database\Connection as DatabaseConnection;
+ use Drupal\Core\Database\StatementInterface;
+ use Drupal\Core\Database\SupportsTemporaryTablesInterface;
++use Drupal\Core\Database\Transaction\TransactionManagerInterface;
+ 
+ /**
+  * SQLite implementation of \Drupal\Core\Database\Connection.
+@@ -27,6 +28,11 @@ class Connection extends DatabaseConnection implements SupportsTemporaryTablesIn
+    * Whether or not the active transaction (if any) will be rolled back.
+    *
+    * @var bool
++   *
++   * @deprecated in drupal:10.0.2 and is removed from drupal:11.0.0. It is
++   *   unused.
++   *
++   * @see https://www.drupal.org/node/5555555
+    */
+   protected $willRollback;
+ 
+@@ -452,6 +458,13 @@ public function nextId($existing_id = 0) {
+     return $this->query('SELECT [value] FROM {sequences}')->fetchField();
+   }
+ 
++  /**
++   * {@inheritdoc}
++   */
++  protected function driverTransactionManager(): TransactionManagerInterface {
++    return new TransactionManager($this);
++  }
++
+   /**
+    * {@inheritdoc}
+    */
+diff --git a/core/modules/sqlite/src/Driver/Database/sqlite/TransactionManager.php b/core/modules/sqlite/src/Driver/Database/sqlite/TransactionManager.php
+new file mode 100644
+index 0000000000..c65cd8615b
+--- /dev/null
++++ b/core/modules/sqlite/src/Driver/Database/sqlite/TransactionManager.php
+@@ -0,0 +1,11 @@
++<?php
++
++namespace Drupal\sqlite\Driver\Database\sqlite;
++
++use Drupal\Core\Database\Transaction\TransactionManagerBase;
++
++/**
++ * SQLite implementation of TransactionManagerInterface.
++ */
++class TransactionManager extends TransactionManagerBase {
++}
+diff --git a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
+index ebbf60826a..9c6ac3544f 100644
+--- a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
++++ b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
+@@ -172,6 +172,7 @@ public function testTransactionRollBackSupported() {
+    * transactions and those that do not.
+    */
+   public function testCommittedTransaction() {
++dump(__METHOD__);
+     try {
+       // Create two nested transactions. The changes should be committed.
+       $this->transactionOuterLayer('A');
+@@ -191,6 +192,7 @@ public function testCommittedTransaction() {
+    * Tests the compatibility of transactions with DDL statements.
+    */
+   public function testTransactionWithDdlStatement() {
++dump(__METHOD__);
+     // First, test that a commit works normally, even with DDL statements.
+     $transaction = $this->connection->startTransaction();
+     $this->insertRow('row');
+@@ -355,6 +357,7 @@ public function assertRowAbsent(string $name, string $message = NULL): void {
+    * Tests transaction stacking, commit, and rollback.
+    */
+   public function testTransactionStacking() {
++dump(__METHOD__);
+     // Standard case: pop the inner transaction before the outer transaction.
+     $transaction = $this->connection->startTransaction();
+     $this->insertRow('outer');
+@@ -461,6 +464,7 @@ public function testTransactionStacking() {
+    * Tests that transactions can continue to be used if a query fails.
+    */
+   public function testQueryFailureInTransaction() {
++dump(__METHOD__);
+     $transaction = $this->connection->startTransaction('test_transaction');
+     $this->connection->schema()->dropTable('test');
+ 
