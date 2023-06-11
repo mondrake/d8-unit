@@ -296,10 +296,10 @@ index 0000000000..763a758a9f
 +}
 diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
 new file mode 100644
-index 0000000000..96ded8e8fe
+index 0000000000..7fcbf11efe
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
-@@ -0,0 +1,420 @@
+@@ -0,0 +1,428 @@
 +<?php
 +
 +namespace Drupal\Core\Database\Transaction;
@@ -405,6 +405,11 @@ index 0000000000..96ded8e8fe
 +   *
 +   * Drivers should not override this method unless they also override the
 +   * $stack property.
++   *
++   * @param string $name
++   *   The name of the transaction.
++   * @param Drupal\Core\Database\Transaction\ManagerStackItem $item
++   *   The stack item to be added.
 +   */
 +  protected function addStackItem(string $name, ManagerStackItem $item): void {
 +    $this->stack[$name] = $item;
@@ -415,6 +420,9 @@ index 0000000000..96ded8e8fe
 +   *
 +   * Drivers should not override this method unless they also override the
 +   * $stack property.
++   *
++   * @param string $name
++   *   The name of the transaction.
 +   */
 +  protected function removeStackItem(string $name): void {
 +    unset($this->stack[$name]);
@@ -588,8 +596,8 @@ index 0000000000..96ded8e8fe
 +   * Processes the root transaction rollback.
 +   */
 +  protected function processRootRollback(): void {
-+    $this->rollbackClientTransaction();
 +    $this->processPostTransactionCallbacks();
++    $this->rollbackClientTransaction();
 +  }
 +
 +  /**
@@ -836,6 +844,217 @@ index 0000000000..d6dc96ed29
 +  public function addPostTransactionCallback(callable $callback): void;
 +
 +}
+diff --git a/core/modules/mysql/src/Driver/Database/mysql/Connection.php b/core/modules/mysql/src/Driver/Database/mysql/Connection.php
+index 9ff1fdf84d..7b3194260a 100644
+--- a/core/modules/mysql/src/Driver/Database/mysql/Connection.php
++++ b/core/modules/mysql/src/Driver/Database/mysql/Connection.php
+@@ -11,6 +11,7 @@
+ use Drupal\Core\Database\Connection as DatabaseConnection;
+ use Drupal\Core\Database\DatabaseConnectionRefusedException;
+ use Drupal\Core\Database\SupportsTemporaryTablesInterface;
++use Drupal\Core\Database\Transaction\TransactionManagerInterface;
+ use Drupal\Core\Database\TransactionNoActiveException;
+ 
+ /**
+@@ -408,107 +409,11 @@ public function nextIdDelete() {
+     }
+   }
+ 
+-  /**
+-   * Overridden to work around issues to MySQL not supporting transactional DDL.
+-   */
+-  protected function popCommittableTransactions() {
+-    // Commit all the committable layers.
+-    foreach (array_reverse($this->transactionLayers) as $name => $active) {
+-      // Stop once we found an active transaction.
+-      if ($active) {
+-        break;
+-      }
+-
+-      // If there are no more layers left then we should commit.
+-      unset($this->transactionLayers[$name]);
+-      if (empty($this->transactionLayers)) {
+-        $this->doCommit();
+-      }
+-      else {
+-        // Attempt to release this savepoint in the standard way.
+-        try {
+-          $this->query('RELEASE SAVEPOINT ' . $name);
+-        }
+-        catch (DatabaseExceptionWrapper $e) {
+-          // However, in MySQL (InnoDB), savepoints are automatically committed
+-          // when tables are altered or created (DDL transactions are not
+-          // supported). This can cause exceptions due to trying to release
+-          // savepoints which no longer exist.
+-          //
+-          // To avoid exceptions when no actual error has occurred, we silently
+-          // succeed for MySQL error code 1305 ("SAVEPOINT does not exist").
+-          if ($e->getPrevious()->errorInfo[1] == '1305') {
+-            // If one SAVEPOINT was released automatically, then all were.
+-            // Therefore, clean the transaction stack.
+-            $this->transactionLayers = [];
+-            // We also have to explain to PDO that the transaction stack has
+-            // been cleaned-up.
+-            $this->doCommit();
+-          }
+-          else {
+-            throw $e;
+-          }
+-        }
+-      }
+-    }
+-  }
+-
+   /**
+    * {@inheritdoc}
+    */
+-  public function rollBack($savepoint_name = 'drupal_transaction') {
+-    // MySQL will automatically commit transactions when tables are altered or
+-    // created (DDL transactions are not supported). Prevent triggering an
+-    // exception to ensure that the error that has caused the rollback is
+-    // properly reported.
+-    if (!$this->connection->inTransaction()) {
+-      // On PHP 7 $this->connection->inTransaction() will return TRUE and
+-      // $this->connection->rollback() does not throw an exception; the
+-      // following code is unreachable.
+-
+-      // If \Drupal\Core\Database\Connection::rollBack() would throw an
+-      // exception then continue to throw an exception.
+-      if (!$this->inTransaction()) {
+-        throw new TransactionNoActiveException();
+-      }
+-      // A previous rollback to an earlier savepoint may mean that the savepoint
+-      // in question has already been accidentally committed.
+-      if (!isset($this->transactionLayers[$savepoint_name])) {
+-        throw new TransactionNoActiveException();
+-      }
+-
+-      trigger_error('Rollback attempted when there is no active transaction. This can cause data integrity issues.', E_USER_WARNING);
+-      return;
+-    }
+-    return parent::rollBack($savepoint_name);
+-  }
+-
+-  /**
+-   * {@inheritdoc}
+-   */
+-  protected function doCommit() {
+-    // MySQL will automatically commit transactions when tables are altered or
+-    // created (DDL transactions are not supported). Prevent triggering an
+-    // exception in this case as all statements have been committed.
+-    if ($this->connection->inTransaction()) {
+-      // On PHP 7 $this->connection->inTransaction() will return TRUE and
+-      // $this->connection->commit() does not throw an exception.
+-      $success = parent::doCommit();
+-    }
+-    else {
+-      // Process the post-root (non-nested) transaction commit callbacks. The
+-      // following code is copied from
+-      // \Drupal\Core\Database\Connection::doCommit()
+-      $success = TRUE;
+-      if (!empty($this->rootTransactionEndCallbacks)) {
+-        $callbacks = $this->rootTransactionEndCallbacks;
+-        $this->rootTransactionEndCallbacks = [];
+-        foreach ($callbacks as $callback) {
+-          call_user_func($callback, $success);
+-        }
+-      }
+-    }
+-    return $success;
++  protected function driverTransactionManager(): TransactionManagerInterface {
++    return new TransactionManager($this);
+   }
+ 
+ }
+diff --git a/core/modules/mysql/src/Driver/Database/mysql/TransactionManager.php b/core/modules/mysql/src/Driver/Database/mysql/TransactionManager.php
+new file mode 100644
+index 0000000000..a7e0f5e51e
+--- /dev/null
++++ b/core/modules/mysql/src/Driver/Database/mysql/TransactionManager.php
+@@ -0,0 +1,83 @@
++<?php
++
++namespace Drupal\mysql\Driver\Database\mysql;
++
++use Drupal\Core\Database\Transaction\ClientConnectionTransactionState;
++use Drupal\Core\Database\Transaction\TransactionManagerBase;
++use Drupal\Core\Database\TransactionNoActiveException;
++
++/**
++ * MySql implementation of TransactionManagerInterface.
++ */
++class TransactionManager extends TransactionManagerBase {
++
++  protected function processRootCommit(): void {
++dump([__METHOD__]);
++    if (!$this->connection->getClientConnection()->inTransaction()) {
++      $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
++      $this->processPostTransactionCallbacks();
++      return;
++    }
++dump([__METHOD__, '--> parent']);
++    parent::processRootCommit();
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  protected function rollbackClientSavepoint(string $name): bool {
++    if (!$this->connection->getClientConnection()->inTransaction()) {
++dump([__METHOD__, '*** VOIDED']);
++      $this->resetStack();
++      $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
++      $this->processPostTransactionCallbacks();
++      return TRUE;
++    }
++dump([__METHOD__, '--> parent']);
++    return parent::rollbackClientSavepoint($name);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  protected function releaseClientSavepoint(string $name): bool {
++    if (!$this->connection->getClientConnection()->inTransaction()) {
++dump([__METHOD__, $name, $this->getConnectionTransactionState(), '*** VOIDED']);
++      $this->resetStack();
++      $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
++      $this->processPostTransactionCallbacks();
++      return TRUE;
++    }
++dump([__METHOD__, $name, $this->getConnectionTransactionState(), '--> parent']);
++    return parent::releaseClientSavepoint($name);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  protected function commitClientTransaction(): bool {
++    if (!$this->connection->getClientConnection()->inTransaction()) {
++dump([__METHOD__, $this->getConnectionTransactionState(), '*** VOIDED']);
++      $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
++      $this->processPostTransactionCallbacks();
++      return TRUE;
++    }
++dump([__METHOD__, $this->getConnectionTransactionState(), '--> parent']);
++    return parent::commitClientTransaction();
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  protected function rollbackClientTransaction(): bool {
++    if (!$this->connection->getClientConnection()->inTransaction()) {
++dump([__METHOD__, '*** VOIDED']);
++      $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
++      $this->processPostTransactionCallbacks();
++      trigger_error('Rollback attempted when there is no active transaction. This can cause data integrity issues.', E_USER_WARNING);
++    }
++dump([__METHOD__, '--> parent']);
++    return parent::rollbackClientTransaction();
++  }
++
++}
 diff --git a/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php b/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php
 index c46dc1bce6..efde7ee933 100644
 --- a/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php
@@ -892,10 +1111,18 @@ index 0000000000..c65cd8615b
 +class TransactionManager extends TransactionManagerBase {
 +}
 diff --git a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
-index ebbf60826a..8d4d1889e2 100644
+index ebbf60826a..e5ec2cf82b 100644
 --- a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
 +++ b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
-@@ -34,6 +34,11 @@
+@@ -2,7 +2,6 @@
+ 
+ namespace Drupal\KernelTests\Core\Database;
+ 
+-use Drupal\Component\Render\FormattableMarkup;
+ use Drupal\Core\Database\TransactionOutOfOrderException;
+ use Drupal\Core\Database\TransactionNoActiveException;
+ use PHPUnit\Framework\Error\Warning;
+@@ -34,6 +33,11 @@
   */
  class DriverSpecificTransactionTestBase extends DriverSpecificDatabaseTestBase {
  
@@ -907,7 +1134,7 @@ index ebbf60826a..8d4d1889e2 100644
    /**
     * Encapsulates a transaction's "inner layer" with an "outer layer".
     *
-@@ -313,6 +318,7 @@ protected function executeDDLStatement() {
+@@ -313,6 +317,7 @@ protected function executeDDLStatement() {
    protected function cleanUp() {
      $this->connection->truncate('test')
        ->execute();
@@ -915,7 +1142,7 @@ index ebbf60826a..8d4d1889e2 100644
    }
  
    /**
-@@ -326,11 +332,8 @@ protected function cleanUp() {
+@@ -326,11 +331,8 @@ protected function cleanUp() {
     * @internal
     */
    public function assertRowPresent(string $name, string $message = NULL): void {
@@ -928,7 +1155,7 @@ index ebbf60826a..8d4d1889e2 100644
    }
  
    /**
-@@ -344,11 +347,8 @@ public function assertRowPresent(string $name, string $message = NULL): void {
+@@ -344,11 +346,8 @@ public function assertRowPresent(string $name, string $message = NULL): void {
     * @internal
     */
    public function assertRowAbsent(string $name, string $message = NULL): void {
@@ -941,7 +1168,7 @@ index ebbf60826a..8d4d1889e2 100644
    }
  
    /**
-@@ -575,4 +575,53 @@ public function testQueryFailureInTransaction() {
+@@ -575,4 +574,53 @@ public function testQueryFailureInTransaction() {
      $this->assertEquals('24', $saved_age);
    }
  
