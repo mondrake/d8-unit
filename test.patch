@@ -845,18 +845,33 @@ index 0000000000..d6dc96ed29
 +
 +}
 diff --git a/core/modules/mysql/src/Driver/Database/mysql/Connection.php b/core/modules/mysql/src/Driver/Database/mysql/Connection.php
-index 9ff1fdf84d..7b3194260a 100644
+index 9ff1fdf84d..0bdfe5a0b9 100644
 --- a/core/modules/mysql/src/Driver/Database/mysql/Connection.php
 +++ b/core/modules/mysql/src/Driver/Database/mysql/Connection.php
-@@ -11,6 +11,7 @@
+@@ -2,16 +2,15 @@
+ 
+ namespace Drupal\mysql\Driver\Database\mysql;
+ 
+-use Drupal\Core\Database\DatabaseAccessDeniedException;
+-use Drupal\Core\Database\DatabaseExceptionWrapper;
+-use Drupal\Core\Database\StatementWrapperIterator;
+-use Drupal\Core\Database\Database;
+-use Drupal\Core\Database\DatabaseNotFoundException;
+-use Drupal\Core\Database\DatabaseException;
  use Drupal\Core\Database\Connection as DatabaseConnection;
++use Drupal\Core\Database\Database;
++use Drupal\Core\Database\DatabaseAccessDeniedException;
  use Drupal\Core\Database\DatabaseConnectionRefusedException;
++use Drupal\Core\Database\DatabaseException;
++use Drupal\Core\Database\DatabaseNotFoundException;
++use Drupal\Core\Database\StatementWrapperIterator;
  use Drupal\Core\Database\SupportsTemporaryTablesInterface;
+-use Drupal\Core\Database\TransactionNoActiveException;
 +use Drupal\Core\Database\Transaction\TransactionManagerInterface;
- use Drupal\Core\Database\TransactionNoActiveException;
  
  /**
-@@ -408,107 +409,11 @@ public function nextIdDelete() {
+  * @addtogroup database
+@@ -408,107 +407,11 @@ public function nextIdDelete() {
      }
    }
  
@@ -905,9 +920,9 @@ index 9ff1fdf84d..7b3194260a 100644
 -    }
 -  }
 -
-   /**
-    * {@inheritdoc}
-    */
+-  /**
+-   * {@inheritdoc}
+-   */
 -  public function rollBack($savepoint_name = 'drupal_transaction') {
 -    // MySQL will automatically commit transactions when tables are altered or
 -    // created (DDL transactions are not supported). Prevent triggering an
@@ -935,9 +950,9 @@ index 9ff1fdf84d..7b3194260a 100644
 -    return parent::rollBack($savepoint_name);
 -  }
 -
--  /**
--   * {@inheritdoc}
--   */
+   /**
+    * {@inheritdoc}
+    */
 -  protected function doCommit() {
 -    // MySQL will automatically commit transactions when tables are altered or
 -    // created (DDL transactions are not supported). Prevent triggering an
@@ -968,31 +983,33 @@ index 9ff1fdf84d..7b3194260a 100644
  }
 diff --git a/core/modules/mysql/src/Driver/Database/mysql/TransactionManager.php b/core/modules/mysql/src/Driver/Database/mysql/TransactionManager.php
 new file mode 100644
-index 0000000000..faf3d59b50
+index 0000000000..ddd17d43ab
 --- /dev/null
 +++ b/core/modules/mysql/src/Driver/Database/mysql/TransactionManager.php
-@@ -0,0 +1,83 @@
+@@ -0,0 +1,77 @@
 +<?php
 +
 +namespace Drupal\mysql\Driver\Database\mysql;
 +
 +use Drupal\Core\Database\Transaction\ClientConnectionTransactionState;
 +use Drupal\Core\Database\Transaction\TransactionManagerBase;
-+use Drupal\Core\Database\TransactionNoActiveException;
 +
 +/**
 + * MySql implementation of TransactionManagerInterface.
++ *
++ * MySQL will automatically commit transactions when tables are altered or
++ * created (DDL transactions are not supported). However, pdo_mysql tracks
++ * whether a client connection is still active and we can prevent triggering
++ * exceptions.
 + */
 +class TransactionManager extends TransactionManagerBase {
 +
 +  protected function processRootCommit(): void {
-+//dump([__METHOD__]);
 +    if (!$this->connection->getClientConnection()->inTransaction()) {
 +      $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
 +      $this->processPostTransactionCallbacks();
 +      return;
 +    }
-+//dump([__METHOD__, '--> parent']);
 +    parent::processRootCommit();
 +  }
 +
@@ -1001,13 +1018,11 @@ index 0000000000..faf3d59b50
 +   */
 +  protected function rollbackClientSavepoint(string $name): bool {
 +    if (!$this->connection->getClientConnection()->inTransaction()) {
-+//dump([__METHOD__, '*** VOIDED']);
 +      $this->resetStack();
 +      $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
 +      $this->processPostTransactionCallbacks();
 +      return TRUE;
 +    }
-+//dump([__METHOD__, '--> parent']);
 +    return parent::rollbackClientSavepoint($name);
 +  }
 +
@@ -1016,13 +1031,11 @@ index 0000000000..faf3d59b50
 +   */
 +  protected function releaseClientSavepoint(string $name): bool {
 +    if (!$this->connection->getClientConnection()->inTransaction()) {
-+//dump([__METHOD__, $name, $this->getConnectionTransactionState(), '*** VOIDED']);
 +      $this->resetStack();
 +      $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
 +      $this->processPostTransactionCallbacks();
 +      return TRUE;
 +    }
-+//dump([__METHOD__, $name, $this->getConnectionTransactionState(), '--> parent']);
 +    return parent::releaseClientSavepoint($name);
 +  }
 +
@@ -1031,12 +1044,10 @@ index 0000000000..faf3d59b50
 +   */
 +  protected function commitClientTransaction(): bool {
 +    if (!$this->connection->getClientConnection()->inTransaction()) {
-+//dump([__METHOD__, $this->getConnectionTransactionState(), '*** VOIDED']);
 +      $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
 +      $this->processPostTransactionCallbacks();
 +      return TRUE;
 +    }
-+//dump([__METHOD__, $this->getConnectionTransactionState(), '--> parent']);
 +    return parent::commitClientTransaction();
 +  }
 +
@@ -1045,15 +1056,64 @@ index 0000000000..faf3d59b50
 +   */
 +  protected function rollbackClientTransaction(): bool {
 +    if (!$this->connection->getClientConnection()->inTransaction()) {
-+//dump([__METHOD__, '*** VOIDED']);
 +      $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
 +      $this->processPostTransactionCallbacks();
 +      trigger_error('Rollback attempted when there is no active transaction. This can cause data integrity issues.', E_USER_WARNING);
 +    }
-+//dump([__METHOD__, '--> parent']);
 +    return parent::rollbackClientTransaction();
 +  }
 +
++}
+diff --git a/core/modules/pgsql/src/Driver/Database/pgsql/Connection.php b/core/modules/pgsql/src/Driver/Database/pgsql/Connection.php
+index 32f6110be6..acfe1b9d2b 100644
+--- a/core/modules/pgsql/src/Driver/Database/pgsql/Connection.php
++++ b/core/modules/pgsql/src/Driver/Database/pgsql/Connection.php
+@@ -2,13 +2,14 @@
+ 
+ namespace Drupal\pgsql\Driver\Database\pgsql;
+ 
+-use Drupal\Core\Database\Database;
+ use Drupal\Core\Database\Connection as DatabaseConnection;
++use Drupal\Core\Database\Database;
+ use Drupal\Core\Database\DatabaseAccessDeniedException;
+ use Drupal\Core\Database\DatabaseNotFoundException;
+ use Drupal\Core\Database\StatementInterface;
+ use Drupal\Core\Database\StatementWrapperIterator;
+ use Drupal\Core\Database\SupportsTemporaryTablesInterface;
++use Drupal\Core\Database\Transaction\TransactionManagerInterface;
+ 
+ // cSpell:ignore ilike nextval
+ 
+@@ -404,6 +405,13 @@ public function hasJson(): bool {
+     }
+   }
+ 
++  /**
++   * {@inheritdoc}
++   */
++  protected function driverTransactionManager(): TransactionManagerInterface {
++    return new TransactionManager($this);
++  }
++
+ }
+ 
+ /**
+diff --git a/core/modules/pgsql/src/Driver/Database/pgsql/TransactionManager.php b/core/modules/pgsql/src/Driver/Database/pgsql/TransactionManager.php
+new file mode 100644
+index 0000000000..ca51d8a54d
+--- /dev/null
++++ b/core/modules/pgsql/src/Driver/Database/pgsql/TransactionManager.php
+@@ -0,0 +1,11 @@
++<?php
++
++namespace Drupal\mysql\Driver\Database\mysql;
++
++use Drupal\Core\Database\Transaction\TransactionManagerBase;
++
++/**
++ * PostgreSql implementation of TransactionManagerInterface.
++ */
++class TransactionManager extends TransactionManagerBase {
 +}
 diff --git a/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php b/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php
 index c46dc1bce6..efde7ee933 100644
