@@ -1,1074 +1,236 @@
 diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
-index f38ac642cd..04eb6d9b43 100644
+index f38ac642cd..84783c5a1c 100644
 --- a/core/lib/Drupal/Core/Database/Connection.php
 +++ b/core/lib/Drupal/Core/Database/Connection.php
-@@ -13,6 +13,7 @@
- use Drupal\Core\Database\Query\Truncate;
- use Drupal\Core\Database\Query\Update;
- use Drupal\Core\Database\Query\Upsert;
-+use Drupal\Core\Database\Transaction\TransactionManagerInterface;
- use Drupal\Core\Pager\PagerManagerInterface;
- 
- /**
-@@ -62,6 +63,11 @@ abstract class Connection {
-    * transaction.
-    *
-    * @var array
-+   *
-+   * @deprecated in drupal:10.0.2 and is removed from drupal:11.0.0. The
-+   *   transaction stack is now managed by TransactionManager.
-+   *
-+   * @see https://www.drupal.org/node/5555555
+@@ -899,6 +899,10 @@ protected function expandArguments(&$query, &$args) {
+    *   The name of the class that should be used for this driver.
     */
-   protected $transactionLayers = [];
- 
-@@ -204,6 +210,11 @@ abstract class Connection {
-    * Post-root (non-nested) transaction commit callbacks.
+   public function getDriverClass($class) {
++    match($class) {
++      'ExceptionHandler', 'Select', 'Insert', 'Merge', 'Upsert', 'Update', 'Delete', 'Truncate', 'Schema', 'Condition', 'Transaction' => @trigger_error('Calling ' . __METHOD__ . '() for \'' . $class . '\' is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Use standard autoloading in the methods that return database operations. See https://www.drupal.org/node/3217534', E_USER_DEPRECATED),
++      default => NULL,
++    };
+     if (empty($this->driverClasses[$class])) {
+       $driver_class = $this->connectionOptions['namespace'] . '\\' . $class;
+       if (class_exists($driver_class)) {
+@@ -963,6 +967,8 @@ public function getDriverClass($class) {
     *
-    * @var callable[]
+    * @return \Drupal\Core\Database\ExceptionHandler
+    *   The database exceptions handler.
 +   *
-+   * @deprecated in drupal:10.0.2 and is removed from drupal:11.0.0. The
-+   *   transaction end callbacks are now managed by TransactionManager.
-+   *
-+   * @see https://www.drupal.org/node/5555555
++   * @todo in drupal:11.0.0, make this method abstract.
     */
-   protected $rootTransactionEndCallbacks = [];
- 
-@@ -226,6 +237,11 @@ abstract class Connection {
-    */
-   private array $enabledEvents = [];
- 
-+  /**
-+   * The transaction manager.
-+   */
-+  protected TransactionManagerInterface|FALSE $transactionManager;
-+
-   /**
-    * Constructs a Connection object.
+   public function exceptionHandler() {
+     $class = $this->getDriverClass('ExceptionHandler');
+@@ -987,6 +993,8 @@ public function exceptionHandler() {
+    *   driver.
     *
-@@ -276,6 +292,20 @@ public function __destruct() {
-     $this->connection = NULL;
-   }
- 
-+  /**
-+   * Returns the client-level database connection object.
+    * @see \Drupal\Core\Database\Query\Select
 +   *
-+   * This method should normally be used only within database driver code. Not
-+   * doing so constitutes a risk of introducing code that is not database
-+   * independent.
-+   *
-+   * @return object
-+   *   The client-level database connection, for example \PDO.
-+   */
-+  public function getClientConnection(): object {
-+    return $this->connection;
-+  }
-+
-   /**
-    * Returns the default query options for any given query.
-    *
-@@ -1294,6 +1324,41 @@ public function escapeLike($string) {
-     return addcslashes($string, '\%_');
-   }
- 
-+  /**
-+   * Returns the transaction manager.
-+   *
-+   * @return \Drupal\Core\Database\Transaction\TransactionManagerInterface|false
-+   *   The transaction manager, or FALSE if not available.
-+   */
-+  public function transactionManager(): TransactionManagerInterface|FALSE {
-+    if (!isset($this->transactionManager)) {
-+      try {
-+        $this->transactionManager = $this->driverTransactionManager();
-+      }
-+      catch (\LogicException $e) {
-+        $this->transactionManager = FALSE;
-+      }
-+    }
-+    return $this->transactionManager;
-+  }
-+
-+  /**
-+   * Returns a new instance of the driver's transaction manager.
-+   *
-+   * Database drivers must implement their own class extending from
-+   * \Drupal\Core\Database\Transaction\TransactionManagerBase, and instantiate
-+   * it here.
-+   *
-+   * @return \Drupal\Core\Database\Transaction\TransactionManagerInterface
-+   *   The transaction manager.
-+   *
-+   * @throws \LogicException
-+   *   If the transaction manager is undefined or unavailable.
-+   */
-+  protected function driverTransactionManager(): TransactionManagerInterface {
-+    throw new \LogicException('The database driver has no TransactionManager implementation');
-+  }
-+
-   /**
-    * Determines if there is an active transaction open.
-    *
-@@ -1301,6 +1366,9 @@ public function escapeLike($string) {
-    *   TRUE if we're currently in a transaction, FALSE otherwise.
++   * @todo in drupal:11.0.0, make this method abstract.
     */
-   public function inTransaction() {
-+    if ($this->transactionManager()) {
-+      return $this->transactionManager()->inTransaction();
-+    }
-     return ($this->transactionDepth() > 0);
-   }
- 
-@@ -1311,6 +1379,9 @@ public function inTransaction() {
-    *   The current transaction depth.
+   public function select($table, $alias = NULL, array $options = []) {
+     assert(is_string($alias) || $alias === NULL, 'The \'$alias\' argument to ' . __METHOD__ . '() must be a string or NULL');
+@@ -1009,6 +1017,8 @@ public function select($table, $alias = NULL, array $options = []) {
+    *
+    * @see \Drupal\Core\Database\Query\Insert
+    * @see \Drupal\Core\Database\Connection::defaultOptions()
++   *
++   * @todo in drupal:11.0.0, make this method abstract.
     */
-   public function transactionDepth() {
-+    if ($this->transactionManager()) {
-+      return $this->transactionManager()->stackDepth();
-+    }
-     return count($this->transactionLayers);
-   }
- 
-@@ -1326,6 +1397,9 @@ public function transactionDepth() {
+   public function insert($table, array $options = []) {
+     $class = $this->getDriverClass('Insert');
+@@ -1057,6 +1067,8 @@ public function lastInsertId(?string $name = NULL): string {
+    *   A new Merge query object.
+    *
+    * @see \Drupal\Core\Database\Query\Merge
++   *
++   * @todo in drupal:11.0.0, make this method abstract.
+    */
+   public function merge($table, array $options = []) {
+     $class = $this->getDriverClass('Merge');
+@@ -1075,6 +1087,8 @@ public function merge($table, array $options = []) {
+    *   A new Upsert query object.
+    *
+    * @see \Drupal\Core\Database\Query\Upsert
++   *
++   * @todo in drupal:11.0.0, make this method abstract.
+    */
+   public function upsert($table, array $options = []) {
+     $class = $this->getDriverClass('Upsert');
+@@ -1096,6 +1110,8 @@ public function upsert($table, array $options = []) {
+    *
+    * @see \Drupal\Core\Database\Query\Update
+    * @see \Drupal\Core\Database\Connection::defaultOptions()
++   *
++   * @todo in drupal:11.0.0, make this method abstract.
+    */
+   public function update($table, array $options = []) {
+     $class = $this->getDriverClass('Update');
+@@ -1117,6 +1133,8 @@ public function update($table, array $options = []) {
+    *
+    * @see \Drupal\Core\Database\Query\Delete
+    * @see \Drupal\Core\Database\Connection::defaultOptions()
++   *
++   * @todo in drupal:11.0.0, make this method abstract.
+    */
+   public function delete($table, array $options = []) {
+     $class = $this->getDriverClass('Delete');
+@@ -1135,6 +1153,8 @@ public function delete($table, array $options = []) {
+    *   A new Truncate query object.
+    *
+    * @see \Drupal\Core\Database\Query\Truncate
++   *
++   * @todo in drupal:11.0.0, make this method abstract.
+    */
+   public function truncate($table, array $options = []) {
+     $class = $this->getDriverClass('Truncate');
+@@ -1148,6 +1168,8 @@ public function truncate($table, array $options = []) {
+    *
+    * @return \Drupal\Core\Database\Schema
+    *   The database Schema object for this connection.
++   *
++   * @todo in drupal:11.0.0, make this method abstract.
+    */
+   public function schema() {
+     if (empty($this->schema)) {
+@@ -1167,6 +1189,8 @@ public function schema() {
+    *   A new Condition query object.
+    *
+    * @see \Drupal\Core\Database\Query\Condition
++   *
++   * @todo in drupal:11.0.0, make this method abstract.
+    */
+   public function condition($conjunction) {
+     $class = $this->getDriverClass('Condition');
+@@ -1324,6 +1348,8 @@ public function transactionDepth() {
+    *   A Transaction object.
+    *
     * @see \Drupal\Core\Database\Transaction
++   *
++   * @todo in drupal:11.0.0, make this method abstract.
     */
    public function startTransaction($name = '') {
-+    if ($this->transactionManager()) {
-+      return $this->transactionManager()->push($name);
-+    }
      $class = $this->getDriverClass('Transaction');
-     return new $class($this, $name);
-   }
-@@ -1345,6 +1419,10 @@ public function startTransaction($name = '') {
-    * @see \Drupal\Core\Database\Transaction::rollBack()
-    */
-   public function rollBack($savepoint_name = 'drupal_transaction') {
-+    if ($this->transactionManager()) {
-+      $this->transactionManager()->rollback($savepoint_name);
-+      return;
-+    }
-     if (!$this->inTransaction()) {
-       throw new TransactionNoActiveException();
-     }
-@@ -1469,6 +1547,10 @@ public function popTransaction($name) {
-    * @see \Drupal\Core\Database\Connection::doCommit()
-    */
-   public function addRootTransactionEndCallback(callable $callback) {
-+    if ($this->transactionManager()) {
-+      $this->transactionManager()->addPostTransactionCallback($callback);
-+      return;
-+    }
-     if (!$this->transactionLayers) {
-       throw new \LogicException('Root transaction end callbacks can only be added when there is an active transaction.');
-     }
-@@ -1644,6 +1726,7 @@ public function supportsTransactionalDDL() {
-    * @see \Drupal\Core\Database\Transaction
-    */
-   public function commit() {
-+    @trigger_error(__METHOD__ . '() is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Instead, @todo. See https://www.drupal.org/node/5555555', E_USER_DEPRECATED);
-     throw new TransactionExplicitCommitNotAllowedException();
-   }
- 
-diff --git a/core/lib/Drupal/Core/Database/Transaction.php b/core/lib/Drupal/Core/Database/Transaction.php
-index 76d5fc8f5f..b03b2ca24a 100644
---- a/core/lib/Drupal/Core/Database/Transaction.php
-+++ b/core/lib/Drupal/Core/Database/Transaction.php
-@@ -48,6 +48,11 @@ class Transaction {
-   protected $name;
- 
-   public function __construct(Connection $connection, $name = NULL) {
-+    if ($connection->transactionManager()) {
-+      $this->connection = $connection;
-+      $this->name = $name;
-+      return;
-+    }
-     $this->connection = $connection;
-     // If there is no transaction depth, then no transaction has started. Name
-     // the transaction 'drupal_transaction'.
-@@ -66,6 +71,10 @@ public function __construct(Connection $connection, $name = NULL) {
-   }
- 
-   public function __destruct() {
-+    if ($this->connection->transactionManager()) {
-+      $this->connection->transactionManager()->unpile($this->name);
-+      return;
-+    }
-     // If we rolled back then the transaction would have already been popped.
-     if (!$this->rolledBack) {
-       $this->connection->popTransaction($this->name);
-@@ -90,6 +99,10 @@ public function name() {
-    * @see \Drupal\Core\Database\Connection::rollBack()
-    */
-   public function rollBack() {
-+    if ($this->connection->transactionManager()) {
-+      $this->connection->transactionManager()->rollback($this->name);
-+      return;
-+    }
-     $this->rolledBack = TRUE;
-     $this->connection->rollBack($this->name);
-   }
-diff --git a/core/lib/Drupal/Core/Database/Transaction/ClientConnectionTransactionState.php b/core/lib/Drupal/Core/Database/Transaction/ClientConnectionTransactionState.php
-new file mode 100644
-index 0000000000..b545d6b2de
---- /dev/null
-+++ b/core/lib/Drupal/Core/Database/Transaction/ClientConnectionTransactionState.php
-@@ -0,0 +1,27 @@
-+<?php
-+
-+/**
-+ * @file
-+ * Enumeration of the possible states of a client connection transaction.
-+ */
-+
-+namespace Drupal\Core\Database\Transaction;
-+
-+/**
-+ * Enumeration of the possible states of a client connection transaction.
-+ */
-+enum ClientConnectionTransactionState {
-+
-+  case Active;
-+  case RolledBack;
-+  case RollbackFailed;
-+  case Committed;
-+  case CommitFailed;
-+
-+  // In some cases the active transaction can be automatically committed by
-+  // the database server (for example, MySql when a DDL statement is executed
-+  // during a transaction). We track such cases with 'Voided' when we can
-+  // detect them.
-+  case Voided;
-+
-+}
-diff --git a/core/lib/Drupal/Core/Database/Transaction/ManagerStackItem.php b/core/lib/Drupal/Core/Database/Transaction/ManagerStackItem.php
-new file mode 100644
-index 0000000000..5edca7915d
---- /dev/null
-+++ b/core/lib/Drupal/Core/Database/Transaction/ManagerStackItem.php
-@@ -0,0 +1,24 @@
-+<?php
-+
-+namespace Drupal\Core\Database\Transaction;
-+
-+/**
-+ * A representation of a Drupal transaction on the TransactionManager stack.
-+ */
-+final class ManagerStackItem {
-+
-+  /**
-+   * Constructor.
-+   *
-+   * @param string $name
-+   *   The name of the Drupal transaction.
-+   * @param \Drupal\Core\Database\Transaction\ManagerStackItemType $type
-+   *   The type of the Drupal transaction, root or savepoint.
-+   */
-+  public function __construct(
-+    public readonly string $name,
-+    public readonly ManagerStackItemType $type,
-+  ) {
-+  }
-+
-+}
-diff --git a/core/lib/Drupal/Core/Database/Transaction/ManagerStackItemType.php b/core/lib/Drupal/Core/Database/Transaction/ManagerStackItemType.php
-new file mode 100644
-index 0000000000..763a758a9f
---- /dev/null
-+++ b/core/lib/Drupal/Core/Database/Transaction/ManagerStackItemType.php
-@@ -0,0 +1,18 @@
-+<?php
-+
-+/**
-+ * @file
-+ * Enumeration of the types of items in the Drupal transaction stack.
-+ */
-+
-+namespace Drupal\Core\Database\Transaction;
-+
-+/**
-+ * Enumeration of the types of items in the Drupal transaction stack.
-+ */
-+enum ManagerStackItemType {
-+
-+  case Root;
-+  case Savepoint;
-+
-+}
-diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
-new file mode 100644
-index 0000000000..7fcbf11efe
---- /dev/null
-+++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
-@@ -0,0 +1,428 @@
-+<?php
-+
-+namespace Drupal\Core\Database\Transaction;
-+
-+use Drupal\Core\Database\Connection;
-+use Drupal\Core\Database\Transaction;
-+use Drupal\Core\Database\TransactionCommitFailedException;
-+use Drupal\Core\Database\TransactionNameNonUniqueException;
-+use Drupal\Core\Database\TransactionNoActiveException;
-+use Drupal\Core\Database\TransactionOutOfOrderException;
-+
-+/**
-+ * The database transaction manager base class.
-+ *
-+ * On many databases transactions cannot nest. Instead, we track nested calls
-+ * to transactions and collapse them into a single client transaction.
-+ *
-+ * Database drivers must implement their own class extending from this, and
-+ * instantiate it via their Connection::driverTransactionManager() method.
-+ *
-+ * @see \Drupal\Core\Database\Connection::driverTransactionManager()
-+ */
-+abstract class TransactionManagerBase implements TransactionManagerInterface {
-+
-+  /**
-+   * The stack of Drupal transactions currently active.
-+   *
-+   * @var array<string,ManagerStackItem>
-+   */
-+  private array $stack = [];
-+
-+  /**
-+   * A list of Drupal transactions rolled back but not yet unpiled.
-+   *
-+   * @var array<string,true>
-+   */
-+  private array $rollbacks = [];
-+
-+  /**
-+   * A list of post-transaction callbacks.
-+   *
-+   * @var callable[]
-+   */
-+  private array $postTransactionCallbacks = [];
-+
-+  /**
-+   * The state of the underlying client connection transaction.
-+   *
-+   * Note that this is a proxy of the actual state on the database server,
-+   * best determined through calls to methods in this class. The actual
-+   * state on the database server could be different.
-+   */
-+  private ClientConnectionTransactionState $connectionTransactionState;
-+
-+  /**
-+   * Constructor.
-+   *
-+   * @param \Drupal\Core\Database\Connection $connection
-+   *   The database connection.
-+   */
-+  public function __construct(
-+    protected readonly Connection $connection,
-+  ) {
-+  }
-+
-+  /**
-+   * Returns the current depth of the transaction stack.
-+   *
-+   * @return int
-+   *   The current depth of the transaction stack.
-+   *
-+   * @todo consider making this function protected.
-+   */
-+  public function stackDepth(): int {
-+    return count($this->stack());
-+  }
-+
-+  /**
-+   * Returns the content of the transaction stack.
-+   *
-+   * Drivers should not override this method unless they also override the
-+   * $stack property.
-+   *
-+   * @return array
-+   *   The elements of the transaction stack.
-+   */
-+  protected function stack(): array {
-+    return $this->stack;
-+  }
-+
-+  /**
-+   * Resets the transaction stack.
-+   *
-+   * Drivers should not override this method unless they also override the
-+   * $stack property.
-+   */
-+  protected function resetStack(): void {
-+    $this->stack = [];
-+  }
-+
-+  /**
-+   * Adds an item to the transaction stack.
-+   *
-+   * Drivers should not override this method unless they also override the
-+   * $stack property.
-+   *
-+   * @param string $name
-+   *   The name of the transaction.
-+   * @param Drupal\Core\Database\Transaction\ManagerStackItem $item
-+   *   The stack item to be added.
-+   */
-+  protected function addStackItem(string $name, ManagerStackItem $item): void {
-+    $this->stack[$name] = $item;
-+  }
-+
-+  /**
-+   * Removes an item from the transaction stack.
-+   *
-+   * Drivers should not override this method unless they also override the
-+   * $stack property.
-+   *
-+   * @param string $name
-+   *   The name of the transaction.
-+   */
-+  protected function removeStackItem(string $name): void {
-+    unset($this->stack[$name]);
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function inTransaction(): bool {
-+    return (bool) $this->stackDepth() && $this->getConnectionTransactionState() === ClientConnectionTransactionState::Active;
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function push(string $name = ''): Transaction {
-+    if (!$this->inTransaction()) {
-+      // If there is no transaction active, name the transaction
-+      // 'drupal_transaction'.
-+      $name = 'drupal_transaction';
-+    }
-+    elseif (!$name) {
-+      // Within transactions, savepoints are used. Each savepoint requires a
-+      // name. So if no name is present we need to create one.
-+      $name = 'savepoint_' . $this->stackDepth();
-+    }
-+
-+    if ($this->has($name)) {
-+      throw new TransactionNameNonUniqueException($name . " is already in use.");
-+    }
-+
-+    // Do the client-level processing.
-+    if ($this->stackDepth() === 0) {
-+      $this->beginClientTransaction();
-+      $type = ManagerStackItemType::Root;
-+      $this->setConnectionTransactionState(ClientConnectionTransactionState::Active);
-+    }
-+    else {
-+      // If we're already in a Drupal transaction then we want to create a
-+      // database savepoint, rather than try to begin another database
-+      // transaction.
-+      $this->addClientSavepoint($name);
-+      $type = ManagerStackItemType::Savepoint;
-+    }
-+
-+    // Push the transaction on the stack, increasing its depth.
-+    $this->addStackItem($name, new ManagerStackItem($name, $type));
-+
-+    return new Transaction($this->connection, $name);
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function unpile(string $name): void {
-+    // If an already rolled back Drupal transaction, do nothing on the client
-+    // connection, just cleanup the list of transactions rolled back.
-+    if (isset($this->rollbacks[$name])) {
-+      unset($this->rollbacks[$name]);
-+      return;
-+    }
-+
-+    if ($name !== 'drupal_transaction' && !$this->has($name)) {
-+      throw new TransactionOutOfOrderException();
-+    }
-+
-+    // Release the client transaction savepoint in case the Drupal transaction
-+    // is not a root one.
-+    if (
-+      $this->has($name)
-+      && $this->stack()[$name]->type === ManagerStackItemType::Savepoint
-+      && $this->getConnectionTransactionState() === ClientConnectionTransactionState::Active
-+    ) {
-+      $this->releaseClientSavepoint($name);
-+    }
-+
-+    // Remove the transaction from the stack.
-+    $this->removeStackItem($name);
-+
-+    // If this was the last Drupal transaction open, we can commit the client
-+    // transaction.
-+    if (
-+      $this->stackDepth() === 0
-+      && $this->getConnectionTransactionState() === ClientConnectionTransactionState::Active
-+    ) {
-+      $this->processRootCommit();
-+    }
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function rollback(string $name): void {
-+    if (!$this->inTransaction()) {
-+      throw new TransactionNoActiveException();
-+    }
-+
-+    // Do the client-level processing.
-+    match ($this->stack()[$name]->type) {
-+      ManagerStackItemType::Root => $this->processRootRollback(),
-+      ManagerStackItemType::Savepoint => $this->rollbackClientSavepoint($name),
-+    };
-+
-+    // Rolled back item should match the last one in stack.
-+    if ($name !== array_key_last($this->stack())) {
-+      throw new TransactionOutOfOrderException();
-+    }
-+
-+    $this->rollbacks[$name] = TRUE;
-+    $this->removeStackItem($name);
-+
-+    // If this was the last Drupal transaction open, we can commit the client
-+    // transaction.
-+    if ($this->stackDepth() === 0 && $this->getConnectionTransactionState() === ClientConnectionTransactionState::Active) {
-+      $this->processRootCommit();
-+    }
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function addPostTransactionCallback(callable $callback): void {
-+    if (!$this->inTransaction()) {
-+      throw new \LogicException('Root transaction end callbacks can only be added when there is an active transaction.');
-+    }
-+    $this->postTransactionCallbacks[] = $callback;
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function has(string $name): bool {
-+    return isset($this->stack()[$name]);
-+  }
-+
-+  /**
-+   * Sets the state of the client connection transaction.
-+   *
-+   * Note that this is a proxy of the actual state on the database server,
-+   * best determined through calls to methods in this class. The actual
-+   * state on the database server could be different.
-+   *
-+   * Drivers should not override this method unless they also override the
-+   * $connectionTransactionState property.
-+   *
-+   * @param \Drupal\Core\Database\Transaction\ClientConnectionTransactionState $state
-+   *   The state of the client connection.
-+   */
-+  protected function setConnectionTransactionState(ClientConnectionTransactionState $state): void {
-+    $this->connectionTransactionState = $state;
-+  }
-+
-+  /**
-+   * Gets the state of the client connection transaction.
-+   *
-+   * Note that this is a proxy of the actual state on the database server,
-+   * best determined through calls to methods in this class. The actual
-+   * state on the database server could be different.
-+   *
-+   * Drivers should not override this method unless they also override the
-+   * $connectionTransactionState property.
-+   *
-+   * @return \Drupal\Core\Database\Transaction\ClientConnectionTransactionState
-+   *   The state of the client connection.
-+   */
-+  protected function getConnectionTransactionState(): ClientConnectionTransactionState {
-+    return $this->connectionTransactionState;
-+  }
-+
-+  /**
-+   * Processes the root transaction rollback.
-+   */
-+  protected function processRootRollback(): void {
-+    $this->processPostTransactionCallbacks();
-+    $this->rollbackClientTransaction();
-+  }
-+
-+  /**
-+   * Processes the root transaction commit.
-+   *
-+   * @throws \Drupal\Core\Database\TransactionCommitFailedException
-+   *   If the commit of the root transaction failed.
-+   */
-+  protected function processRootCommit(): void {
-+    $clientCommit = $this->commitClientTransaction();
-+    $this->processPostTransactionCallbacks();
-+    if (!$clientCommit) {
-+      throw new TransactionCommitFailedException();
-+    }
-+  }
-+
-+  /**
-+   * Processes the post-transaction callbacks.
-+   */
-+  protected function processPostTransactionCallbacks(): void {
-+    if (!empty($this->postTransactionCallbacks)) {
-+      $callbacks = $this->postTransactionCallbacks;
-+      $this->postTransactionCallbacks = [];
-+      foreach ($callbacks as $callback) {
-+        call_user_func($callback, $this->getConnectionTransactionState() === ClientConnectionTransactionState::Committed || $this->getConnectionTransactionState() === ClientConnectionTransactionState::Voided);
-+      }
-+    }
-+  }
-+
-+  /**
-+   * Begins a transaction on the client connection.
-+   *
-+   * This is a PDO-based implementation. Drivers should override this method
-+   * to use a method specific for the client.
-+   *
-+   * @return bool
-+   *   Returns TRUE on success or FALSE on failure.
-+   */
-+  protected function beginClientTransaction(): bool {
-+    return $this->connection->getClientConnection()->beginTransaction();
-+  }
-+
-+  /**
-+   * Adds a savepoint on the client transaction.
-+   *
-+   * This is a PDO-based implementation. Drivers should override this method
-+   * to use a method specific for the client.
-+   *
-+   * @param string $name
-+   *   The name of the savepoint.
-+   *
-+   * @return bool
-+   *   Returns TRUE on success or FALSE on failure.
-+   */
-+  protected function addClientSavepoint(string $name): bool {
-+    $this->connection->query('SAVEPOINT ' . $name);
-+    return TRUE;
-+  }
-+
-+  /**
-+   * Rolls back to a savepoint on the client transaction.
-+   *
-+   * This is a PDO-based implementation. Drivers should override this method
-+   * to use a method specific for the client.
-+   *
-+   * @param string $name
-+   *   The name of the savepoint.
-+   *
-+   * @return bool
-+   *   Returns TRUE on success or FALSE on failure.
-+   */
-+  protected function rollbackClientSavepoint(string $name): bool {
-+    $this->connection->query('ROLLBACK TO SAVEPOINT ' . $name);
-+    return TRUE;
-+  }
-+
-+  /**
-+   * Releases a savepoint on the client transaction.
-+   *
-+   * This is a PDO-based implementation. Drivers should override this method
-+   * to use a method specific for the client.
-+   *
-+   * @param string $name
-+   *   The name of the savepoint.
-+   *
-+   * @return bool
-+   *   Returns TRUE on success or FALSE on failure.
-+   */
-+  protected function releaseClientSavepoint(string $name): bool {
-+    $this->connection->query('RELEASE SAVEPOINT ' . $name);
-+    return TRUE;
-+  }
-+
-+  /**
-+   * Rolls back a client transaction.
-+   *
-+   * This is a PDO-based implementation. Drivers should override this method
-+   * to use a method specific for the client.
-+   *
-+   * @return bool
-+   *   Returns TRUE on success or FALSE on failure.
-+   */
-+  protected function rollbackClientTransaction(): bool {
-+    $clientRollback = $this->connection->getClientConnection()->rollBack();
-+    $this->setConnectionTransactionState($clientRollback ?
-+      ClientConnectionTransactionState::RolledBack :
-+      ClientConnectionTransactionState::RollbackFailed
-+    );
-+    return $clientRollback;
-+  }
-+
-+  /**
-+   * Commits a client transaction.
-+   *
-+   * This is a PDO-based implementation. Drivers should override this method
-+   * to use a method specific for the client.
-+   *
-+   * @return bool
-+   *   Returns TRUE on success or FALSE on failure.
-+   */
-+  protected function commitClientTransaction(): bool {
-+    $clientCommit = $this->connection->getClientConnection()->commit();
-+    $this->setConnectionTransactionState($clientCommit ?
-+      ClientConnectionTransactionState::Committed :
-+      ClientConnectionTransactionState::CommitFailed
-+    );
-+    return $clientCommit;
-+  }
-+
-+}
-diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php
-new file mode 100644
-index 0000000000..d6dc96ed29
---- /dev/null
-+++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php
-@@ -0,0 +1,110 @@
-+<?php
-+
-+namespace Drupal\Core\Database\Transaction;
-+
-+use Drupal\Core\Database\Transaction;
-+
-+/**
-+ * Interface for the database transaction manager classes.
-+ */
-+interface TransactionManagerInterface {
-+
-+  /**
-+   * Determines if there is an active transaction open.
-+   *
-+   * @return bool
-+   *   TRUE if we're currently in a transaction, FALSE otherwise.
-+   */
-+  public function inTransaction(): bool;
-+
-+  /**
-+   * Checks if a named Drupal transaction is active.
-+   *
-+   * @param string $name
-+   *   The name of the transaction.
-+   *
-+   * @return bool
-+   *   TRUE if the transaction is active, FALSE otherwise.
-+   */
-+  public function has(string $name): bool;
-+
-+  /**
-+   * Pushes a new Drupal transaction on the stack.
-+   *
-+   * This begins a client connection transaction if there is not one active,
-+   * or adds a savepoint to the active one.
-+   *
-+   * @param string $name
-+   *   (optional) The name of the savepoint.
-+   *
-+   * @return \Drupal\Core\Database\Transaction
-+   *   A Transaction object.
-+   *
-+   * @throws \Drupal\Core\Database\TransactionNameNonUniqueException
-+   *   If a Drupal Transaction with the specified name exists already.
-+   */
-+  public function push(string $name = ''): Transaction;
-+
-+  /**
-+   * Removes a Drupal transaction from the stack.
-+   *
-+   * The unpiled item does not necessarily need to be the last on the stack.
-+   * This method should only be called by a Transaction object going out of
-+   * scope.
-+   *
-+   * @param string $name
-+   *   (optional) The name of the savepoint.
-+   *
-+   * @throws \Drupal\Core\Database\TransactionOutOfOrderException
-+   *   If a Drupal Transaction with the specified name does not exist.
-+   * @throws \Drupal\Core\Database\TransactionCommitFailedException
-+   *   If the commit of the root transaction failed.
-+   */
-+  public function unpile(string $name): void;
-+
-+  /**
-+   * Rolls back a Drupal transaction.
-+   *
-+   * Rollbacks for nested transactions need to occur in reverse order to the
-+   * pushes to the stack. Rolling back the last active Drupal transaction leads
-+   * to rolling back the client connection (or to committing it in the edge
-+   * case when the root was unpiled earlier).
-+   *
-+   * @param string $name
-+   *   (optional) The name of the savepoint.
-+   *
-+   * @throws \Drupal\Core\Database\TransactionNoActiveException
-+   *   If there is no active client connection.
-+   * @throws \Drupal\Core\Database\TransactionOutOfOrderException
-+   *   If the order of rollback is not in reverse sequence against the pushes
-+   *   to the stack.
-+   * @throws \Drupal\Core\Database\TransactionCommitFailedException
-+   *   If the commit of the root transaction failed.
-+   */
-+  public function rollback(string $name): void;
-+
-+  /**
-+   * Adds a root transaction end callback.
-+   *
-+   * These callbacks are invoked immediately after the client transaction has
-+   * been committed or rolled back.
-+   *
-+   * It can for example be used to avoid deadlocks on write-heavy tables that
-+   * do not need to be part of the transaction, like cache tag invalidations.
-+   *
-+   * Another use case is that services using alternative backends like Redis
-+   * and Memcache cache implementations can replicate the transaction-behavior
-+   * of the database cache backend and avoid race conditions.
-+   *
-+   * An argument is passed to the callbacks that indicates whether the
-+   * transaction was successful or not.
-+   *
-+   * @param callable $callback
-+   *   The callback to invoke.
-+   *
-+   * @throws \LogicException
-+   *   When a callback addition is attempted but no transaction is active.
-+   */
-+  public function addPostTransactionCallback(callable $callback): void;
-+
-+}
 diff --git a/core/modules/mysql/src/Driver/Database/mysql/Connection.php b/core/modules/mysql/src/Driver/Database/mysql/Connection.php
-index 9ff1fdf84d..0bdfe5a0b9 100644
+index 9ff1fdf84d..e0b33c856f 100644
 --- a/core/modules/mysql/src/Driver/Database/mysql/Connection.php
 +++ b/core/modules/mysql/src/Driver/Database/mysql/Connection.php
-@@ -2,16 +2,15 @@
+@@ -2,15 +2,17 @@
  
  namespace Drupal\mysql\Driver\Database\mysql;
  
--use Drupal\Core\Database\DatabaseAccessDeniedException;
--use Drupal\Core\Database\DatabaseExceptionWrapper;
++use Drupal\Core\Database\Connection as DatabaseConnection;
++use Drupal\Core\Database\Database;
+ use Drupal\Core\Database\DatabaseAccessDeniedException;
++use Drupal\Core\Database\DatabaseConnectionRefusedException;
++use Drupal\Core\Database\DatabaseException;
+ use Drupal\Core\Database\DatabaseExceptionWrapper;
 -use Drupal\Core\Database\StatementWrapperIterator;
 -use Drupal\Core\Database\Database;
--use Drupal\Core\Database\DatabaseNotFoundException;
+ use Drupal\Core\Database\DatabaseNotFoundException;
 -use Drupal\Core\Database\DatabaseException;
- use Drupal\Core\Database\Connection as DatabaseConnection;
-+use Drupal\Core\Database\Database;
-+use Drupal\Core\Database\DatabaseAccessDeniedException;
- use Drupal\Core\Database\DatabaseConnectionRefusedException;
-+use Drupal\Core\Database\DatabaseException;
-+use Drupal\Core\Database\DatabaseNotFoundException;
+-use Drupal\Core\Database\Connection as DatabaseConnection;
+-use Drupal\Core\Database\DatabaseConnectionRefusedException;
++use Drupal\Core\Database\Query\Condition;
 +use Drupal\Core\Database\StatementWrapperIterator;
  use Drupal\Core\Database\SupportsTemporaryTablesInterface;
--use Drupal\Core\Database\TransactionNoActiveException;
-+use Drupal\Core\Database\Transaction\TransactionManagerInterface;
++use Drupal\Core\Database\Transaction;
+ use Drupal\Core\Database\TransactionNoActiveException;
  
  /**
-  * @addtogroup database
-@@ -408,107 +407,11 @@ public function nextIdDelete() {
-     }
+@@ -511,6 +513,86 @@ protected function doCommit() {
+     return $success;
    }
  
--  /**
--   * Overridden to work around issues to MySQL not supporting transactional DDL.
--   */
--  protected function popCommittableTransactions() {
--    // Commit all the committable layers.
--    foreach (array_reverse($this->transactionLayers) as $name => $active) {
--      // Stop once we found an active transaction.
--      if ($active) {
--        break;
--      }
--
--      // If there are no more layers left then we should commit.
--      unset($this->transactionLayers[$name]);
--      if (empty($this->transactionLayers)) {
--        $this->doCommit();
--      }
--      else {
--        // Attempt to release this savepoint in the standard way.
--        try {
--          $this->query('RELEASE SAVEPOINT ' . $name);
--        }
--        catch (DatabaseExceptionWrapper $e) {
--          // However, in MySQL (InnoDB), savepoints are automatically committed
--          // when tables are altered or created (DDL transactions are not
--          // supported). This can cause exceptions due to trying to release
--          // savepoints which no longer exist.
--          //
--          // To avoid exceptions when no actual error has occurred, we silently
--          // succeed for MySQL error code 1305 ("SAVEPOINT does not exist").
--          if ($e->getPrevious()->errorInfo[1] == '1305') {
--            // If one SAVEPOINT was released automatically, then all were.
--            // Therefore, clean the transaction stack.
--            $this->transactionLayers = [];
--            // We also have to explain to PDO that the transaction stack has
--            // been cleaned-up.
--            $this->doCommit();
--          }
--          else {
--            throw $e;
--          }
--        }
--      }
--    }
--  }
--
--  /**
--   * {@inheritdoc}
--   */
--  public function rollBack($savepoint_name = 'drupal_transaction') {
--    // MySQL will automatically commit transactions when tables are altered or
--    // created (DDL transactions are not supported). Prevent triggering an
--    // exception to ensure that the error that has caused the rollback is
--    // properly reported.
--    if (!$this->connection->inTransaction()) {
--      // On PHP 7 $this->connection->inTransaction() will return TRUE and
--      // $this->connection->rollback() does not throw an exception; the
--      // following code is unreachable.
--
--      // If \Drupal\Core\Database\Connection::rollBack() would throw an
--      // exception then continue to throw an exception.
--      if (!$this->inTransaction()) {
--        throw new TransactionNoActiveException();
--      }
--      // A previous rollback to an earlier savepoint may mean that the savepoint
--      // in question has already been accidentally committed.
--      if (!isset($this->transactionLayers[$savepoint_name])) {
--        throw new TransactionNoActiveException();
--      }
--
--      trigger_error('Rollback attempted when there is no active transaction. This can cause data integrity issues.', E_USER_WARNING);
--      return;
--    }
--    return parent::rollBack($savepoint_name);
--  }
--
-   /**
-    * {@inheritdoc}
-    */
--  protected function doCommit() {
--    // MySQL will automatically commit transactions when tables are altered or
--    // created (DDL transactions are not supported). Prevent triggering an
--    // exception in this case as all statements have been committed.
--    if ($this->connection->inTransaction()) {
--      // On PHP 7 $this->connection->inTransaction() will return TRUE and
--      // $this->connection->commit() does not throw an exception.
--      $success = parent::doCommit();
--    }
--    else {
--      // Process the post-root (non-nested) transaction commit callbacks. The
--      // following code is copied from
--      // \Drupal\Core\Database\Connection::doCommit()
--      $success = TRUE;
--      if (!empty($this->rootTransactionEndCallbacks)) {
--        $callbacks = $this->rootTransactionEndCallbacks;
--        $this->rootTransactionEndCallbacks = [];
--        foreach ($callbacks as $callback) {
--          call_user_func($callback, $success);
--        }
--      }
--    }
--    return $success;
-+  protected function driverTransactionManager(): TransactionManagerInterface {
-+    return new TransactionManager($this);
-   }
- 
++  /**
++   * {@inheritdoc}
++   */
++  public function exceptionHandler() {
++    return new ExceptionHandler();
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function select($table, $alias = NULL, array $options = []) {
++    return new Select($this, $table, $alias, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function insert($table, array $options = []) {
++    return new Insert($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function merge($table, array $options = []) {
++    return new Merge($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function upsert($table, array $options = []) {
++    return new Upsert($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function update($table, array $options = []) {
++    return new Update($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function delete($table, array $options = []) {
++    return new Delete($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function truncate($table, array $options = []) {
++    return new Truncate($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function schema() {
++    if (empty($this->schema)) {
++      $this->schema = new Schema($this);
++    }
++    return $this->schema;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function condition($conjunction) {
++    return new Condition($conjunction);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function startTransaction($name = '') {
++    return new Transaction($this, $name);
++  }
++
  }
-diff --git a/core/modules/mysql/src/Driver/Database/mysql/TransactionManager.php b/core/modules/mysql/src/Driver/Database/mysql/TransactionManager.php
-new file mode 100644
-index 0000000000..ddd17d43ab
---- /dev/null
-+++ b/core/modules/mysql/src/Driver/Database/mysql/TransactionManager.php
-@@ -0,0 +1,77 @@
-+<?php
-+
-+namespace Drupal\mysql\Driver\Database\mysql;
-+
-+use Drupal\Core\Database\Transaction\ClientConnectionTransactionState;
-+use Drupal\Core\Database\Transaction\TransactionManagerBase;
-+
-+/**
-+ * MySql implementation of TransactionManagerInterface.
-+ *
-+ * MySQL will automatically commit transactions when tables are altered or
-+ * created (DDL transactions are not supported). However, pdo_mysql tracks
-+ * whether a client connection is still active and we can prevent triggering
-+ * exceptions.
-+ */
-+class TransactionManager extends TransactionManagerBase {
-+
-+  protected function processRootCommit(): void {
-+    if (!$this->connection->getClientConnection()->inTransaction()) {
-+      $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
-+      $this->processPostTransactionCallbacks();
-+      return;
-+    }
-+    parent::processRootCommit();
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  protected function rollbackClientSavepoint(string $name): bool {
-+    if (!$this->connection->getClientConnection()->inTransaction()) {
-+      $this->resetStack();
-+      $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
-+      $this->processPostTransactionCallbacks();
-+      return TRUE;
-+    }
-+    return parent::rollbackClientSavepoint($name);
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  protected function releaseClientSavepoint(string $name): bool {
-+    if (!$this->connection->getClientConnection()->inTransaction()) {
-+      $this->resetStack();
-+      $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
-+      $this->processPostTransactionCallbacks();
-+      return TRUE;
-+    }
-+    return parent::releaseClientSavepoint($name);
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  protected function commitClientTransaction(): bool {
-+    if (!$this->connection->getClientConnection()->inTransaction()) {
-+      $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
-+      $this->processPostTransactionCallbacks();
-+      return TRUE;
-+    }
-+    return parent::commitClientTransaction();
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  protected function rollbackClientTransaction(): bool {
-+    if (!$this->connection->getClientConnection()->inTransaction()) {
-+      $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
-+      $this->processPostTransactionCallbacks();
-+      trigger_error('Rollback attempted when there is no active transaction. This can cause data integrity issues.', E_USER_WARNING);
-+    }
-+    return parent::rollbackClientTransaction();
-+  }
-+
-+}
+ 
+ 
 diff --git a/core/modules/pgsql/src/Driver/Database/pgsql/Connection.php b/core/modules/pgsql/src/Driver/Database/pgsql/Connection.php
-index 32f6110be6..22c1c53244 100644
+index 32f6110be6..3ba9748bcd 100644
 --- a/core/modules/pgsql/src/Driver/Database/pgsql/Connection.php
 +++ b/core/modules/pgsql/src/Driver/Database/pgsql/Connection.php
-@@ -2,13 +2,14 @@
+@@ -2,13 +2,16 @@
  
  namespace Drupal\pgsql\Driver\Database\pgsql;
  
@@ -1077,334 +239,1010 @@ index 32f6110be6..22c1c53244 100644
 +use Drupal\Core\Database\Database;
  use Drupal\Core\Database\DatabaseAccessDeniedException;
  use Drupal\Core\Database\DatabaseNotFoundException;
++use Drupal\Core\Database\ExceptionHandler;
++use Drupal\Core\Database\Query\Condition;
  use Drupal\Core\Database\StatementInterface;
  use Drupal\Core\Database\StatementWrapperIterator;
  use Drupal\Core\Database\SupportsTemporaryTablesInterface;
-+use Drupal\Core\Database\Transaction\TransactionManagerInterface;
++use Drupal\Core\Database\Transaction;
  
  // cSpell:ignore ilike nextval
  
-@@ -69,6 +70,13 @@ class Connection extends DatabaseConnection implements SupportsTemporaryTablesIn
-    */
-   protected $identifierQuotes = ['"', '"'];
- 
-+  /**
-+   * An array of transaction savepoints.
-+   *
-+   * @var array<string,Transaction>
-+   */
-+  protected array $savepoints = [];
-+
-   /**
-    * Constructs a connection object.
-    */
-@@ -195,7 +203,7 @@ public function query($query, array $args = [], $options = []) {
-     // - A 'mimic_implicit_commit' does not exist already.
-     // - The query is not a savepoint query.
-     $wrap_with_savepoint = $this->inTransaction() &&
--      !isset($this->transactionLayers['mimic_implicit_commit']) &&
-+      !$this->transactionManager()->has('mimic_implicit_commit') &&
-       !(is_string($query) && (
-         stripos($query, 'ROLLBACK TO SAVEPOINT ') === 0 ||
-         stripos($query, 'RELEASE SAVEPOINT ') === 0 ||
-@@ -355,12 +363,10 @@ public function getFullQualifiedTableName($table) {
-    * @param $savepoint_name
-    *   A string representing the savepoint name. By default,
-    *   "mimic_implicit_commit" is used.
--   *
--   * @see Drupal\Core\Database\Connection::pushTransaction()
-    */
-   public function addSavepoint($savepoint_name = 'mimic_implicit_commit') {
-     if ($this->inTransaction()) {
--      $this->pushTransaction($savepoint_name);
-+      $this->savepoints[$savepoint_name] = $this->startTransaction($savepoint_name);
-     }
-   }
- 
-@@ -370,12 +376,10 @@ public function addSavepoint($savepoint_name = 'mimic_implicit_commit') {
-    * @param $savepoint_name
-    *   A string representing the savepoint name. By default,
-    *   "mimic_implicit_commit" is used.
--   *
--   * @see Drupal\Core\Database\Connection::popTransaction()
-    */
-   public function releaseSavepoint($savepoint_name = 'mimic_implicit_commit') {
--    if (isset($this->transactionLayers[$savepoint_name])) {
--      $this->popTransaction($savepoint_name);
-+    if ($this->inTransaction() && $this->transactionManager()->has($savepoint_name)) {
-+      unset($this->savepoints[$savepoint_name]);
-     }
-   }
- 
-@@ -387,8 +391,9 @@ public function releaseSavepoint($savepoint_name = 'mimic_implicit_commit') {
-    *   "mimic_implicit_commit" is used.
-    */
-   public function rollbackSavepoint($savepoint_name = 'mimic_implicit_commit') {
--    if (isset($this->transactionLayers[$savepoint_name])) {
--      $this->rollBack($savepoint_name);
-+    if ($this->inTransaction() && $this->transactionManager()->has($savepoint_name)) {
-+      $this->savepoints[$savepoint_name]->rollBack();
-+      unset($this->savepoints[$savepoint_name]);
-     }
-   }
- 
-@@ -404,6 +409,13 @@ public function hasJson(): bool {
+@@ -404,6 +407,86 @@ public function hasJson(): bool {
      }
    }
  
 +  /**
 +   * {@inheritdoc}
 +   */
-+  protected function driverTransactionManager(): TransactionManagerInterface {
-+    return new TransactionManager($this);
++  public function exceptionHandler() {
++    return new ExceptionHandler();
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function select($table, $alias = NULL, array $options = []) {
++    return new Select($this, $table, $alias, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function insert($table, array $options = []) {
++    return new Insert($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function merge($table, array $options = []) {
++    return new Merge($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function upsert($table, array $options = []) {
++    return new Upsert($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function update($table, array $options = []) {
++    return new Update($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function delete($table, array $options = []) {
++    return new Delete($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function truncate($table, array $options = []) {
++    return new Truncate($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function schema() {
++    if (empty($this->schema)) {
++      $this->schema = new Schema($this);
++    }
++    return $this->schema;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function condition($conjunction) {
++    return new Condition($conjunction);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function startTransaction($name = '') {
++    return new Transaction($this, $name);
 +  }
 +
  }
  
  /**
-diff --git a/core/modules/pgsql/src/Driver/Database/pgsql/TransactionManager.php b/core/modules/pgsql/src/Driver/Database/pgsql/TransactionManager.php
-new file mode 100644
-index 0000000000..80e1e899d5
---- /dev/null
-+++ b/core/modules/pgsql/src/Driver/Database/pgsql/TransactionManager.php
-@@ -0,0 +1,11 @@
-+<?php
-+
-+namespace Drupal\pgsql\Driver\Database\pgsql;
-+
-+use Drupal\Core\Database\Transaction\TransactionManagerBase;
-+
-+/**
-+ * PostgreSql implementation of TransactionManagerInterface.
-+ */
-+class TransactionManager extends TransactionManagerBase {
-+}
 diff --git a/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php b/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php
-index c46dc1bce6..efde7ee933 100644
+index c46dc1bce6..0c14efb20f 100644
 --- a/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php
 +++ b/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php
-@@ -7,6 +7,7 @@
- use Drupal\Core\Database\Connection as DatabaseConnection;
+@@ -2,11 +2,14 @@
+ 
+ namespace Drupal\sqlite\Driver\Database\sqlite;
+ 
++use Drupal\Core\Database\Connection as DatabaseConnection;
+ use Drupal\Core\Database\DatabaseExceptionWrapper;
+ use Drupal\Core\Database\DatabaseNotFoundException;
+-use Drupal\Core\Database\Connection as DatabaseConnection;
++use Drupal\Core\Database\ExceptionHandler;
++use Drupal\Core\Database\Query\Condition;
  use Drupal\Core\Database\StatementInterface;
  use Drupal\Core\Database\SupportsTemporaryTablesInterface;
-+use Drupal\Core\Database\Transaction\TransactionManagerInterface;
++use Drupal\Core\Database\Transaction;
  
  /**
   * SQLite implementation of \Drupal\Core\Database\Connection.
-@@ -27,6 +28,11 @@ class Connection extends DatabaseConnection implements SupportsTemporaryTablesIn
-    * Whether or not the active transaction (if any) will be rolled back.
-    *
-    * @var bool
-+   *
-+   * @deprecated in drupal:10.0.2 and is removed from drupal:11.0.0. It is
-+   *   unused.
-+   *
-+   * @see https://www.drupal.org/node/5555555
-    */
-   protected $willRollback;
- 
-@@ -452,6 +458,13 @@ public function nextId($existing_id = 0) {
-     return $this->query('SELECT [value] FROM {sequences}')->fetchField();
+@@ -508,4 +511,84 @@ public static function createUrlFromConnectionOptions(array $connection_options)
+     return $db_url;
    }
  
 +  /**
 +   * {@inheritdoc}
 +   */
-+  protected function driverTransactionManager(): TransactionManagerInterface {
-+    return new TransactionManager($this);
++  public function exceptionHandler() {
++    return new ExceptionHandler();
 +  }
 +
-   /**
-    * {@inheritdoc}
-    */
-diff --git a/core/modules/sqlite/src/Driver/Database/sqlite/TransactionManager.php b/core/modules/sqlite/src/Driver/Database/sqlite/TransactionManager.php
-new file mode 100644
-index 0000000000..c65cd8615b
---- /dev/null
-+++ b/core/modules/sqlite/src/Driver/Database/sqlite/TransactionManager.php
-@@ -0,0 +1,11 @@
-+<?php
-+
-+namespace Drupal\sqlite\Driver\Database\sqlite;
-+
-+use Drupal\Core\Database\Transaction\TransactionManagerBase;
-+
-+/**
-+ * SQLite implementation of TransactionManagerInterface.
-+ */
-+class TransactionManager extends TransactionManagerBase {
-+}
-diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Connection.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Connection.php
-index e45d48ade9..619db90d51 100644
---- a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Connection.php
-+++ b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Connection.php
-@@ -4,6 +4,7 @@
- 
- include_once dirname(__DIR__, 8) . '/pgsql/src/Driver/Database/pgsql/Connection.php';
- 
-+use Drupal\Core\Database\Transaction\TransactionManagerInterface;
- use Drupal\pgsql\Driver\Database\pgsql\Connection as CoreConnection;
- 
- /**
-@@ -18,4 +19,11 @@ public function driver() {
-     return 'DrivertestPgsql';
-   }
- 
 +  /**
 +   * {@inheritdoc}
 +   */
-+  protected function driverTransactionManager(): TransactionManagerInterface {
-+    return new TransactionManager($this);
++  public function select($table, $alias = NULL, array $options = []) {
++    return new Select($this, $table, $alias, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function insert($table, array $options = []) {
++    return new Insert($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function merge($table, array $options = []) {
++    return new Merge($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function upsert($table, array $options = []) {
++    return new Upsert($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function update($table, array $options = []) {
++    return new Update($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function delete($table, array $options = []) {
++    return new Delete($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function truncate($table, array $options = []) {
++    return new Truncate($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function schema() {
++    if (empty($this->schema)) {
++      $this->schema = new Schema($this);
++    }
++    return $this->schema;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function condition($conjunction) {
++    return new Condition($conjunction);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function startTransaction($name = '') {
++    return new Transaction($this, $name);
 +  }
 +
  }
-diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/TransactionManager.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/TransactionManager.php
+diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Delete.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Delete.php
+deleted file mode 100644
+index 9e0ca19134..0000000000
+--- a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Delete.php
++++ /dev/null
+@@ -1,10 +0,0 @@
+-<?php
+-
+-namespace Drupal\driver_test\Driver\Database\DrivertestMysql;
+-
+-use Drupal\mysql\Driver\Database\mysql\Delete as CoreDelete;
+-
+-/**
+- * MySQL test implementation of \Drupal\Core\Database\Query\Delete.
+- */
+-class Delete extends CoreDelete {}
+diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Insert.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Insert.php
+deleted file mode 100644
+index 5c253174bc..0000000000
+--- a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Insert.php
++++ /dev/null
+@@ -1,10 +0,0 @@
+-<?php
+-
+-namespace Drupal\driver_test\Driver\Database\DrivertestMysql;
+-
+-use Drupal\mysql\Driver\Database\mysql\Insert as CoreInsert;
+-
+-/**
+- * MySQL test implementation of \Drupal\Core\Database\Query\Insert.
+- */
+-class Insert extends CoreInsert {}
+diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Merge.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Merge.php
+deleted file mode 100644
+index 832d778567..0000000000
+--- a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Merge.php
++++ /dev/null
+@@ -1,10 +0,0 @@
+-<?php
+-
+-namespace Drupal\driver_test\Driver\Database\DrivertestMysql;
+-
+-use Drupal\mysql\Driver\Database\mysql\Merge as CoreMerge;
+-
+-/**
+- * MySQL test implementation of \Drupal\Core\Database\Query\Merge.
+- */
+-class Merge extends CoreMerge {}
+diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Schema.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Schema.php
+deleted file mode 100644
+index bc1bf9eec2..0000000000
+--- a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Schema.php
++++ /dev/null
+@@ -1,10 +0,0 @@
+-<?php
+-
+-namespace Drupal\driver_test\Driver\Database\DrivertestMysql;
+-
+-use Drupal\mysql\Driver\Database\mysql\Schema as CoreSchema;
+-
+-/**
+- * MySQL test implementation of \Drupal\Core\Database\Schema.
+- */
+-class Schema extends CoreSchema {}
+diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Select.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Select.php
+deleted file mode 100644
+index b87333103e..0000000000
+--- a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Select.php
++++ /dev/null
+@@ -1,10 +0,0 @@
+-<?php
+-
+-namespace Drupal\driver_test\Driver\Database\DrivertestMysql;
+-
+-use Drupal\mysql\Driver\Database\mysql\Select as CoreSelect;
+-
+-/**
+- * MySQL test implementation of \Drupal\Core\Database\Query\Select.
+- */
+-class Select extends CoreSelect {}
+diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Truncate.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Truncate.php
+deleted file mode 100644
+index 24ac394cc7..0000000000
+--- a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Truncate.php
++++ /dev/null
+@@ -1,10 +0,0 @@
+-<?php
+-
+-namespace Drupal\driver_test\Driver\Database\DrivertestMysql;
+-
+-use Drupal\mysql\Driver\Database\mysql\Truncate as CoreTruncate;
+-
+-/**
+- * MySQL test implementation of \Drupal\Core\Database\Query\Truncate.
+- */
+-class Truncate extends CoreTruncate {}
+diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Update.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Update.php
+deleted file mode 100644
+index 3f36bab738..0000000000
+--- a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Update.php
++++ /dev/null
+@@ -1,10 +0,0 @@
+-<?php
+-
+-namespace Drupal\driver_test\Driver\Database\DrivertestMysql;
+-
+-use Drupal\mysql\Driver\Database\mysql\Update as CoreUpdate;
+-
+-/**
+- * MySQL test implementation of \Drupal\Core\Database\Query\Update.
+- */
+-class Update extends CoreUpdate {}
+diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Upsert.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Upsert.php
+deleted file mode 100644
+index d2bd76e6ea..0000000000
+--- a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysql/Upsert.php
++++ /dev/null
+@@ -1,10 +0,0 @@
+-<?php
+-
+-namespace Drupal\driver_test\Driver\Database\DrivertestMysql;
+-
+-use Drupal\mysql\Driver\Database\mysql\Upsert as CoreUpsert;
+-
+-/**
+- * MySQL test implementation of \Drupal\Core\Database\Query\Upsert.
+- */
+-class Upsert extends CoreUpsert {}
+diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Delete.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Delete.php
+deleted file mode 100644
+index 2590810442..0000000000
+--- a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Delete.php
++++ /dev/null
+@@ -1,10 +0,0 @@
+-<?php
+-
+-namespace Drupal\driver_test\Driver\Database\DrivertestMysqlDeprecatedVersion;
+-
+-use Drupal\mysql\Driver\Database\mysql\Delete as CoreDelete;
+-
+-/**
+- * MySQL test implementation of \Drupal\Core\Database\Query\Delete.
+- */
+-class Delete extends CoreDelete {}
+diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Insert.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Insert.php
+deleted file mode 100644
+index f29049d5af..0000000000
+--- a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Insert.php
++++ /dev/null
+@@ -1,10 +0,0 @@
+-<?php
+-
+-namespace Drupal\driver_test\Driver\Database\DrivertestMysqlDeprecatedVersion;
+-
+-use Drupal\mysql\Driver\Database\mysql\Insert as CoreInsert;
+-
+-/**
+- * MySQL test implementation of \Drupal\Core\Database\Query\Insert.
+- */
+-class Insert extends CoreInsert {}
+diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Merge.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Merge.php
+deleted file mode 100644
+index d4f0fd8cd2..0000000000
+--- a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Merge.php
++++ /dev/null
+@@ -1,10 +0,0 @@
+-<?php
+-
+-namespace Drupal\driver_test\Driver\Database\DrivertestMysqlDeprecatedVersion;
+-
+-use Drupal\mysql\Driver\Database\mysql\Merge as CoreMerge;
+-
+-/**
+- * MySQL test implementation of \Drupal\Core\Database\Query\Merge.
+- */
+-class Merge extends CoreMerge {}
+diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Schema.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Schema.php
+deleted file mode 100644
+index 0b608b4baf..0000000000
+--- a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Schema.php
++++ /dev/null
+@@ -1,10 +0,0 @@
+-<?php
+-
+-namespace Drupal\driver_test\Driver\Database\DrivertestMysqlDeprecatedVersion;
+-
+-use Drupal\mysql\Driver\Database\mysql\Schema as CoreSchema;
+-
+-/**
+- * MySQL test implementation of \Drupal\Core\Database\Schema.
+- */
+-class Schema extends CoreSchema {}
+diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Select.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Select.php
+deleted file mode 100644
+index 8b58677005..0000000000
+--- a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Select.php
++++ /dev/null
+@@ -1,10 +0,0 @@
+-<?php
+-
+-namespace Drupal\driver_test\Driver\Database\DrivertestMysqlDeprecatedVersion;
+-
+-use Drupal\mysql\Driver\Database\mysql\Select as CoreSelect;
+-
+-/**
+- * MySQL test implementation of \Drupal\Core\Database\Query\Select.
+- */
+-class Select extends CoreSelect {}
+diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Truncate.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Truncate.php
+deleted file mode 100644
+index fbdbb05b79..0000000000
+--- a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Truncate.php
++++ /dev/null
+@@ -1,10 +0,0 @@
+-<?php
+-
+-namespace Drupal\driver_test\Driver\Database\DrivertestMysqlDeprecatedVersion;
+-
+-use Drupal\mysql\Driver\Database\mysql\Truncate as CoreTruncate;
+-
+-/**
+- * MySQL test implementation of \Drupal\Core\Database\Query\Truncate.
+- */
+-class Truncate extends CoreTruncate {}
+diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Update.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Update.php
+deleted file mode 100644
+index 9d8c63905e..0000000000
+--- a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Update.php
++++ /dev/null
+@@ -1,10 +0,0 @@
+-<?php
+-
+-namespace Drupal\driver_test\Driver\Database\DrivertestMysqlDeprecatedVersion;
+-
+-use Drupal\mysql\Driver\Database\mysql\Update as CoreUpdate;
+-
+-/**
+- * MySQL test implementation of \Drupal\Core\Database\Query\Update.
+- */
+-class Update extends CoreUpdate {}
+diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Upsert.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Upsert.php
+deleted file mode 100644
+index 58a792b644..0000000000
+--- a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestMysqlDeprecatedVersion/Upsert.php
++++ /dev/null
+@@ -1,10 +0,0 @@
+-<?php
+-
+-namespace Drupal\driver_test\Driver\Database\DrivertestMysqlDeprecatedVersion;
+-
+-use Drupal\mysql\Driver\Database\mysql\Upsert as CoreUpsert;
+-
+-/**
+- * MySQL test implementation of \Drupal\Core\Database\Query\Upsert.
+- */
+-class Upsert extends CoreUpsert {}
+diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Delete.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Delete.php
+deleted file mode 100644
+index 29840d0dfa..0000000000
+--- a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Delete.php
++++ /dev/null
+@@ -1,10 +0,0 @@
+-<?php
+-
+-namespace Drupal\driver_test\Driver\Database\DrivertestPgsql;
+-
+-use Drupal\pgsql\Driver\Database\pgsql\Delete as CoreDelete;
+-
+-/**
+- * PostgreSQL implementation of \Drupal\Core\Database\Query\Delete.
+- */
+-class Delete extends CoreDelete {}
+diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Insert.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Insert.php
+deleted file mode 100644
+index a35e74d445..0000000000
+--- a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Insert.php
++++ /dev/null
+@@ -1,10 +0,0 @@
+-<?php
+-
+-namespace Drupal\driver_test\Driver\Database\DrivertestPgsql;
+-
+-use Drupal\pgsql\Driver\Database\pgsql\Insert as CoreInsert;
+-
+-/**
+- * PostgreSQL implementation of \Drupal\Core\Database\Query\Insert.
+- */
+-class Insert extends CoreInsert {}
+diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Schema.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Schema.php
+deleted file mode 100644
+index 522311cdc2..0000000000
+--- a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Schema.php
++++ /dev/null
+@@ -1,10 +0,0 @@
+-<?php
+-
+-namespace Drupal\driver_test\Driver\Database\DrivertestPgsql;
+-
+-use Drupal\pgsql\Driver\Database\pgsql\Schema as CoreSchema;
+-
+-/**
+- * PostgreSQL implementation of \Drupal\Core\Database\Schema.
+- */
+-class Schema extends CoreSchema {}
+diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Select.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Select.php
+deleted file mode 100644
+index 12fe909b2e..0000000000
+--- a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Select.php
++++ /dev/null
+@@ -1,10 +0,0 @@
+-<?php
+-
+-namespace Drupal\driver_test\Driver\Database\DrivertestPgsql;
+-
+-use Drupal\pgsql\Driver\Database\pgsql\Select as CoreSelect;
+-
+-/**
+- * PostgreSQL implementation of \Drupal\Core\Database\Query\Select.
+- */
+-class Select extends CoreSelect {}
+diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Truncate.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Truncate.php
+deleted file mode 100644
+index 416c082563..0000000000
+--- a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Truncate.php
++++ /dev/null
+@@ -1,10 +0,0 @@
+-<?php
+-
+-namespace Drupal\driver_test\Driver\Database\DrivertestPgsql;
+-
+-use Drupal\pgsql\Driver\Database\pgsql\Truncate as CoreTruncate;
+-
+-/**
+- * PostgreSQL implementation of \Drupal\Core\Database\Query\Truncate.
+- */
+-class Truncate extends CoreTruncate {}
+diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Update.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Update.php
+deleted file mode 100644
+index 48d3f0380e..0000000000
+--- a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Update.php
++++ /dev/null
+@@ -1,10 +0,0 @@
+-<?php
+-
+-namespace Drupal\driver_test\Driver\Database\DrivertestPgsql;
+-
+-use Drupal\pgsql\Driver\Database\pgsql\Update as CoreUpdate;
+-
+-/**
+- * PostgreSQL implementation of \Drupal\Core\Database\Query\Update.
+- */
+-class Update extends CoreUpdate {}
+diff --git a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Upsert.php b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Upsert.php
+deleted file mode 100644
+index 93e51d1ae0..0000000000
+--- a/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/Upsert.php
++++ /dev/null
+@@ -1,10 +0,0 @@
+-<?php
+-
+-namespace Drupal\driver_test\Driver\Database\DrivertestPgsql;
+-
+-use Drupal\pgsql\Driver\Database\pgsql\Upsert as CoreUpsert;
+-
+-/**
+- * PostgreSQL implementation of \Drupal\Core\Database\Query\Upsert.
+- */
+-class Upsert extends CoreUpsert {}
+diff --git a/core/tests/Drupal/KernelTests/Core/Database/ConnectionTest.php b/core/tests/Drupal/KernelTests/Core/Database/ConnectionTest.php
+index 1f441ec736..a7951e25cd 100644
+--- a/core/tests/Drupal/KernelTests/Core/Database/ConnectionTest.php
++++ b/core/tests/Drupal/KernelTests/Core/Database/ConnectionTest.php
+@@ -97,8 +97,6 @@ public function testConnectionOptions() {
+     // Set up identical replica and confirm connection options are identical.
+     Database::addConnectionInfo('default', 'replica', $connection_info['default']);
+     $db2 = Database::getConnection('replica', 'default');
+-    // Getting a driver class ensures the namespace option is set.
+-    $this->assertEquals($db->getDriverClass('Select'), $db2->getDriverClass('Select'));
+     $connectionOptions2 = $db2->getConnectionOptions();
+ 
+     // Get a fresh copy of the default connection options.
+diff --git a/core/tests/Drupal/Tests/Core/Database/ConditionTest.php b/core/tests/Drupal/Tests/Core/Database/ConditionTest.php
+index 56f674ac2c..629459ef22 100644
+--- a/core/tests/Drupal/Tests/Core/Database/ConditionTest.php
++++ b/core/tests/Drupal/Tests/Core/Database/ConditionTest.php
+@@ -5,6 +5,7 @@
+ use Drupal\Core\Database\Connection;
+ use Drupal\Core\Database\Query\Condition;
+ use Drupal\Core\Database\Query\PlaceholderInterface;
++use Drupal\Tests\Core\Database\Stub\StubCondition;
+ use Drupal\Tests\Core\Database\Stub\StubConnection;
+ use Drupal\Tests\Core\Database\Stub\StubPDO;
+ use Drupal\Tests\UnitTestCase;
+@@ -184,14 +185,7 @@ public function providerTestCompileWithSqlInjectionForOperator() {
+    * Tests that the core Condition can be overridden.
+    */
+   public function testContribCondition() {
+-    $mockCondition = $this->getMockBuilder(Condition::class)
+-      ->setMockClassName('MockCondition')
+-      ->setConstructorArgs([NULL])
+-      ->disableOriginalConstructor()
+-      ->getMock();
+     $contrib_namespace = 'Drupal\mock\Driver\Database\mock';
+-    $mocked_namespace = $contrib_namespace . '\\Condition';
+-    class_alias('MockCondition', $mocked_namespace);
+ 
+     $options['namespace'] = $contrib_namespace;
+     $options['prefix'] = '';
+@@ -200,7 +194,7 @@ class_alias('MockCondition', $mocked_namespace);
+ 
+     $connection = new StubConnection($mockPdo, $options);
+     $condition = $connection->condition('AND');
+-    $this->assertSame('MockCondition', get_class($condition));
++    $this->assertSame(StubCondition::class, get_class($condition));
+   }
+ 
+ }
+diff --git a/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php b/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
+index 45e8f49e4c..ba965a70af 100644
+--- a/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
++++ b/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
+@@ -316,6 +316,7 @@ public function providerGetDriverClass() {
+   /**
+    * @covers ::getDriverClass
+    * @dataProvider providerGetDriverClass
++   * @group legacy
+    */
+   public function testGetDriverClass($expected, $namespace, $class) {
+     $additional_class_loader = new ClassLoader();
+@@ -325,6 +326,10 @@ public function testGetDriverClass($expected, $namespace, $class) {
+ 
+     $mock_pdo = $this->createMock('Drupal\Tests\Core\Database\Stub\StubPDO');
+     $connection = new StubConnection($mock_pdo, ['namespace' => $namespace]);
++    match($class) {
++      'ExceptionHandler', 'Select', 'Insert', 'Merge', 'Upsert', 'Update', 'Delete', 'Truncate', 'Schema', 'Condition', 'Transaction' => $this->expectDeprecation('Calling Drupal\\Core\\Database\\Connection::getDriverClass()() for \'' . $class . '\' is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Use standard autoloading in the methods that return database operations. See https://www.drupal.org/node/3217534'),
++      default => NULL,
++    };
+     $this->assertEquals($expected, $connection->getDriverClass($class));
+   }
+ 
+diff --git a/core/tests/Drupal/Tests/Core/Database/Stub/StubCondition.php b/core/tests/Drupal/Tests/Core/Database/Stub/StubCondition.php
 new file mode 100644
-index 0000000000..7c1904f9dc
+index 0000000000..3b7b79a699
 --- /dev/null
-+++ b/core/modules/system/tests/modules/driver_test/src/Driver/Database/DrivertestPgsql/TransactionManager.php
-@@ -0,0 +1,13 @@
++++ b/core/tests/Drupal/Tests/Core/Database/Stub/StubCondition.php
+@@ -0,0 +1,11 @@
 +<?php
 +
-+namespace Drupal\driver_test\Driver\Database\DrivertestPgsql;
++namespace Drupal\Tests\Core\Database\Stub;
 +
-+include_once dirname(__DIR__, 8) . '/pgsql/src/Driver/Database/pgsql/TransactionManager.php';
-+
-+use Drupal\pgsql\Driver\Database\pgsql\TransactionManager as CoreTransactionManager;
++use Drupal\Core\Database\Query\Condition;
 +
 +/**
-+ * PostgreSql implementation of TransactionManagerInterface.
++ * A stub of core Condition class for testing purposes.
 + */
-+class TransactionManager extends CoreTransactionManager {
++class StubCondition extends Condition {
 +}
-diff --git a/core/tests/Drupal/KernelTests/Core/Cache/EndOfTransactionQueriesTest.php b/core/tests/Drupal/KernelTests/Core/Cache/EndOfTransactionQueriesTest.php
-index 8d8b1a1400..40d804893f 100644
---- a/core/tests/Drupal/KernelTests/Core/Cache/EndOfTransactionQueriesTest.php
-+++ b/core/tests/Drupal/KernelTests/Core/Cache/EndOfTransactionQueriesTest.php
-@@ -68,6 +68,14 @@ public function testEntitySave(): void {
+diff --git a/core/tests/Drupal/Tests/Core/Database/Stub/StubConnection.php b/core/tests/Drupal/Tests/Core/Database/Stub/StubConnection.php
+index e39d388181..2ce07e0646 100644
+--- a/core/tests/Drupal/Tests/Core/Database/Stub/StubConnection.php
++++ b/core/tests/Drupal/Tests/Core/Database/Stub/StubConnection.php
+@@ -3,8 +3,17 @@
+ namespace Drupal\Tests\Core\Database\Stub;
  
-     $executed_statements = [];
-     foreach (Database::getLog('testEntitySave') as $log) {
-+      // Exclude transaction related statements from the log.
-+      if (
-+        str_starts_with($log['query'], 'ROLLBACK TO SAVEPOINT ') ||
-+        str_starts_with($log['query'], 'RELEASE SAVEPOINT ') ||
-+        str_starts_with($log['query'], 'SAVEPOINT ')
-+      ) {
-+        continue;
-+      }
-       $executed_statements[] = $log['query'];
-     }
-     $last_statement_index = max(array_keys($executed_statements));
-diff --git a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
-index ebbf60826a..e5ec2cf82b 100644
---- a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
-+++ b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
-@@ -2,7 +2,6 @@
+ use Drupal\Core\Database\Connection;
++use Drupal\Core\Database\ExceptionHandler;
+ use Drupal\Core\Database\Log;
++use Drupal\Core\Database\Query\Delete;
++use Drupal\Core\Database\Query\Insert;
++use Drupal\Core\Database\Query\Merge;
++use Drupal\Core\Database\Query\Select;
++use Drupal\Core\Database\Query\Truncate;
++use Drupal\Core\Database\Query\Update;
+ use Drupal\Core\Database\StatementWrapper;
++use Drupal\Core\Database\Transaction;
++use Drupal\Tests\Core\Database\Stub\Driver\Schema;
  
- namespace Drupal\KernelTests\Core\Database;
+ /**
+  * A stub of the abstract Connection class for testing purposes.
+@@ -99,4 +108,84 @@ public function testLogCaller() {
+     return (new Log())->findCaller();
+   }
  
--use Drupal\Component\Render\FormattableMarkup;
- use Drupal\Core\Database\TransactionOutOfOrderException;
- use Drupal\Core\Database\TransactionNoActiveException;
- use PHPUnit\Framework\Error\Warning;
-@@ -34,6 +33,11 @@
++  /**
++   * {@inheritdoc}
++   */
++  public function exceptionHandler() {
++    return new ExceptionHandler();
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function select($table, $alias = NULL, array $options = []) {
++    return new Select($this, $table, $alias, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function insert($table, array $options = []) {
++    return new Insert($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function merge($table, array $options = []) {
++    return new Merge($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function upsert($table, array $options = []) {
++    return new StubUpsert($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function update($table, array $options = []) {
++    return new Update($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function delete($table, array $options = []) {
++    return new Delete($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function truncate($table, array $options = []) {
++    return new Truncate($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function schema() {
++    if (empty($this->schema)) {
++      $this->schema = new Schema();
++    }
++    return $this->schema;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function condition($conjunction) {
++    return new StubCondition($conjunction);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function startTransaction($name = '') {
++    return new Transaction($this, $name);
++  }
++
+ }
+diff --git a/core/tests/Drupal/Tests/Core/Database/Stub/StubUpsert.php b/core/tests/Drupal/Tests/Core/Database/Stub/StubUpsert.php
+new file mode 100644
+index 0000000000..34b28e9398
+--- /dev/null
++++ b/core/tests/Drupal/Tests/Core/Database/Stub/StubUpsert.php
+@@ -0,0 +1,19 @@
++<?php
++
++namespace Drupal\Tests\Core\Database\Stub;
++
++use Drupal\Core\Database\Query\Upsert;
++
++/**
++ * A stub of core Upsert for testing purposes.
++ */
++class StubUpsert extends Upsert {
++
++  /**
++   * {@inheritdoc}
++   */
++  public function __toString() {
++    return '';
++  }
++
++}
+diff --git a/core/tests/fixtures/database_drivers/custom/fake/Connection.php b/core/tests/fixtures/database_drivers/custom/fake/Connection.php
+index 761d4efd32..4f3eb088b6 100644
+--- a/core/tests/fixtures/database_drivers/custom/fake/Connection.php
++++ b/core/tests/fixtures/database_drivers/custom/fake/Connection.php
+@@ -3,12 +3,38 @@
+ namespace Drupal\Driver\Database\fake;
+ 
+ use Drupal\Core\Database\Connection as CoreConnection;
++use Drupal\Core\Database\ExceptionHandler;
++use Drupal\Core\Database\Query\Condition;
++use Drupal\Core\Database\Query\Delete;
++use Drupal\Core\Database\Query\Insert;
++use Drupal\Core\Database\Query\Merge;
++use Drupal\Core\Database\Query\Select;
++use Drupal\Core\Database\Query\Truncate;
++use Drupal\Core\Database\Query\Update;
++use Drupal\Core\Database\Query\Upsert;
++use Drupal\Core\Database\StatementWrapper;
++use Drupal\Core\Database\Transaction;
+ 
+ /**
+  * A fake Connection class for testing purposes.
   */
- class DriverSpecificTransactionTestBase extends DriverSpecificDatabaseTestBase {
+ class Connection extends CoreConnection {
  
 +  /**
-+   * Keeps track of the post-transaction callback action executed.
++   * {@inheritdoc}
 +   */
-+  protected ?string $postTransactionCallbackAction = NULL;
++  protected $statementClass = NULL;
++
++  /**
++   * {@inheritdoc}
++   */
++  protected $statementWrapperClass = StatementWrapper::class;
++
++  /**
++   * {@inheritdoc}
++   */
++  protected $identifierQuotes = ['"', '"'];
 +
    /**
-    * Encapsulates a transaction's "inner layer" with an "outer layer".
+    * Public property so we can test driver loading mechanism.
     *
-@@ -313,6 +317,7 @@ protected function executeDDLStatement() {
-   protected function cleanUp() {
-     $this->connection->truncate('test')
-       ->execute();
-+    $this->postTransactionCallbackAction = NULL;
+@@ -58,4 +84,84 @@ public function nextId($existing_id = 0) {
+     return 0;
    }
  
-   /**
-@@ -326,11 +331,8 @@ protected function cleanUp() {
-    * @internal
++  /**
++   * {@inheritdoc}
++   */
++  public function exceptionHandler() {
++    return new ExceptionHandler();
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function select($table, $alias = NULL, array $options = []) {
++    return new Select($this, $table, $alias, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function insert($table, array $options = []) {
++    return new Insert($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function merge($table, array $options = []) {
++    return new Merge($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function upsert($table, array $options = []) {
++    return new Upsert($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function update($table, array $options = []) {
++    return new Update($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function delete($table, array $options = []) {
++    return new Delete($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function truncate($table, array $options = []) {
++    return new Truncate($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function schema() {
++    if (empty($this->schema)) {
++      $this->schema = new Schema($this);
++    }
++    return $this->schema;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function condition($conjunction) {
++    return new Condition($conjunction, FALSE);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function startTransaction($name = '') {
++    return new Transaction($this, $name);
++  }
++
+ }
+diff --git a/core/tests/fixtures/database_drivers/module/corefake/src/Driver/Database/corefakeWithAllCustomClasses/Connection.php b/core/tests/fixtures/database_drivers/module/corefake/src/Driver/Database/corefakeWithAllCustomClasses/Connection.php
+index ecf7e5cccc..5f44ffa533 100644
+--- a/core/tests/fixtures/database_drivers/module/corefake/src/Driver/Database/corefakeWithAllCustomClasses/Connection.php
++++ b/core/tests/fixtures/database_drivers/module/corefake/src/Driver/Database/corefakeWithAllCustomClasses/Connection.php
+@@ -14,4 +14,84 @@ class Connection extends BaseConnection {
     */
-   public function assertRowPresent(string $name, string $message = NULL): void {
--    if (!isset($message)) {
--      $message = new FormattableMarkup('Row %name is present.', ['%name' => $name]);
--    }
-     $present = (boolean) $this->connection->query('SELECT 1 FROM {test} WHERE [name] = :name', [':name' => $name])->fetchField();
--    $this->assertTrue($present, $message);
-+    $this->assertTrue($present, $message ?? "Row '{$name}' should be present, but it actually does not exist.");
-   }
- 
-   /**
-@@ -344,11 +346,8 @@ public function assertRowPresent(string $name, string $message = NULL): void {
-    * @internal
-    */
-   public function assertRowAbsent(string $name, string $message = NULL): void {
--    if (!isset($message)) {
--      $message = new FormattableMarkup('Row %name is absent.', ['%name' => $name]);
--    }
-     $present = (boolean) $this->connection->query('SELECT 1 FROM {test} WHERE [name] = :name', [':name' => $name])->fetchField();
--    $this->assertFalse($present, $message);
-+    $this->assertFalse($present, $message ?? "Row '{$name}' should be absent, but it actually exists.");
-   }
- 
-   /**
-@@ -575,4 +574,53 @@ public function testQueryFailureInTransaction() {
-     $this->assertEquals('24', $saved_age);
-   }
+   public $driver = 'corefakeWithAllCustomClasses';
  
 +  /**
-+   * Tests that adding a post-transaction callback fails with no transaction.
++   * {@inheritdoc}
 +   */
-+  public function testRootTransactionEndCallbackAddedWithoutTransaction(): void {
-+    $this->expectException(\LogicException::class);
-+    $this->connection->addRootTransactionEndCallback([$this, 'rootTransactionCallback']);
++  public function exceptionHandler() {
++    return new ExceptionHandler();
 +  }
 +
 +  /**
-+   * Tests post-transaction callback executes after transaction commit.
++   * {@inheritdoc}
 +   */
-+  public function testRootTransactionEndCallbackCalledOnCommit(): void {
-+    $this->cleanUp();
-+    $transaction = $this->connection->startTransaction();
-+    $this->connection->addRootTransactionEndCallback([$this, 'rootTransactionCallback']);
-+    $this->insertRow('row');
-+    $this->assertNull($this->postTransactionCallbackAction);
-+    unset($transaction);
-+    $this->assertSame('rtcCommit', $this->postTransactionCallbackAction);
-+    $this->assertRowPresent('row');
-+    $this->assertRowPresent('rtcCommit');
++  public function select($table, $alias = NULL, array $options = []) {
++    return new Select($this, $table, $alias, $options);
 +  }
 +
 +  /**
-+   * Tests post-transaction callback executes after transaction rollback.
++   * {@inheritdoc}
 +   */
-+  public function testRootTransactionEndCallbackCalledOnRollback(): void {
-+    $this->cleanUp();
-+    $transaction = $this->connection->startTransaction();
-+    $this->connection->addRootTransactionEndCallback([$this, 'rootTransactionCallback']);
-+    $this->insertRow('row');
-+    $this->assertNull($this->postTransactionCallbackAction);
-+    $transaction->rollBack();
-+    $this->assertSame('rtcRollback', $this->postTransactionCallbackAction);
-+    unset($transaction);
-+    $this->assertRowAbsent('row');
-+    // The row insert should be missing since the client rollback occurs after
-+    // the processing of the callbacks.
-+    $this->assertRowAbsent('rtcRollback');
++  public function insert($table, array $options = []) {
++    return new Insert($this, $table, $options);
 +  }
 +
 +  /**
-+   * A post-transaction callback for testing purposes.
++   * {@inheritdoc}
 +   */
-+  public function rootTransactionCallback(bool $success): void {
-+    $this->postTransactionCallbackAction = $success ? 'rtcCommit' : 'rtcRollback';
-+    $this->insertRow($this->postTransactionCallbackAction);
++  public function merge($table, array $options = []) {
++    return new Merge($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function upsert($table, array $options = []) {
++    return new Upsert($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function update($table, array $options = []) {
++    return new Update($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function delete($table, array $options = []) {
++    return new Delete($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function truncate($table, array $options = []) {
++    return new Truncate($this, $table, $options);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function schema() {
++    if (empty($this->schema)) {
++      $this->schema = new Schema($this);
++    }
++    return $this->schema;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function condition($conjunction) {
++    return new Condition($conjunction, FALSE);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function startTransaction($name = '') {
++    return new Transaction($this, $name);
 +  }
 +
  }
