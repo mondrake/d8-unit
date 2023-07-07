@@ -1383,6 +1383,62 @@ index 9eea31934b6..bcd80f97291 100644
    }
  
  }
+diff --git a/core/modules/path_alias/tests/src/Kernel/AliasTest.php b/core/modules/path_alias/tests/src/Kernel/AliasTest.php
+index d78ad96f968..abb040f5e56 100644
+--- a/core/modules/path_alias/tests/src/Kernel/AliasTest.php
++++ b/core/modules/path_alias/tests/src/Kernel/AliasTest.php
+@@ -2,6 +2,7 @@
+ 
+ namespace Drupal\Tests\path_alias\Kernel;
+ 
++use Drupal\Component\Datetime\TimeInterface;
+ use Drupal\Core\Cache\MemoryCounterBackend;
+ use Drupal\Core\Language\LanguageInterface;
+ use Drupal\KernelTests\KernelTestBase;
+@@ -114,11 +115,11 @@ public function testLookupPath() {
+    * Tests the alias whitelist.
+    */
+   public function testWhitelist() {
+-    $memoryCounterBackend = new MemoryCounterBackend();
++    $memoryCounterBackend = new MemoryCounterBackend(\Drupal::service(TimeInterface::class));
+ 
+     // Create AliasManager and Path object.
+     $whitelist = new AliasWhitelist('path_alias_whitelist', $memoryCounterBackend, $this->container->get('lock'), $this->container->get('state'), $this->container->get('path_alias.repository'));
+-    $aliasManager = new AliasManager($this->container->get('path_alias.repository'), $whitelist, $this->container->get('language_manager'), $memoryCounterBackend);
++    $aliasManager = new AliasManager($this->container->get('path_alias.repository'), $whitelist, $this->container->get('language_manager'), $memoryCounterBackend, $this->container->get(TimeInterface::class));
+ 
+     // No alias for user and admin yet, so should be NULL.
+     $this->assertNull($whitelist->get('user'));
+@@ -175,7 +176,7 @@ public function testWhitelist() {
+    * Tests situation where the whitelist cache is deleted mid-request.
+    */
+   public function testWhitelistCacheDeletionMidRequest() {
+-    $memoryCounterBackend = new MemoryCounterBackend();
++    $memoryCounterBackend = new MemoryCounterBackend(\Drupal::service(TimeInterface::class));
+ 
+     // Create AliasManager and Path object.
+     $whitelist = new AliasWhitelist('path_alias_whitelist', $memoryCounterBackend, $this->container->get('lock'), $this->container->get('state'), $this->container->get('path_alias.repository'));
+diff --git a/core/modules/path_alias/tests/src/Unit/AliasManagerTest.php b/core/modules/path_alias/tests/src/Unit/AliasManagerTest.php
+index a03417c3517..f6ee5bd581a 100644
+--- a/core/modules/path_alias/tests/src/Unit/AliasManagerTest.php
++++ b/core/modules/path_alias/tests/src/Unit/AliasManagerTest.php
+@@ -2,6 +2,7 @@
+ 
+ namespace Drupal\Tests\path_alias\Unit;
+ 
++use Drupal\Component\Datetime\Time;
+ use Drupal\Core\Language\Language;
+ use Drupal\Core\Language\LanguageInterface;
+ use Drupal\path_alias\AliasRepositoryInterface;
+@@ -74,7 +75,7 @@ protected function setUp(): void {
+     $this->languageManager = $this->createMock('Drupal\Core\Language\LanguageManagerInterface');
+     $this->cache = $this->createMock('Drupal\Core\Cache\CacheBackendInterface');
+ 
+-    $this->aliasManager = new AliasManager($this->aliasRepository, $this->aliasWhitelist, $this->languageManager, $this->cache);
++    $this->aliasManager = new AliasManager($this->aliasRepository, $this->aliasWhitelist, $this->languageManager, $this->cache, new Time($this->createMock('Symfony\Component\HttpFoundation\RequestStack')));
+ 
+   }
+ 
 diff --git a/core/modules/search/search.services.yml b/core/modules/search/search.services.yml
 index bda507af4f0..ab97437bdbd 100644
 --- a/core/modules/search/search.services.yml
@@ -1460,6 +1516,41 @@ index 583ffd2e889..4c5bd6fbd9f 100644
          // Only mark items that were not previously marked for reindex, so that
          // marked items maintain their priority by request time.
          ->condition('reindex', 0);
+diff --git a/core/modules/system/tests/src/Kernel/System/FloodTest.php b/core/modules/system/tests/src/Kernel/System/FloodTest.php
+index 3b682a8cd75..49f98ea283f 100644
+--- a/core/modules/system/tests/src/Kernel/System/FloodTest.php
++++ b/core/modules/system/tests/src/Kernel/System/FloodTest.php
+@@ -2,6 +2,7 @@
+ 
+ namespace Drupal\Tests\system\Kernel\System;
+ 
++use Drupal\Component\Datetime\TimeInterface;
+ use Drupal\Core\Flood\DatabaseBackend;
+ use Drupal\Core\Flood\MemoryBackend;
+ use Drupal\KernelTests\KernelTestBase;
+@@ -56,7 +57,8 @@ public function testDatabaseBackend() {
+ 
+     $connection = \Drupal::service('database');
+     $request_stack = \Drupal::service('request_stack');
+-    $flood = new DatabaseBackend($connection, $request_stack);
++    $time = \Drupal::service(TimeInterface::class);
++    $flood = new DatabaseBackend($connection, $request_stack, $time);
+     $this->assertTrue($flood->isAllowed($name, $threshold));
+     // Register expired event.
+     $flood->register($name, $window_expired);
+@@ -81,10 +83,11 @@ public function testDatabaseBackend() {
+   public function floodBackendProvider() :array {
+     $request_stack = \Drupal::service('request_stack');
+     $connection = \Drupal::service('database');
++    $time = \Drupal::service(TimeInterface::class);
+ 
+     return [
+       new MemoryBackend($request_stack),
+-      new DatabaseBackend($connection, $request_stack),
++      new DatabaseBackend($connection, $request_stack, $time),
+     ];
+   }
+ 
 diff --git a/core/modules/update/src/UpdateProcessor.php b/core/modules/update/src/UpdateProcessor.php
 index a07a47c8f51..2efe2861a8e 100644
 --- a/core/modules/update/src/UpdateProcessor.php
@@ -1869,6 +1960,33 @@ index 7983cc7b2bb..0cbedb66c24 100644
    }
  
    /**
+diff --git a/core/tests/Drupal/KernelTests/Core/Cache/BackendChainTest.php b/core/tests/Drupal/KernelTests/Core/Cache/BackendChainTest.php
+index 5cdc4133461..23d33d784be 100644
+--- a/core/tests/Drupal/KernelTests/Core/Cache/BackendChainTest.php
++++ b/core/tests/Drupal/KernelTests/Core/Cache/BackendChainTest.php
+@@ -2,6 +2,7 @@
+ 
+ namespace Drupal\KernelTests\Core\Cache;
+ 
++use Drupal\Component\Datetime\TimeInterface;
+ use Drupal\Core\Cache\BackendChain;
+ use Drupal\Core\Cache\MemoryBackend;
+ 
+@@ -16,10 +17,11 @@ protected function createCacheBackend($bin) {
+     $chain = new BackendChain();
+ 
+     // We need to create some various backends in the chain.
++    $time = \Drupal::service(TimeInterface::class);
+     $chain
+-      ->appendBackend(new MemoryBackend())
+-      ->prependBackend(new MemoryBackend())
+-      ->appendBackend(new MemoryBackend());
++      ->appendBackend(new MemoryBackend($time))
++      ->prependBackend(new MemoryBackend($time))
++      ->appendBackend(new MemoryBackend($time));
+ 
+     \Drupal::service('cache_tags.invalidator')->addInvalidator($chain);
+ 
 diff --git a/core/tests/Drupal/KernelTests/Core/Cache/ChainedFastBackendTest.php b/core/tests/Drupal/KernelTests/Core/Cache/ChainedFastBackendTest.php
 index a93b674d5cf..976a5d02860 100644
 --- a/core/tests/Drupal/KernelTests/Core/Cache/ChainedFastBackendTest.php
@@ -1947,6 +2065,27 @@ index 8d8b1a1400f..9c5c680d121 100644
    }
  
    /**
+diff --git a/core/tests/Drupal/KernelTests/Core/Cache/MemoryBackendTest.php b/core/tests/Drupal/KernelTests/Core/Cache/MemoryBackendTest.php
+index ad6da493024..9051840e7b1 100644
+--- a/core/tests/Drupal/KernelTests/Core/Cache/MemoryBackendTest.php
++++ b/core/tests/Drupal/KernelTests/Core/Cache/MemoryBackendTest.php
+@@ -2,6 +2,7 @@
+ 
+ namespace Drupal\KernelTests\Core\Cache;
+ 
++use Drupal\Component\Datetime\TimeInterface;
+ use Drupal\Core\Cache\MemoryBackend;
+ 
+ /**
+@@ -18,7 +19,7 @@ class MemoryBackendTest extends GenericCacheBackendUnitTestBase {
+    *   A new MemoryBackend object.
+    */
+   protected function createCacheBackend($bin) {
+-    $backend = new MemoryBackend();
++    $backend = new MemoryBackend(\Drupal::service(TimeInterface::class));
+     \Drupal::service('cache_tags.invalidator')->addInvalidator($backend);
+     return $backend;
+   }
 diff --git a/core/tests/Drupal/KernelTests/Core/Cache/PhpBackendTest.php b/core/tests/Drupal/KernelTests/Core/Cache/PhpBackendTest.php
 index b35a3b94f03..a256091bff9 100644
 --- a/core/tests/Drupal/KernelTests/Core/Cache/PhpBackendTest.php
@@ -1981,6 +2120,64 @@ index b35a3b94f03..a256091bff9 100644
    }
  
  }
+diff --git a/core/tests/Drupal/KernelTests/Core/DrupalKernel/DrupalKernelSiteTest.php b/core/tests/Drupal/KernelTests/Core/DrupalKernel/DrupalKernelSiteTest.php
+index e8bdd904192..5d3c9b5fe35 100644
+--- a/core/tests/Drupal/KernelTests/Core/DrupalKernel/DrupalKernelSiteTest.php
++++ b/core/tests/Drupal/KernelTests/Core/DrupalKernel/DrupalKernelSiteTest.php
+@@ -28,6 +28,11 @@ public function testServicesYml() {
+     $class = __CLASS__;
+     $doc = <<<EOD
+ services:
++  _defaults:
++    autowire: true
++  Symfony\Component\HttpFoundation\RequestStack: ~
++  Drupal\Component\Datetime\TimeInterface:
++    class: Drupal\Component\Datetime\Time
+   # Add a new service.
+   site.service.yml:
+     class: $class
+diff --git a/core/tests/Drupal/KernelTests/Core/Plugin/PluginTestBase.php b/core/tests/Drupal/KernelTests/Core/Plugin/PluginTestBase.php
+index b1b48d0db88..2b29ecd2a6f 100644
+--- a/core/tests/Drupal/KernelTests/Core/Plugin/PluginTestBase.php
++++ b/core/tests/Drupal/KernelTests/Core/Plugin/PluginTestBase.php
+@@ -2,6 +2,7 @@
+ 
+ namespace Drupal\KernelTests\Core\Plugin;
+ 
++use Drupal\Component\Datetime\TimeInterface;
+ use Drupal\Core\Plugin\Context\EntityContextDefinition;
+ use Drupal\KernelTests\KernelTestBase;
+ use Drupal\plugin_test\Plugin\TestPluginManager;
+@@ -45,7 +46,7 @@ protected function setUp(): void {
+     //   as derivatives and ReflectionFactory.
+     $this->testPluginManager = new TestPluginManager();
+     $this->mockBlockManager = new MockBlockManager();
+-    $module_handler = new ModuleHandler($this->root, [], new MemoryBackend());
++    $module_handler = new ModuleHandler($this->root, [], new MemoryBackend(\Drupal::service(TimeInterface::class)));
+     $this->defaultsTestPluginManager = new DefaultsTestPluginManager($module_handler);
+ 
+     // The expected plugin definitions within each manager. Several tests assert
+diff --git a/core/tests/Drupal/KernelTests/Core/Routing/RouteProviderTest.php b/core/tests/Drupal/KernelTests/Core/Routing/RouteProviderTest.php
+index cb30230de41..7e354b4bf59 100644
+--- a/core/tests/Drupal/KernelTests/Core/Routing/RouteProviderTest.php
++++ b/core/tests/Drupal/KernelTests/Core/Routing/RouteProviderTest.php
+@@ -8,6 +8,7 @@
+ namespace Drupal\KernelTests\Core\Routing;
+ 
+ use ColinODell\PsrTestLogger\TestLogger;
++use Drupal\Component\Datetime\TimeInterface;
+ use Drupal\Core\Cache\MemoryBackend;
+ use Drupal\Core\Database\Database;
+ use Drupal\Core\DependencyInjection\ContainerBuilder;
+@@ -103,7 +104,7 @@ protected function setUp(): void {
+     $this->fixtures = new RoutingFixtures();
+     $this->state = new State(new KeyValueMemoryFactory());
+     $this->currentPath = new CurrentPathStack(new RequestStack());
+-    $this->cache = new MemoryBackend();
++    $this->cache = new MemoryBackend(\Drupal::service(TimeInterface::class));
+     $this->pathProcessor = \Drupal::service('path_processor_manager');
+     $this->cacheTagsInvalidator = \Drupal::service('cache_tags.invalidator');
+     $this->installEntitySchema('path_alias');
 diff --git a/core/tests/Drupal/KernelTests/KernelTestBase.php b/core/tests/Drupal/KernelTests/KernelTestBase.php
 index c98b77fd9fe..6223acdfe27 100644
 --- a/core/tests/Drupal/KernelTests/KernelTestBase.php
@@ -2004,6 +2201,74 @@ index c98b77fd9fe..6223acdfe27 100644
  
      // Use memory for key value storages to avoid database queries. Store the
      // key value factory on the test object so that key value storages persist
+diff --git a/core/tests/Drupal/Tests/Core/Asset/AssetResolverTest.php b/core/tests/Drupal/Tests/Core/Asset/AssetResolverTest.php
+index 76ee6d23f87..a5246ad1f64 100644
+--- a/core/tests/Drupal/Tests/Core/Asset/AssetResolverTest.php
++++ b/core/tests/Drupal/Tests/Core/Asset/AssetResolverTest.php
+@@ -7,6 +7,7 @@
+ 
+ namespace Drupal\Tests\Core\Asset;
+ 
++use Drupal\Component\Datetime\Time;
+ use Drupal\Core\Asset\AssetResolver;
+ use Drupal\Core\Asset\AttachedAssets;
+ use Drupal\Core\Asset\AttachedAssetsInterface;
+@@ -119,7 +120,7 @@ protected function setUp(): void {
+     $this->languageManager->expects($this->any())
+       ->method('getCurrentLanguage')
+       ->will($this->onConsecutiveCalls($english, $english, $japanese, $japanese));
+-    $this->cache = new TestMemoryBackend();
++    $this->cache = new TestMemoryBackend(new Time($this->createMock('Symfony\Component\HttpFoundation\RequestStack')));
+ 
+     $this->assetResolver = new AssetResolver($this->libraryDiscovery, $this->libraryDependencyResolver, $this->moduleHandler, $this->themeManager, $this->languageManager, $this->cache);
+   }
+diff --git a/core/tests/Drupal/Tests/Core/Cache/BackendChainImplementationUnitTest.php b/core/tests/Drupal/Tests/Core/Cache/BackendChainImplementationUnitTest.php
+index 9be88bbcb1a..5a3a138ad80 100644
+--- a/core/tests/Drupal/Tests/Core/Cache/BackendChainImplementationUnitTest.php
++++ b/core/tests/Drupal/Tests/Core/Cache/BackendChainImplementationUnitTest.php
+@@ -2,6 +2,7 @@
+ 
+ namespace Drupal\Tests\Core\Cache;
+ 
++use Drupal\Component\Datetime\Time;
+ use Drupal\Core\Cache\BackendChain;
+ use Drupal\Core\Cache\Cache;
+ use Drupal\Core\Cache\MemoryBackend;
+@@ -50,9 +51,10 @@ protected function setUp(): void {
+     parent::setUp();
+ 
+     // Set up three memory backends to be used in the chain.
+-    $this->firstBackend = new MemoryBackend();
+-    $this->secondBackend = new MemoryBackend();
+-    $this->thirdBackend = new MemoryBackend();
++    $time = new Time($this->createMock('Symfony\Component\HttpFoundation\RequestStack'));
++    $this->firstBackend = new MemoryBackend($time);
++    $this->secondBackend = new MemoryBackend($time);
++    $this->thirdBackend = new MemoryBackend($time);
+ 
+     // Set an initial fixed dataset for all testing. The next three data
+     // collections will test two edge cases (last backend has the data, and
+diff --git a/core/tests/Drupal/Tests/Core/Cache/ChainedFastBackendTest.php b/core/tests/Drupal/Tests/Core/Cache/ChainedFastBackendTest.php
+index ac5fb40a3b9..b405c3d0ceb 100644
+--- a/core/tests/Drupal/Tests/Core/Cache/ChainedFastBackendTest.php
++++ b/core/tests/Drupal/Tests/Core/Cache/ChainedFastBackendTest.php
+@@ -2,6 +2,7 @@
+ 
+ namespace Drupal\Tests\Core\Cache;
+ 
++use Drupal\Component\Datetime\Time;
+ use Drupal\Core\Cache\ChainedFastBackend;
+ use Drupal\Core\Cache\MemoryBackend;
+ use Drupal\Tests\UnitTestCase;
+@@ -47,7 +48,7 @@ public function testGetDoesNotHitConsistentBackend() {
+     $consistent_cache->expects($this->never())
+       ->method('getMultiple');
+ 
+-    $fast_cache = new MemoryBackend();
++    $fast_cache = new MemoryBackend(new Time($this->createMock('Symfony\Component\HttpFoundation\RequestStack')));
+     $fast_cache->set('foo', 'baz');
+ 
+     $chained_fast_backend = new ChainedFastBackend(
 diff --git a/core/tests/Drupal/Tests/Core/Cache/DatabaseBackendFactoryTest.php b/core/tests/Drupal/Tests/Core/Cache/DatabaseBackendFactoryTest.php
 index 9d5ac4bdf92..9e3970cb397 100644
 --- a/core/tests/Drupal/Tests/Core/Cache/DatabaseBackendFactoryTest.php
@@ -2026,6 +2291,170 @@ index 9d5ac4bdf92..9e3970cb397 100644
      );
  
      $this->assertSame($expected_max_rows_foo, $database_backend_factory->get('foo')->getMaxRows());
+diff --git a/core/tests/Drupal/Tests/Core/Cache/VariationCacheTest.php b/core/tests/Drupal/Tests/Core/Cache/VariationCacheTest.php
+index 60f50db4155..3bec29af690 100644
+--- a/core/tests/Drupal/Tests/Core/Cache/VariationCacheTest.php
++++ b/core/tests/Drupal/Tests/Core/Cache/VariationCacheTest.php
+@@ -2,6 +2,7 @@
+ 
+ namespace Drupal\Tests\Core\Cache;
+ 
++use Drupal\Component\Datetime\Time;
+ use Drupal\Core\Cache\CacheableMetadata;
+ use Drupal\Core\Cache\CacheRedirect;
+ use Drupal\Core\Cache\Context\CacheContextsManager;
+@@ -123,7 +124,7 @@ class VariationCacheTest extends UnitTestCase {
+   protected function setUp(): void {
+     parent::setUp();
+     $this->requestStack = $this->prophesize(RequestStack::class);
+-    $this->memoryBackend = new MemoryBackend();
++    $this->memoryBackend = new MemoryBackend(new Time($this->createMock('Symfony\Component\HttpFoundation\RequestStack')));
+     $this->cacheContextsManager = $this->prophesize(CacheContextsManager::class);
+ 
+     $housing_type = &$this->housingType;
+diff --git a/core/tests/Drupal/Tests/Core/Config/Entity/ConfigEntityStorageTest.php b/core/tests/Drupal/Tests/Core/Config/Entity/ConfigEntityStorageTest.php
+index 65c70288f96..4195f916b51 100644
+--- a/core/tests/Drupal/Tests/Core/Config/Entity/ConfigEntityStorageTest.php
++++ b/core/tests/Drupal/Tests/Core/Config/Entity/ConfigEntityStorageTest.php
+@@ -2,6 +2,7 @@
+ 
+ namespace Drupal\Tests\Core\Config\Entity;
+ 
++use Drupal\Component\Datetime\Time;
+ use Drupal\Component\Uuid\UuidInterface;
+ use Drupal\Core\Cache\Cache;
+ use Drupal\Core\Cache\CacheTagsInvalidatorInterface;
+@@ -137,7 +138,7 @@ protected function setUp(): void {
+     $entity_query_factory = $this->prophesize(QueryFactoryInterface::class);
+     $entity_query_factory->get($entity_type, 'AND')->willReturn($this->entityQuery->reveal());
+ 
+-    $this->entityStorage = new ConfigEntityStorage($entity_type, $this->configFactory->reveal(), $this->uuidService->reveal(), $this->languageManager->reveal(), new MemoryCache());
++    $this->entityStorage = new ConfigEntityStorage($entity_type, $this->configFactory->reveal(), $this->uuidService->reveal(), $this->languageManager->reveal(), new MemoryCache(new Time($this->createMock('Symfony\Component\HttpFoundation\RequestStack'))));
+     $this->entityStorage->setModuleHandler($this->moduleHandler->reveal());
+ 
+     $entity_type_manager = $this->prophesize(EntityTypeManagerInterface::class);
+diff --git a/core/tests/Drupal/Tests/Core/Entity/KeyValueStore/KeyValueEntityStorageTest.php b/core/tests/Drupal/Tests/Core/Entity/KeyValueStore/KeyValueEntityStorageTest.php
+index ea94a0c07ce..475973933f2 100644
+--- a/core/tests/Drupal/Tests/Core/Entity/KeyValueStore/KeyValueEntityStorageTest.php
++++ b/core/tests/Drupal/Tests/Core/Entity/KeyValueStore/KeyValueEntityStorageTest.php
+@@ -2,6 +2,7 @@
+ 
+ namespace Drupal\Tests\Core\Entity\KeyValueStore;
+ 
++use Drupal\Component\Datetime\Time;
+ use Drupal\Core\Cache\MemoryCache\MemoryCache;
+ use Drupal\Core\Config\Entity\ConfigEntityInterface;
+ use Drupal\Core\DependencyInjection\ContainerBuilder;
+@@ -135,7 +136,7 @@ protected function setUpKeyValueEntityStorage($uuid_key = 'uuid') {
+       ->method('getCurrentLanguage')
+       ->willReturn($language);
+ 
+-    $this->entityStorage = new KeyValueEntityStorage($this->entityType, $this->keyValueStore, $this->uuidService, $this->languageManager, new MemoryCache());
++    $this->entityStorage = new KeyValueEntityStorage($this->entityType, $this->keyValueStore, $this->uuidService, $this->languageManager, new MemoryCache(new Time($this->createMock('Symfony\Component\HttpFoundation\RequestStack'))));
+     $this->entityStorage->setModuleHandler($this->moduleHandler);
+ 
+     $container = new ContainerBuilder();
+diff --git a/core/tests/Drupal/Tests/Core/Entity/Sql/SqlContentEntityStorageTest.php b/core/tests/Drupal/Tests/Core/Entity/Sql/SqlContentEntityStorageTest.php
+index 749c33cba22..20e17663ec2 100644
+--- a/core/tests/Drupal/Tests/Core/Entity/Sql/SqlContentEntityStorageTest.php
++++ b/core/tests/Drupal/Tests/Core/Entity/Sql/SqlContentEntityStorageTest.php
+@@ -7,6 +7,7 @@
+ 
+ namespace Drupal\Tests\Core\Entity\Sql;
+ 
++use Drupal\Component\Datetime\Time;
+ use Drupal\Core\Cache\MemoryCache\MemoryCache;
+ use Drupal\Core\DependencyInjection\ContainerBuilder;
+ use Drupal\Core\Entity\EntityFieldManager;
+@@ -429,7 +430,7 @@ public function testOnEntityTypeCreate() {
+       ->willReturn($schema_handler);
+ 
+     $storage = $this->getMockBuilder('Drupal\Core\Entity\Sql\SqlContentEntityStorage')
+-      ->setConstructorArgs([$this->entityType, $this->connection, $this->entityFieldManager->reveal(), $this->cache, $this->languageManager, new MemoryCache(), $this->entityTypeBundleInfo, $this->entityTypeManager->reveal()])
++      ->setConstructorArgs([$this->entityType, $this->connection, $this->entityFieldManager->reveal(), $this->cache, $this->languageManager, new MemoryCache(new Time($this->createMock('Symfony\Component\HttpFoundation\RequestStack'))), $this->entityTypeBundleInfo, $this->entityTypeManager->reveal()])
+       ->onlyMethods(['getStorageSchema'])
+       ->getMock();
+ 
+@@ -1178,7 +1179,7 @@ protected function setUpEntityStorage() {
+       ->getActiveFieldStorageDefinitions($this->entityType->id())
+       ->willReturn($this->fieldDefinitions);
+ 
+-    $this->entityStorage = new SqlContentEntityStorage($this->entityType, $this->connection, $this->entityFieldManager->reveal(), $this->cache, $this->languageManager, new MemoryCache(), $this->entityTypeBundleInfo, $this->entityTypeManager->reveal());
++    $this->entityStorage = new SqlContentEntityStorage($this->entityType, $this->connection, $this->entityFieldManager->reveal(), $this->cache, $this->languageManager, new MemoryCache(new Time($this->createMock('Symfony\Component\HttpFoundation\RequestStack'))), $this->entityTypeBundleInfo, $this->entityTypeManager->reveal());
+     $this->entityStorage->setModuleHandler($this->moduleHandler);
+   }
+ 
+@@ -1252,7 +1253,7 @@ public function testLoadMultipleNoPersistentCache() {
+       ->willReturn($this->entityType);
+ 
+     $entity_storage = $this->getMockBuilder('Drupal\Core\Entity\Sql\SqlContentEntityStorage')
+-      ->setConstructorArgs([$this->entityType, $this->connection, $this->entityFieldManager->reveal(), $this->cache, $this->languageManager, new MemoryCache(), $this->entityTypeBundleInfo, $this->entityTypeManager->reveal()])
++      ->setConstructorArgs([$this->entityType, $this->connection, $this->entityFieldManager->reveal(), $this->cache, $this->languageManager, new MemoryCache(new Time($this->createMock('Symfony\Component\HttpFoundation\RequestStack'))), $this->entityTypeBundleInfo, $this->entityTypeManager->reveal()])
+       ->onlyMethods(['getFromStorage', 'invokeStorageLoadHook', 'initTableLayout'])
+       ->getMock();
+     $entity_storage->method('invokeStorageLoadHook')
+@@ -1312,7 +1313,7 @@ public function testLoadMultiplePersistentCacheMiss() {
+       ->willReturn($this->entityType);
+ 
+     $entity_storage = $this->getMockBuilder('Drupal\Core\Entity\Sql\SqlContentEntityStorage')
+-      ->setConstructorArgs([$this->entityType, $this->connection, $this->entityFieldManager->reveal(), $this->cache, $this->languageManager, new MemoryCache(), $this->entityTypeBundleInfo, $this->entityTypeManager->reveal()])
++      ->setConstructorArgs([$this->entityType, $this->connection, $this->entityFieldManager->reveal(), $this->cache, $this->languageManager, new MemoryCache(new Time($this->createMock('Symfony\Component\HttpFoundation\RequestStack'))), $this->entityTypeBundleInfo, $this->entityTypeManager->reveal()])
+       ->onlyMethods(['getFromStorage', 'invokeStorageLoadHook', 'initTableLayout'])
+       ->getMock();
+     $entity_storage->method('invokeStorageLoadHook')
+@@ -1373,7 +1374,7 @@ public function testHasData() {
+       ->getActiveFieldStorageDefinitions($this->entityType->id())
+       ->willReturn($this->fieldDefinitions);
+ 
+-    $this->entityStorage = new SqlContentEntityStorage($this->entityType, $database, $this->entityFieldManager->reveal(), $this->cache, $this->languageManager, new MemoryCache(), $this->entityTypeBundleInfo, $this->entityTypeManager->reveal());
++    $this->entityStorage = new SqlContentEntityStorage($this->entityType, $database, $this->entityFieldManager->reveal(), $this->cache, $this->languageManager, new MemoryCache(new Time($this->createMock('Symfony\Component\HttpFoundation\RequestStack'))), $this->entityTypeBundleInfo, $this->entityTypeManager->reveal());
+ 
+     $result = $this->entityStorage->hasData();
+ 
+diff --git a/core/tests/Drupal/Tests/Core/Render/RendererBubblingTest.php b/core/tests/Drupal/Tests/Core/Render/RendererBubblingTest.php
+index 88517acc6e7..6bd82f74b1b 100644
+--- a/core/tests/Drupal/Tests/Core/Render/RendererBubblingTest.php
++++ b/core/tests/Drupal/Tests/Core/Render/RendererBubblingTest.php
+@@ -7,6 +7,7 @@
+ 
+ namespace Drupal\Tests\Core\Render;
+ 
++use Drupal\Component\Datetime\Time;
+ use Drupal\Core\Cache\CacheableMetadata;
+ use Drupal\Core\Cache\MemoryBackend;
+ use Drupal\Core\Cache\VariationCache;
+@@ -83,8 +84,8 @@ public function testContextBubblingCustomCacheBin() {
+     $bin = $this->randomMachineName();
+ 
+     $this->setUpRequest();
+-    $this->memoryCache = new VariationCache($this->requestStack, new MemoryBackend(), $this->cacheContextsManager);
+-    $custom_cache = new VariationCache($this->requestStack, new MemoryBackend(), $this->cacheContextsManager);
++    $this->memoryCache = new VariationCache($this->requestStack, new MemoryBackend(new Time($this->createMock('Symfony\Component\HttpFoundation\RequestStack'))), $this->cacheContextsManager);
++    $custom_cache = new VariationCache($this->requestStack, new MemoryBackend(new Time($this->createMock('Symfony\Component\HttpFoundation\RequestStack'))), $this->cacheContextsManager);
+ 
+     $this->cacheFactory->expects($this->atLeastOnce())
+       ->method('get')
+diff --git a/core/tests/Drupal/Tests/Core/Render/RendererTestBase.php b/core/tests/Drupal/Tests/Core/Render/RendererTestBase.php
+index 631fccc5611..3787738d81a 100644
+--- a/core/tests/Drupal/Tests/Core/Render/RendererTestBase.php
++++ b/core/tests/Drupal/Tests/Core/Render/RendererTestBase.php
+@@ -7,6 +7,7 @@
+ 
+ namespace Drupal\Tests\Core\Render;
+ 
++use Drupal\Component\Datetime\Time;
+ use Drupal\Core\Cache\Cache;
+ use Drupal\Core\Cache\CacheableMetadata;
+ use Drupal\Core\Cache\Context\ContextCacheKeys;
+@@ -221,7 +222,7 @@ protected function setUpUnusedCache() {
+    * Sets up a memory-based render cache back-end.
+    */
+   protected function setupMemoryCache() {
+-    $this->memoryCache = $this->memoryCache ?: new VariationCache($this->requestStack, new MemoryBackend(), $this->cacheContextsManager);
++    $this->memoryCache = $this->memoryCache ?: new VariationCache($this->requestStack, new MemoryBackend(new Time($this->requestStack)), $this->cacheContextsManager);
+ 
+     $this->cacheFactory->expects($this->atLeastOnce())
+       ->method('get')
 diff --git a/core/tests/Drupal/Tests/Core/Session/UserSessionTest.php b/core/tests/Drupal/Tests/Core/Session/UserSessionTest.php
 index 7d4da73a735..ac9a4ceff4b 100644
 --- a/core/tests/Drupal/Tests/Core/Session/UserSessionTest.php
