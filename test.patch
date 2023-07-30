@@ -1,683 +1,777 @@
+diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
+index 39a856e966e..67d314e6938 100644
+--- a/core/lib/Drupal/Core/Database/Connection.php
++++ b/core/lib/Drupal/Core/Database/Connection.php
+@@ -2,9 +2,9 @@
+ 
+ namespace Drupal\Core\Database;
+ 
+-use Drupal\Component\Assertion\Inspector;
+ use Drupal\Core\Database\Event\DatabaseEvent;
+ use Drupal\Core\Database\Exception\EventException;
++use Drupal\Core\Database\Identifier\IdentifierHandler;
+ use Drupal\Core\Database\Query\Condition;
+ use Drupal\Core\Database\Query\Delete;
+ use Drupal\Core\Database\Query\Insert;
+@@ -111,13 +111,6 @@ abstract class Connection {
+    */
+   protected $schema = NULL;
+ 
+-  /**
+-   * The prefix used by this database connection.
+-   *
+-   * @var string
+-   */
+-  protected string $prefix;
+-
+   /**
+    * Replacements to fully qualify {table} placeholders in SQL strings.
+    *
+@@ -177,28 +170,9 @@ abstract class Connection {
+   protected $unprefixedTablesMap = [];
+ 
+   /**
+-   * List of escaped table names, keyed by unescaped names.
+-   *
+-   * @var array
+-   */
+-  protected $escapedTables = [];
+-
+-  /**
+-   * List of escaped field names, keyed by unescaped names.
+-   *
+-   * There are cases in which escapeField() is called on an empty string. In
+-   * this case it should always return an empty string.
+-   *
+-   * @var array
+-   */
+-  protected $escapedFields = ["" => ""];
+-
+-  /**
+-   * List of escaped aliases names, keyed by unescaped aliases.
+-   *
+-   * @var array
++   * @todo
+    */
+-  protected $escapedAliases = [];
++  protected IdentifierHandler $identifierHandler;
+ 
+   /**
+    * Post-root (non-nested) transaction commit callbacks.
+@@ -207,17 +181,6 @@ abstract class Connection {
+    */
+   protected $rootTransactionEndCallbacks = [];
+ 
+-  /**
+-   * The identifier quote characters for the database type.
+-   *
+-   * An array containing the start and end identifier quote characters for the
+-   * database type. The ANSI SQL standard identifier quote character is a double
+-   * quotation mark.
+-   *
+-   * @var string[]
+-   */
+-  protected $identifierQuotes;
+-
+   /**
+    * Tracks the database API events to be dispatched.
+    *
+@@ -238,11 +201,8 @@ abstract class Connection {
+    *   - Other driver-specific options.
+    */
+   public function __construct(object $connection, array $connection_options) {
+-    assert(count($this->identifierQuotes) === 2 && Inspector::assertAllStrings($this->identifierQuotes), '\Drupal\Core\Database\Connection::$identifierQuotes must contain 2 string values');
+-
+     // Manage the table prefix.
+     $connection_options['prefix'] = $connection_options['prefix'] ?? '';
+-    $this->setPrefix($connection_options['prefix']);
+ 
+     // Work out the database driver namespace if none is provided. This normally
+     // written to setting.php by installer or set by
+@@ -255,6 +215,18 @@ public function __construct(object $connection, array $connection_options) {
+     $this->connectionOptions = $connection_options;
+   }
+ 
++  /**
++   * Implements the magic __get() method.
++   *
++   * @todo Remove the method in Drupal 1x.
++   */
++  public function __get($name) {
++    if (in_array($name, ['prefix', 'escapedTables', 'escapedFields', 'escapedAliases', 'identifierQuotes'])) {
++      @trigger_error("Connection::\${$name} should not be accessed in drupal:9.x.0 and is removed from drupal:10.0.0. This is no longer used. See https://www.drupal.org/node/1234567", E_USER_DEPRECATED);
++      return [];
++    }
++  }
++
+   /**
+    * Opens a client connection.
+    *
+@@ -381,7 +353,8 @@ public function attachDatabase(string $database): void {
+    * @return string $prefix
+    */
+   public function getPrefix(): string {
+-    return $this->prefix;
++    // @trigger_error(__METHOD__ . '() is deprecated in drupal:9.x.0 and is removed from drupal:10.0.0. @todo. See https://www.drupal.org/node/1234567', E_USER_DEPRECATED);
++    return $this->identifierHandler->getTablePrefix();
+   }
+ 
+   /**
+@@ -391,12 +364,7 @@ public function getPrefix(): string {
+    *   A single prefix.
+    */
+   protected function setPrefix($prefix) {
+-    assert(is_string($prefix), 'The \'$prefix\' argument to ' . __METHOD__ . '() must be a string');
+-    $this->prefix = $prefix;
+-    $this->tablePlaceholderReplacements = [
+-      $this->identifierQuotes[0] . str_replace('.', $this->identifierQuotes[1] . '.' . $this->identifierQuotes[0], $prefix),
+-      $this->identifierQuotes[1],
+-    ];
++    @trigger_error(__METHOD__ . '() is deprecated in drupal:9.x.0 and is removed from drupal:10.0.0. @todo. See https://www.drupal.org/node/1234567', E_USER_DEPRECATED);
+   }
+ 
+   /**
+@@ -414,7 +382,12 @@ protected function setPrefix($prefix) {
+    *   The properly-prefixed string.
+    */
+   public function prefixTables($sql) {
+-    return str_replace(['{', '}'], $this->tablePlaceholderReplacements, $sql);
++    $replacements = $tables = [];
++    preg_match_all('/(\{(\S*)\})/', $sql, $tables, PREG_SET_ORDER, 0);
++    foreach ($tables as $table) {
++      $replacements[$table[1]] = $this->identifierHandler->getPlatformTableName($table[2], TRUE, TRUE);
++    }
++    return str_replace(array_keys($replacements), array_values($replacements), $sql);
+   }
+ 
+   /**
+@@ -438,7 +411,14 @@ public function prefixTables($sql) {
+    *   This method should only be called by database API code.
+    */
+   public function quoteIdentifiers($sql) {
+-    return str_replace(['[', ']'], $this->identifierQuotes, $sql);
++    preg_match_all('/(\[(.+?)\])/', $sql, $matches);
++    $identifiers = [];
++    $i = 0;
++    foreach ($matches[1] as $match) {
++      $identifiers[$match] = $this->identifierHandler->getPlatformIdentifierName($matches[2][$i]);
++      $i++;
++    }
++    return strtr($sql, $identifiers);
+   }
+ 
+   /**
+@@ -457,7 +437,7 @@ public function quoteIdentifiers($sql) {
+    */
+   public function tablePrefix($table = 'default') {
+     @trigger_error(__METHOD__ . '() is deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. Instead, you should just use Connection::getPrefix(). See https://www.drupal.org/node/3260849', E_USER_DEPRECATED);
+-    return $this->prefix;
++    return $this->identifierHandler->getTablePrefix();
+   }
+ 
+   /**
+@@ -486,9 +466,7 @@ public function getUnprefixedTablesMap() {
+    * @return string
+    */
+   public function getFullQualifiedTableName($table) {
+-    $options = $this->getConnectionOptions();
+-    $prefix = $this->getPrefix();
+-    return $options['database'] . '.' . $prefix . $table;
++    return $this->identifierHandler->getPlatformDatabaseName($this->getConnectionOptions()['database']) . '.' . $this->identifierHandler->getPlatformTableName($table, TRUE, TRUE);
+   }
+ 
+   /**
+@@ -670,10 +648,7 @@ public function getLogger() {
+    *   A table prefix-parsed string for the sequence name.
+    */
+   public function makeSequenceName($table, $field) {
+-    $sequence_name = $this->prefixTables('{' . $table . '}_' . $field . '_seq');
+-    // Remove identifier quotes as we are constructing a new name from a
+-    // prefixed and quoted table name.
+-    return str_replace($this->identifierQuotes, '', $sequence_name);
++    return $this->identifierHandler->getPlatformTableName($table, TRUE, FALSE) . "_{$field}_seq";
+   }
+ 
+   /**
+@@ -986,6 +961,13 @@ public function exceptionHandler() {
+     return new $class();
+   }
+ 
++  /**
++   * @todo
++   */
++  public function getIdentifierHandler(): IdentifierHandler {
++    return $this->identifierHandler;
++  }
++
+   /**
+    * Prepares and returns a SELECT query object.
+    *
+@@ -1227,9 +1209,7 @@ public function condition($conjunction) {
+    *   The sanitized database name.
+    */
+   public function escapeDatabase($database) {
+-    $database = preg_replace('/[^A-Za-z0-9_]+/', '', $database);
+-    [$start_quote, $end_quote] = $this->identifierQuotes;
+-    return $start_quote . $database . $end_quote;
++    return $this->identifierHandler->getPlatformDatabaseName($database);
+   }
+ 
+   /**
+@@ -1250,10 +1230,7 @@ public function escapeDatabase($database) {
+    * @see \Drupal\Core\Database\Connection::setPrefix()
+    */
+   public function escapeTable($table) {
+-    if (!isset($this->escapedTables[$table])) {
+-      $this->escapedTables[$table] = preg_replace('/[^A-Za-z0-9_.]+/', '', $table);
+-    }
+-    return $this->escapedTables[$table];
++    return $this->identifierHandler->getPlatformTableName($table);
+   }
+ 
+   /**
+@@ -1270,14 +1247,7 @@ public function escapeTable($table) {
+    *   The sanitized field name.
+    */
+   public function escapeField($field) {
+-    if (!isset($this->escapedFields[$field])) {
+-      $escaped = preg_replace('/[^A-Za-z0-9_.]+/', '', $field);
+-      [$start_quote, $end_quote] = $this->identifierQuotes;
+-      // Sometimes fields have the format table_alias.field. In such cases
+-      // both identifiers should be quoted, for example, "table_alias"."field".
+-      $this->escapedFields[$field] = $start_quote . str_replace('.', $end_quote . '.' . $start_quote, $escaped) . $end_quote;
+-    }
+-    return $this->escapedFields[$field];
++    return $this->identifierHandler->getPlatformColumnName($field);
+   }
+ 
+   /**
+@@ -1295,11 +1265,7 @@ public function escapeField($field) {
+    *   The sanitized alias name.
+    */
+   public function escapeAlias($field) {
+-    if (!isset($this->escapedAliases[$field])) {
+-      [$start_quote, $end_quote] = $this->identifierQuotes;
+-      $this->escapedAliases[$field] = $start_quote . preg_replace('/[^A-Za-z0-9_]+/', '', $field) . $end_quote;
+-    }
+-    return $this->escapedAliases[$field];
++    return $this->identifierHandler->getPlatformAliasName($field);
+   }
+ 
+   /**
+diff --git a/core/lib/Drupal/Core/Database/Identifier/IdentifierHandler.php b/core/lib/Drupal/Core/Database/Identifier/IdentifierHandler.php
+new file mode 100644
+index 00000000000..1cbf6316e83
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/Identifier/IdentifierHandler.php
+@@ -0,0 +1,173 @@
++<?php
++
++declare(strict_types=1);
++
++namespace Drupal\Core\Database\Identifier;
++
++/**
++ * @todo
++ */
++class IdentifierHandler {
++
++  /**
++   * @todo
++   */
++  protected array $identifiers;
++
++  /**
++   * Constructs an IdentifierHandler object.
++   *
++   * @param string $tablePrefix
++   *   The table prefix to be used by the database connection.
++   * @param array{0:string, 1:string} $identifierQuotes
++   *   The identifier quote characters for the database type. An array
++   *   containing the start and end identifier quote characters for the
++   *   database type. The ANSI SQL standard identifier quote character is a
++   *   double quotation mark.
++   */
++  public function __construct(
++    protected string $tablePrefix,
++    protected array $identifierQuotes = ['"', '"'],
++  ) {
++  }
++
++  /**
++   * @todo
++   */
++  public function getTablePrefix(): string {
++    return $this->tablePrefix;
++  }
++
++  /**
++   * @todo
++   */
++  protected function setIdentifier(string $identifier, string $platform_identifier, IdentifierType $type, bool $isAlias): void {
++    if (!$isAlias) {
++      $this->identifiers['identifier'][$identifier][$type->value] = $platform_identifier;
++      $this->identifiers['platform'][$platform_identifier][$type->value] = $identifier;
++    }
++    else {
++      $this->identifiers['identifier'][$identifier]['alias'][$type->value] = $platform_identifier;
++      $this->identifiers['platform'][$platform_identifier]['alias'][$type->value] = $identifier;
++    }
++  }
++
++  /**
++   * @todo
++   */
++  protected function hasIdentifier(string $identifier, IdentifierType $type): bool {
++    return isset($this->identifiers['identifier'][$identifier][$type->value]);
++  }
++
++  /**
++   * @todo
++   */
++  public function getPlatformIdentifierName(string $original_name, bool $quoted = TRUE): string {
++    if (!$this->hasIdentifier($original_name, IdentifierType::Generic)) {
++      $this->setIdentifier($original_name, $this->resolvePlatformGenericIdentifier($original_name), IdentifierType::Generic, FALSE);
++    }
++    [$start_quote, $end_quote] = $this->identifierQuotes;
++    $identifier = $this->identifiers['identifier'][$original_name][IdentifierType::Generic->value];
++    return $quoted ? $start_quote . $identifier . $end_quote : $identifier;
++  }
++
++  /**
++   * @todo
++   */
++  public function getPlatformDatabaseName(string $original_name, bool $quoted = TRUE): string {
++    $original_name = preg_replace('/[^A-Za-z0-9_]+/', '', $original_name);
++    if (!$this->hasIdentifier($original_name, IdentifierType::Database)) {
++      $this->setIdentifier($original_name, $this->resolvePlatformDatabaseIdentifier($original_name), IdentifierType::Database, FALSE);
++    }
++    [$start_quote, $end_quote] = $this->identifierQuotes;
++    return $quoted ?
++      $start_quote . $this->identifiers['identifier'][$original_name][IdentifierType::Database->value] . $end_quote :
++      $this->identifiers['identifier'][$original_name][IdentifierType::Database->value];
++  }
++
++  /**
++   * @todo
++   */
++  public function getPlatformTableName(string $original_name, bool $prefixed = FALSE, bool $quoted = FALSE): string {
++    $original_name = preg_replace('/[^A-Za-z0-9_.]+/', '', $original_name);
++    if (!$this->hasIdentifier($original_name, IdentifierType::Table)) {
++      $table_name = $this->resolvePlatformTableIdentifier($original_name);
++      $this->setIdentifier($original_name, $table_name, IdentifierType::Table, FALSE);
++      $this->setIdentifier($original_name, $this->getTablePrefix() . $table_name, IdentifierType::PrefixedTable, FALSE);
++    }
++    [$start_quote, $end_quote] = $this->identifierQuotes;
++    $table = $prefixed ? $this->identifiers['identifier'][$original_name][IdentifierType::PrefixedTable->value] : $this->identifiers['identifier'][$original_name][IdentifierType::Table->value];
++    return $quoted ? $start_quote . str_replace(".", "$end_quote.$start_quote", $table) . $end_quote : $table;
++  }
++
++  /**
++   * @todo
++   */
++  public function getPlatformColumnName(string $original_name, bool $quoted = TRUE): string {
++    if ($original_name === '') {
++      return '';
++    }
++    $original_name = preg_replace('/[^A-Za-z0-9_.]+/', '', $original_name);
++    if (!$this->hasIdentifier($original_name, IdentifierType::Column)) {
++      $this->setIdentifier($original_name, $this->resolvePlatformColumnIdentifier($original_name), IdentifierType::Column, FALSE);
++    }
++    // Sometimes fields have the format table_alias.field. In such cases
++    // both identifiers should be quoted, for example, "table_alias"."field".
++    [$start_quote, $end_quote] = $this->identifierQuotes;
++    return $quoted ?
++      $start_quote . str_replace(".", "$end_quote.$start_quote", $this->identifiers['identifier'][$original_name][IdentifierType::Column->value]) . $end_quote :
++      $this->identifiers['identifier'][$original_name][IdentifierType::Column->value];
++  }
++
++  /**
++   * @todo
++   */
++  public function getPlatformAliasName(string $original_name, int $type = 0, bool $quoted = TRUE): string {
++    $original_name = preg_replace('/[^A-Za-z0-9_]+/', '', $original_name);
++    if ($original_name[0] === $this->identifierQuotes[0]) {
++      $original_name = substr($original_name, 1, -1);
++    }
++    if (!$this->hasIdentifier($original_name, IdentifierType::Alias)) {
++      $this->setIdentifier($original_name, $this->resolvePlatformGenericIdentifier($original_name), $type, TRUE);
++    }
++    [$start_quote, $end_quote] = $this->identifierQuotes;
++    $alias = $this->identifiers['identifier'][$original_name][static::ALIAS][$type] ?? $this->identifiers['identifier'][$original_name][static::ALIAS][0];
++    return $quoted ? $start_quote . $alias . $end_quote : $alias;
++  }
++
++  /**
++   * @todo
++   */
++  protected function resolvePlatformGenericIdentifier(string $identifier): string {
++    return $identifier;
++  }
++
++  /**
++   * @todo
++   */
++  protected function resolvePlatformDatabaseIdentifier(string $identifier): string {
++    return $identifier;
++  }
++
++  /**
++   * @todo
++   */
++  protected function resolvePlatformTableIdentifier(string $identifier): string {
++    return $identifier;
++  }
++
++  /**
++   * @todo
++   */
++  protected function resolvePlatformColumnIdentifier(string $identifier): string {
++    return $identifier;
++  }
++
++  /**
++   * @todo
++   */
++  protected function resolvePlatformAliasIdentifier(string $identifier, int $type = 0): string {
++    return $identifier;
++  }
++
++}
+diff --git a/core/lib/Drupal/Core/Database/Identifier/IdentifierType.php b/core/lib/Drupal/Core/Database/Identifier/IdentifierType.php
+new file mode 100644
+index 00000000000..d957767fce5
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/Identifier/IdentifierType.php
+@@ -0,0 +1,25 @@
++<?php
++
++/**
++ * @file
++ * Enum for database identifier types.
++ */
++
++declare(strict_types=1);
++
++namespace Drupal\Core\Database\Identifier;
++
++/**
++ * Enum for database identifier types.
++ */
++enum IdentifierType: int {
++  case Generic = 0x0;
++  case Database = 0x4;
++  case Sequence = 0x5;
++  case Table = 0x7;
++  case PrefixedTable = 0x8;
++  case Column = 0xC;
++  case Index = 0xD;
++
++  case Alias = 0x100;
++}
 diff --git a/core/lib/Drupal/Core/Database/Schema.php b/core/lib/Drupal/Core/Database/Schema.php
-index 9153cd9ef8f0d9564b96276530c4abbfee8a4b3a..3b2fd00a83bfeddbb8947aa4fe8375a50fec5cd1 100644
+index 9153cd9ef8f..4d7d516866e 100644
 --- a/core/lib/Drupal/Core/Database/Schema.php
 +++ b/core/lib/Drupal/Core/Database/Schema.php
-@@ -6,6 +6,22 @@
- 
- /**
-  * Provides a base implementation for Database Schema.
-+ *
-+ * @phpstan-type TableColumnDefinition array{
-+ *   'description': string,
-+ *   'type': string,
-+ *   'serialize': bool,
-+ *   'size': string,
-+ *   'not null': bool,
-+ *   'default': scalar|array<scalar>,
-+ *   'length': string,
-+ *   'unsigned': bool,
-+ *   'precision': int,
-+ *   'scale': int,
-+ *   'binary': bool
-+ * }
-+ * @phpstan-type TableColumns array<string, TableColumnDefinition>
-+ * @phpstan-type KeyColumns array<string|array{0: string, 1: int}>
-  */
- abstract class Schema implements PlaceholderInterface {
- 
-@@ -321,6 +337,8 @@ abstract public function dropTable($table);
-    *   If the specified table doesn't exist.
-    * @throws \Drupal\Core\Database\SchemaObjectExistsException
-    *   If the specified table already has a field by that name.
-+   * @throws \Drupal\Core\Database\SchemaException
-+   *   If the specified keys fail validation.
+@@ -82,12 +82,16 @@ public function nextPlaceholder() {
+    *   A keyed array with information about the schema, table name and prefix.
     */
-   abstract public function addField($table, $field, $spec, $keys_new = []);
- 
-@@ -357,15 +375,53 @@ abstract public function indexExists($table, $name);
-    * @param $table
-    *   The table to be altered.
-    * @param $fields
--   *   Fields for the primary key.
-+   *   Fields for the primary key. Partial column length specifications are not
-+   *   allowed.
-    *
-    * @throws \Drupal\Core\Database\SchemaObjectDoesNotExistException
-    *   If the specified table doesn't exist.
-    * @throws \Drupal\Core\Database\SchemaObjectExistsException
-    *   If the specified table already has a primary key.
-+   * @throws \Drupal\Core\Database\SchemaException
-+   *   If the specified key fails validation.
-    */
-   abstract public function addPrimaryKey($table, $fields);
- 
-+  /**
-+   * Validates a primary key schema definition.
-+   *
-+   * @param KeyColumns $key_fields
-+   *   An array containing the fields that will form the primary key.
-+   * @param TableColumns $fields
-+   *   (Optional) An array containing the field specifications of the table,
-+   *   as per the schema data structure format.
-+   *
-+   * @throws \Drupal\Core\Database\SchemaException
-+   *   If the specified fields fail validation.
-+   */
-+  protected function validatePrimaryKeySchema(array $key_fields, array $fields = []): void {
-+    // Ensure no partial column length specified.
-+    $fixed_key_fields = [];
-+    foreach ($key_fields as $key_field) {
-+      if (is_array($key_field)) {
-+        @trigger_error('Specification of primary key with column length is deprecated in drupal:10.2.0 and will throw a SchemaException from drupal:11.0.0. Specify full columns for a primary key, or use an index for columns with partial length. See https://www.drupal.org/node/3375071', E_USER_DEPRECATED);
-+        $fixed_key_fields[] = $key_field[0];
-+      }
-+      else {
-+        $fixed_key_fields[] = $key_field;
-+      }
+   protected function getPrefixInfo($table = 'default', $add_prefix = TRUE) {
++    $prefix = $this->connection->getPrefix();
+     $info = [
+       'schema' => $this->defaultSchema,
+-      'prefix' => $this->connection->getPrefix(),
++      'prefix' => $prefix,
+     ];
+-    if ($add_prefix) {
+-      $table = $info['prefix'] . $table;
++    if (strpos($table, '%') !== FALSE) {
++      $table = ($add_prefix ? $prefix : '') . $table;
 +    }
-+
-+    // Ensure primary key is not null.
-+    if (!empty($fields)) {
-+      foreach (array_intersect($fixed_key_fields, array_keys($fields)) as $field_name) {
-+        if (!isset($fields[$field_name]['not null']) || $fields[$field_name]['not null'] !== TRUE) {
-+          throw new SchemaException("The '$field_name' field specification does not define 'not null' as TRUE.");
-+        }
-+      }
-+    }
-+  }
-+
-   /**
-    * Drop the primary key.
-    *
-@@ -406,15 +462,38 @@ protected function findPrimaryKeyColumns($table) {
-    * @param $name
-    *   The name of the key.
-    * @param $fields
--   *   An array of field names.
-+   *   An array of field names. Partial column length specifications are not
-+   *   allowed.
-    *
-    * @throws \Drupal\Core\Database\SchemaObjectDoesNotExistException
-    *   If the specified table doesn't exist.
-    * @throws \Drupal\Core\Database\SchemaObjectExistsException
-    *   If the specified table already has a key by that name.
-+   * @throws \Drupal\Core\Database\SchemaException
-+   *   If the specified key fails validation.
-    */
-   abstract public function addUniqueKey($table, $name, $fields);
- 
-+  /**
-+   * Validates a unique key schema definition.
-+   *
-+   * @param KeyColumns $key_fields
-+   *   An array containing the fields that will form the unique key.
-+   * @param TableColumns $fields
-+   *   (Optional) An array containing the field specifications of the table,
-+   *   as per the schema data structure format.
-+   *
-+   * @throws \Drupal\Core\Database\SchemaException
-+   *   If the specified key fails validation.
-+   */
-+  protected function validateUniqueKeySchema(array $key_fields, array $fields = []): void {
-+    foreach ($key_fields as $key_field) {
-+      if (is_array($key_field)) {
-+        @trigger_error('Specification of unique keys with column length is deprecated in drupal:10.2.0 and will throw a SchemaException from drupal:11.0.0. Specify full columns for an unique key, or use an index for columns with partial length. See https://www.drupal.org/node/3375071', E_USER_DEPRECATED);
-+      }
-+    }
-+  }
-+
-   /**
-    * Drop a unique key.
-    *
-@@ -592,6 +671,8 @@ protected function introspectIndexSchema($table) {
-    *   If the specified table or source field doesn't exist.
-    * @throws \Drupal\Core\Database\SchemaObjectExistsException
-    *   If the specified destination field already exists.
-+   * @throws \Drupal\Core\Database\SchemaException
-+   *   If the specified keys fail validation.
-    */
-   abstract public function changeField($table, $field, $field_new, $spec, $keys_new = []);
- 
-@@ -605,6 +686,8 @@ abstract public function changeField($table, $field, $field_new, $spec, $keys_ne
-    *
-    * @throws \Drupal\Core\Database\SchemaObjectExistsException
-    *   If the specified table already exists.
-+   * @throws \Drupal\Core\Database\SchemaException
-+   *   If the table definition fails validation.
-    * @throws \BadMethodCallException
-    *   When ::createTableSql() is not implemented in the concrete driver class.
-    */
-@@ -714,8 +797,14 @@ protected function escapeDefaultValue($value) {
-    * @throws \Drupal\Core\Database\SchemaException
-    *   Thrown if any primary key field specification does not exist or if they
-    *   do not define 'not null' as TRUE.
-+   *
-+   * @deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Use
-+   *   ::validatePrimaryKeySchema() instead.
-+   *
-+   * @see https://www.drupal.org/node/3375071
-    */
-   protected function ensureNotNullPrimaryKey(array $primary_key, array $fields) {
-+    @trigger_error(__METHOD__ . ' is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Use ::validatePrimaryKeySchema() instead. See https://www.drupal.org/node/3375071', E_USER_DEPRECATED);
-     foreach (array_intersect($primary_key, array_keys($fields)) as $field_name) {
-       if (!isset($fields[$field_name]['not null']) || $fields[$field_name]['not null'] !== TRUE) {
-         throw new SchemaException("The '$field_name' field specification does not define 'not null' as TRUE.");
-diff --git a/core/lib/Drupal/Core/Database/database.api.php b/core/lib/Drupal/Core/Database/database.api.php
-index 50e4bb506073d73cbf8aab0026a9f27b6d97e846..b628e86b8d74642fb8f12458fce0949cdca4ce13 100644
---- a/core/lib/Drupal/Core/Database/database.api.php
-+++ b/core/lib/Drupal/Core/Database/database.api.php
-@@ -323,10 +323,12 @@
-  *     'numeric' columns must specify 'precision' and 'scale', and type
-  *     'varchar' must specify the 'length' parameter.
-  *  - 'primary key': An array of one or more key column specifiers (see below)
-- *    that form the primary key.
-+ *    that form the primary key. Primary keys do not allow partial column length
-+ *    specifications.
-  *  - 'unique keys': An associative array of unique keys ('keyname' =>
-  *    specification). Each specification is an array of one or more
-  *    key column specifiers (see below) that form a unique key on the table.
-+ *    Unique keys do not allow partial column length specifications.
-  *  - 'foreign keys': An associative array of relations ('my_relation' =>
-  *    specification). Each specification is an array containing the name of
-  *    the referenced table ('table'), and an array of column mappings
-@@ -340,9 +342,10 @@
-  *
-  * A key column specifier is either a string naming a column or an array of two
-  * elements, column name and length, specifying a prefix of the named column.
-- * Note that some DBMS drivers may opt to ignore the prefix length configuration
-- * and still use the whole field value for the key. Code should therefore not
-- * rely on this functionality.
-+ * Partial column length for a column can only be specified for indexes. Note
-+ * that some DBMS drivers may opt to ignore the prefix length configuration and
-+ * still use the whole field value for the key. Code should therefore not rely
-+ * on this functionality.
-  *
-  * As an example, this is the schema definition for the 'users_data' table. It
-  * shows five fields ('uid', 'module', 'name', 'value', and 'serialized'), the
-diff --git a/core/modules/mysql/src/Driver/Database/mysql/Schema.php b/core/modules/mysql/src/Driver/Database/mysql/Schema.php
-index d0076f3481e08431635f1e6b12077ee1a12d1eb8..8566cd81dce6824947abf8433b6decab40d3b3eb 100644
---- a/core/modules/mysql/src/Driver/Database/mysql/Schema.php
-+++ b/core/modules/mysql/src/Driver/Database/mysql/Schema.php
-@@ -101,7 +101,12 @@ protected function createTableSql($name, $table) {
- 
-     // Process keys & indexes.
-     if (!empty($table['primary key']) && is_array($table['primary key'])) {
--      $this->ensureNotNullPrimaryKey($table['primary key'], $table['fields']);
-+      $this->validatePrimaryKeySchema($table['primary key'], $table['fields']);
-+    }
-+    if (!empty($table['unique keys'])) {
-+      foreach ($table['unique keys'] as $key_fields) {
-+        $this->validateUniqueKeySchema($key_fields, $table['fields']);
-+      }
++    else {
++      $table = $this->connection->getIdentifierHandler()->getPlatformTableName($table, $add_prefix);
      }
-     $keys = $this->createKeysSql($table);
-     if (count($keys)) {
-@@ -404,9 +409,15 @@ public function addField($table, $field, $spec, $keys_new = []) {
-     }
- 
-     // Fields that are part of a PRIMARY KEY must be added as NOT NULL.
--    $is_primary_key = isset($keys_new['primary key']) && in_array($field, $keys_new['primary key'], TRUE);
-+    $is_primary_key = isset($keys_new['primary key']) && in_array($field, $this->fieldNames($keys_new['primary key']), TRUE);
-     if ($is_primary_key) {
--      $this->ensureNotNullPrimaryKey($keys_new['primary key'], [$field => $spec]);
-+      $this->validatePrimaryKeySchema($keys_new['primary key'], [$field => $spec]);
-+    }
-+
-+    if (!empty($keys_new['unique keys'])) {
-+      foreach ($keys_new['unique keys'] as $key_fields) {
-+        $this->validateUniqueKeySchema($key_fields, [$field => $spec]);
-+      }
-     }
- 
-     $fixnull = FALSE;
-@@ -489,6 +500,7 @@ public function indexExists($table, $name) {
-    * {@inheritdoc}
-    */
-   public function addPrimaryKey($table, $fields) {
-+    $this->validatePrimaryKeySchema($fields);
-     if (!$this->tableExists($table)) {
-       throw new SchemaObjectDoesNotExistException("Cannot add primary key to table '$table': table doesn't exist.");
-     }
-@@ -526,6 +538,7 @@ protected function findPrimaryKeyColumns($table) {
-    * {@inheritdoc}
-    */
-   public function addUniqueKey($table, $name, $fields) {
-+    $this->validateUniqueKeySchema($fields);
-     if (!$this->tableExists($table)) {
-       throw new SchemaObjectDoesNotExistException("Cannot add unique key '$name' to table '$table': table doesn't exist.");
-     }
-@@ -617,8 +630,13 @@ public function changeField($table, $field, $field_new, $spec, $keys_new = []) {
-     if (($field != $field_new) && $this->fieldExists($table, $field_new)) {
-       throw new SchemaObjectExistsException("Cannot rename field '$table.$field' to '$field_new': target field already exists.");
-     }
--    if (isset($keys_new['primary key']) && in_array($field_new, $keys_new['primary key'], TRUE)) {
--      $this->ensureNotNullPrimaryKey($keys_new['primary key'], [$field_new => $spec]);
-+    if (isset($keys_new['primary key']) && in_array($field_new, $this->fieldNames($keys_new['primary key']), TRUE)) {
-+      $this->validatePrimaryKeySchema($keys_new['primary key'], [$field_new => $spec]);
-+    }
-+    if (!empty($keys_new['unique keys'])) {
-+      foreach ($keys_new['unique keys'] as $key_fields) {
-+        $this->validateUniqueKeySchema($key_fields, [$field_new => $spec]);
-+      }
-     }
- 
-     $sql = 'ALTER TABLE {' . $table . '} CHANGE [' . $field . '] ' . $this->createFieldSql($field_new, $this->processField($spec));
-diff --git a/core/modules/mysql/tests/src/Kernel/mysql/SchemaUniquePrefixedKeysIndexTest.php b/core/modules/mysql/tests/src/Kernel/mysql/SchemaUniquePrefixedKeysIndexTest.php
-index 2d7c962bf6f2c1d77d5df6a275d401368bfc3d65..57730723f78d7a346f88f7c7d7b1d93c49bf49bc 100644
---- a/core/modules/mysql/tests/src/Kernel/mysql/SchemaUniquePrefixedKeysIndexTest.php
-+++ b/core/modules/mysql/tests/src/Kernel/mysql/SchemaUniquePrefixedKeysIndexTest.php
-@@ -8,6 +8,7 @@
-  * Tests adding UNIQUE keys to tables.
-  *
-  * @group Database
-+ * @group legacy
-  */
- class SchemaUniquePrefixedKeysIndexTest extends SchemaUniquePrefixedKeysIndexTestBase {
- 
-diff --git a/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php b/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php
-index a7a389a67f9a1dfaa82aacc1f359b6a09feb93fc..3e103152b791ac0d357c2220a9c54414f9b0ceb9 100644
---- a/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php
-+++ b/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php
-@@ -291,11 +291,12 @@ protected function createTableSql($name, $table) {
- 
-     $sql_keys = [];
-     if (!empty($table['primary key']) && is_array($table['primary key'])) {
--      $this->ensureNotNullPrimaryKey($table['primary key'], $table['fields']);
-+      $this->validatePrimaryKeySchema($table['primary key'], $table['fields']);
-       $sql_keys[] = 'CONSTRAINT ' . $this->ensureIdentifiersLength($name, '', 'pkey') . ' PRIMARY KEY (' . $this->createPrimaryKeySql($table['primary key']) . ')';
-     }
-     if (isset($table['unique keys']) && is_array($table['unique keys'])) {
-       foreach ($table['unique keys'] as $key_name => $key) {
-+        $this->validateUniqueKeySchema($key, $table['fields']);
-         // Use the createPrimaryKeySql(), which already discards any prefix
-         // lengths passed as part of the key column specifiers. (Postgres
-         // doesn't support setting a prefix length for PRIMARY or UNIQUE
-@@ -641,9 +642,15 @@ public function addField($table, $field, $spec, $new_keys = []) {
-     }
- 
-     // Fields that are part of a PRIMARY KEY must be added as NOT NULL.
--    $is_primary_key = isset($new_keys['primary key']) && in_array($field, $new_keys['primary key'], TRUE);
-+    $is_primary_key = isset($new_keys['primary key']) && in_array($field, $this->fieldNames($new_keys['primary key']), TRUE);
-     if ($is_primary_key) {
--      $this->ensureNotNullPrimaryKey($new_keys['primary key'], [$field => $spec]);
-+      $this->validatePrimaryKeySchema($new_keys['primary key'], [$field => $spec]);
-+    }
-+
-+    if (!empty($new_keys['unique keys'])) {
-+      foreach ($new_keys['unique keys'] as $key_fields) {
-+        $this->validateUniqueKeySchema($key_fields, [$field => $spec]);
-+      }
-     }
- 
-     $fixnull = FALSE;
-@@ -766,6 +773,7 @@ public function constraintExists($table, $name) {
-    * {@inheritdoc}
-    */
-   public function addPrimaryKey($table, $fields) {
-+    $this->validatePrimaryKeySchema($fields);
-     if (!$this->tableExists($table)) {
-       throw new SchemaObjectDoesNotExistException("Cannot add primary key to table '$table': table doesn't exist.");
-     }
-@@ -804,6 +812,7 @@ protected function findPrimaryKeyColumns($table) {
-    * {@inheritdoc}
-    */
-   public function addUniqueKey($table, $name, $fields) {
-+    $this->validateUniqueKeySchema($fields);
-     if (!$this->tableExists($table)) {
-       throw new SchemaObjectDoesNotExistException("Cannot add unique key '$name' to table '$table': table doesn't exist.");
-     }
-@@ -903,8 +912,13 @@ public function changeField($table, $field, $field_new, $spec, $new_keys = []) {
-     if (($field != $field_new) && $this->fieldExists($table, $field_new)) {
-       throw new SchemaObjectExistsException("Cannot rename field '$table.$field' to '$field_new': target field already exists.");
-     }
--    if (isset($new_keys['primary key']) && in_array($field_new, $new_keys['primary key'], TRUE)) {
--      $this->ensureNotNullPrimaryKey($new_keys['primary key'], [$field_new => $spec]);
-+    if (isset($new_keys['primary key']) && in_array($field_new, $this->fieldNames($new_keys['primary key']), TRUE)) {
-+      $this->validatePrimaryKeySchema($new_keys['primary key'], [$field_new => $spec]);
-+    }
-+    if (!empty($new_keys['unique keys'])) {
-+      foreach ($new_keys['unique keys'] as $key_fields) {
-+        $this->validateUniqueKeySchema($key_fields, [$field_new => $spec]);
-+      }
-     }
- 
-     $spec = $this->processField($spec);
-diff --git a/core/modules/pgsql/tests/src/Kernel/pgsql/SchemaUniquePrefixedKeysIndexTest.php b/core/modules/pgsql/tests/src/Kernel/pgsql/SchemaUniquePrefixedKeysIndexTest.php
-index c7285e4ee263dca310d90bde0bbdb936da8bc271..240aaa4b89e96ecf3aa55371d50062e511abf272 100644
---- a/core/modules/pgsql/tests/src/Kernel/pgsql/SchemaUniquePrefixedKeysIndexTest.php
-+++ b/core/modules/pgsql/tests/src/Kernel/pgsql/SchemaUniquePrefixedKeysIndexTest.php
-@@ -8,6 +8,7 @@
-  * Tests adding UNIQUE keys to tables.
-  *
-  * @group Database
-+ * @group legacy
-  */
- class SchemaUniquePrefixedKeysIndexTest extends SchemaUniquePrefixedKeysIndexTestBase {
- 
-diff --git a/core/modules/sqlite/src/Driver/Database/sqlite/Schema.php b/core/modules/sqlite/src/Driver/Database/sqlite/Schema.php
-index eb836eb453635d4d866179ee5a2339378d731b2e..66ab30c0420b20313eea3093aafd40bb73a84b3b 100644
---- a/core/modules/sqlite/src/Driver/Database/sqlite/Schema.php
-+++ b/core/modules/sqlite/src/Driver/Database/sqlite/Schema.php
-@@ -48,7 +48,12 @@ public function fieldExists($table, $column) {
-    */
-   public function createTableSql($name, $table) {
-     if (!empty($table['primary key']) && is_array($table['primary key'])) {
--      $this->ensureNotNullPrimaryKey($table['primary key'], $table['fields']);
-+      $this->validatePrimaryKeySchema($table['primary key'], $table['fields']);
-+    }
-+    if (!empty($table['unique keys'])) {
-+      foreach ($table['unique keys'] as $key_fields) {
-+        $this->validateUniqueKeySchema($key_fields, $table['fields']);
-+      }
-     }
- 
-     $sql = [];
-@@ -315,8 +320,13 @@ public function addField($table, $field, $specification, $keys_new = []) {
-     if ($this->fieldExists($table, $field)) {
-       throw new SchemaObjectExistsException("Cannot add field '$table.$field': field already exists.");
-     }
--    if (isset($keys_new['primary key']) && in_array($field, $keys_new['primary key'], TRUE)) {
--      $this->ensureNotNullPrimaryKey($keys_new['primary key'], [$field => $specification]);
-+    if (isset($keys_new['primary key']) && in_array($field, $this->fieldNames($keys_new['primary key']), TRUE)) {
-+      $this->validatePrimaryKeySchema($keys_new['primary key'], [$field => $specification]);
-+    }
-+    if (!empty($keys_new['unique keys'])) {
-+      foreach ($keys_new['unique keys'] as $key_fields) {
-+        $this->validateUniqueKeySchema($key_fields, [$field => $specification]);
-+      }
-     }
- 
-     // SQLite doesn't have a full-featured ALTER TABLE statement. It only
-@@ -606,8 +616,13 @@ public function changeField($table, $field, $field_new, $spec, $keys_new = []) {
-     if (($field != $field_new) && $this->fieldExists($table, $field_new)) {
-       throw new SchemaObjectExistsException("Cannot rename field '$table.$field' to '$field_new': target field already exists.");
-     }
--    if (isset($keys_new['primary key']) && in_array($field_new, $keys_new['primary key'], TRUE)) {
--      $this->ensureNotNullPrimaryKey($keys_new['primary key'], [$field_new => $spec]);
-+    if (isset($keys_new['primary key']) && in_array($field_new, $this->fieldNames($keys_new['primary key']), TRUE)) {
-+      $this->validatePrimaryKeySchema($keys_new['primary key'], [$field_new => $spec]);
-+    }
-+    if (!empty($keys_new['unique keys'])) {
-+      foreach ($keys_new['unique keys'] as $key_fields) {
-+        $this->validateUniqueKeySchema($key_fields, [$field_new => $spec]);
-+      }
-     }
- 
-     $old_schema = $this->introspectSchema($table);
-@@ -714,6 +729,7 @@ public function dropIndex($table, $name) {
-    * {@inheritdoc}
-    */
-   public function addUniqueKey($table, $name, $fields) {
-+    $this->validateUniqueKeySchema($fields);
-     if (!$this->tableExists($table)) {
-       throw new SchemaObjectDoesNotExistException("Cannot add unique key '$name' to table '$table': table doesn't exist.");
-     }
-@@ -758,7 +774,7 @@ public function addPrimaryKey($table, $fields) {
-     }
- 
-     $new_schema['primary key'] = $fields;
--    $this->ensureNotNullPrimaryKey($new_schema['primary key'], $new_schema['fields']);
-+    $this->validatePrimaryKeySchema($new_schema['primary key'], $new_schema['fields']);
-     $this->alterTable($table, $old_schema, $new_schema);
+     // If the prefix contains a period in it, then that means the prefix also
+     // contains a schema reference in which case we will change the schema key
+diff --git a/core/modules/migrate/tests/src/Unit/MigrateSqlIdMapTest.php b/core/modules/migrate/tests/src/Unit/MigrateSqlIdMapTest.php
+index cf7cf0a9b84..058b1526fc4 100644
+--- a/core/modules/migrate/tests/src/Unit/MigrateSqlIdMapTest.php
++++ b/core/modules/migrate/tests/src/Unit/MigrateSqlIdMapTest.php
+@@ -975,8 +975,8 @@ public function testGetQualifiedMapTablePrefix() {
+     $qualified_map_table = $this->getIdMap()->getQualifiedMapTableName();
+     // The SQLite driver is a special flower. It will prefix tables with
+     // PREFIX.TABLE, instead of the standard PREFIXTABLE.
+-    // @see \Drupal\sqlite\Driver\Database\sqlite\Connection::__construct()
+-    $this->assertEquals('prefix.migrate_map_sql_idmap_test', $qualified_map_table);
++    // @see \Drupal\Core\Database\Driver\sqlite\Connection::__construct()
++    $this->assertEquals('"prefix"."migrate_map_sql_idmap_test"', $qualified_map_table);
    }
  
-diff --git a/core/modules/sqlite/tests/src/Kernel/sqlite/SchemaUniquePrefixedKeysIndexTest.php b/core/modules/sqlite/tests/src/Kernel/sqlite/SchemaUniquePrefixedKeysIndexTest.php
-index 108eda059603a8e451b1e5d12a28191f0af66c72..eee545e0244a07bc700b51b9b06978b7b76caf2a 100644
---- a/core/modules/sqlite/tests/src/Kernel/sqlite/SchemaUniquePrefixedKeysIndexTest.php
-+++ b/core/modules/sqlite/tests/src/Kernel/sqlite/SchemaUniquePrefixedKeysIndexTest.php
-@@ -8,6 +8,7 @@
-  * Tests adding UNIQUE keys to tables.
-  *
-  * @group Database
-+ * @group legacy
-  */
- class SchemaUniquePrefixedKeysIndexTest extends SchemaUniquePrefixedKeysIndexTestBase {
+   /**
+diff --git a/core/modules/mysql/src/Driver/Database/mysql/Connection.php b/core/modules/mysql/src/Driver/Database/mysql/Connection.php
+index e0b33c856f0..35496e263f5 100644
+--- a/core/modules/mysql/src/Driver/Database/mysql/Connection.php
++++ b/core/modules/mysql/src/Driver/Database/mysql/Connection.php
+@@ -9,6 +9,7 @@
+ use Drupal\Core\Database\DatabaseException;
+ use Drupal\Core\Database\DatabaseExceptionWrapper;
+ use Drupal\Core\Database\DatabaseNotFoundException;
++use Drupal\Core\Database\Identifier\IdentifierHandler;
+ use Drupal\Core\Database\Query\Condition;
+ use Drupal\Core\Database\StatementWrapperIterator;
+ use Drupal\Core\Database\SupportsTemporaryTablesInterface;
+@@ -91,11 +92,6 @@ class Connection extends DatabaseConnection implements SupportsTemporaryTablesIn
+    */
+   const MIN_MAX_ALLOWED_PACKET = 1024;
  
-diff --git a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificSchemaTestBase.php b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificSchemaTestBase.php
-index 96933c2333494818f10903697a38d7413413a36b..9d40b97bf0df991613f9da813e1cd27b6533583d 100644
---- a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificSchemaTestBase.php
-+++ b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificSchemaTestBase.php
-@@ -764,6 +764,196 @@ public function testInvalidPrimaryKeyAddition(): void {
-     $this->schema->addField($table_name, 'new_test_field', ['type' => 'int'], ['primary key' => ['test_field', 'new_test_field']]);
+-  /**
+-   * {@inheritdoc}
+-   */
+-  protected $identifierQuotes = ['"', '"'];
+-
+   /**
+    * {@inheritdoc}
+    */
+@@ -122,10 +118,10 @@ public function __construct(\PDO $connection, array $connection_options) {
+       }
+     }
+ 
+-    if ($this->identifierQuotes === ['"', '"'] && !$is_ansi_quotes_mode) {
+-      $this->identifierQuotes = ['`', '`'];
+-    }
+     parent::__construct($connection, $connection_options);
++
++    // Initialize the identifier handler.
++    $this->identifierHandler = new IdentifierHandler($this->connectionOptions['prefix'], $is_ansi_quotes_mode ? ['"', '"'] : ['`', '`']);
    }
  
-+  /**
-+   * @covers ::validatePrimaryKeySchema
-+   * @group legacy
-+   */
-+  public function testInvalidPrimaryKeyColumnsOnCreateTable(): void {
-+    $this->expectDeprecation("Specification of primary key with column length is deprecated in drupal:10.2.0 and will throw a SchemaException from drupal:11.0.0. Specify full columns for a primary key, or use an index for columns with partial length. See https://www.drupal.org/node/3375071");
-+    // Test with partial column length.
-+    $this->schema->createTable('table_with_invalid_pk', [
-+      'description' => 'Table with partial column length primary key.',
-+      'fields' => [
-+        'test_field_1'  => [
-+          'type' => 'varchar',
-+          'length' => 50,
-+          'not null' => TRUE,
-+        ],
-+      ],
-+      'primary key' => [['test_field_1', 10]],
-+    ]);
-+  }
-+
-+  /**
-+   * @covers ::validatePrimaryKeySchema
-+   * @group legacy
-+   */
-+  public function testInvalidPrimaryKeyColumnsOnAddPrimaryKey(): void {
-+    $this->expectDeprecation("Specification of primary key with column length is deprecated in drupal:10.2.0 and will throw a SchemaException from drupal:11.0.0. Specify full columns for a primary key, or use an index for columns with partial length. See https://www.drupal.org/node/3375071");
-+    // Test with partial column length.
-+    $this->schema->createTable('table_with_invalid_pk', [
-+      'description' => 'Table with partial column length primary key.',
-+      'fields' => [
-+        'test_field_1'  => [
-+          'type' => 'varchar',
-+          'length' => 50,
-+          'not null' => TRUE,
-+        ],
-+      ],
-+    ]);
-+    $this->schema->addPrimaryKey('table_with_invalid_pk', [['test_field_1', 10]]);
-+  }
-+
-+  /**
-+   * @covers ::validatePrimaryKeySchema
-+   * @group legacy
-+   */
-+  public function testInvalidPrimaryKeyColumnsOnAddField(): void {
-+    $this->expectDeprecation("Specification of primary key with column length is deprecated in drupal:10.2.0 and will throw a SchemaException from drupal:11.0.0. Specify full columns for a primary key, or use an index for columns with partial length. See https://www.drupal.org/node/3375071");
-+    // Test with partial column length.
-+    $this->schema->createTable('table_with_invalid_pk', [
-+      'description' => 'Table with partial column length primary key.',
-+      'fields' => [
-+        'test_field_1'  => [
-+          'type' => 'varchar',
-+          'length' => 50,
-+          'not null' => TRUE,
-+        ],
-+      ],
-+    ]);
-+    $this->schema->addField('table_with_invalid_pk', 'new_test_field', [
-+      'type' => 'varchar',
-+      'length' => 50,
-+      'not null' => TRUE,
-+    ], [
-+      'primary key' => [['new_test_field', 10]],
-+    ]);
-+  }
-+
-+  /**
-+   * @covers ::validatePrimaryKeySchema
-+   * @group legacy
-+   */
-+  public function testInvalidPrimaryKeyColumnsOnChangeField(): void {
-+    $this->expectDeprecation("Specification of primary key with column length is deprecated in drupal:10.2.0 and will throw a SchemaException from drupal:11.0.0. Specify full columns for a primary key, or use an index for columns with partial length. See https://www.drupal.org/node/3375071");
-+    // Test with partial column length.
-+    $this->schema->createTable('table_with_invalid_pk', [
-+      'description' => 'Table with partial column length primary key.',
-+      'fields' => [
-+        'test_field_1'  => [
-+          'type' => 'varchar',
-+          'length' => 50,
-+          'not null' => TRUE,
-+        ],
-+      ],
-+    ]);
-+    $this->schema->changeField('table_with_invalid_pk', 'test_field_1', 'test_field_1', [
-+      'type' => 'varchar',
-+      'length' => 20,
-+      'not null' => TRUE,
-+    ], [
-+      'primary key' => [['test_field_1', 10]],
-+    ]);
-+  }
-+
-+  /**
-+   * @covers ::validateUniqueKeySchema
-+   * @group legacy
-+   */
-+  public function testInvalidUniqueKeyColumnsOnCreateTable(): void {
-+    $this->expectDeprecation("Specification of unique keys with column length is deprecated in drupal:10.2.0 and will throw a SchemaException from drupal:11.0.0. Specify full columns for an unique key, or use an index for columns with partial length. See https://www.drupal.org/node/3375071");
-+    // Test with partial column length.
-+    $this->schema->createTable('table_with_invalid_unique_key', [
-+      'description' => 'Table with partial column length unique key.',
-+      'fields' => [
-+        'test_field_1'  => [
-+          'type' => 'varchar',
-+          'length' => 50,
-+          'not null' => TRUE,
-+        ],
-+      ],
-+      'unique keys' => [
-+        'test_unique_key' => [['test_field_1', 10]],
-+      ],
-+    ]);
-+  }
-+
-+  /**
-+   * @covers ::validateUniqueKeySchema
-+   * @group legacy
-+   */
-+  public function testInvalidUniqueKeyColumnsOnAddUniqueKey(): void {
-+    $this->expectDeprecation("Specification of unique keys with column length is deprecated in drupal:10.2.0 and will throw a SchemaException from drupal:11.0.0. Specify full columns for an unique key, or use an index for columns with partial length. See https://www.drupal.org/node/3375071");
-+    // Test with partial column length.
-+    $this->schema->createTable('table_with_invalid_unique_key', [
-+      'description' => 'Table with partial column length unique key.',
-+      'fields' => [
-+        'test_field_1'  => [
-+          'type' => 'varchar',
-+          'length' => 50,
-+          'not null' => TRUE,
-+        ],
-+      ],
-+    ]);
-+    $this->schema->addUniqueKey('table_with_invalid_unique_key', 'test_unique_key', [['test_field_1', 10]]);
-+  }
-+
-+  /**
-+   * @covers ::validateUniqueKeySchema
-+   * @group legacy
-+   */
-+  public function testInvalidUniqueKeyColumnsOnAddField(): void {
-+    $this->expectDeprecation("Specification of unique keys with column length is deprecated in drupal:10.2.0 and will throw a SchemaException from drupal:11.0.0. Specify full columns for an unique key, or use an index for columns with partial length. See https://www.drupal.org/node/3375071");
-+    // Test with partial column length.
-+    $this->schema->createTable('table_with_invalid_unique_key', [
-+      'description' => 'Table with partial column length unique key.',
-+      'fields' => [
-+        'test_field_1'  => [
-+          'type' => 'varchar',
-+          'length' => 50,
-+          'not null' => TRUE,
-+        ],
-+      ],
-+    ]);
-+    $this->schema->addField('table_with_invalid_unique_key', 'new_test_field', [
-+      'type' => 'varchar',
-+      'length' => 50,
-+      'not null' => TRUE,
-+    ], [
-+      'unique keys' => [
-+        'test_unique_key' => [['new_test_field', 10]],
-+      ],
-+    ]);
-+  }
-+
-+  /**
-+   * @covers ::validateUniqueKeySchema
-+   * @group legacy
-+   */
-+  public function testInvalidUniqueKeyColumnsOnChangeField(): void {
-+    $this->expectDeprecation("Specification of unique keys with column length is deprecated in drupal:10.2.0 and will throw a SchemaException from drupal:11.0.0. Specify full columns for an unique key, or use an index for columns with partial length. See https://www.drupal.org/node/3375071");
-+    // Test with partial column length.
-+    $this->schema->createTable('table_with_invalid_unique_key', [
-+      'description' => 'Table with partial column length unique key.',
-+      'fields' => [
-+        'test_field_1'  => [
-+          'type' => 'varchar',
-+          'length' => 50,
-+          'not null' => TRUE,
-+        ],
-+      ],
-+    ]);
-+    $this->schema->changeField('table_with_invalid_unique_key', 'test_field_1', 'test_field_1', [
-+      'type' => 'varchar',
-+      'length' => 20,
-+      'not null' => TRUE,
-+    ], [
-+      'unique keys' => [
-+        'test_unique_key' => [['test_field_1', 10]],
-+      ],
-+    ]);
-+  }
-+
    /**
-    * Tests changing the primary key with an invalid field specification.
+diff --git a/core/modules/mysql/tests/src/Unit/ConnectionTest.php b/core/modules/mysql/tests/src/Unit/ConnectionTest.php
+index 84200f8aaa0..446d27c5c94 100644
+--- a/core/modules/mysql/tests/src/Unit/ConnectionTest.php
++++ b/core/modules/mysql/tests/src/Unit/ConnectionTest.php
+@@ -66,7 +66,6 @@ private function createConnection(): Connection {
+ 
+       public function __construct(\PDO $connection) {
+         $this->connection = $connection;
+-        $this->setPrefix('');
+       }
+ 
+     };
+diff --git a/core/modules/pgsql/src/Driver/Database/pgsql/Connection.php b/core/modules/pgsql/src/Driver/Database/pgsql/Connection.php
+index 3ba9748bcdd..7eef9005eb1 100644
+--- a/core/modules/pgsql/src/Driver/Database/pgsql/Connection.php
++++ b/core/modules/pgsql/src/Driver/Database/pgsql/Connection.php
+@@ -7,6 +7,7 @@
+ use Drupal\Core\Database\DatabaseAccessDeniedException;
+ use Drupal\Core\Database\DatabaseNotFoundException;
+ use Drupal\Core\Database\ExceptionHandler;
++use Drupal\Core\Database\Identifier\IdentifierHandler;
+ use Drupal\Core\Database\Query\Condition;
+ use Drupal\Core\Database\StatementInterface;
+ use Drupal\Core\Database\StatementWrapperIterator;
+@@ -67,11 +68,6 @@ class Connection extends DatabaseConnection implements SupportsTemporaryTablesIn
     */
-diff --git a/core/tests/Drupal/KernelTests/Core/Database/SchemaUniquePrefixedKeysIndexTestBase.php b/core/tests/Drupal/KernelTests/Core/Database/SchemaUniquePrefixedKeysIndexTestBase.php
-index 12313abf989c90a3d571fa1103100f38e420646c..75a16e1709e502bb4efe9870ad40d3a0bbabc10a 100644
---- a/core/tests/Drupal/KernelTests/Core/Database/SchemaUniquePrefixedKeysIndexTestBase.php
-+++ b/core/tests/Drupal/KernelTests/Core/Database/SchemaUniquePrefixedKeysIndexTestBase.php
-@@ -8,6 +8,10 @@
-  * Tests adding UNIQUE keys to tables.
-  *
-  * @group Database
-+ * @group legacy
-+ *
-+ * @todo in drupal:11.0.0, do not drop this test but rather test full length
-+ *   columns.
+   protected $transactionalDDLSupport = TRUE;
+ 
+-  /**
+-   * {@inheritdoc}
+-   */
+-  protected $identifierQuotes = ['"', '"'];
+-
+   /**
+    * Constructs a connection object.
+    */
+@@ -95,26 +91,9 @@ public function __construct(\PDO $connection, array $connection_options) {
+     if (isset($connection_options['init_commands'])) {
+       $this->connection->exec(implode('; ', $connection_options['init_commands']));
+     }
+-  }
+ 
+-  /**
+-   * {@inheritdoc}
+-   */
+-  protected function setPrefix($prefix) {
+-    assert(is_string($prefix), 'The \'$prefix\' argument to ' . __METHOD__ . '() must be a string');
+-    $this->prefix = $prefix;
+-
+-    // Add the schema name if it is not set to public, otherwise it will use the
+-    // default schema name.
+-    $quoted_schema = '';
+-    if (isset($this->connectionOptions['schema']) && ($this->connectionOptions['schema'] !== 'public')) {
+-      $quoted_schema = $this->identifierQuotes[0] . $this->connectionOptions['schema'] . $this->identifierQuotes[1] . '.';
+-    }
+-
+-    $this->tablePlaceholderReplacements = [
+-      $quoted_schema . $this->identifierQuotes[0] . str_replace('.', $this->identifierQuotes[1] . '.' . $this->identifierQuotes[0], $prefix),
+-      $this->identifierQuotes[1],
+-    ];
++    // Initialize the identifier handler.
++    $this->identifierHandler = new IdentifierHandler($connection_options['prefix']);
+   }
+ 
+   /**
+@@ -346,7 +325,7 @@ public function getFullQualifiedTableName($table) {
+ 
+     // The fully qualified table name in PostgreSQL is in the form of
+     // <database>.<schema>.<table>.
+-    return $options['database'] . '.' . $schema . '.' . $this->getPrefix() . $table;
++    return $options['database'] . '.' . $schema . '.' . $this->identifierHandler->getPlatformTableName($table, TRUE, FALSE);
+   }
+ 
+   /**
+diff --git a/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php b/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php
+index 0c14efb20f7..8d7352a8592 100644
+--- a/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php
++++ b/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php
+@@ -6,6 +6,7 @@
+ use Drupal\Core\Database\DatabaseExceptionWrapper;
+ use Drupal\Core\Database\DatabaseNotFoundException;
+ use Drupal\Core\Database\ExceptionHandler;
++use Drupal\Core\Database\Identifier\IdentifierHandler;
+ use Drupal\Core\Database\Query\Condition;
+ use Drupal\Core\Database\StatementInterface;
+ use Drupal\Core\Database\SupportsTemporaryTablesInterface;
+@@ -73,11 +74,6 @@ class Connection extends DatabaseConnection implements SupportsTemporaryTablesIn
+    */
+   protected $transactionalDDLSupport = TRUE;
+ 
+-  /**
+-   * {@inheritdoc}
+-   */
+-  protected $identifierQuotes = ['"', '"'];
+-
+   /**
+    * Constructs a \Drupal\sqlite\Driver\Database\sqlite\Connection object.
+    */
+@@ -93,8 +89,8 @@ public function __construct(\PDO $connection, array $connection_options) {
+       $prefix .= '.';
+     }
+ 
+-    // Regenerate the prefix.
+-    $this->setPrefix($prefix);
++    // Initialize the identifier handler.
++    $this->identifierHandler = new IdentifierHandler($prefix);
+   }
+ 
+   /**
+@@ -459,10 +455,8 @@ public function nextId($existing_id = 0) {
+    * {@inheritdoc}
+    */
+   public function getFullQualifiedTableName($table) {
+-    $prefix = $this->getPrefix();
+-
+     // Don't include the SQLite database file name as part of the table name.
+-    return $prefix . $table;
++    return $this->identifierHandler->getPlatformTableName($table, TRUE, TRUE);
+   }
+ 
+   /**
+diff --git a/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php b/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
+index 28670b71753..fa6e0c55c1c 100644
+--- a/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
++++ b/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
+@@ -17,53 +17,6 @@
   */
- abstract class SchemaUniquePrefixedKeysIndexTestBase extends DriverSpecificDatabaseTestBase {
+ class ConnectionTest extends UnitTestCase {
  
-@@ -28,6 +32,7 @@ abstract class SchemaUniquePrefixedKeysIndexTestBase extends DriverSpecificDatab
-    * Tests UNIQUE keys put directly on the table definition.
-    */
-   public function testCreateTable(): void {
-+    $this->expectDeprecation('Specification of unique keys with column length is deprecated in drupal:10.2.0 and will throw a SchemaException from drupal:11.0.0. Specify full columns for an unique key, or use an index for columns with partial length. See https://www.drupal.org/node/3375071');
-     $this->connection->schema()->createTable('test_unique', [
-       'fields' => [
-         'field' => [
-@@ -47,6 +52,7 @@ public function testCreateTable(): void {
-    * Tests adding a UNIQUE key to an existing table.
-    */
-   public function testAddUniqueKey(): void {
-+    $this->expectDeprecation('Specification of unique keys with column length is deprecated in drupal:10.2.0 and will throw a SchemaException from drupal:11.0.0. Specify full columns for an unique key, or use an index for columns with partial length. See https://www.drupal.org/node/3375071');
-     $this->connection->schema()
-       ->addUniqueKey('test_people', 'job', [['job', 10]]);
+-  /**
+-   * Data provider for testPrefixRoundTrip().
+-   *
+-   * @return array
+-   *   Array of arrays with the following elements:
+-   *   - Arguments to pass to Connection::setPrefix().
+-   *   - Expected result from Connection::tablePrefix().
+-   */
+-  public function providerPrefixRoundTrip() {
+-    return [
+-      [
+-        [
+-          '' => 'test_',
+-        ],
+-        'test_',
+-      ],
+-      [
+-        [
+-          'fooTable' => 'foo_',
+-          'barTable' => 'foo_',
+-        ],
+-        'foo_',
+-      ],
+-    ];
+-  }
+-
+-  /**
+-   * Exercise setPrefix() and tablePrefix().
+-   *
+-   * @dataProvider providerPrefixRoundTrip
+-   */
+-  public function testPrefixRoundTrip($expected, $prefix_info) {
+-    $mock_pdo = $this->createMock('Drupal\Tests\Core\Database\Stub\StubPDO');
+-    $connection = new StubConnection($mock_pdo, []);
+-
+-    // setPrefix() is protected, so we make it accessible with reflection.
+-    $reflection = new \ReflectionClass('Drupal\Tests\Core\Database\Stub\StubConnection');
+-    $set_prefix = $reflection->getMethod('setPrefix');
+-
+-    // Set the prefix data.
+-    $set_prefix->invokeArgs($connection, [$prefix_info]);
+-    // Check the round-trip.
+-    foreach ($expected as $table => $prefix) {
+-      $this->assertEquals($prefix, $connection->getPrefix());
+-    }
+-  }
+-
+   /**
+    * Data provider for testPrefixTables().
+    *
+@@ -574,26 +527,6 @@ public function testEscapeDatabase($expected, $name, array $identifier_quote = [
+     $this->assertEquals($expected, $connection->escapeDatabase($name));
+   }
  
-@@ -57,6 +63,7 @@ public function testAddUniqueKey(): void {
-    * Tests adding a new field with UNIQUE key.
+-  /**
+-   * @covers ::__construct
+-   */
+-  public function testIdentifierQuotesAssertCount() {
+-    $this->expectException(\AssertionError::class);
+-    $this->expectExceptionMessage('\Drupal\Core\Database\Connection::$identifierQuotes must contain 2 string values');
+-    $mock_pdo = $this->createMock(StubPDO::class);
+-    new StubConnection($mock_pdo, [], ['"']);
+-  }
+-
+-  /**
+-   * @covers ::__construct
+-   */
+-  public function testIdentifierQuotesAssertString() {
+-    $this->expectException(\AssertionError::class);
+-    $this->expectExceptionMessage('\Drupal\Core\Database\Connection::$identifierQuotes must contain 2 string values');
+-    $mock_pdo = $this->createMock(StubPDO::class);
+-    new StubConnection($mock_pdo, [], [0, '1']);
+-  }
+-
+   /**
+    * @covers ::__construct
     */
-   public function testAddField(): void {
-+    $this->expectDeprecation('Specification of unique keys with column length is deprecated in drupal:10.2.0 and will throw a SchemaException from drupal:11.0.0. Specify full columns for an unique key, or use an index for columns with partial length. See https://www.drupal.org/node/3375071');
-     $field_spec = [
-       'type' => 'varchar',
-       'length' => 50,
-@@ -76,6 +83,7 @@ public function testAddField(): void {
-    * Tests changing a field to add a UNIQUE key.
+diff --git a/core/tests/Drupal/Tests/Core/Database/Stub/StubConnection.php b/core/tests/Drupal/Tests/Core/Database/Stub/StubConnection.php
+index 2ce07e0646b..701a4df045a 100644
+--- a/core/tests/Drupal/Tests/Core/Database/Stub/StubConnection.php
++++ b/core/tests/Drupal/Tests/Core/Database/Stub/StubConnection.php
+@@ -4,6 +4,7 @@
+ 
+ use Drupal\Core\Database\Connection;
+ use Drupal\Core\Database\ExceptionHandler;
++use Drupal\Core\Database\Identifier\IdentifierHandler;
+ use Drupal\Core\Database\Log;
+ use Drupal\Core\Database\Query\Delete;
+ use Drupal\Core\Database\Query\Insert;
+@@ -46,8 +47,9 @@ class StubConnection extends Connection {
+    *   The identifier quote characters. Defaults to an empty strings.
     */
-   public function testChangeField(): void {
-+    $this->expectDeprecation('Specification of unique keys with column length is deprecated in drupal:10.2.0 and will throw a SchemaException from drupal:11.0.0. Specify full columns for an unique key, or use an index for columns with partial length. See https://www.drupal.org/node/3375071');
-     $field_spec = [
-       'description' => "The person's job",
-       'type' => 'varchar_ascii',
+   public function __construct(\PDO $connection, array $connection_options, $identifier_quotes = ['', '']) {
+-    $this->identifierQuotes = $identifier_quotes;
+     parent::__construct($connection, $connection_options);
++    // Initialize the identifier handler.
++    $this->identifierHandler = new IdentifierHandler($connection_options['prefix'] ?? '', $identifier_quotes);
+   }
+ 
+   /**
