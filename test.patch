@@ -1,782 +1,882 @@
+diff --git a/core/core.services.yml b/core/core.services.yml
+index 32e39e055ea..7993acea730 100644
+--- a/core/core.services.yml
++++ b/core/core.services.yml
+@@ -1791,3 +1791,17 @@ services:
+     class: Drupal\Core\Pager\PagerParameters
+     arguments: ['@request_stack']
+   Drupal\Core\Pager\PagerParametersInterface: '@pager.parameters'
++  select_extender_factory.pager:
++    class: Drupal\Core\Database\Query\PagerSelectExtenderFactory
++    arguments: ['@pager.manager']
++    tags:
++      - { name: backend_overridable }
++  Drupal\Core\Database\Query\PagerSelectExtenderFactory: '@select_extender_factory.pager'
++  Drupal\Core\Database\Query\PagerSelectExtender: '@select_extender_factory.pager'
++  select_extender_factory.table_sort:
++    class: Drupal\Core\Database\Query\TableSortExtenderFactory
++    arguments: ['@request_stack']
++    tags:
++      - { name: backend_overridable }
++  Drupal\Core\Database\Query\TableSortExtenderFactory: '@select_extender_factory.table_sort'
++  Drupal\Core\Database\Query\TableSortExtender: '@select_extender_factory.table_sort'
 diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
-index 39a856e966e..67d314e6938 100644
+index 39a856e966e..7c5064d6aa6 100644
 --- a/core/lib/Drupal/Core/Database/Connection.php
 +++ b/core/lib/Drupal/Core/Database/Connection.php
-@@ -2,9 +2,9 @@
- 
- namespace Drupal\Core\Database;
- 
--use Drupal\Component\Assertion\Inspector;
- use Drupal\Core\Database\Event\DatabaseEvent;
- use Drupal\Core\Database\Exception\EventException;
-+use Drupal\Core\Database\Identifier\IdentifierHandler;
- use Drupal\Core\Database\Query\Condition;
- use Drupal\Core\Database\Query\Delete;
- use Drupal\Core\Database\Query\Insert;
-@@ -111,13 +111,6 @@ abstract class Connection {
-    */
-   protected $schema = NULL;
- 
--  /**
--   * The prefix used by this database connection.
--   *
--   * @var string
--   */
--  protected string $prefix;
--
-   /**
-    * Replacements to fully qualify {table} placeholders in SQL strings.
+@@ -897,23 +897,14 @@ protected function expandArguments(&$query, &$args) {
     *
-@@ -177,28 +170,9 @@ abstract class Connection {
-   protected $unprefixedTablesMap = [];
- 
-   /**
--   * List of escaped table names, keyed by unescaped names.
--   *
--   * @var array
--   */
--  protected $escapedTables = [];
--
--  /**
--   * List of escaped field names, keyed by unescaped names.
--   *
--   * There are cases in which escapeField() is called on an empty string. In
--   * this case it should always return an empty string.
--   *
--   * @var array
--   */
--  protected $escapedFields = ["" => ""];
--
--  /**
--   * List of escaped aliases names, keyed by unescaped aliases.
--   *
--   * @var array
-+   * @todo
-    */
--  protected $escapedAliases = [];
-+  protected IdentifierHandler $identifierHandler;
- 
-   /**
-    * Post-root (non-nested) transaction commit callbacks.
-@@ -207,17 +181,6 @@ abstract class Connection {
-    */
-   protected $rootTransactionEndCallbacks = [];
- 
--  /**
--   * The identifier quote characters for the database type.
--   *
--   * An array containing the start and end identifier quote characters for the
--   * database type. The ANSI SQL standard identifier quote character is a double
--   * quotation mark.
--   *
--   * @var string[]
--   */
--  protected $identifierQuotes;
--
-   /**
-    * Tracks the database API events to be dispatched.
-    *
-@@ -238,11 +201,8 @@ abstract class Connection {
-    *   - Other driver-specific options.
-    */
-   public function __construct(object $connection, array $connection_options) {
--    assert(count($this->identifierQuotes) === 2 && Inspector::assertAllStrings($this->identifierQuotes), '\Drupal\Core\Database\Connection::$identifierQuotes must contain 2 string values');
--
-     // Manage the table prefix.
-     $connection_options['prefix'] = $connection_options['prefix'] ?? '';
--    $this->setPrefix($connection_options['prefix']);
- 
-     // Work out the database driver namespace if none is provided. This normally
-     // written to setting.php by installer or set by
-@@ -255,6 +215,18 @@ public function __construct(object $connection, array $connection_options) {
-     $this->connectionOptions = $connection_options;
-   }
- 
-+  /**
-+   * Implements the magic __get() method.
-+   *
-+   * @todo Remove the method in Drupal 1x.
-+   */
-+  public function __get($name) {
-+    if (in_array($name, ['prefix', 'escapedTables', 'escapedFields', 'escapedAliases', 'identifierQuotes'])) {
-+      @trigger_error("Connection::\${$name} should not be accessed in drupal:9.x.0 and is removed from drupal:10.0.0. This is no longer used. See https://www.drupal.org/node/1234567", E_USER_DEPRECATED);
-+      return [];
-+    }
-+  }
-+
-   /**
-    * Opens a client connection.
-    *
-@@ -381,7 +353,8 @@ public function attachDatabase(string $database): void {
-    * @return string $prefix
-    */
-   public function getPrefix(): string {
--    return $this->prefix;
-+    // @trigger_error(__METHOD__ . '() is deprecated in drupal:9.x.0 and is removed from drupal:10.0.0. @todo. See https://www.drupal.org/node/1234567', E_USER_DEPRECATED);
-+    return $this->identifierHandler->getTablePrefix();
-   }
- 
-   /**
-@@ -391,12 +364,7 @@ public function getPrefix(): string {
-    *   A single prefix.
-    */
-   protected function setPrefix($prefix) {
--    assert(is_string($prefix), 'The \'$prefix\' argument to ' . __METHOD__ . '() must be a string');
--    $this->prefix = $prefix;
--    $this->tablePlaceholderReplacements = [
--      $this->identifierQuotes[0] . str_replace('.', $this->identifierQuotes[1] . '.' . $this->identifierQuotes[0], $prefix),
--      $this->identifierQuotes[1],
--    ];
-+    @trigger_error(__METHOD__ . '() is deprecated in drupal:9.x.0 and is removed from drupal:10.0.0. @todo. See https://www.drupal.org/node/1234567', E_USER_DEPRECATED);
-   }
- 
-   /**
-@@ -414,7 +382,12 @@ protected function setPrefix($prefix) {
-    *   The properly-prefixed string.
-    */
-   public function prefixTables($sql) {
--    return str_replace(['{', '}'], $this->tablePlaceholderReplacements, $sql);
-+    $replacements = $tables = [];
-+    preg_match_all('/(\{(\S*)\})/', $sql, $tables, PREG_SET_ORDER, 0);
-+    foreach ($tables as $table) {
-+      $replacements[$table[1]] = $this->identifierHandler->getPlatformTableName($table[2], TRUE, TRUE);
-+    }
-+    return str_replace(array_keys($replacements), array_values($replacements), $sql);
-   }
- 
-   /**
-@@ -438,7 +411,14 @@ public function prefixTables($sql) {
-    *   This method should only be called by database API code.
-    */
-   public function quoteIdentifiers($sql) {
--    return str_replace(['[', ']'], $this->identifierQuotes, $sql);
-+    preg_match_all('/(\[(.+?)\])/', $sql, $matches);
-+    $identifiers = [];
-+    $i = 0;
-+    foreach ($matches[1] as $match) {
-+      $identifiers[$match] = $this->identifierHandler->getPlatformIdentifierName($matches[2][$i]);
-+      $i++;
-+    }
-+    return strtr($sql, $identifiers);
-   }
- 
-   /**
-@@ -457,7 +437,7 @@ public function quoteIdentifiers($sql) {
-    */
-   public function tablePrefix($table = 'default') {
-     @trigger_error(__METHOD__ . '() is deprecated in drupal:10.1.0 and is removed from drupal:11.0.0. Instead, you should just use Connection::getPrefix(). See https://www.drupal.org/node/3260849', E_USER_DEPRECATED);
--    return $this->prefix;
-+    return $this->identifierHandler->getTablePrefix();
-   }
- 
-   /**
-@@ -486,9 +466,7 @@ public function getUnprefixedTablesMap() {
     * @return string
+    *   The name of the class that should be used for this driver.
++   *
++   * @deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Use
++   *   standard autoloading in the methods that return database operations.
++   *
++   * @see https://www.drupal.org/node/3217534
     */
-   public function getFullQualifiedTableName($table) {
--    $options = $this->getConnectionOptions();
--    $prefix = $this->getPrefix();
--    return $options['database'] . '.' . $prefix . $table;
-+    return $this->identifierHandler->getPlatformDatabaseName($this->getConnectionOptions()['database']) . '.' . $this->identifierHandler->getPlatformTableName($table, TRUE, TRUE);
+   public function getDriverClass($class) {
+-    match($class) {
+-      'Install\\Tasks',
+-      'ExceptionHandler',
+-      'Select',
+-      'Insert',
+-      'Merge',
+-      'Upsert',
+-      'Update',
+-      'Delete',
+-      'Truncate',
+-      'Schema',
+-      'Condition',
+-      'Transaction' => @trigger_error('Calling ' . __METHOD__ . '() for \'' . $class . '\' is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Use standard autoloading in the methods that return database operations. See https://www.drupal.org/node/3217534', E_USER_DEPRECATED),
+-      default => NULL,
+-    };
++    @trigger_error('Calling ' . __METHOD__ . '() for \'' . $class . '\' is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Use standard autoloading in the methods that return database operations. See https://www.drupal.org/node/3217534', E_USER_DEPRECATED);
+     if (empty($this->driverClasses[$class])) {
+       $driver_class = $this->connectionOptions['namespace'] . '\\' . $class;
+       if (class_exists($driver_class)) {
+@@ -1901,8 +1892,14 @@ public function getProvider(): string {
+    *
+    * @throws \Drupal\Core\DependencyInjection\ContainerNotInitializedException
+    *   If the container has not been initialized yet.
++   *
++   * @deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Use
++   *   dependency injection instead.
++   *
++   * @see https://www.drupal.org/node/3218001
+    */
+   public function getPagerManager(): PagerManagerInterface {
++    @trigger_error(__METHOD__ . '() is deprecated in drupal:10.2.0 and will be required in drupal:11.0.0. Use dependency injection instead. See https://www.drupal.org/node/3218001', E_USER_DEPRECATED);
+     return \Drupal::service('pager.manager');
    }
  
-   /**
-@@ -670,10 +648,7 @@ public function getLogger() {
-    *   A table prefix-parsed string for the sequence name.
-    */
-   public function makeSequenceName($table, $field) {
--    $sequence_name = $this->prefixTables('{' . $table . '}_' . $field . '_seq');
--    // Remove identifier quotes as we are constructing a new name from a
--    // prefixed and quoted table name.
--    return str_replace($this->identifierQuotes, '', $sequence_name);
-+    return $this->identifierHandler->getPlatformTableName($table, TRUE, FALSE) . "_{$field}_seq";
-   }
+diff --git a/core/lib/Drupal/Core/Database/Query/PagerSelectExtender.php b/core/lib/Drupal/Core/Database/Query/PagerSelectExtender.php
+index 3620d9b5d17..13bcc7b86c3 100644
+--- a/core/lib/Drupal/Core/Database/Query/PagerSelectExtender.php
++++ b/core/lib/Drupal/Core/Database/Query/PagerSelectExtender.php
+@@ -3,6 +3,7 @@
+ namespace Drupal\Core\Database\Query;
  
-   /**
-@@ -986,6 +961,13 @@ public function exceptionHandler() {
-     return new $class();
-   }
+ use Drupal\Core\Database\Connection;
++use Drupal\Core\Pager\PagerManagerInterface;
+ 
+ /**
+  * Query extender for pager queries.
+@@ -16,6 +17,11 @@
+  */
+ class PagerSelectExtender extends SelectExtender {
  
 +  /**
-+   * @todo
++   * The pager manager service.
 +   */
-+  public function getIdentifierHandler(): IdentifierHandler {
-+    return $this->identifierHandler;
-+  }
++  protected PagerManagerInterface $pagerManager;
 +
    /**
-    * Prepares and returns a SELECT query object.
+    * The number of elements per page to allow.
     *
-@@ -1227,9 +1209,7 @@ public function condition($conjunction) {
-    *   The sanitized database name.
+@@ -44,9 +50,16 @@ class PagerSelectExtender extends SelectExtender {
+    *   Select query object.
+    * @param \Drupal\Core\Database\Connection $connection
+    *   Database connection object.
++   * @param \Drupal\Core\Pager\PagerManagerInterface $pager_manager
++   *   The pager manager service.
     */
-   public function escapeDatabase($database) {
--    $database = preg_replace('/[^A-Za-z0-9_]+/', '', $database);
--    [$start_quote, $end_quote] = $this->identifierQuotes;
--    return $start_quote . $database . $end_quote;
-+    return $this->identifierHandler->getPlatformDatabaseName($database);
+-  public function __construct(SelectInterface $query, Connection $connection) {
++  public function __construct(SelectInterface $query, Connection $connection, PagerManagerInterface $pager_manager = NULL) {
++    if (is_null($pager_manager)) {
++      @trigger_error('Calling ' . __METHOD__ . ' without the $pager_manager argument is deprecated in drupal:10.2.0 and will be required in drupal:11.0.0. Use the relevant service to instantiate extenders. See https://www.drupal.org/node/3218001', E_USER_DEPRECATED);
++      $pager_manager = \Drupal::service('pager.manager');
++    }
+     parent::__construct($query, $connection);
++    $this->pagerManager = $pager_manager;
+ 
+     // Add pager tag. Do this here to ensure that it is always added before
+     // preExecute() is called.
+@@ -74,7 +87,7 @@ public function execute() {
+     $this->ensureElement();
+ 
+     $total_items = $this->getCountQuery()->execute()->fetchField();
+-    $pager = $this->connection->getPagerManager()->createPager($total_items, $this->limit, $this->element);
++    $pager = $this->pagerManager->createPager($total_items, $this->limit, $this->element);
+     $this->range($pager->getCurrentPage() * $this->limit, $this->limit);
+ 
+     // Now that we've added our pager-based range instructions, run the query normally.
+@@ -89,7 +102,7 @@ public function execute() {
+    */
+   protected function ensureElement() {
+     if (!isset($this->element)) {
+-      $this->element($this->connection->getPagerManager()->getMaxPagerElementId() + 1);
++      $this->element($this->pagerManager->getMaxPagerElementId() + 1);
+     }
    }
  
-   /**
-@@ -1250,10 +1230,7 @@ public function escapeDatabase($database) {
-    * @see \Drupal\Core\Database\Connection::setPrefix()
+@@ -157,7 +170,7 @@ public function limit($limit = 10) {
     */
-   public function escapeTable($table) {
--    if (!isset($this->escapedTables[$table])) {
--      $this->escapedTables[$table] = preg_replace('/[^A-Za-z0-9_.]+/', '', $table);
--    }
--    return $this->escapedTables[$table];
-+    return $this->identifierHandler->getPlatformTableName($table);
+   public function element($element) {
+     $this->element = $element;
+-    $this->connection->getPagerManager()->reservePagerElementId($this->element);
++    $this->pagerManager->reservePagerElementId($this->element);
+     return $this;
    }
  
-   /**
-@@ -1270,14 +1247,7 @@ public function escapeTable($table) {
-    *   The sanitized field name.
-    */
-   public function escapeField($field) {
--    if (!isset($this->escapedFields[$field])) {
--      $escaped = preg_replace('/[^A-Za-z0-9_.]+/', '', $field);
--      [$start_quote, $end_quote] = $this->identifierQuotes;
--      // Sometimes fields have the format table_alias.field. In such cases
--      // both identifiers should be quoted, for example, "table_alias"."field".
--      $this->escapedFields[$field] = $start_quote . str_replace('.', $end_quote . '.' . $start_quote, $escaped) . $end_quote;
--    }
--    return $this->escapedFields[$field];
-+    return $this->identifierHandler->getPlatformColumnName($field);
-   }
- 
-   /**
-@@ -1295,11 +1265,7 @@ public function escapeField($field) {
-    *   The sanitized alias name.
-    */
-   public function escapeAlias($field) {
--    if (!isset($this->escapedAliases[$field])) {
--      [$start_quote, $end_quote] = $this->identifierQuotes;
--      $this->escapedAliases[$field] = $start_quote . preg_replace('/[^A-Za-z0-9_]+/', '', $field) . $end_quote;
--    }
--    return $this->escapedAliases[$field];
-+    return $this->identifierHandler->getPlatformAliasName($field);
-   }
- 
-   /**
-diff --git a/core/lib/Drupal/Core/Database/Identifier/IdentifierHandler.php b/core/lib/Drupal/Core/Database/Identifier/IdentifierHandler.php
+diff --git a/core/lib/Drupal/Core/Database/Query/PagerSelectExtenderFactory.php b/core/lib/Drupal/Core/Database/Query/PagerSelectExtenderFactory.php
 new file mode 100644
-index 00000000000..4d9aeb4c4e5
+index 00000000000..0d74835d47e
 --- /dev/null
-+++ b/core/lib/Drupal/Core/Database/Identifier/IdentifierHandler.php
-@@ -0,0 +1,178 @@
++++ b/core/lib/Drupal/Core/Database/Query/PagerSelectExtenderFactory.php
+@@ -0,0 +1,48 @@
 +<?php
 +
 +declare(strict_types=1);
 +
-+namespace Drupal\Core\Database\Identifier;
++namespace Drupal\Core\Database\Query;
++
++use Drupal\Core\Database\Connection;
++use Drupal\Core\Pager\PagerManagerInterface;
 +
 +/**
-+ * @todo
++ * Select extender factory for pager queries.
 + */
-+class IdentifierHandler {
++class PagerSelectExtenderFactory {
 +
 +  /**
-+   * @var array{'identifier':array<string,array<int,string>>,'platform':array<string,array<int,string>>}
-+   */
-+  protected array $identifiers;
-+
-+  /**
-+   * @var array{'identifier':array<string,array<int,string>>,'platform':array<string,array<int,string>>}
-+   */
-+  protected array $aliases;
-+
-+  /**
-+   * Constructs an IdentifierHandler object.
++   * Constructs a PagerSelectExtenderFactory object.
 +   *
-+   * @param string $tablePrefix
-+   *   The table prefix to be used by the database connection.
-+   * @param array{0:string, 1:string} $identifierQuotes
-+   *   The identifier quote characters for the database type. An array
-+   *   containing the start and end identifier quote characters for the
-+   *   database type. The ANSI SQL standard identifier quote character is a
-+   *   double quotation mark.
++   * @param \Drupal\Core\Pager\PagerManagerInterface $pagerManager
++   *   The pager manager service.
 +   */
 +  public function __construct(
-+    protected string $tablePrefix,
-+    protected array $identifierQuotes = ['"', '"'],
++    protected readonly PagerManagerInterface $pagerManager,
 +  ) {
 +  }
 +
 +  /**
-+   * @todo
++   * Returns a query extender for pager queries.
++   *
++   * @param \Drupal\Core\Database\Query\SelectInterface $query
++   *   Select query object.
++   * @param \Drupal\Core\Database\Connection $connection
++   *   Database connection object.
++   *
++   * @return \Drupal\Core\Database\Query\PagerSelectExtender
++   *   A query extender for pager queries.
 +   */
-+  public function getTablePrefix(): string {
-+    return $this->tablePrefix;
-+  }
-+
-+  /**
-+   * @todo
-+   */
-+  protected function setIdentifier(string $identifier, string $platform_identifier, IdentifierType $type, bool $isAlias): void {
-+    if (!$isAlias) {
-+      $this->identifiers['identifier'][$identifier][$type->value] = $platform_identifier;
-+      $this->identifiers['platform'][$platform_identifier][$type->value] = $identifier;
++  public function get(SelectInterface $query, Connection $connection): PagerSelectExtender {
++    // @todo remove this BC layer in drupal:11.0.0.
++    $class = $connection->getConnectionOptions()['namespace'] . '\\PagerSelectExtender';
++    if (class_exists($class)) {
++      @trigger_error("Invoking {$class} outside of a backend overridable service is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Include the driver class in a backend overridable service instead. See https://www.drupal.org/node/3217534", E_USER_DEPRECATED);
++      return new $class($query, $connection);
 +    }
-+    else {
-+      $this->aliases['identifier'][$identifier][$type->value] = $platform_identifier;
-+      $this->aliases['platform'][$platform_identifier][$type->value] = $identifier;
-+    }
-+  }
-+
-+  /**
-+   * @todo
-+   */
-+  protected function hasIdentifier(string $identifier, IdentifierType $type): bool {
-+    return isset($this->identifiers['identifier'][$identifier][$type->value]);
-+  }
-+
-+  /**
-+   * @todo
-+   */
-+  public function getPlatformIdentifierName(string $original_name, bool $quoted = TRUE): string {
-+    if (!$this->hasIdentifier($original_name, IdentifierType::Generic)) {
-+      $this->setIdentifier($original_name, $this->resolvePlatformGenericIdentifier($original_name), IdentifierType::Generic, FALSE);
-+    }
-+    [$start_quote, $end_quote] = $this->identifierQuotes;
-+    $identifier = $this->identifiers['identifier'][$original_name][IdentifierType::Generic->value];
-+    return $quoted ? $start_quote . $identifier . $end_quote : $identifier;
-+  }
-+
-+  /**
-+   * @todo
-+   */
-+  public function getPlatformDatabaseName(string $original_name, bool $quoted = TRUE): string {
-+    $original_name = (string) preg_replace('/[^A-Za-z0-9_]+/', '', $original_name);
-+    if (!$this->hasIdentifier($original_name, IdentifierType::Database)) {
-+      $this->setIdentifier($original_name, $this->resolvePlatformDatabaseIdentifier($original_name), IdentifierType::Database, FALSE);
-+    }
-+    [$start_quote, $end_quote] = $this->identifierQuotes;
-+    return $quoted ?
-+      $start_quote . $this->identifiers['identifier'][$original_name][IdentifierType::Database->value] . $end_quote :
-+      $this->identifiers['identifier'][$original_name][IdentifierType::Database->value];
-+  }
-+
-+  /**
-+   * @todo
-+   */
-+  public function getPlatformTableName(string $original_name, bool $prefixed = FALSE, bool $quoted = FALSE): string {
-+    $original_name = (string) preg_replace('/[^A-Za-z0-9_.]+/', '', $original_name);
-+    if (!$this->hasIdentifier($original_name, IdentifierType::Table)) {
-+      $table_name = $this->resolvePlatformTableIdentifier($original_name);
-+      $this->setIdentifier($original_name, $table_name, IdentifierType::Table, FALSE);
-+      $this->setIdentifier($original_name, $this->getTablePrefix() . $table_name, IdentifierType::PrefixedTable, FALSE);
-+    }
-+    [$start_quote, $end_quote] = $this->identifierQuotes;
-+    $table = $prefixed ? $this->identifiers['identifier'][$original_name][IdentifierType::PrefixedTable->value] : $this->identifiers['identifier'][$original_name][IdentifierType::Table->value];
-+    return $quoted ? $start_quote . str_replace(".", "$end_quote.$start_quote", $table) . $end_quote : $table;
-+  }
-+
-+  /**
-+   * @todo
-+   */
-+  public function getPlatformColumnName(string $original_name, bool $quoted = TRUE): string {
-+    if ($original_name === '') {
-+      return '';
-+    }
-+    $original_name = (string) preg_replace('/[^A-Za-z0-9_.]+/', '', $original_name);
-+    if (!$this->hasIdentifier($original_name, IdentifierType::Column)) {
-+      $this->setIdentifier($original_name, $this->resolvePlatformColumnIdentifier($original_name), IdentifierType::Column, FALSE);
-+    }
-+    // Sometimes fields have the format table_alias.field. In such cases
-+    // both identifiers should be quoted, for example, "table_alias"."field".
-+    [$start_quote, $end_quote] = $this->identifierQuotes;
-+    return $quoted ?
-+      $start_quote . str_replace(".", "$end_quote.$start_quote", $this->identifiers['identifier'][$original_name][IdentifierType::Column->value]) . $end_quote :
-+      $this->identifiers['identifier'][$original_name][IdentifierType::Column->value];
-+  }
-+
-+  /**
-+   * @todo
-+   */
-+  public function getPlatformAliasName(string $original_name, IdentifierType $type = IdentifierType::Generic, bool $quoted = TRUE): string {
-+    $original_name = (string) preg_replace('/[^A-Za-z0-9_]+/', '', $original_name);
-+    if ($original_name[0] === $this->identifierQuotes[0]) {
-+      $original_name = substr($original_name, 1, -1);
-+    }
-+    if (!$this->hasIdentifier($original_name, IdentifierType::Alias)) {
-+      $this->setIdentifier($original_name, $this->resolvePlatformGenericIdentifier($original_name), $type, TRUE);
-+    }
-+    [$start_quote, $end_quote] = $this->identifierQuotes;
-+    $alias = $this->aliases['identifier'][$original_name][$type->value] ?? $this->identifiers['identifier'][$original_name][0];
-+    return $quoted ? $start_quote . $alias . $end_quote : $alias;
-+  }
-+
-+  /**
-+   * @todo
-+   */
-+  protected function resolvePlatformGenericIdentifier(string $identifier): string {
-+    return $identifier;
-+  }
-+
-+  /**
-+   * @todo
-+   */
-+  protected function resolvePlatformDatabaseIdentifier(string $identifier): string {
-+    return $identifier;
-+  }
-+
-+  /**
-+   * @todo
-+   */
-+  protected function resolvePlatformTableIdentifier(string $identifier): string {
-+    return $identifier;
-+  }
-+
-+  /**
-+   * @todo
-+   */
-+  protected function resolvePlatformColumnIdentifier(string $identifier): string {
-+    return $identifier;
-+  }
-+
-+  /**
-+   * @todo
-+   */
-+  protected function resolvePlatformAliasIdentifier(string $identifier, int $type = 0): string {
-+    return $identifier;
++    // @todo end
++    return new PagerSelectExtender($query, $connection, $this->pagerManager);
 +  }
 +
 +}
-diff --git a/core/lib/Drupal/Core/Database/Identifier/IdentifierType.php b/core/lib/Drupal/Core/Database/Identifier/IdentifierType.php
-new file mode 100644
-index 00000000000..d957767fce5
---- /dev/null
-+++ b/core/lib/Drupal/Core/Database/Identifier/IdentifierType.php
-@@ -0,0 +1,25 @@
-+<?php
-+
-+/**
-+ * @file
-+ * Enum for database identifier types.
-+ */
-+
-+declare(strict_types=1);
-+
-+namespace Drupal\Core\Database\Identifier;
-+
-+/**
-+ * Enum for database identifier types.
-+ */
-+enum IdentifierType: int {
-+  case Generic = 0x0;
-+  case Database = 0x4;
-+  case Sequence = 0x5;
-+  case Table = 0x7;
-+  case PrefixedTable = 0x8;
-+  case Column = 0xC;
-+  case Index = 0xD;
-+
-+  case Alias = 0x100;
-+}
-diff --git a/core/lib/Drupal/Core/Database/Schema.php b/core/lib/Drupal/Core/Database/Schema.php
-index 9153cd9ef8f..4d7d516866e 100644
---- a/core/lib/Drupal/Core/Database/Schema.php
-+++ b/core/lib/Drupal/Core/Database/Schema.php
-@@ -82,12 +82,16 @@ public function nextPlaceholder() {
-    *   A keyed array with information about the schema, table name and prefix.
+diff --git a/core/lib/Drupal/Core/Database/Query/Select.php b/core/lib/Drupal/Core/Database/Query/Select.php
+index 157696d1c28..fed9bce33c8 100644
+--- a/core/lib/Drupal/Core/Database/Query/Select.php
++++ b/core/lib/Drupal/Core/Database/Query/Select.php
+@@ -331,6 +331,17 @@ public function havingCompile(Connection $connection) {
+    * {@inheritdoc}
     */
-   protected function getPrefixInfo($table = 'default', $add_prefix = TRUE) {
-+    $prefix = $this->connection->getPrefix();
-     $info = [
-       'schema' => $this->defaultSchema,
--      'prefix' => $this->connection->getPrefix(),
-+      'prefix' => $prefix,
-     ];
--    if ($add_prefix) {
--      $table = $info['prefix'] . $table;
-+    if (strpos($table, '%') !== FALSE) {
-+      $table = ($add_prefix ? $prefix : '') . $table;
+   public function extend($extender_name) {
++    $serviceName = ltrim($extender_name, '\\');
++
++    // @todo remove the BC layer in Drupal 11, remove the if wrapper and just
++    // leave the return.
++    // @see https://www.drupal.org/project/drupal/issues/3260284
++    if (\Drupal::hasService($serviceName)) {
++      return \Drupal::service($serviceName)->get($this, $this->connection);
 +    }
-+    else {
-+      $table = $this->connection->getIdentifierHandler()->getPlatformTableName($table, $add_prefix);
-     }
-     // If the prefix contains a period in it, then that means the prefix also
-     // contains a schema reference in which case we will change the schema key
-diff --git a/core/modules/migrate/tests/src/Unit/MigrateSqlIdMapTest.php b/core/modules/migrate/tests/src/Unit/MigrateSqlIdMapTest.php
-index cf7cf0a9b84..058b1526fc4 100644
---- a/core/modules/migrate/tests/src/Unit/MigrateSqlIdMapTest.php
-+++ b/core/modules/migrate/tests/src/Unit/MigrateSqlIdMapTest.php
-@@ -975,8 +975,8 @@ public function testGetQualifiedMapTablePrefix() {
-     $qualified_map_table = $this->getIdMap()->getQualifiedMapTableName();
-     // The SQLite driver is a special flower. It will prefix tables with
-     // PREFIX.TABLE, instead of the standard PREFIXTABLE.
--    // @see \Drupal\sqlite\Driver\Database\sqlite\Connection::__construct()
--    $this->assertEquals('prefix.migrate_map_sql_idmap_test', $qualified_map_table);
-+    // @see \Drupal\Core\Database\Driver\sqlite\Connection::__construct()
-+    $this->assertEquals('"prefix"."migrate_map_sql_idmap_test"', $qualified_map_table);
-   }
- 
-   /**
-diff --git a/core/modules/mysql/src/Driver/Database/mysql/Connection.php b/core/modules/mysql/src/Driver/Database/mysql/Connection.php
-index e0b33c856f0..35496e263f5 100644
---- a/core/modules/mysql/src/Driver/Database/mysql/Connection.php
-+++ b/core/modules/mysql/src/Driver/Database/mysql/Connection.php
-@@ -9,6 +9,7 @@
- use Drupal\Core\Database\DatabaseException;
- use Drupal\Core\Database\DatabaseExceptionWrapper;
- use Drupal\Core\Database\DatabaseNotFoundException;
-+use Drupal\Core\Database\Identifier\IdentifierHandler;
- use Drupal\Core\Database\Query\Condition;
- use Drupal\Core\Database\StatementWrapperIterator;
- use Drupal\Core\Database\SupportsTemporaryTablesInterface;
-@@ -91,11 +92,6 @@ class Connection extends DatabaseConnection implements SupportsTemporaryTablesIn
-    */
-   const MIN_MAX_ALLOWED_PACKET = 1024;
- 
--  /**
--   * {@inheritdoc}
--   */
--  protected $identifierQuotes = ['"', '"'];
--
-   /**
-    * {@inheritdoc}
-    */
-@@ -122,10 +118,10 @@ public function __construct(\PDO $connection, array $connection_options) {
-       }
-     }
- 
--    if ($this->identifierQuotes === ['"', '"'] && !$is_ansi_quotes_mode) {
--      $this->identifierQuotes = ['`', '`'];
--    }
-     parent::__construct($connection, $connection_options);
 +
-+    // Initialize the identifier handler.
-+    $this->identifierHandler = new IdentifierHandler($this->connectionOptions['prefix'], $is_ansi_quotes_mode ? ['"', '"'] : ['`', '`']);
-   }
- 
-   /**
-diff --git a/core/modules/mysql/tests/src/Unit/ConnectionTest.php b/core/modules/mysql/tests/src/Unit/ConnectionTest.php
-index 84200f8aaa0..446d27c5c94 100644
---- a/core/modules/mysql/tests/src/Unit/ConnectionTest.php
-+++ b/core/modules/mysql/tests/src/Unit/ConnectionTest.php
-@@ -66,7 +66,6 @@ private function createConnection(): Connection {
- 
-       public function __construct(\PDO $connection) {
-         $this->connection = $connection;
--        $this->setPrefix('');
-       }
- 
-     };
-diff --git a/core/modules/pgsql/src/Driver/Database/pgsql/Connection.php b/core/modules/pgsql/src/Driver/Database/pgsql/Connection.php
-index 3ba9748bcdd..7eef9005eb1 100644
---- a/core/modules/pgsql/src/Driver/Database/pgsql/Connection.php
-+++ b/core/modules/pgsql/src/Driver/Database/pgsql/Connection.php
-@@ -7,6 +7,7 @@
- use Drupal\Core\Database\DatabaseAccessDeniedException;
- use Drupal\Core\Database\DatabaseNotFoundException;
- use Drupal\Core\Database\ExceptionHandler;
-+use Drupal\Core\Database\Identifier\IdentifierHandler;
- use Drupal\Core\Database\Query\Condition;
- use Drupal\Core\Database\StatementInterface;
- use Drupal\Core\Database\StatementWrapperIterator;
-@@ -67,11 +68,6 @@ class Connection extends DatabaseConnection implements SupportsTemporaryTablesIn
-    */
-   protected $transactionalDDLSupport = TRUE;
- 
--  /**
--   * {@inheritdoc}
--   */
--  protected $identifierQuotes = ['"', '"'];
--
-   /**
-    * Constructs a connection object.
-    */
-@@ -95,26 +91,9 @@ public function __construct(\PDO $connection, array $connection_options) {
-     if (isset($connection_options['init_commands'])) {
-       $this->connection->exec(implode('; ', $connection_options['init_commands']));
++    // @todo remove the BC layer in Drupal 11.
++    // Start of BC layer.
+     $parts = explode('\\', $extender_name);
+     $class = end($parts);
+     $driver_class = $this->connection->getDriverClass($class);
+@@ -338,6 +349,7 @@ public function extend($extender_name) {
+       return new $driver_class($this, $this->connection);
      }
--  }
- 
--  /**
--   * {@inheritdoc}
--   */
--  protected function setPrefix($prefix) {
--    assert(is_string($prefix), 'The \'$prefix\' argument to ' . __METHOD__ . '() must be a string');
--    $this->prefix = $prefix;
--
--    // Add the schema name if it is not set to public, otherwise it will use the
--    // default schema name.
--    $quoted_schema = '';
--    if (isset($this->connectionOptions['schema']) && ($this->connectionOptions['schema'] !== 'public')) {
--      $quoted_schema = $this->identifierQuotes[0] . $this->connectionOptions['schema'] . $this->identifierQuotes[1] . '.';
--    }
--
--    $this->tablePlaceholderReplacements = [
--      $quoted_schema . $this->identifierQuotes[0] . str_replace('.', $this->identifierQuotes[1] . '.' . $this->identifierQuotes[0], $prefix),
--      $this->identifierQuotes[1],
--    ];
-+    // Initialize the identifier handler.
-+    $this->identifierHandler = new IdentifierHandler($connection_options['prefix']);
+     return new $extender_name($this, $this->connection);
++    // End of BC layer.
    }
  
    /**
-@@ -346,7 +325,7 @@ public function getFullQualifiedTableName($table) {
- 
-     // The fully qualified table name in PostgreSQL is in the form of
-     // <database>.<schema>.<table>.
--    return $options['database'] . '.' . $schema . '.' . $this->getPrefix() . $table;
-+    return $options['database'] . '.' . $schema . '.' . $this->identifierHandler->getPlatformTableName($table, TRUE, FALSE);
-   }
- 
-   /**
-diff --git a/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php b/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php
-index 0c14efb20f7..8d7352a8592 100644
---- a/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php
-+++ b/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php
-@@ -6,6 +6,7 @@
- use Drupal\Core\Database\DatabaseExceptionWrapper;
- use Drupal\Core\Database\DatabaseNotFoundException;
- use Drupal\Core\Database\ExceptionHandler;
-+use Drupal\Core\Database\Identifier\IdentifierHandler;
- use Drupal\Core\Database\Query\Condition;
- use Drupal\Core\Database\StatementInterface;
- use Drupal\Core\Database\SupportsTemporaryTablesInterface;
-@@ -73,11 +74,6 @@ class Connection extends DatabaseConnection implements SupportsTemporaryTablesIn
-    */
-   protected $transactionalDDLSupport = TRUE;
- 
--  /**
--   * {@inheritdoc}
--   */
--  protected $identifierQuotes = ['"', '"'];
--
-   /**
-    * Constructs a \Drupal\sqlite\Driver\Database\sqlite\Connection object.
-    */
-@@ -93,8 +89,8 @@ public function __construct(\PDO $connection, array $connection_options) {
-       $prefix .= '.';
+diff --git a/core/lib/Drupal/Core/Database/Query/SelectExtender.php b/core/lib/Drupal/Core/Database/Query/SelectExtender.php
+index 0681813f04c..fbe921b86d0 100644
+--- a/core/lib/Drupal/Core/Database/Query/SelectExtender.php
++++ b/core/lib/Drupal/Core/Database/Query/SelectExtender.php
+@@ -221,6 +221,17 @@ public function extend($extender_name) {
+     // We cannot call $this->query->extend(), because with multiple extenders
+     // you will replace all the earlier extenders with the last extender,
+     // instead of creating list of objects that extend each other.
++    $serviceName = ltrim($extender_name, '\\');
++
++    // @todo remove the BC layer in Drupal 11, remove the if wrapper and just
++    // leave the return.
++    // @see https://www.drupal.org/project/drupal/issues/3260284
++    if (\Drupal::hasService($serviceName)) {
++      return \Drupal::service($serviceName)->get($this, $this->connection);
++    }
++
++    // @todo remove the BC layer in Drupal 11.
++    // Start of BC layer.
+     $parts = explode('\\', $extender_name);
+     $class = end($parts);
+     $driver_class = $this->connection->getDriverClass($class);
+@@ -228,6 +239,7 @@ public function extend($extender_name) {
+       return new $driver_class($this, $this->connection);
      }
- 
--    // Regenerate the prefix.
--    $this->setPrefix($prefix);
-+    // Initialize the identifier handler.
-+    $this->identifierHandler = new IdentifierHandler($prefix);
+     return new $extender_name($this, $this->connection);
++    // End of BC layer.
    }
  
-   /**
-@@ -459,10 +455,8 @@ public function nextId($existing_id = 0) {
-    * {@inheritdoc}
-    */
-   public function getFullQualifiedTableName($table) {
--    $prefix = $this->getPrefix();
--
-     // Don't include the SQLite database file name as part of the table name.
--    return $prefix . $table;
-+    return $this->identifierHandler->getPlatformTableName($table, TRUE, TRUE);
-   }
- 
-   /**
-diff --git a/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php b/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
-index 28670b71753..fa6e0c55c1c 100644
---- a/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
-+++ b/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
-@@ -17,53 +17,6 @@
-  */
- class ConnectionTest extends UnitTestCase {
- 
--  /**
--   * Data provider for testPrefixRoundTrip().
--   *
--   * @return array
--   *   Array of arrays with the following elements:
--   *   - Arguments to pass to Connection::setPrefix().
--   *   - Expected result from Connection::tablePrefix().
--   */
--  public function providerPrefixRoundTrip() {
--    return [
--      [
--        [
--          '' => 'test_',
--        ],
--        'test_',
--      ],
--      [
--        [
--          'fooTable' => 'foo_',
--          'barTable' => 'foo_',
--        ],
--        'foo_',
--      ],
--    ];
--  }
--
--  /**
--   * Exercise setPrefix() and tablePrefix().
--   *
--   * @dataProvider providerPrefixRoundTrip
--   */
--  public function testPrefixRoundTrip($expected, $prefix_info) {
--    $mock_pdo = $this->createMock('Drupal\Tests\Core\Database\Stub\StubPDO');
--    $connection = new StubConnection($mock_pdo, []);
--
--    // setPrefix() is protected, so we make it accessible with reflection.
--    $reflection = new \ReflectionClass('Drupal\Tests\Core\Database\Stub\StubConnection');
--    $set_prefix = $reflection->getMethod('setPrefix');
--
--    // Set the prefix data.
--    $set_prefix->invokeArgs($connection, [$prefix_info]);
--    // Check the round-trip.
--    foreach ($expected as $table => $prefix) {
--      $this->assertEquals($prefix, $connection->getPrefix());
--    }
--  }
--
-   /**
-    * Data provider for testPrefixTables().
-    *
-@@ -574,26 +527,6 @@ public function testEscapeDatabase($expected, $name, array $identifier_quote = [
-     $this->assertEquals($expected, $connection->escapeDatabase($name));
-   }
- 
--  /**
--   * @covers ::__construct
--   */
--  public function testIdentifierQuotesAssertCount() {
--    $this->expectException(\AssertionError::class);
--    $this->expectExceptionMessage('\Drupal\Core\Database\Connection::$identifierQuotes must contain 2 string values');
--    $mock_pdo = $this->createMock(StubPDO::class);
--    new StubConnection($mock_pdo, [], ['"']);
--  }
--
--  /**
--   * @covers ::__construct
--   */
--  public function testIdentifierQuotesAssertString() {
--    $this->expectException(\AssertionError::class);
--    $this->expectExceptionMessage('\Drupal\Core\Database\Connection::$identifierQuotes must contain 2 string values');
--    $mock_pdo = $this->createMock(StubPDO::class);
--    new StubConnection($mock_pdo, [], [0, '1']);
--  }
--
-   /**
-    * @covers ::__construct
-    */
-diff --git a/core/tests/Drupal/Tests/Core/Database/Stub/StubConnection.php b/core/tests/Drupal/Tests/Core/Database/Stub/StubConnection.php
-index 2ce07e0646b..701a4df045a 100644
---- a/core/tests/Drupal/Tests/Core/Database/Stub/StubConnection.php
-+++ b/core/tests/Drupal/Tests/Core/Database/Stub/StubConnection.php
+   /* Alter accessors to expose the query data to alter hooks. */
+diff --git a/core/lib/Drupal/Core/Database/Query/TableSortExtender.php b/core/lib/Drupal/Core/Database/Query/TableSortExtender.php
+index 60da1b864ac..c88b3eb4cd5 100644
+--- a/core/lib/Drupal/Core/Database/Query/TableSortExtender.php
++++ b/core/lib/Drupal/Core/Database/Query/TableSortExtender.php
 @@ -4,6 +4,7 @@
  
  use Drupal\Core\Database\Connection;
- use Drupal\Core\Database\ExceptionHandler;
-+use Drupal\Core\Database\Identifier\IdentifierHandler;
- use Drupal\Core\Database\Log;
- use Drupal\Core\Database\Query\Delete;
- use Drupal\Core\Database\Query\Insert;
-@@ -46,8 +47,9 @@ class StubConnection extends Connection {
-    *   The identifier quote characters. Defaults to an empty strings.
-    */
-   public function __construct(\PDO $connection, array $connection_options, $identifier_quotes = ['', '']) {
--    $this->identifierQuotes = $identifier_quotes;
-     parent::__construct($connection, $connection_options);
-+    // Initialize the identifier handler.
-+    $this->identifierHandler = new IdentifierHandler($connection_options['prefix'] ?? '', $identifier_quotes);
-   }
+ use Drupal\Core\Utility\TableSort;
++use Symfony\Component\HttpFoundation\RequestStack;
+ 
+ /**
+  * Query extender class for tablesort queries.
+@@ -11,10 +12,27 @@
+ class TableSortExtender extends SelectExtender {
  
    /**
+-   * {@inheritdoc}
++   * The request stack.
+    */
+-  public function __construct(SelectInterface $query, Connection $connection) {
++  protected RequestStack $requestStack;
++
++  /**
++   * Constructs a TableSortExtender object.
++   *
++   * @param \Drupal\Core\Database\Query\SelectInterface $query
++   *   Select query object.
++   * @param \Drupal\Core\Database\Connection $connection
++   *   Database connection object.
++   * @param \Symfony\Component\HttpFoundation\RequestStack $request_stack
++   *   The request stack.
++   */
++  public function __construct(SelectInterface $query, Connection $connection, RequestStack $request_stack = NULL) {
++    if (is_null($request_stack)) {
++      @trigger_error('Calling ' . __METHOD__ . ' without the $request_stack argument is deprecated in drupal:10.2.0 and will be required in drupal:11.0.0. Use the relevant service to instantiate extenders. See https://www.drupal.org/node/3218001', E_USER_DEPRECATED);
++      $request_stack = \Drupal::service('request_stack');
++    }
+     parent::__construct($query, $connection);
++    $this->requestStack = $request_stack;
+ 
+     // Add convenience tag to mark that this is an extended query. We have to
+     // do this in the constructor to ensure that it is set before preExecute()
+@@ -34,7 +52,7 @@ public function __construct(SelectInterface $query, Connection $connection) {
+    * @see table.html.twig
+    */
+   public function orderByHeader(array $header) {
+-    $context = TableSort::getContextFromRequest($header, \Drupal::request());
++    $context = TableSort::getContextFromRequest($header, $this->requestStack->getCurrentRequest());
+     if (!empty($context['sql'])) {
+       // Based on code from \Drupal\Core\Database\Connection::escapeTable(),
+       // but this can also contain a dot.
+diff --git a/core/lib/Drupal/Core/Database/Query/TableSortExtenderFactory.php b/core/lib/Drupal/Core/Database/Query/TableSortExtenderFactory.php
+new file mode 100644
+index 00000000000..5133988e75f
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/Query/TableSortExtenderFactory.php
+@@ -0,0 +1,48 @@
++<?php
++
++declare(strict_types=1);
++
++namespace Drupal\Core\Database\Query;
++
++use Drupal\Core\Database\Connection;
++use Symfony\Component\HttpFoundation\RequestStack;
++
++/**
++ * Select extender factory for tablesort queries.
++ */
++class TableSortExtenderFactory {
++
++  /**
++   * Constructs a TableSortExtenderFactory object.
++   *
++   * @param \Symfony\Component\HttpFoundation\RequestStack $requestStack
++   *   The request stack.
++   */
++  public function __construct(
++    protected readonly RequestStack $requestStack,
++  ) {
++  }
++
++  /**
++   * Returns a query extender for tablesort queries.
++   *
++   * @param \Drupal\Core\Database\Query\SelectInterface $query
++   *   Select query object.
++   * @param \Drupal\Core\Database\Connection $connection
++   *   Database connection object.
++   *
++   * @return \Drupal\Core\Database\Query\TableSortExtender
++   *   A query extender for tablesort queries.
++   */
++  public function get(SelectInterface $query, Connection $connection): TableSortExtender {
++    // @todo remove this BC layer in drupal:11.0.0.
++    $class = $connection->getConnectionOptions()['namespace'] . '\\TableSortExtender';
++    if (class_exists($class)) {
++      @trigger_error("Invoking {$class} outside of a backend overridable service is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Include the driver class in a backend overridable service instead. See https://www.drupal.org/node/3217534", E_USER_DEPRECATED);
++      return new $class($query, $connection);
++    }
++    // @todo end
++    return new TableSortExtender($query, $connection, $this->requestStack);
++  }
++
++}
+diff --git a/core/modules/search/search.services.yml b/core/modules/search/search.services.yml
+index bda507af4f0..405428589a4 100644
+--- a/core/modules/search/search.services.yml
++++ b/core/modules/search/search.services.yml
+@@ -19,3 +19,19 @@ services:
+     class: Drupal\search\SearchTextProcessor
+     arguments: ['@transliteration', '@config.factory', '@module_handler']
+   Drupal\search\SearchTextProcessorInterface: '@search.text_processor'
++
++  select_extender_factory.search_query:
++    class: Drupal\search\SearchQueryFactory
++    arguments: ['@config.factory', '@search.text_processor']
++    tags:
++      - { name: backend_overridable }
++  Drupal\search\SearchQueryFactory: '@select_extender_factory.search_query'
++  Drupal\search\SearchQuery: '@select_extender_factory.search_query'
++
++  select_extender_factory.views_search_query:
++    class: Drupal\search\ViewsSearchQueryFactory
++    arguments: ['@config.factory', '@search.text_processor']
++    tags:
++      - { name: backend_overridable }
++  Drupal\search\ViewsSearchQueryFactory: '@select_extender_factory.views_search_query'
++  Drupal\search\ViewsSearchQuery: '@select_extender_factory.views_search_query'
+diff --git a/core/modules/search/src/SearchQuery.php b/core/modules/search/src/SearchQuery.php
+index 73817872e34..4f994f9769d 100644
+--- a/core/modules/search/src/SearchQuery.php
++++ b/core/modules/search/src/SearchQuery.php
+@@ -2,6 +2,8 @@
+ 
+ namespace Drupal\search;
+ 
++use Drupal\Core\Config\ConfigFactoryInterface;
++use Drupal\Core\Database\Connection;
+ use Drupal\Core\Database\Query\SelectExtender;
+ use Drupal\Core\Database\Query\SelectInterface;
+ 
+@@ -73,6 +75,16 @@ class SearchQuery extends SelectExtender {
+    */
+   const NO_KEYWORD_MATCHES = 8;
+ 
++  /**
++   * The config factory.
++   */
++  protected ConfigFactoryInterface $configFactory;
++
++  /**
++   * The search text processor service.
++   */
++  protected SearchTextProcessorInterface $searchTextProcessor;
++
+   /**
+    * The keywords and advanced search options that are entered by the user.
+    *
+@@ -186,6 +198,32 @@ class SearchQuery extends SelectExtender {
+    */
+   protected $multiply = [];
+ 
++  /**
++   * Constructs a SearchQuery object.
++   *
++   * @param \Drupal\Core\Database\Query\SelectInterface $query
++   *   Select query object.
++   * @param \Drupal\Core\Database\Connection $connection
++   *   Database connection object.
++   * @param \Drupal\Core\Config\ConfigFactoryInterface $config_factory
++   *   The config factory.
++   * @param \Drupal\search\SearchTextProcessorInterface $search_text_processor
++   *   The search text processor service.
++   */
++  public function __construct(SelectInterface $query, Connection $connection, ConfigFactoryInterface $config_factory = NULL, SearchTextProcessorInterface $search_text_processor = NULL) {
++    if (is_null($config_factory)) {
++      @trigger_error('Calling ' . __METHOD__ . ' without the $config_factory argument is deprecated in drupal:10.2.0 and will be required in drupal:11.0.0. Use the relevant service to instantiate extenders. See https://www.drupal.org/node/3218001', E_USER_DEPRECATED);
++      $config_factory = \Drupal::service('config.factory');
++    }
++    if (is_null($search_text_processor)) {
++      @trigger_error('Calling ' . __METHOD__ . ' without the $search_text_processor argument is deprecated in drupal:10.2.0 and will be required in drupal:11.0.0. Use the relevant service to instantiate extenders. See https://www.drupal.org/node/3218001', E_USER_DEPRECATED);
++      $search_text_processor = \Drupal::service('search.text_processor');
++    }
++    parent::__construct($query, $connection);
++    $this->configFactory = $config_factory;
++    $this->searchTextProcessor = $search_text_processor;
++  }
++
+   /**
+    * Sets the search query expression.
+    *
+@@ -231,9 +269,7 @@ protected function parseSearchExpression() {
+ 
+     // Classify tokens.
+     $in_or = FALSE;
+-    $limit_combinations = \Drupal::config('search.settings')->get('and_or_limit');
+-    /** @var \Drupal\search\SearchTextProcessorInterface $text_processor */
+-    $text_processor = \Drupal::service('search.text_processor');
++    $limit_combinations = $this->configFactory->get('search.settings')->get('and_or_limit');
+     // The first search expression does not count as AND.
+     $and_count = -1;
+     $or_count = 0;
+@@ -256,7 +292,7 @@ protected function parseSearchExpression() {
+       // Simplify keyword according to indexing rules and external
+       // preprocessors. Use same process as during search indexing, so it
+       // will match search index.
+-      $words = $text_processor->analyze($match[2]);
++      $words = $this->searchTextProcessor->analyze($match[2]);
+       // Re-explode in case simplification added more words, except when
+       // matching a phrase.
+       $words = $phrase ? [$words] : preg_split('/ /', $words, -1, PREG_SPLIT_NO_EMPTY);
+@@ -364,7 +400,7 @@ protected function parseWord($word) {
+     $split = explode(' ', $word);
+     foreach ($split as $s) {
+       $num = is_numeric($s);
+-      if ($num || mb_strlen($s) >= \Drupal::config('search.settings')->get('index.minimum_word_size')) {
++      if ($num || mb_strlen($s) >= $this->configFactory->get('search.settings')->get('index.minimum_word_size')) {
+         if (!isset($this->words[$s])) {
+           $this->words[$s] = $s;
+           $num_new_scores++;
+diff --git a/core/modules/search/src/SearchQueryFactory.php b/core/modules/search/src/SearchQueryFactory.php
+new file mode 100644
+index 00000000000..f6cc07d3adf
+--- /dev/null
++++ b/core/modules/search/src/SearchQueryFactory.php
+@@ -0,0 +1,52 @@
++<?php
++
++declare(strict_types=1);
++
++namespace Drupal\search;
++
++use Drupal\Core\Config\ConfigFactoryInterface;
++use Drupal\Core\Database\Connection;
++use Drupal\Core\Database\Query\SelectInterface;
++
++/**
++ * Select extender factory for search queries.
++ */
++class SearchQueryFactory {
++
++  /**
++   * Constructs a SearchQueryFactory object.
++   *
++   * @param \Drupal\Core\Config\ConfigFactoryInterface $configFactory
++   *   The config factory.
++   * @param \Drupal\search\SearchTextProcessorInterface $searchTextProcessor
++   *   The search text processor service.
++   */
++  public function __construct(
++    protected readonly ConfigFactoryInterface $configFactory,
++    protected readonly SearchTextProcessorInterface $searchTextProcessor,
++  ) {
++  }
++
++  /**
++   * Returns a query extender for search queries.
++   *
++   * @param \Drupal\Core\Database\Query\SelectInterface $query
++   *   Select query object.
++   * @param \Drupal\Core\Database\Connection $connection
++   *   Database connection object.
++   *
++   * @return Drupal\search\SearchQuery
++   *   A query extender for search queries.
++   */
++  public function get(SelectInterface $query, Connection $connection): SearchQuery {
++    // @todo remove this BC layer in drupal:11.0.0.
++    $class = $connection->getConnectionOptions()['namespace'] . '\\SearchQuery';
++    if (class_exists($class)) {
++      @trigger_error("Invoking {$class} outside of a backend overridable service is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Include the driver class in a backend overridable service instead. See https://www.drupal.org/node/3217534", E_USER_DEPRECATED);
++      return new $class($query, $connection);
++    }
++    // @todo end
++    return new SearchQuery($query, $connection, $this->configFactory, $this->searchTextProcessor);
++  }
++
++}
+diff --git a/core/modules/search/src/ViewsSearchQueryFactory.php b/core/modules/search/src/ViewsSearchQueryFactory.php
+new file mode 100644
+index 00000000000..0f2ead08722
+--- /dev/null
++++ b/core/modules/search/src/ViewsSearchQueryFactory.php
+@@ -0,0 +1,52 @@
++<?php
++
++declare(strict_types=1);
++
++namespace Drupal\search;
++
++use Drupal\Core\Config\ConfigFactoryInterface;
++use Drupal\Core\Database\Connection;
++use Drupal\Core\Database\Query\SelectInterface;
++
++/**
++ * Select extender factory for views search queries.
++ */
++class ViewsSearchQueryFactory {
++
++  /**
++   * Constructs a ViewsSearchQueryFactory object.
++   *
++   * @param \Drupal\Core\Config\ConfigFactoryInterface $configFactory
++   *   The config factory.
++   * @param \Drupal\search\SearchTextProcessorInterface $searchTextProcessor
++   *   The search text processor service.
++   */
++  public function __construct(
++    protected readonly ConfigFactoryInterface $configFactory,
++    protected readonly SearchTextProcessorInterface $searchTextProcessor,
++  ) {
++  }
++
++  /**
++   * Returns a query extender for views search queries.
++   *
++   * @param \Drupal\Core\Database\Query\SelectInterface $query
++   *   Select query object.
++   * @param \Drupal\Core\Database\Connection $connection
++   *   Database connection object.
++   *
++   * @return Drupal\search\ViewsSearchQuery
++   *   A query extender for views search queries.
++   */
++  public function get(SelectInterface $query, Connection $connection): ViewsSearchQuery {
++    // @todo remove this BC layer in drupal:11.0.0.
++    $class = $connection->getConnectionOptions()['namespace'] . '\\ViewsSearchQuery';
++    if (class_exists($class)) {
++      @trigger_error("Invoking {$class} outside of a backend overridable service is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Include the driver class in a backend overridable service instead. See https://www.drupal.org/node/3217534", E_USER_DEPRECATED);
++      return new $class($query, $connection);
++    }
++    // @todo end
++    return new ViewsSearchQuery($query, $connection, $this->configFactory, $this->searchTextProcessor);
++  }
++
++}
+diff --git a/core/modules/system/tests/modules/database_test/database_test.services.yml b/core/modules/system/tests/modules/database_test/database_test.services.yml
+index 0bac13c303a..9156fbc5376 100644
+--- a/core/modules/system/tests/modules/database_test/database_test.services.yml
++++ b/core/modules/system/tests/modules/database_test/database_test.services.yml
+@@ -3,3 +3,8 @@ services:
+   Drupal\database_test\EventSubscriber\DatabaseEventSubscriber:
+     tags:
+       - { name: event_subscriber }
++  select_extender_factory.test_extender:
++    class: Drupal\database_test\TestExtenderFactory
++    tags:
++      - { name: backend_overridable }
++  Drupal\Core\Database\Query\SelectExtender: '@select_extender_factory.test_extender'
+diff --git a/core/modules/system/tests/modules/database_test/src/TestExtenderFactory.php b/core/modules/system/tests/modules/database_test/src/TestExtenderFactory.php
+new file mode 100644
+index 00000000000..0f7ee9439bd
+--- /dev/null
++++ b/core/modules/system/tests/modules/database_test/src/TestExtenderFactory.php
+@@ -0,0 +1,31 @@
++<?php
++
++declare(strict_types=1);
++
++namespace Drupal\database_test;
++
++use Drupal\Core\Database\Connection;
++use Drupal\Core\Database\Query\SelectExtender;
++use Drupal\Core\Database\Query\SelectInterface;
++
++/**
++ * Test select extender factory.
++ */
++class TestExtenderFactory {
++
++  /**
++   * Returns a test query extender.
++   *
++   * @param \Drupal\Core\Database\Query\SelectInterface $query
++   *   Select query object.
++   * @param \Drupal\Core\Database\Connection $connection
++   *   Database connection object.
++   *
++   * @return \Drupal\Core\Database\Query\SelectExtender
++   *   A test query extender.
++   */
++  public function get(SelectInterface $query, Connection $connection): SelectExtender {
++    return new SelectExtender($query, $connection);
++  }
++
++}
+diff --git a/core/tests/Drupal/KernelTests/Core/Database/ConnectionTest.php b/core/tests/Drupal/KernelTests/Core/Database/ConnectionTest.php
+index a7951e25cd6..a75255e8fb6 100644
+--- a/core/tests/Drupal/KernelTests/Core/Database/ConnectionTest.php
++++ b/core/tests/Drupal/KernelTests/Core/Database/ConnectionTest.php
+@@ -4,6 +4,7 @@
+ 
+ use Drupal\Core\Database\Database;
+ use Drupal\Core\Database\Query\Condition;
++use Drupal\Core\Pager\PagerManagerInterface;
+ 
+ /**
+  * Tests of the core database system.
+@@ -199,4 +200,14 @@ public function testDeprecatedTablePrefix(): void {
+     $this->assertIsString($this->connection->tablePrefix());
+   }
+ 
++  /**
++   * Tests deprecation of ::getPagerManager.
++   *
++   * @group legacy
++   */
++  public function testGetPagerManagerDeprecation() {
++    $this->expectDeprecation('Drupal\\Core\\Database\\Connection::getPagerManager() is deprecated in drupal:10.2.0 and will be required in drupal:11.0.0. Use dependency injection instead. See https://www.drupal.org/node/3218001');
++    $this->assertInstanceOf(PagerManagerInterface ::class, $this->connection->getPagerManager());
++  }
++
+ }
+diff --git a/core/tests/Drupal/KernelTests/Core/Database/SelectExtenderTest.php b/core/tests/Drupal/KernelTests/Core/Database/SelectExtenderTest.php
+index 5a23f9a2500..2cfe3e11dbc 100644
+--- a/core/tests/Drupal/KernelTests/Core/Database/SelectExtenderTest.php
++++ b/core/tests/Drupal/KernelTests/Core/Database/SelectExtenderTest.php
+@@ -3,8 +3,12 @@
+ namespace Drupal\KernelTests\Core\Database;
+ 
+ use Composer\Autoload\ClassLoader;
++use Drupal\Core\Database\Query\PagerSelectExtender;
+ use Drupal\Core\Database\Query\SelectExtender;
++use Drupal\Core\Database\Query\TableSortExtender;
+ use Drupal\KernelTests\KernelTestBase;
++use Drupal\search\SearchQuery;
++use Drupal\search\ViewsSearchQuery;
+ use Drupal\Tests\Core\Database\Stub\StubConnection;
+ use Drupal\Tests\Core\Database\Stub\StubPDO;
+ 
+@@ -17,7 +21,12 @@
+ class SelectExtenderTest extends KernelTestBase {
+ 
+   /**
+-   * Data provider for testExtend().
++   * {@inheritdoc}
++   */
++  protected static $modules = ['database_test', 'search'];
++
++  /**
++   * Data provider for ::testExtend().
+    *
+    * @return array
+    *   Array of arrays with the following elements:
+@@ -30,7 +39,7 @@ public function providerExtend(): array {
+       [
+         'Drupal\Core\Database\Query\PagerSelectExtender',
+         'Drupal\corefake\Driver\Database\corefake',
+-        'Drupal\Core\Database\Query\PagerSelectExtender',
++        PagerSelectExtender::class,
+       ],
+       [
+         'Drupal\Core\Database\Query\PagerSelectExtender',
+@@ -40,7 +49,7 @@ public function providerExtend(): array {
+       [
+         'Drupal\Core\Database\Query\TableSortExtender',
+         'Drupal\corefake\Driver\Database\corefake',
+-        'Drupal\Core\Database\Query\TableSortExtender',
++        TableSortExtender::class,
+       ],
+       [
+         'Drupal\Core\Database\Query\TableSortExtender',
+@@ -50,7 +59,7 @@ public function providerExtend(): array {
+       [
+         'Drupal\search\SearchQuery',
+         'Drupal\corefake\Driver\Database\corefake',
+-        'Drupal\search\SearchQuery',
++        SearchQuery::class,
+       ],
+       [
+         'Drupal\search\SearchQuery',
+@@ -60,17 +69,31 @@ public function providerExtend(): array {
+       [
+         'Drupal\search\ViewsSearchQuery',
+         'Drupal\corefake\Driver\Database\corefake',
+-        'Drupal\search\ViewsSearchQuery',
++        ViewsSearchQuery::class,
+       ],
+       [
+         'Drupal\search\ViewsSearchQuery',
+         'Drupal\corefake\Driver\Database\corefake',
+         '\Drupal\search\ViewsSearchQuery',
+       ],
++    ];
++  }
++
++  /**
++   * Data provider for ::testExtendWithLocalClasses().
++   *
++   * @return array
++   *   Array of arrays with the following elements:
++   *   - Expected namespaced class name.
++   *   - The database driver namespace.
++   *   - The namespaced class name for which to extend.
++   */
++  public function providerExtendWithLocalClasses(): array {
++    return [
+       [
+         'Drupal\corefake\Driver\Database\corefakeWithAllCustomClasses\PagerSelectExtender',
+         'Drupal\corefake\Driver\Database\corefakeWithAllCustomClasses',
+-        'Drupal\Core\Database\Query\PagerSelectExtender',
++        PagerSelectExtender::class,
+       ],
+       [
+         'Drupal\corefake\Driver\Database\corefakeWithAllCustomClasses\PagerSelectExtender',
+@@ -80,7 +103,7 @@ public function providerExtend(): array {
+       [
+         'Drupal\corefake\Driver\Database\corefakeWithAllCustomClasses\TableSortExtender',
+         'Drupal\corefake\Driver\Database\corefakeWithAllCustomClasses',
+-        'Drupal\Core\Database\Query\TableSortExtender',
++        TableSortExtender::class,
+       ],
+       [
+         'Drupal\corefake\Driver\Database\corefakeWithAllCustomClasses\TableSortExtender',
+@@ -90,7 +113,7 @@ public function providerExtend(): array {
+       [
+         'Drupal\corefake\Driver\Database\corefakeWithAllCustomClasses\SearchQuery',
+         'Drupal\corefake\Driver\Database\corefakeWithAllCustomClasses',
+-        'Drupal\search\SearchQuery',
++        SearchQuery::class,
+       ],
+       [
+         'Drupal\corefake\Driver\Database\corefakeWithAllCustomClasses\SearchQuery',
+@@ -100,7 +123,7 @@ public function providerExtend(): array {
+       [
+         'Drupal\corefake\Driver\Database\corefakeWithAllCustomClasses\ViewsSearchQuery',
+         'Drupal\corefake\Driver\Database\corefakeWithAllCustomClasses',
+-        'Drupal\search\ViewsSearchQuery',
++        ViewsSearchQuery::class,
+       ],
+       [
+         'Drupal\corefake\Driver\Database\corefakeWithAllCustomClasses\ViewsSearchQuery',
+@@ -118,6 +141,35 @@ public function providerExtend(): array {
+   public function testExtend(string $expected, string $namespace, string $extend): void {
+     $additional_class_loader = new ClassLoader();
+     $additional_class_loader->addPsr4("Drupal\\corefake\\Driver\\Database\\corefake\\", __DIR__ . "/../../../../../tests/fixtures/database_drivers/module/corefake/src/Driver/Database/corefake");
++    $additional_class_loader->register(TRUE);
++
++    $mock_pdo = $this->createMock(StubPDO::class);
++    $connection = new StubConnection($mock_pdo, ['namespace' => $namespace]);
++
++    // Tests the method \Drupal\Core\Database\Query\Select::extend().
++    $select = $connection->select('test')->extend($extend);
++    $this->assertEquals($expected, get_class($select));
++
++    // Get an instance of the class \Drupal\Core\Database\Query\SelectExtender.
++    $select_extender = $connection->select('test')->extend(SelectExtender::class);
++    $this->assertEquals(SelectExtender::class, get_class($select_extender));
++
++    // Tests the method \Drupal\Core\Database\Query\SelectExtender::extend().
++    $select_extender_extended = $select_extender->extend($extend);
++    $this->assertEquals($expected, get_class($select_extender_extended));
++  }
++
++  /**
++   * @covers ::extend
++   * @covers \Drupal\Core\Database\Query\SelectExtender::extend
++   * @dataProvider providerExtendWithLocalClasses
++   * @group legacy
++   */
++  public function testExtendWithLocalClasses(string $expected, string $namespace, string $extend): void {
++    $this->expectDeprecation('Invoking Drupal\\corefake\\Driver\\Database\\corefakeWithAllCustomClasses\\%A outside of a backend overridable service is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Include the driver class in a backend overridable service instead. See https://www.drupal.org/node/3217534');
++    $this->expectDeprecation('Calling %A::__construct without the %A argument is deprecated in drupal:10.2.0 and will be required in drupal:11.0.0. Use the relevant service to instantiate extenders. See https://www.drupal.org/node/3218001');
++
++    $additional_class_loader = new ClassLoader();
+     $additional_class_loader->addPsr4("Drupal\\corefake\\Driver\\Database\\corefakeWithAllCustomClasses\\", __DIR__ . "/../../../../../tests/fixtures/database_drivers/module/corefake/src/Driver/Database/corefakeWithAllCustomClasses");
+     $additional_class_loader->register(TRUE);
+ 
+diff --git a/core/tests/Drupal/KernelTests/Core/Database/SelectTest.php b/core/tests/Drupal/KernelTests/Core/Database/SelectTest.php
+index 777c8e9b822..770d0d8712a 100644
+--- a/core/tests/Drupal/KernelTests/Core/Database/SelectTest.php
++++ b/core/tests/Drupal/KernelTests/Core/Database/SelectTest.php
+@@ -14,6 +14,11 @@
+  */
+ class SelectTest extends DatabaseTestBase {
+ 
++  /**
++   * {@inheritdoc}
++   */
++  protected static $modules = ['database_test'];
++
+   /**
+    * Tests rudimentary SELECT statements.
+    */
+diff --git a/core/tests/Drupal/KernelTests/Core/Database/TaggingTest.php b/core/tests/Drupal/KernelTests/Core/Database/TaggingTest.php
+index 3a9ea2c7e6e..d127f7fe2d8 100644
+--- a/core/tests/Drupal/KernelTests/Core/Database/TaggingTest.php
++++ b/core/tests/Drupal/KernelTests/Core/Database/TaggingTest.php
+@@ -14,6 +14,11 @@
+  */
+ class TaggingTest extends DatabaseTestBase {
+ 
++  /**
++   * {@inheritdoc}
++   */
++  protected static $modules = ['database_test'];
++
+   /**
+    * Confirms that a query has a tag added to it.
+    */
+diff --git a/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php b/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
+index 28670b71753..6d69655dfa6 100644
+--- a/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
++++ b/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
+@@ -325,21 +325,7 @@ public function testGetDriverClass($expected, $namespace, $class) {
+ 
+     $mock_pdo = $this->createMock('Drupal\Tests\Core\Database\Stub\StubPDO');
+     $connection = new StubConnection($mock_pdo, ['namespace' => $namespace]);
+-    match($class) {
+-      'Install\\Tasks',
+-      'ExceptionHandler',
+-      'Select',
+-      'Insert',
+-      'Merge',
+-      'Upsert',
+-      'Update',
+-      'Delete',
+-      'Truncate',
+-      'Schema',
+-      'Condition',
+-      'Transaction' => $this->expectDeprecation('Calling Drupal\\Core\\Database\\Connection::getDriverClass() for \'' . $class . '\' is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Use standard autoloading in the methods that return database operations. See https://www.drupal.org/node/3217534'),
+-      default => NULL,
+-    };
++    $this->expectDeprecation('Calling Drupal\\Core\\Database\\Connection::getDriverClass() for \'' . $class . '\' is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Use standard autoloading in the methods that return database operations. See https://www.drupal.org/node/3217534');
+     $this->assertEquals($expected, $connection->getDriverClass($class));
+   }
+ 
