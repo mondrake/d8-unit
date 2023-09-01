@@ -1,294 +1,155 @@
 diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
-index 67dc4a1a1a..fe1e10bda4 100644
+index 67dc4a1a1a..065161e1e6 100644
 --- a/core/lib/Drupal/Core/Database/Connection.php
 +++ b/core/lib/Drupal/Core/Database/Connection.php
-@@ -2085,6 +2085,7 @@ public function isEventEnabled(string $eventName): bool {
-   public function enableEvents(array $eventNames): static {
-     foreach ($eventNames as $eventName) {
-       assert(class_exists($eventName), "Event class {$eventName} does not exist");
-+      assert(is_a($eventName, DatabaseEvent::class, true), "Event class {$eventName} is not a valid database event class");
-       $this->enabledEvents[$eventName] = TRUE;
+@@ -859,6 +859,29 @@ public function query($query, array $args = [], $options = []) {
      }
-     return $this;
-@@ -2101,6 +2102,7 @@ public function enableEvents(array $eventNames): static {
-   public function disableEvents(array $eventNames): static {
-     foreach ($eventNames as $eventName) {
-       assert(class_exists($eventName), "Event class {$eventName} does not exist");
-+      assert(is_a($eventName, DatabaseEvent::class, true), "Event class {$eventName} is not a valid database event class");
-       $this->enabledEvents[$eventName] = FALSE;
-     }
-     return $this;
-diff --git a/core/lib/Drupal/Core/Database/Event/TransactionBeginEvent.php b/core/lib/Drupal/Core/Database/Event/TransactionBeginEvent.php
-new file mode 100644
-index 0000000000..291a259545
---- /dev/null
-+++ b/core/lib/Drupal/Core/Database/Event/TransactionBeginEvent.php
-@@ -0,0 +1,33 @@
-+<?php
-+
-+declare(strict_types=1);
-+
-+namespace Drupal\Core\Database\Event;
-+
-+/**
-+ * Represents the beginning of a transaction.
-+ */
-+class TransactionBeginEvent extends DatabaseEvent {
-+
-+  /**
-+   * Constructs a TransactionBeginEvent object.
-+   *
-+   * See 'Customizing database settings' in settings.php for an explanation of
-+   * the $key and $target connection values.
-+   *
-+   * @param string $key
-+   *   The database connection key.
-+   * @param string $target
-+   *   The database connection target.
-+   * @param string $name
-+   *   The name of the transaction.
-+   */
-+  public function __construct(
-+    public readonly string $key,
-+    public readonly string $target,
-+    public readonly string $name,
-+  ) {
-+    parent::__construct();
-+  }
-+
-+}
-diff --git a/core/lib/Drupal/Core/Database/Event/TransactionSavepointEvent.php b/core/lib/Drupal/Core/Database/Event/TransactionSavepointEvent.php
-new file mode 100644
-index 0000000000..cc1e0084e9
---- /dev/null
-+++ b/core/lib/Drupal/Core/Database/Event/TransactionSavepointEvent.php
-@@ -0,0 +1,36 @@
-+<?php
-+
-+declare(strict_types=1);
-+
-+namespace Drupal\Core\Database\Event;
-+
-+/**
-+ * Represents the activation of a transaction savepoint.
-+ */
-+class TransactionSavepointEvent extends DatabaseEvent {
-+
-+  /**
-+   * Constructs a TransactionSavepointEvent object.
-+   *
-+   * See 'Customizing database settings' in settings.php for an explanation of
-+   * the $key and $target connection values.
-+   *
-+   * @param string $key
-+   *   The database connection key.
-+   * @param string $target
-+   *   The database connection target.
-+   * @param string $name
-+   *   The name of the savepoint.
-+   * @param string $parentName
-+   *   The name of the parent transaction or savepoint.
-+   */
-+  public function __construct(
-+    public readonly string $key,
-+    public readonly string $target,
-+    public readonly string $name,
-+    public readonly string $parentName,
-+  ) {
-+    parent::__construct();
-+  }
-+
-+}
-diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
-index 112077b90e..6b6105adb2 100644
---- a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
-+++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
-@@ -5,6 +5,8 @@
- namespace Drupal\Core\Database\Transaction;
- 
- use Drupal\Core\Database\Connection;
-+use Drupal\Core\Database\Event\TransactionBeginEvent;
-+use Drupal\Core\Database\Event\TransactionSavepointEvent;
- use Drupal\Core\Database\Transaction;
- use Drupal\Core\Database\TransactionCommitFailedException;
- use Drupal\Core\Database\TransactionNameNonUniqueException;
-@@ -59,6 +61,14 @@ abstract class TransactionManagerBase implements TransactionManagerInterface {
-    */
-   private ClientConnectionTransactionState $connectionTransactionState;
+   }
  
 +  /**
-+   * The list of transaction related events.
++   * Executes a data definition language (DDL) statement.
++   *
++   * This method allows to prevent DDL statement execution to void any active
++   * transaction when the driver does not support transactional DDL.
++   *
++   * @param string $sql
++   *   The DDL statement to execute. This is a SQL string that may contain
++   *   placeholders.
++   * @param array $arguments
++   *   (Optional) The associative array of arguments for the prepared
++   *   statement.
++   * @param array $options
++   *   (Optional) An associative array of options to control how the query is
++   *   run. The given options will be merged with self::defaultOptions().
 +   */
-+  private array $transactionEvents = [
-+    TransactionBeginEvent::class,
-+    TransactionSavepointEvent::class,
-+  ];
++  public function executeDdlStatement(string $sql, array $arguments = [], array $options = []): void {
++    if (!$this->transactionalDDLSupport && $this->inTransaction()) {
++      throw new DatabaseExceptionWrapper('Cannot execute a DDL statement while a transaction is active');
++    }
++    $this->query($sql, $arguments, $options);
++  }
 +
    /**
-    * Constructor.
+    * Expands out shorthand placeholders.
     *
-@@ -136,6 +146,36 @@ protected function removeStackItem(string $name): void {
-     unset($this->stack[$name]);
-   }
- 
-+  /**
-+   * Enables transaction events dispatching.
-+   *
-+   * @param string[] $eventNames
-+   *   (Optional) A list of transaction events to be enabled. If left blank,
-+   *   all transaction events will be enabled.
-+   */
-+  public function enableEvents(array $eventNames = []): void {
-+    $events = $this->transactionEvents;
-+    if (!empty($eventNames)) {
-+      $events = array_intersect($events, $eventNames);
-+    }
-+    $this->connection->enableEvents($events);
-+  }
-+
-+  /**
-+   * Disables transaction events dispatching.
-+   *
-+   * @param string[] $eventNames
-+   *   (Optional) A list of transaction events to be disabled. If left blank,
-+   *   all transaction events will be disabled.
-+   */
-+  public function disableEvents(array $eventNames = []): void {
-+    $events = $this->transactionEvents;
-+    if (!empty($eventNames)) {
-+      $events = array_intersect($events, $eventNames);
-+    }
-+    $this->connection->disableEvents($events);
-+  }
-+
-   /**
-    * {@inheritdoc}
-    */
-@@ -164,6 +204,13 @@ public function push(string $name = ''): Transaction {
- 
-     // Do the client-level processing.
-     if ($this->stackDepth() === 0) {
-+      if ($this->connection->isEventEnabled(TransactionBeginEvent::class)) {
-+        $this->connection->dispatchEvent(new TransactionBeginEvent(
-+          $this->connection->getKey(),
-+          $this->connection->getTarget(),
-+          $name,
-+        ));
-+      }
-       $this->beginClientTransaction();
-       $type = StackItemType::Root;
-       $this->setConnectionTransactionState(ClientConnectionTransactionState::Active);
-@@ -172,6 +219,14 @@ public function push(string $name = ''): Transaction {
-       // If we're already in a Drupal transaction then we want to create a
-       // database savepoint, rather than try to begin another database
-       // transaction.
-+      if ($this->connection->isEventEnabled(TransactionSavepointEvent::class)) {
-+        $this->connection->dispatchEvent(new TransactionSavepointEvent(
-+          $this->connection->getKey(),
-+          $this->connection->getTarget(),
-+          $name,
-+          array_keys($this->stack())[$this->stackDepth() - 1],
-+        ));
-+      }
-       $this->addClientSavepoint($name);
-       $type = StackItemType::Savepoint;
+diff --git a/core/lib/Drupal/Core/Database/Schema.php b/core/lib/Drupal/Core/Database/Schema.php
+index 9153cd9ef8..ac2cb24618 100644
+--- a/core/lib/Drupal/Core/Database/Schema.php
++++ b/core/lib/Drupal/Core/Database/Schema.php
+@@ -614,7 +614,7 @@ public function createTable($name, $table) {
      }
-diff --git a/core/modules/system/tests/modules/database_test/src/EventSubscriber/DatabaseEventSubscriber.php b/core/modules/system/tests/modules/database_test/src/EventSubscriber/DatabaseEventSubscriber.php
-index e35d333fd2..3137411e22 100644
---- a/core/modules/system/tests/modules/database_test/src/EventSubscriber/DatabaseEventSubscriber.php
-+++ b/core/modules/system/tests/modules/database_test/src/EventSubscriber/DatabaseEventSubscriber.php
-@@ -4,6 +4,8 @@
- 
- use Drupal\Core\Database\Event\StatementExecutionEndEvent;
- use Drupal\Core\Database\Event\StatementExecutionStartEvent;
-+use Drupal\Core\Database\Event\TransactionBeginEvent;
-+use Drupal\Core\Database\Event\TransactionSavepointEvent;
- use Symfony\Component\EventDispatcher\EventSubscriberInterface;
- 
- /**
-@@ -33,6 +35,8 @@ public static function getSubscribedEvents(): array {
-     return [
-       StatementExecutionStartEvent::class => 'onStatementExecutionStart',
-       StatementExecutionEndEvent::class => 'onStatementExecutionEnd',
-+      TransactionBeginEvent::class => 'onTransactionBegin',
-+      TransactionSavepointEvent::class => 'onTransactionSavepoint',
-     ];
+     $statements = $this->createTableSql($name, $table);
+     foreach ($statements as $statement) {
+-      $this->connection->query($statement);
++      $this->connection->executeDdlStatement($statement);
+     }
    }
  
-@@ -58,4 +62,24 @@ public function onStatementExecutionEnd(StatementExecutionEndEvent $event): void
-     $this->countStatementEnds++;
+diff --git a/core/modules/mysql/src/Driver/Database/mysql/Schema.php b/core/modules/mysql/src/Driver/Database/mysql/Schema.php
+index d0076f3481..24c2f29f65 100644
+--- a/core/modules/mysql/src/Driver/Database/mysql/Schema.php
++++ b/core/modules/mysql/src/Driver/Database/mysql/Schema.php
+@@ -377,7 +377,7 @@ public function renameTable($table, $new_name) {
+     }
+ 
+     $info = $this->getPrefixInfo($new_name);
+-    $this->connection->query('ALTER TABLE {' . $table . '} RENAME TO [' . $info['table'] . ']');
++    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} RENAME TO [' . $info['table'] . ']');
    }
  
-+  /**
-+   * Subscribes to a TransactionBeginEvent
-+   *
-+   * @param \Drupal\Core\Database\Event\TransactionBeginEvent $event
-+   *   The transaction event.
-+   */
-+  public function onTransactionBegin(TransactionBeginEvent $event): void {
-+    throw new \RuntimeException($event->key . ' ' . $event->target . ' ' . $event->name);
-+  }
-+
-+  /**
-+   * Subscribes to a TransactionSavepointEvent
-+   *
-+   * @param \Drupal\Core\Database\Event\TransactionSavepointEvent $event
-+   *   The transaction event.
-+   */
-+  public function onTransactionSavepoint(TransactionSavepointEvent $event): void {
-+    throw new \RuntimeException($event->key . ' ' . $event->target . ' ' . $event->name . ' ' . $event->parentName);
-+  }
-+
- }
-diff --git a/core/tests/Drupal/KernelTests/Core/Database/TransactionEventTest.php b/core/tests/Drupal/KernelTests/Core/Database/TransactionEventTest.php
-new file mode 100644
-index 0000000000..244a5f318e
---- /dev/null
-+++ b/core/tests/Drupal/KernelTests/Core/Database/TransactionEventTest.php
-@@ -0,0 +1,46 @@
-+<?php
-+
-+declare(strict_types=1);
-+
-+namespace Drupal\KernelTests\Core\Database;
-+
-+use Drupal\Core\Database\Event\TransactionBeginEvent;
-+
-+/**
-+ * Tests the Transaction events.
-+ *
-+ * @group Database
-+ */
-+class TransactionEventTest extends DatabaseTestBase {
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  protected function setUp(): void {
-+    parent::setUp();
-+    $this->connection->transactionManager()->enableEvents();
-+  }
-+
-+  /**
-+   * Tests transaction beginning.
-+   */
-+  public function testTransactionBegin(): void {
-+    $this->expectException(\RuntimeException::class);
-+    $this->expectExceptionMessage("default default drupal_transaction");
-+    $tx = $this->connection->startTransaction();
-+  }
-+
-+  /**
-+   * Tests adding a savepoint.
-+   */
-+  public function testTransactionSavepoint(): void {
-+    $this->connection->transactionManager()->disableEvents([
-+      TransactionBeginEvent::class,
-+    ]);
-+    $tx = $this->connection->startTransaction();
-+    $this->expectException(\RuntimeException::class);
-+    $this->expectExceptionMessage("default default savepoint_1 drupal_transaction");
-+    $savepoint = $this->connection->startTransaction();
-+  }
-+
-+}
+   /**
+@@ -388,7 +388,7 @@ public function dropTable($table) {
+       return FALSE;
+     }
+ 
+-    $this->connection->query('DROP TABLE {' . $table . '}');
++    $this->connection->executeDdlStatement('DROP TABLE {' . $table . '}');
+     return TRUE;
+   }
+ 
+@@ -426,7 +426,7 @@ public function addField($table, $field, $spec, $keys_new = []) {
+ 
+       $query .= ', ADD ' . implode(', ADD ', $keys_sql);
+     }
+-    $this->connection->query($query);
++    $this->connection->executeDdlStatement($query);
+     if (isset($spec['initial_from_field'])) {
+       if (isset($spec['initial'])) {
+         $expression = 'COALESCE(' . $spec['initial_from_field'] . ', :default_initial_value)';
+@@ -471,7 +471,7 @@ public function dropField($table, $field) {
+       $this->dropPrimaryKey($table);
+     }
+ 
+-    $this->connection->query('ALTER TABLE {' . $table . '} DROP [' . $field . ']');
++    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} DROP [' . $field . ']');
+     return TRUE;
+   }
+ 
+@@ -496,7 +496,7 @@ public function addPrimaryKey($table, $fields) {
+       throw new SchemaObjectExistsException("Cannot add primary key to table '$table': primary key already exists.");
+     }
+ 
+-    $this->connection->query('ALTER TABLE {' . $table . '} ADD PRIMARY KEY (' . $this->createKeySql($fields) . ')');
++    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} ADD PRIMARY KEY (' . $this->createKeySql($fields) . ')');
+   }
+ 
+   /**
+@@ -507,7 +507,7 @@ public function dropPrimaryKey($table) {
+       return FALSE;
+     }
+ 
+-    $this->connection->query('ALTER TABLE {' . $table . '} DROP PRIMARY KEY');
++    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} DROP PRIMARY KEY');
+     return TRUE;
+   }
+ 
+@@ -533,7 +533,7 @@ public function addUniqueKey($table, $name, $fields) {
+       throw new SchemaObjectExistsException("Cannot add unique key '$name' to table '$table': unique key already exists.");
+     }
+ 
+-    $this->connection->query('ALTER TABLE {' . $table . '} ADD UNIQUE KEY [' . $name . '] (' . $this->createKeySql($fields) . ')');
++    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} ADD UNIQUE KEY [' . $name . '] (' . $this->createKeySql($fields) . ')');
+   }
+ 
+   /**
+@@ -544,7 +544,7 @@ public function dropUniqueKey($table, $name) {
+       return FALSE;
+     }
+ 
+-    $this->connection->query('ALTER TABLE {' . $table . '} DROP KEY [' . $name . ']');
++    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} DROP KEY [' . $name . ']');
+     return TRUE;
+   }
+ 
+@@ -562,7 +562,7 @@ public function addIndex($table, $name, $fields, array $spec) {
+     $spec['indexes'][$name] = $fields;
+     $indexes = $this->getNormalizedIndexes($spec);
+ 
+-    $this->connection->query('ALTER TABLE {' . $table . '} ADD INDEX [' . $name . '] (' . $this->createKeySql($indexes[$name]) . ')');
++    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} ADD INDEX [' . $name . '] (' . $this->createKeySql($indexes[$name]) . ')');
+   }
+ 
+   /**
+@@ -573,7 +573,7 @@ public function dropIndex($table, $name) {
+       return FALSE;
+     }
+ 
+-    $this->connection->query('ALTER TABLE {' . $table . '} DROP INDEX [' . $name . ']');
++    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} DROP INDEX [' . $name . ']');
+     return TRUE;
+   }
+ 
+@@ -625,11 +625,11 @@ public function changeField($table, $field, $field_new, $spec, $keys_new = []) {
+     if ($keys_sql = $this->createKeysSql($keys_new)) {
+       $sql .= ', ADD ' . implode(', ADD ', $keys_sql);
+     }
+-    $this->connection->query($sql);
++    $this->connection->executeDdlStatement($sql);
+ 
+     if ($spec['type'] === 'serial') {
+       $max = $this->connection->query('SELECT MAX(`' . $field_new . '`) FROM {' . $table . '}')->fetchField();
+-      $this->connection->query("ALTER TABLE {" . $table . "} AUTO_INCREMENT = " . ($max + 1));
++      $this->connection->executeDdlStatement("ALTER TABLE {" . $table . "} AUTO_INCREMENT = " . ($max + 1));
+     }
+   }
+ 
