@@ -1,201 +1,229 @@
-diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
-index 67dc4a1a1a4..65f9b211516 100644
---- a/core/lib/Drupal/Core/Database/Connection.php
-+++ b/core/lib/Drupal/Core/Database/Connection.php
-@@ -242,6 +242,8 @@ abstract class Connection {
+diff --git a/core/lib/Drupal/Core/Database/Transaction.php b/core/lib/Drupal/Core/Database/Transaction.php
+index 47069baafba..32b296295e4 100644
+--- a/core/lib/Drupal/Core/Database/Transaction.php
++++ b/core/lib/Drupal/Core/Database/Transaction.php
+@@ -34,6 +34,11 @@ class Transaction {
+    * A boolean value to indicate whether this transaction has been rolled back.
+    *
+    * @var bool
++   *
++   * @deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. There is
++   *   no replecement.
++   *
++   * @see https://www.drupal.org/node/3381002
     */
-   protected TransactionManagerInterface|FALSE $transactionManager;
+   protected $rolledBack = FALSE;
  
-+  protected ?Connection $ddlConnection;
-+
+@@ -47,7 +52,11 @@ class Transaction {
+    */
+   protected $name;
+ 
+-  public function __construct(Connection $connection, $name = NULL) {
++  public function __construct(
++    Connection $connection,
++    $name = NULL,
++    protected readonly string $id = NULL,
++  ) {
+     if ($connection->transactionManager()) {
+       $this->connection = $connection;
+       $this->name = $name;
+@@ -76,7 +85,7 @@ public function __construct(Connection $connection, $name = NULL) {
+ 
+   public function __destruct() {
+     if ($this->connection->transactionManager()) {
+-      $this->connection->transactionManager()->unpile($this->name);
++      $this->connection->transactionManager()->unpile($this->name, $this->id);
+       return;
+     }
+     // Start of BC layer.
+@@ -107,7 +116,7 @@ public function name() {
+    */
+   public function rollBack() {
+     if ($this->connection->transactionManager()) {
+-      $this->connection->transactionManager()->rollback($this->name);
++      $this->connection->transactionManager()->rollback($this->name, $this->id);
+       return;
+     }
+     // Start of BC layer.
+diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
+index 112077b90ee..0a815625803 100644
+--- a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
++++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
+@@ -37,11 +37,11 @@ abstract class TransactionManagerBase implements TransactionManagerInterface {
+   private array $stack = [];
+ 
    /**
-    * Constructs a Connection object.
+-   * A list of Drupal transactions rolled back but not yet unpiled.
++   * The stack of Drupal transaction ids.
     *
-@@ -290,6 +292,9 @@ public function __destruct() {
-     // using $this in the call to set the statement class can be garbage
-     // collected.
-     $this->connection = NULL;
-+    if (isset($this->ddlConnection)) {
-+      Database::closeConnection('__ddl', $this->getKey());
-+    }
+-   * @var array<string,true>
++   * @var array<string,string>
+    */
+-  private array $rollbacks = [];
++  private array $idStack = [];
+ 
+   /**
+    * A list of post-transaction callbacks.
+@@ -106,34 +106,41 @@ protected function stack(): array {
+    */
+   protected function resetStack(): void {
+     $this->stack = [];
++    $this->idStack = [];
    }
  
    /**
-@@ -859,6 +864,37 @@ public function query($query, array $args = [], $options = []) {
-     }
-   }
- 
-+  /**
-+   * Executes a data definition language (DDL) statement.
-+   *
-+   * This method allows to prevent DDL statement execution to void any active
-+   * transaction when the driver does not support transactional DDL.
-+   *
-+   * @param string $sql
-+   *   The DDL statement to execute. This is a SQL string that may contain
-+   *   placeholders.
-+   * @param array $arguments
-+   *   (Optional) The associative array of arguments for the prepared
-+   *   statement.
-+   * @param array $options
-+   *   (Optional) An associative array of options to control how the query is
-+   *   run. The given options will be merged with self::defaultOptions().
-+   */
-+  public function executeDdlStatement(string $sql, array $arguments = [], array $options = []): void {
-+    $this->getDdlConnection()->query($sql, $arguments, $options);
-+  }
-+
-+  protected function getDdlConnection(): static {
-+    if (!isset($this->ddlConnection)) {
-+dump(['***A***', Database::getAllConnectionInfo()]);
-+      $connectionInfo = Database::getConnectionInfo($this->getKey());
-+      Database::addConnectionInfo($this->getKey(), '__ddl', $connectionInfo['default']);
-+dump(['***B***', Database::getAllConnectionInfo()]);
-+      $this->ddlConnection = Database::getConnection('__ddl', $this->getKey());
-+    }
-+    return $this->ddlConnection;
-+  }
-+
-   /**
-    * Expands out shorthand placeholders.
+    * Adds an item to the transaction stack.
     *
-diff --git a/core/lib/Drupal/Core/Database/Exception/TransactionActiveOnDdlException.php b/core/lib/Drupal/Core/Database/Exception/TransactionActiveOnDdlException.php
-new file mode 100644
-index 00000000000..62165860072
---- /dev/null
-+++ b/core/lib/Drupal/Core/Database/Exception/TransactionActiveOnDdlException.php
-@@ -0,0 +1,13 @@
-+<?php
+    * Drivers should not override this method unless they also override the
+-   * $stack property.
++   * $stack and $idStack properties.
+    *
+    * @param string $name
+    *   The name of the transaction.
+    * @param \Drupal\Core\Database\Transaction\StackItemType $type
+    *   The stack item type.
++   * @param string $id
++   *   The id of the transaction.
+    */
+-  protected function addStackItem(string $name, StackItemType $type): void {
++  protected function addStackItem(string $name, StackItemType $type, string $id): void {
+     $this->stack[$name] = $type;
++    $this->idStack[$id] = $name;
+   }
+ 
+   /**
+    * Removes an item from the transaction stack.
+    *
+    * Drivers should not override this method unless they also override the
+-   * $stack property.
++   * $stack and $idStack properties.
+    *
+    * @param string $name
+    *   The name of the transaction.
++   * @param string $id
++   *   The id of the transaction.
+    */
+-  protected function removeStackItem(string $name): void {
++  protected function removeStackItem(string $name, string $id): void {
+     unset($this->stack[$name]);
++    unset($this->idStack[$id]);
+   }
+ 
+   /**
+@@ -176,20 +183,23 @@ public function push(string $name = ''): Transaction {
+       $type = StackItemType::Savepoint;
+     }
+ 
++    // Define an unique id for the transaction.
++    $id = uniqid();
 +
-+namespace Drupal\Core\Database\Exception;
-+
-+/**
-+ * Exception thrown when a DDL statement would fail a transaction.
-+ *
-+ * Data Definition Language (DDL) may not be supported in transaction, this
-+ * exception will be thrown in case a statement like this is executed while a
-+ * transaction is active.
-+ */
-+class TransactionActiveOnDdlException extends \RuntimeException {
-+}
-diff --git a/core/lib/Drupal/Core/Database/Schema.php b/core/lib/Drupal/Core/Database/Schema.php
-index 9153cd9ef8f..ac2cb246189 100644
---- a/core/lib/Drupal/Core/Database/Schema.php
-+++ b/core/lib/Drupal/Core/Database/Schema.php
-@@ -614,7 +614,7 @@ public function createTable($name, $table) {
-     }
-     $statements = $this->createTableSql($name, $table);
-     foreach ($statements as $statement) {
--      $this->connection->query($statement);
-+      $this->connection->executeDdlStatement($statement);
-     }
-   }
+     // Push the transaction on the stack, increasing its depth.
+-    $this->addStackItem($name, $type);
++    $this->addStackItem($name, $type, $id);
  
-diff --git a/core/modules/mysql/src/Driver/Database/mysql/Schema.php b/core/modules/mysql/src/Driver/Database/mysql/Schema.php
-index d0076f3481e..24c2f29f659 100644
---- a/core/modules/mysql/src/Driver/Database/mysql/Schema.php
-+++ b/core/modules/mysql/src/Driver/Database/mysql/Schema.php
-@@ -377,7 +377,7 @@ public function renameTable($table, $new_name) {
-     }
- 
-     $info = $this->getPrefixInfo($new_name);
--    $this->connection->query('ALTER TABLE {' . $table . '} RENAME TO [' . $info['table'] . ']');
-+    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} RENAME TO [' . $info['table'] . ']');
+-    return new Transaction($this->connection, $name);
++    return new Transaction($this->connection, $name, $id);
    }
  
    /**
-@@ -388,7 +388,7 @@ public function dropTable($table) {
-       return FALSE;
+    * {@inheritdoc}
+    */
+-  public function unpile(string $name): void {
+-    // If an already rolled back Drupal transaction, do nothing on the client
+-    // connection, just cleanup the list of transactions rolled back.
+-    if (isset($this->rollbacks[$name])) {
+-      unset($this->rollbacks[$name]);
++  public function unpile(string $name, string $id): void {
++    // If an already committed or rolled back Drupal transaction, or if the
++    // stacks were reset leaving Transaction objects orphaned (for example in
++    // case of a DDL statement breaking an active transaction), do nothing.
++    if (!isset($this->idStack[$id])) {
+       return;
      }
  
--    $this->connection->query('DROP TABLE {' . $table . '}');
-+    $this->connection->executeDdlStatement('DROP TABLE {' . $table . '}');
-     return TRUE;
-   }
- 
-@@ -426,7 +426,7 @@ public function addField($table, $field, $spec, $keys_new = []) {
- 
-       $query .= ', ADD ' . implode(', ADD ', $keys_sql);
-     }
--    $this->connection->query($query);
-+    $this->connection->executeDdlStatement($query);
-     if (isset($spec['initial_from_field'])) {
-       if (isset($spec['initial'])) {
-         $expression = 'COALESCE(' . $spec['initial_from_field'] . ', :default_initial_value)';
-@@ -471,7 +471,7 @@ public function dropField($table, $field) {
-       $this->dropPrimaryKey($table);
+@@ -208,7 +218,7 @@ public function unpile(string $name): void {
      }
  
--    $this->connection->query('ALTER TABLE {' . $table . '} DROP [' . $field . ']');
-+    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} DROP [' . $field . ']');
-     return TRUE;
-   }
+     // Remove the transaction from the stack.
+-    $this->removeStackItem($name);
++    $this->removeStackItem($name, $id);
  
-@@ -496,7 +496,7 @@ public function addPrimaryKey($table, $fields) {
-       throw new SchemaObjectExistsException("Cannot add primary key to table '$table': primary key already exists.");
+     // If this was the last Drupal transaction open, we can commit the client
+     // transaction.
+@@ -223,7 +233,7 @@ public function unpile(string $name): void {
+   /**
+    * {@inheritdoc}
+    */
+-  public function rollback(string $name): void {
++  public function rollback(string $name, string $id): void {
+     if (!$this->inTransaction()) {
+       throw new TransactionNoActiveException();
+     }
+@@ -239,8 +249,7 @@ public function rollback(string $name): void {
+       throw new TransactionOutOfOrderException();
      }
  
--    $this->connection->query('ALTER TABLE {' . $table . '} ADD PRIMARY KEY (' . $this->createKeySql($fields) . ')');
-+    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} ADD PRIMARY KEY (' . $this->createKeySql($fields) . ')');
-   }
+-    $this->rollbacks[$name] = TRUE;
+-    $this->removeStackItem($name);
++    $this->removeStackItem($name, $id);
+ 
+     // If this was the last Drupal transaction open, we can commit the client
+     // transaction.
+diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php
+index 86d5de4ac5a..1bd0cd3e5fd 100644
+--- a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php
++++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php
+@@ -36,6 +36,8 @@ public function has(string $name): bool;
+    * This begins a client connection transaction if there is not one active,
+    * or adds a savepoint to the active one.
+    *
++   * This method should only be called internally by a database driver.
++   *
+    * @param string $name
+    *   (optional) The name of the savepoint.
+    *
+@@ -54,15 +56,19 @@ public function push(string $name = ''): Transaction;
+    * This method should only be called by a Transaction object going out of
+    * scope.
+    *
++   * This method should only be called internally by a database driver.
++   *
+    * @param string $name
+-   *   (optional) The name of the savepoint.
++   *   The name of the transaction.
++   * @param string $id
++   *   The id of the transaction.
+    *
+    * @throws \Drupal\Core\Database\TransactionOutOfOrderException
+    *   If a Drupal Transaction with the specified name does not exist.
+    * @throws \Drupal\Core\Database\TransactionCommitFailedException
+    *   If the commit of the root transaction failed.
+    */
+-  public function unpile(string $name): void;
++  public function unpile(string $name, string $id): void;
  
    /**
-@@ -507,7 +507,7 @@ public function dropPrimaryKey($table) {
-       return FALSE;
-     }
- 
--    $this->connection->query('ALTER TABLE {' . $table . '} DROP PRIMARY KEY');
-+    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} DROP PRIMARY KEY');
-     return TRUE;
-   }
- 
-@@ -533,7 +533,7 @@ public function addUniqueKey($table, $name, $fields) {
-       throw new SchemaObjectExistsException("Cannot add unique key '$name' to table '$table': unique key already exists.");
-     }
- 
--    $this->connection->query('ALTER TABLE {' . $table . '} ADD UNIQUE KEY [' . $name . '] (' . $this->createKeySql($fields) . ')');
-+    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} ADD UNIQUE KEY [' . $name . '] (' . $this->createKeySql($fields) . ')');
-   }
- 
-   /**
-@@ -544,7 +544,7 @@ public function dropUniqueKey($table, $name) {
-       return FALSE;
-     }
- 
--    $this->connection->query('ALTER TABLE {' . $table . '} DROP KEY [' . $name . ']');
-+    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} DROP KEY [' . $name . ']');
-     return TRUE;
-   }
- 
-@@ -562,7 +562,7 @@ public function addIndex($table, $name, $fields, array $spec) {
-     $spec['indexes'][$name] = $fields;
-     $indexes = $this->getNormalizedIndexes($spec);
- 
--    $this->connection->query('ALTER TABLE {' . $table . '} ADD INDEX [' . $name . '] (' . $this->createKeySql($indexes[$name]) . ')');
-+    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} ADD INDEX [' . $name . '] (' . $this->createKeySql($indexes[$name]) . ')');
-   }
+    * Rolls back a Drupal transaction.
+@@ -72,8 +78,12 @@ public function unpile(string $name): void;
+    * to rolling back the client connection (or to committing it in the edge
+    * case when the root was unpiled earlier).
+    *
++   * This method should only be called internally by a database driver.
++   *
+    * @param string $name
+-   *   (optional) The name of the savepoint.
++   *   The name of the transaction.
++   * @param string $id
++   *   The id of the transaction.
+    *
+    * @throws \Drupal\Core\Database\TransactionNoActiveException
+    *   If there is no active client connection.
+@@ -83,7 +93,7 @@ public function unpile(string $name): void;
+    * @throws \Drupal\Core\Database\TransactionCommitFailedException
+    *   If the commit of the root transaction failed.
+    */
+-  public function rollback(string $name): void;
++  public function rollback(string $name, string $id): void;
  
    /**
-@@ -573,7 +573,7 @@ public function dropIndex($table, $name) {
-       return FALSE;
-     }
- 
--    $this->connection->query('ALTER TABLE {' . $table . '} DROP INDEX [' . $name . ']');
-+    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} DROP INDEX [' . $name . ']');
-     return TRUE;
-   }
- 
-@@ -625,11 +625,11 @@ public function changeField($table, $field, $field_new, $spec, $keys_new = []) {
-     if ($keys_sql = $this->createKeysSql($keys_new)) {
-       $sql .= ', ADD ' . implode(', ADD ', $keys_sql);
-     }
--    $this->connection->query($sql);
-+    $this->connection->executeDdlStatement($sql);
- 
-     if ($spec['type'] === 'serial') {
-       $max = $this->connection->query('SELECT MAX(`' . $field_new . '`) FROM {' . $table . '}')->fetchField();
--      $this->connection->query("ALTER TABLE {" . $table . "} AUTO_INCREMENT = " . ($max + 1));
-+      $this->connection->executeDdlStatement("ALTER TABLE {" . $table . "} AUTO_INCREMENT = " . ($max + 1));
-     }
-   }
- 
+    * Adds a root transaction end callback.
