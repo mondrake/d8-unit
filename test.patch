@@ -1,25 +1,27 @@
 diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
-index 67dc4a1a1a..14a672b827 100644
+index 67dc4a1a1a4..8354d36f8c0 100644
 --- a/core/lib/Drupal/Core/Database/Connection.php
 +++ b/core/lib/Drupal/Core/Database/Connection.php
-@@ -5,6 +5,7 @@
- use Drupal\Component\Assertion\Inspector;
- use Drupal\Core\Database\Event\DatabaseEvent;
- use Drupal\Core\Database\Exception\EventException;
-+use Drupal\Core\Database\Exception\TransactionActiveOnDdlException;
- use Drupal\Core\Database\Query\Condition;
- use Drupal\Core\Database\Query\Delete;
- use Drupal\Core\Database\Query\Insert;
-@@ -16,6 +17,8 @@
- use Drupal\Core\Database\Transaction\TransactionManagerInterface;
- use Drupal\Core\Pager\PagerManagerInterface;
+@@ -242,6 +242,8 @@ abstract class Connection {
+    */
+   protected TransactionManagerInterface|FALSE $transactionManager;
  
-+use Drupal\Core\Utility\Error;
++  protected ?static $ddlConnection;
 +
- /**
-  * Base Database API class.
-  *
-@@ -859,6 +862,30 @@ public function query($query, array $args = [], $options = []) {
+   /**
+    * Constructs a Connection object.
+    *
+@@ -290,6 +292,9 @@ public function __destruct() {
+     // using $this in the call to set the statement class can be garbage
+     // collected.
+     $this->connection = NULL;
++    if (!is_null($this->ddlConnection)) {
++      Database::closeConnection('__ddl', $this->getKey());
++    }
+   }
+ 
+   /**
+@@ -859,6 +864,37 @@ public function query($query, array $args = [], $options = []) {
      }
    }
  
@@ -40,11 +42,18 @@ index 67dc4a1a1a..14a672b827 100644
 +   *   run. The given options will be merged with self::defaultOptions().
 +   */
 +  public function executeDdlStatement(string $sql, array $arguments = [], array $options = []): void {
-+    if (!$this->transactionalDDLSupport && $this->inTransaction()) {
-+      @trigger_error('Executing a DDL statement while a transaction is active is deprecated in drupal:10.2.0 and will throw a TransactionActiveOnDdlException in drupal:11.0.0. Change your code accordingly. See https://www.drupal.org/node/3335566' . "\n" . Error::formatBacktrace(debug_backtrace()), E_USER_DEPRECATED);
-+      // throw new TransactionActiveOnDdlException('Cannot execute a DDL statement while a transaction is active');
-+    }
-+    $this->query($sql, $arguments, $options);
++    $this->getDdlConnection()->query($sql, $arguments, $options);
++  }
++
++  protected function getDdlConnection(): static {
++    if (is_null($this->ddlConnection)) [
++dump(['***A***', Database::getAllConnectionInfo()]);
++      $connectionInfo = Database::getConnectionInfo($this->getKey());
++      Database::addConnectionInfo($this->getKey(), '__ddl', $connectionInfo['default']);
++dump(['***B***', Database::getAllConnectionInfo()]);
++      $this->ddlConnection = Database::openConnection($this->getKey(), '__ddl');
++    ]
++    return $this->ddlConnection;
 +  }
 +
    /**
@@ -52,7 +61,7 @@ index 67dc4a1a1a..14a672b827 100644
     *
 diff --git a/core/lib/Drupal/Core/Database/Exception/TransactionActiveOnDdlException.php b/core/lib/Drupal/Core/Database/Exception/TransactionActiveOnDdlException.php
 new file mode 100644
-index 0000000000..6216586007
+index 00000000000..62165860072
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/Exception/TransactionActiveOnDdlException.php
 @@ -0,0 +1,13 @@
@@ -70,7 +79,7 @@ index 0000000000..6216586007
 +class TransactionActiveOnDdlException extends \RuntimeException {
 +}
 diff --git a/core/lib/Drupal/Core/Database/Schema.php b/core/lib/Drupal/Core/Database/Schema.php
-index 9153cd9ef8..ac2cb24618 100644
+index 9153cd9ef8f..ac2cb246189 100644
 --- a/core/lib/Drupal/Core/Database/Schema.php
 +++ b/core/lib/Drupal/Core/Database/Schema.php
 @@ -614,7 +614,7 @@ public function createTable($name, $table) {
@@ -82,24 +91,8 @@ index 9153cd9ef8..ac2cb24618 100644
      }
    }
  
-diff --git a/core/lib/Drupal/Core/Routing/MatcherDumper.php b/core/lib/Drupal/Core/Routing/MatcherDumper.php
-index cbd3aac0d0..a5c21b6d30 100644
---- a/core/lib/Drupal/Core/Routing/MatcherDumper.php
-+++ b/core/lib/Drupal/Core/Routing/MatcherDumper.php
-@@ -124,9 +124,11 @@ public function dump(array $options = []): string {
-           ->execute();
-       }
-       catch (\Exception $e) {
-+        unset($transaction);
-         if (!$this->ensureTableExists()) {
-           throw $e;
-         }
-+        $transaction = $this->connection->startTransaction();
-       }
- 
-       // Split the routes into chunks to avoid big INSERT queries.
 diff --git a/core/modules/mysql/src/Driver/Database/mysql/Schema.php b/core/modules/mysql/src/Driver/Database/mysql/Schema.php
-index d0076f3481..24c2f29f65 100644
+index d0076f3481e..24c2f29f659 100644
 --- a/core/modules/mysql/src/Driver/Database/mysql/Schema.php
 +++ b/core/modules/mysql/src/Driver/Database/mysql/Schema.php
 @@ -377,7 +377,7 @@ public function renameTable($table, $new_name) {
