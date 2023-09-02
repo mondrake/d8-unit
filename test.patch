@@ -1,8 +1,364 @@
+diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
+index 67dc4a1a1a4..97b528c25be 100644
+--- a/core/lib/Drupal/Core/Database/Connection.php
++++ b/core/lib/Drupal/Core/Database/Connection.php
+@@ -1480,7 +1480,7 @@ public function startTransaction($name = '') {
+   public function rollBack($savepoint_name = 'drupal_transaction') {
+     @trigger_error(__METHOD__ . '() is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Do not rollback the connection, roll back the Transaction objects instead. See https://www.drupal.org/node/3381002', E_USER_DEPRECATED);
+     if ($this->transactionManager()) {
+-      $this->transactionManager()->rollback($savepoint_name);
++      $this->transactionManager()->rollback($savepoint_name, 'bc-force-rollback');
+       return;
+     }
+     if (!$this->inTransaction()) {
+diff --git a/core/lib/Drupal/Core/Database/Transaction.php b/core/lib/Drupal/Core/Database/Transaction.php
+index 47069baafba..56b3f2eaef6 100644
+--- a/core/lib/Drupal/Core/Database/Transaction.php
++++ b/core/lib/Drupal/Core/Database/Transaction.php
+@@ -34,6 +34,11 @@ class Transaction {
+    * A boolean value to indicate whether this transaction has been rolled back.
+    *
+    * @var bool
++   *
++   * @deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. There is
++   *   no replecement.
++   *
++   * @see https://www.drupal.org/node/3381002
+    */
+   protected $rolledBack = FALSE;
+ 
+@@ -47,7 +52,11 @@ class Transaction {
+    */
+   protected $name;
+ 
+-  public function __construct(Connection $connection, $name = NULL) {
++  public function __construct(
++    Connection $connection,
++    $name = NULL,
++    protected readonly string $id = '',
++  ) {
+     if ($connection->transactionManager()) {
+       $this->connection = $connection;
+       $this->name = $name;
+@@ -76,11 +85,12 @@ public function __construct(Connection $connection, $name = NULL) {
+ 
+   public function __destruct() {
+     if ($this->connection->transactionManager()) {
+-      $this->connection->transactionManager()->unpile($this->name);
++      $this->connection->transactionManager()->unpile($this->name, $this->id);
+       return;
+     }
+     // Start of BC layer.
+     // If we rolled back then the transaction would have already been popped.
++    // @phpstan-ignore-next-line
+     if (!$this->rolledBack) {
+       // @phpstan-ignore-next-line
+       $this->connection->popTransaction($this->name);
+@@ -107,10 +117,11 @@ public function name() {
+    */
+   public function rollBack() {
+     if ($this->connection->transactionManager()) {
+-      $this->connection->transactionManager()->rollback($this->name);
++      $this->connection->transactionManager()->rollback($this->name, $this->id);
+       return;
+     }
+     // Start of BC layer.
++    // @phpstan-ignore-next-line
+     $this->rolledBack = TRUE;
+     // @phpstan-ignore-next-line
+     $this->connection->rollBack($this->name);
+diff --git a/core/lib/Drupal/Core/Database/Transaction/StackItem.php b/core/lib/Drupal/Core/Database/Transaction/StackItem.php
+new file mode 100644
+index 00000000000..30b9126e7ca
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/Transaction/StackItem.php
+@@ -0,0 +1,26 @@
++<?php
++
++declare(strict_types=1);
++
++namespace Drupal\Core\Database\Transaction;
++
++/**
++ * A value object for items on the transaction stack.
++ */
++final class StackItem {
++
++  /**
++   * Constructor.
++   *
++   * @param string $name
++   *   The name of the transaction.
++   * @param StackItemType $type
++   *   The stack item type.
++   */
++  public function __construct(
++    public readonly string $name,
++    public readonly StackItemType $type,
++  ) {
++  }
++
++}
+diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
+index 112077b90ee..cf34920399a 100644
+--- a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
++++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
+@@ -32,16 +32,11 @@ abstract class TransactionManagerBase implements TransactionManagerInterface {
+    * the layer order is enforced, while for rollbacks the API allows to
+    * rollback to savepoints before the last one.
+    *
+-   * @var array<string,StackItemType>
+-   */
+-  private array $stack = [];
+-
+-  /**
+-   * A list of Drupal transactions rolled back but not yet unpiled.
++   * The array key is the transaction's unique id, its value a StackItem.
+    *
+-   * @var array<string,true>
++   * @var array<string,StackItem>
+    */
+-  private array $rollbacks = [];
++  private array $stack = [];
+ 
+   /**
+    * A list of post-transaction callbacks.
+@@ -91,7 +86,7 @@ public function stackDepth(): int {
+    * $stack property.
+    *
+    * phpcs:ignore Drupal.Commenting.FunctionComment.InvalidReturn
+-   * @return array<string,StackItemType>
++   * @return array<string,StackItem>
+    *   The elements of the transaction stack.
+    */
+   protected function stack(): array {
+@@ -114,13 +109,13 @@ protected function resetStack(): void {
+    * Drivers should not override this method unless they also override the
+    * $stack property.
+    *
+-   * @param string $name
+-   *   The name of the transaction.
+-   * @param \Drupal\Core\Database\Transaction\StackItemType $type
+-   *   The stack item type.
++   * @param string $id
++   *   The id of the transaction.
++   * @param \Drupal\Core\Database\Transaction\StackItem $item
++   *   The stack item.
+    */
+-  protected function addStackItem(string $name, StackItemType $type): void {
+-    $this->stack[$name] = $type;
++  protected function addStackItem(string $id, StackItem $item): void {
++    $this->stack[$id] = $item;
+   }
+ 
+   /**
+@@ -129,11 +124,11 @@ protected function addStackItem(string $name, StackItemType $type): void {
+    * Drivers should not override this method unless they also override the
+    * $stack property.
+    *
+-   * @param string $name
+-   *   The name of the transaction.
++   * @param string $id
++   *   The id of the transaction.
+    */
+-  protected function removeStackItem(string $name): void {
+-    unset($this->stack[$name]);
++  protected function removeStackItem(string $id): void {
++    unset($this->stack[$id]);
+   }
+ 
+   /**
+@@ -176,23 +171,31 @@ public function push(string $name = ''): Transaction {
+       $type = StackItemType::Savepoint;
+     }
+ 
+-    // Push the transaction on the stack, increasing its depth.
+-    $this->addStackItem($name, $type);
++    // Define an unique id for the transaction.
++    $id = uniqid();
+ 
+-    return new Transaction($this->connection, $name);
++    // Add an item on the stack, increasing its depth.
++    $this->addStackItem($id, new StackItem($name, $type));
++
++    // Actually return a new Transaction object.
++    return new Transaction($this->connection, $name, $id);
+   }
+ 
+   /**
+    * {@inheritdoc}
+    */
+-  public function unpile(string $name): void {
+-    // If an already rolled back Drupal transaction, do nothing on the client
+-    // connection, just cleanup the list of transactions rolled back.
+-    if (isset($this->rollbacks[$name])) {
+-      unset($this->rollbacks[$name]);
++  public function unpile(string $name, string $id): void {
++global $xxx;
++if ($xxx) dump([__METHOD__, $id, $name, $this->stack]);
++    // If the $id does not correspond to the one in the stack for that $name,
++    // we are facing an orphaned Transaction object (for example in case of a
++    // DDL statement breaking an active transaction), do nothing.
++    if (!isset($this->stack()[$id]) || $this->stack()[$id]->name !== $name) {
+       return;
+     }
+ 
++    // If unpiling a savepoint, but that does not exist on the stack, the stack
++    // got corrupted.
+     if ($name !== 'drupal_transaction' && !$this->has($name)) {
+       throw new TransactionOutOfOrderException();
+     }
+@@ -201,14 +204,20 @@ public function unpile(string $name): void {
+     // is not a root one.
+     if (
+       $this->has($name)
+-      && $this->stack()[$name] === StackItemType::Savepoint
++      && $this->stack()[$id]->type === StackItemType::Savepoint
+       && $this->getConnectionTransactionState() === ClientConnectionTransactionState::Active
+     ) {
+       $this->releaseClientSavepoint($name);
++      // If we are not releasing the last savepoint but an earlier one, all
++      // subsequent savepoints will have been released as well. The stack must
++      // be diminished accordingly.
++      while (($i = array_key_last($this->stack())) !== $id) {
++        $this->removeStackItem($i);
++      }
+     }
+ 
+     // Remove the transaction from the stack.
+-    $this->removeStackItem($name);
++    $this->removeStackItem($id);
+ 
+     // If this was the last Drupal transaction open, we can commit the client
+     // transaction.
+@@ -223,24 +232,45 @@ public function unpile(string $name): void {
+   /**
+    * {@inheritdoc}
+    */
+-  public function rollback(string $name): void {
++  public function rollback(string $name, string $id): void {
++    // @todo remove in drupal:11.0.0.
++    // Start of BC layer.
++    if ($id === 'bc-force-rollback') {
++      foreach ($this->stack() as $stackId => $item) {
++        if ($item->name === $name) {
++          $id = $stackId;
++          break;
++        }
++      }
++      if ($id === 'bc-force-rollback') {
++        throw new TransactionOutOfOrderException();
++      }
++    }
++    // End of BC layer.
++
++    // If the $id does not correspond to the one in the stack for that $name,
++    // we are facing an orphaned Transaction object (for example in case of a
++    // DDL statement breaking an active transaction), do nothing.
++    if (!isset($this->stack()[$id]) || $this->stack()[$id]->name !== $name) {
++      return;
++    }
++
+     if (!$this->inTransaction()) {
+       throw new TransactionNoActiveException();
+     }
+ 
+     // Do the client-level processing.
+-    match ($this->stack()[$name]) {
++    match ($this->stack()[$id]->type) {
+       StackItemType::Root => $this->processRootRollback(),
+       StackItemType::Savepoint => $this->rollbackClientSavepoint($name),
+     };
+ 
+     // Rolled back item should match the last one in stack.
+-    if ($name !== array_key_last($this->stack())) {
++    if ($id !== array_key_last($this->stack())) {
+       throw new TransactionOutOfOrderException();
+     }
+ 
+-    $this->rollbacks[$name] = TRUE;
+-    $this->removeStackItem($name);
++    $this->removeStackItem($id);
+ 
+     // If this was the last Drupal transaction open, we can commit the client
+     // transaction.
+@@ -263,7 +293,12 @@ public function addPostTransactionCallback(callable $callback): void {
+    * {@inheritdoc}
+    */
+   public function has(string $name): bool {
+-    return isset($this->stack()[$name]);
++    foreach ($this->stack() as $item) {
++      if ($item->name === $name) {
++        return TRUE;
++      }
++    }
++    return FALSE;
+   }
+ 
+   /**
+diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php
+index 86d5de4ac5a..1bd0cd3e5fd 100644
+--- a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php
++++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php
+@@ -36,6 +36,8 @@ public function has(string $name): bool;
+    * This begins a client connection transaction if there is not one active,
+    * or adds a savepoint to the active one.
+    *
++   * This method should only be called internally by a database driver.
++   *
+    * @param string $name
+    *   (optional) The name of the savepoint.
+    *
+@@ -54,15 +56,19 @@ public function push(string $name = ''): Transaction;
+    * This method should only be called by a Transaction object going out of
+    * scope.
+    *
++   * This method should only be called internally by a database driver.
++   *
+    * @param string $name
+-   *   (optional) The name of the savepoint.
++   *   The name of the transaction.
++   * @param string $id
++   *   The id of the transaction.
+    *
+    * @throws \Drupal\Core\Database\TransactionOutOfOrderException
+    *   If a Drupal Transaction with the specified name does not exist.
+    * @throws \Drupal\Core\Database\TransactionCommitFailedException
+    *   If the commit of the root transaction failed.
+    */
+-  public function unpile(string $name): void;
++  public function unpile(string $name, string $id): void;
+ 
+   /**
+    * Rolls back a Drupal transaction.
+@@ -72,8 +78,12 @@ public function unpile(string $name): void;
+    * to rolling back the client connection (or to committing it in the edge
+    * case when the root was unpiled earlier).
+    *
++   * This method should only be called internally by a database driver.
++   *
+    * @param string $name
+-   *   (optional) The name of the savepoint.
++   *   The name of the transaction.
++   * @param string $id
++   *   The id of the transaction.
+    *
+    * @throws \Drupal\Core\Database\TransactionNoActiveException
+    *   If there is no active client connection.
+@@ -83,7 +93,7 @@ public function unpile(string $name): void;
+    * @throws \Drupal\Core\Database\TransactionCommitFailedException
+    *   If the commit of the root transaction failed.
+    */
+-  public function rollback(string $name): void;
++  public function rollback(string $name, string $id): void;
+ 
+   /**
+    * Adds a root transaction end callback.
 diff --git a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
-index 18c2efcb0ca..b0e9fc3e9b6 100644
+index 18c2efcb0ca..ec50495fcc5 100644
 --- a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
 +++ b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
-@@ -576,6 +576,30 @@ public function testQueryFailureInTransaction() {
+@@ -576,6 +576,32 @@ public function testQueryFailureInTransaction() {
      $this->assertEquals('24', $saved_age);
    }
  
@@ -10,6 +366,7 @@ index 18c2efcb0ca..b0e9fc3e9b6 100644
 +   * Tests releasing a savepoint before last is safe.
 +   */
 +  public function testReleaseIntermediateSavepoint(): void {
++global $xxx; $xxx = TRUE;
 +    $transaction = $this->connection->startTransaction();
 +    $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
 +    $savepoint1 = $this->connection->startTransaction();
@@ -28,6 +385,7 @@ index 18c2efcb0ca..b0e9fc3e9b6 100644
 +    unset($transaction);
 +    $this->assertFalse($this->connection->inTransaction());
 +    $this->assertRowPresent('row');
++$xxx = FALSE;
 +  }
 +
    /**
