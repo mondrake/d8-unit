@@ -100,7 +100,7 @@ index 00000000000..30b9126e7ca
 +
 +}
 diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
-index 112077b90ee..fc70b3cfb79 100644
+index 112077b90ee..a498cf3257a 100644
 --- a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
 +++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
 @@ -32,16 +32,11 @@ abstract class TransactionManagerBase implements TransactionManagerInterface {
@@ -168,7 +168,7 @@ index 112077b90ee..fc70b3cfb79 100644
    }
  
    /**
-@@ -176,20 +171,24 @@ public function push(string $name = ''): Transaction {
+@@ -176,23 +171,29 @@ public function push(string $name = ''): Transaction {
        $type = StackItemType::Savepoint;
      }
  
@@ -194,14 +194,19 @@ index 112077b90ee..fc70b3cfb79 100644
 -    if (isset($this->rollbacks[$name])) {
 -      unset($this->rollbacks[$name]);
 +  public function unpile(string $name, string $id): void {
-+    // If an already committed or rolled back Drupal transaction, or if the
-+    // stacks were reset leaving Transaction objects orphaned (for example in
-+    // case of a DDL statement breaking an active transaction), do nothing.
-+    if (!isset($this->stack()[$id])) {
++    // If the $id does not correspond to the one in the stack for that $name,
++    // we are facing an orphaned Transaction object (for example in case of a
++    // DDL statement breaking an active transaction), do nothing.
++    if (!isset($this->stack()[$id]) || $this->stack()[$id]->name !== $name) {
        return;
      }
  
-@@ -201,14 +200,14 @@ public function unpile(string $name): void {
++    // If unpiling a savepoint, but that does not exist on the stack, the stack
++    // got corrupted.
+     if ($name !== 'drupal_transaction' && !$this->has($name)) {
+       throw new TransactionOutOfOrderException();
+     }
+@@ -201,14 +202,20 @@ public function unpile(string $name): void {
      // is not a root one.
      if (
        $this->has($name)
@@ -210,6 +215,12 @@ index 112077b90ee..fc70b3cfb79 100644
        && $this->getConnectionTransactionState() === ClientConnectionTransactionState::Active
      ) {
        $this->releaseClientSavepoint($name);
++      // If we are not releasing the last savepoint but an earlier one, all
++      // subsequent savepoints will have been released as well. The stack must
++      // be diminished accordingly.
++      while (($i = array_key_last($this->stack())) !== $id) {
++        $this->removeStackItem($i);
++      }
      }
  
      // Remove the transaction from the stack.
@@ -218,7 +229,7 @@ index 112077b90ee..fc70b3cfb79 100644
  
      // If this was the last Drupal transaction open, we can commit the client
      // transaction.
-@@ -223,24 +222,38 @@ public function unpile(string $name): void {
+@@ -223,24 +230,45 @@ public function unpile(string $name): void {
    /**
     * {@inheritdoc}
     */
@@ -238,6 +249,13 @@ index 112077b90ee..fc70b3cfb79 100644
 +      }
 +    }
 +    // End of BC layer.
++
++    // If the $id does not correspond to the one in the stack for that $name,
++    // we are facing an orphaned Transaction object (for example in case of a
++    // DDL statement breaking an active transaction), do nothing.
++    if (!isset($this->stack()[$id]) || $this->stack()[$id]->name !== $name) {
++      return;
++    }
 +
      if (!$this->inTransaction()) {
        throw new TransactionNoActiveException();
@@ -262,7 +280,7 @@ index 112077b90ee..fc70b3cfb79 100644
  
      // If this was the last Drupal transaction open, we can commit the client
      // transaction.
-@@ -263,7 +276,12 @@ public function addPostTransactionCallback(callable $callback): void {
+@@ -263,7 +291,12 @@ public function addPostTransactionCallback(callable $callback): void {
     * {@inheritdoc}
     */
    public function has(string $name): bool {
@@ -334,3 +352,38 @@ index 86d5de4ac5a..1bd0cd3e5fd 100644
  
    /**
     * Adds a root transaction end callback.
+diff --git a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
+index 18c2efcb0ca..b0e9fc3e9b6 100644
+--- a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
++++ b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
+@@ -576,6 +576,30 @@ public function testQueryFailureInTransaction() {
+     $this->assertEquals('24', $saved_age);
+   }
+ 
++  /**
++   * Tests releasing a savepoint before last is safe.
++   */
++  public function testReleaseIntermediateSavepoint(): void {
++    $transaction = $this->connection->startTransaction();
++    $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
++    $savepoint1 = $this->connection->startTransaction();
++    $this->assertSame(2, $this->connection->transactionManager()->stackDepth());
++    $savepoint2 = $this->connection->startTransaction();
++    $this->assertSame(3, $this->connection->transactionManager()->stackDepth());
++    $savepoint3 = $this->connection->startTransaction();
++    $this->assertSame(4, $this->connection->transactionManager()->stackDepth());
++    $savepoint4 = $this->connection->startTransaction();
++    $this->assertSame(5, $this->connection->transactionManager()->stackDepth());
++    $this->insertRow('row');
++    unset($savepoint2);
++    $this->assertSame(2, $this->connection->transactionManager()->stackDepth());
++    $this->assertRowPresent('row');
++    unset($savepoint1);
++    unset($transaction);
++    $this->assertFalse($this->connection->inTransaction());
++    $this->assertRowPresent('row');
++  }
++
+   /**
+    * Tests for transaction names.
+    */
