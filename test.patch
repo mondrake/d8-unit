@@ -100,7 +100,7 @@ index 00000000000..30b9126e7ca
 +
 +}
 diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
-index 112077b90ee..608239d7f65 100644
+index 112077b90ee..552bcf48cab 100644
 --- a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
 +++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
 @@ -32,16 +32,11 @@ abstract class TransactionManagerBase implements TransactionManagerInterface {
@@ -168,7 +168,7 @@ index 112077b90ee..608239d7f65 100644
    }
  
    /**
-@@ -176,23 +171,34 @@ public function push(string $name = ''): Transaction {
+@@ -176,23 +171,30 @@ public function push(string $name = ''): Transaction {
        $type = StackItemType::Savepoint;
      }
  
@@ -176,13 +176,11 @@ index 112077b90ee..608239d7f65 100644
 -    $this->addStackItem($name, $type);
 +    // Define an unique id for the transaction.
 +    $id = uniqid();
- 
--    return new Transaction($this->connection, $name);
++
 +    // Add an item on the stack, increasing its depth.
 +    $this->addStackItem($id, new StackItem($name, $type));
-+global $xxx;
-+if ($xxx) dump([__METHOD__, $id, $name, $this->stack]);
-+
+ 
+-    return new Transaction($this->connection, $name);
 +    // Actually return a new Transaction object.
 +    return new Transaction($this->connection, $name, $id);
    }
@@ -196,13 +194,11 @@ index 112077b90ee..608239d7f65 100644
 -    if (isset($this->rollbacks[$name])) {
 -      unset($this->rollbacks[$name]);
 +  public function unpile(string $name, string $id): void {
-+global $xxx;
 +    // If the $id does not correspond to the one in the stack for that $name,
 +    // we are facing an orphaned Transaction object (for example in case of a
 +    // DDL statement breaking an active transaction), so there is nothing more
 +    // to do.
 +    if (!isset($this->stack()[$id]) || $this->stack()[$id]->name !== $name) {
-+if ($xxx) dump([__METHOD__, '*** MISSING', $id, $name]);
        return;
      }
  
@@ -211,7 +207,7 @@ index 112077b90ee..608239d7f65 100644
      if ($name !== 'drupal_transaction' && !$this->has($name)) {
        throw new TransactionOutOfOrderException();
      }
-@@ -201,14 +207,22 @@ public function unpile(string $name): void {
+@@ -201,14 +203,20 @@ public function unpile(string $name): void {
      // is not a root one.
      if (
        $this->has($name)
@@ -231,18 +227,15 @@ index 112077b90ee..608239d7f65 100644
      // Remove the transaction from the stack.
 -    $this->removeStackItem($name);
 +    $this->removeStackItem($id);
-+
-+if ($xxx) dump([__METHOD__, $id, $name, $this->stack, isset($this->stack()[$id])]);
  
      // If this was the last Drupal transaction open, we can commit the client
      // transaction.
-@@ -223,24 +237,49 @@ public function unpile(string $name): void {
+@@ -223,24 +231,47 @@ public function unpile(string $name): void {
    /**
     * {@inheritdoc}
     */
 -  public function rollback(string $name): void {
 +  public function rollback(string $name, string $id): void {
-+global $xxx;
 +    // @todo remove in drupal:11.0.0.
 +    // Start of BC layer.
 +    if ($id === 'bc-force-rollback') {
@@ -263,7 +256,6 @@ index 112077b90ee..608239d7f65 100644
 +    // DDL statement breaking an active transaction), so there is nothing more
 +    // to do.
 +    if (!isset($this->stack()[$id]) || $this->stack()[$id]->name !== $name) {
-+if ($xxx) dump([__METHOD__, '*** MISSING', $id, $name]);
 +      return;
 +    }
 +
@@ -286,12 +278,12 @@ index 112077b90ee..608239d7f65 100644
  
 -    $this->rollbacks[$name] = TRUE;
 -    $this->removeStackItem($name);
++    // Remove the transaction from the stack.
 +    $this->removeStackItem($id);
-+if ($xxx) dump([__METHOD__, $id, $name, $this->stack, isset($this->stack()[$id])]);
  
      // If this was the last Drupal transaction open, we can commit the client
      // transaction.
-@@ -263,7 +302,12 @@ public function addPostTransactionCallback(callable $callback): void {
+@@ -263,7 +294,12 @@ public function addPostTransactionCallback(callable $callback): void {
     * {@inheritdoc}
     */
    public function has(string $name): bool {
@@ -364,59 +356,10 @@ index 86d5de4ac5a..1bd0cd3e5fd 100644
    /**
     * Adds a root transaction end callback.
 diff --git a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
-index 18c2efcb0ca..2ce4ef649d4 100644
+index 18c2efcb0ca..b0e9fc3e9b6 100644
 --- a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
 +++ b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
-@@ -214,6 +214,8 @@ public function testTransactionWithDdlStatement() {
- 
-     // Even with stacking.
-     $this->cleanUp();
-+global $xxx; $xxx = TRUE;
-+dump('>>> ONE');
-     $transaction = $this->connection->startTransaction();
-     $transaction2 = $this->connection->startTransaction();
-     $this->executeDDLStatement();
-@@ -226,6 +228,7 @@ public function testTransactionWithDdlStatement() {
- 
-     // A transaction after a DDL statement should still work the same.
-     $this->cleanUp();
-+dump('>>> TWO');
-     $transaction = $this->connection->startTransaction();
-     $transaction2 = $this->connection->startTransaction();
-     $this->executeDDLStatement();
-@@ -242,6 +245,7 @@ public function testTransactionWithDdlStatement() {
-       // For database servers that support transactional DDL, a rollback
-       // of a transaction including DDL statements should be possible.
-       $this->cleanUp();
-+dump('>>> THREE');
-       $transaction = $this->connection->startTransaction();
-       $this->insertRow('row');
-       $this->executeDDLStatement();
-@@ -251,6 +255,7 @@ public function testTransactionWithDdlStatement() {
- 
-       // Including with stacking.
-       $this->cleanUp();
-+dump('>>> FOUR');
-       $transaction = $this->connection->startTransaction();
-       $transaction2 = $this->connection->startTransaction();
-       $this->executeDDLStatement();
-@@ -266,6 +271,7 @@ public function testTransactionWithDdlStatement() {
-       // For database servers that do not support transactional DDL,
-       // the DDL statement should commit the transaction stack.
-       $this->cleanUp();
-+dump('>>> FIVE');
-       $transaction = $this->connection->startTransaction();
-       $this->insertRow('row');
-       $this->executeDDLStatement();
-@@ -282,6 +288,7 @@ public function testTransactionWithDdlStatement() {
-       unset($transaction);
-       $this->assertRowPresent('row');
-     }
-+$xxx = FALSE;
-   }
- 
-   /**
-@@ -576,6 +583,30 @@ public function testQueryFailureInTransaction() {
+@@ -576,6 +576,30 @@ public function testQueryFailureInTransaction() {
      $this->assertEquals('24', $saved_age);
    }
  
