@@ -12,7 +12,7 @@ index 67dc4a1a1a4..97b528c25be 100644
      }
      if (!$this->inTransaction()) {
 diff --git a/core/lib/Drupal/Core/Database/Transaction.php b/core/lib/Drupal/Core/Database/Transaction.php
-index 47069baafba..56b3f2eaef6 100644
+index 47069baafba..062dd177d09 100644
 --- a/core/lib/Drupal/Core/Database/Transaction.php
 +++ b/core/lib/Drupal/Core/Database/Transaction.php
 @@ -34,6 +34,11 @@ class Transaction {
@@ -21,7 +21,7 @@ index 47069baafba..56b3f2eaef6 100644
     * @var bool
 +   *
 +   * @deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. There is
-+   *   no replecement.
++   *   no replacement.
 +   *
 +   * @see https://www.drupal.org/node/3381002
     */
@@ -100,12 +100,19 @@ index 00000000000..30b9126e7ca
 +
 +}
 diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
-index 112077b90ee..552bcf48cab 100644
+index 112077b90ee..24dda69eadb 100644
 --- a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
 +++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
-@@ -32,16 +32,11 @@ abstract class TransactionManagerBase implements TransactionManagerInterface {
-    * the layer order is enforced, while for rollbacks the API allows to
-    * rollback to savepoints before the last one.
+@@ -28,20 +28,15 @@ abstract class TransactionManagerBase implements TransactionManagerInterface {
+    * The stack of Drupal transactions currently active.
+    *
+    * This is not a real LIFO (Last In, First Out) stack, where we would only
+-   * remove the layers according to the order they were introduced. For commits
+-   * the layer order is enforced, while for rollbacks the API allows to
+-   * rollback to savepoints before the last one.
++   * remove the layers according to the order they were introduced. For
++   * rollbacks the layer order is enforced, while for the root transaction and
++   * for savepoints the API allows to release any item before the last one.
     *
 -   * @var array<string,StackItemType>
 -   */
@@ -168,7 +175,7 @@ index 112077b90ee..552bcf48cab 100644
    }
  
    /**
-@@ -176,23 +171,30 @@ public function push(string $name = ''): Transaction {
+@@ -176,39 +171,54 @@ public function push(string $name = ''): Transaction {
        $type = StackItemType::Savepoint;
      }
  
@@ -207,7 +214,16 @@ index 112077b90ee..552bcf48cab 100644
      if ($name !== 'drupal_transaction' && !$this->has($name)) {
        throw new TransactionOutOfOrderException();
      }
-@@ -201,14 +203,20 @@ public function unpile(string $name): void {
+ 
++    // If we are releasing not the last savepoint but an earlier one, or
++    // committing a root transaction while savepoints are active, all
++    // subsequent savepoints will be released as well. The stack must be
++    // diminished accordingly.
++    while (($i = array_key_last($this->stack())) !== $id) {
++      $this->removeStackItem($i);
++    }
++
+     // Release the client transaction savepoint in case the Drupal transaction
      // is not a root one.
      if (
        $this->has($name)
@@ -215,12 +231,6 @@ index 112077b90ee..552bcf48cab 100644
 +      && $this->stack()[$id]->type === StackItemType::Savepoint
        && $this->getConnectionTransactionState() === ClientConnectionTransactionState::Active
      ) {
-+      // If we are not releasing the last savepoint but an earlier one, all
-+      // subsequent savepoints will have been released as well. The stack must
-+      // be diminished accordingly.
-+      while (($i = array_key_last($this->stack())) !== $id) {
-+        $this->removeStackItem($i);
-+      }
        $this->releaseClientSavepoint($name);
      }
  
@@ -230,7 +240,7 @@ index 112077b90ee..552bcf48cab 100644
  
      // If this was the last Drupal transaction open, we can commit the client
      // transaction.
-@@ -223,24 +231,47 @@ public function unpile(string $name): void {
+@@ -223,24 +233,47 @@ public function unpile(string $name): void {
    /**
     * {@inheritdoc}
     */
@@ -283,7 +293,7 @@ index 112077b90ee..552bcf48cab 100644
  
      // If this was the last Drupal transaction open, we can commit the client
      // transaction.
-@@ -263,7 +294,12 @@ public function addPostTransactionCallback(callable $callback): void {
+@@ -263,7 +296,12 @@ public function addPostTransactionCallback(callable $callback): void {
     * {@inheritdoc}
     */
    public function has(string $name): bool {
@@ -356,10 +366,40 @@ index 86d5de4ac5a..1bd0cd3e5fd 100644
    /**
     * Adds a root transaction end callback.
 diff --git a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
-index 18c2efcb0ca..b0e9fc3e9b6 100644
+index 18c2efcb0ca..4a36ce10f5e 100644
 --- a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
 +++ b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
-@@ -576,6 +576,30 @@ public function testQueryFailureInTransaction() {
+@@ -370,19 +370,24 @@ public function testTransactionStacking() {
+     $this->assertRowPresent('outer');
+     $this->assertRowPresent('inner');
+ 
+-    // Pop the transaction in a different order they have been pushed.
++    // Unset the Transactions in a different order from push.
+     $this->cleanUp();
+     $transaction = $this->connection->startTransaction();
+     $this->insertRow('outer');
+     $transaction2 = $this->connection->startTransaction();
+     $this->insertRow('inner');
+-    // Pop the outer transaction, nothing should happen.
++    // Commit the outer (root) transaction, nothing should happen.
+     unset($transaction);
+     $this->insertRow('inner-after-outer-commit');
+-    $this->assertTrue($this->connection->inTransaction(), 'Still in a transaction after popping the outer transaction');
+-    // Pop the inner transaction, the whole transaction should commit.
++    // Since we have committed the outer (root) Transaction object, the inner
++    // (savepoint) one has been dropped by the database already, and we are no
++    // longer in an active transaction state.
++    $this->assertFalse($this->connection->inTransaction());
++    // Unpile the inner (savepoint) Transaction object, it should be a no-op
++    // anyway given it was dropped by the database already, and removed from
++    // our transaction stack.
+     unset($transaction2);
+-    $this->assertFalse($this->connection->inTransaction(), 'Transaction closed after popping the inner transaction');
++    $this->assertFalse($this->connection->inTransaction());
+     $this->assertRowPresent('outer');
+     $this->assertRowPresent('inner');
+     $this->assertRowPresent('inner-after-outer-commit');
+@@ -576,6 +581,46 @@ public function testQueryFailureInTransaction() {
      $this->assertEquals('24', $saved_age);
    }
  
@@ -382,6 +422,22 @@ index 18c2efcb0ca..b0e9fc3e9b6 100644
 +    $this->assertSame(2, $this->connection->transactionManager()->stackDepth());
 +    $this->assertRowPresent('row');
 +    unset($savepoint1);
++    unset($transaction);
++    $this->assertFalse($this->connection->inTransaction());
++    $this->assertRowPresent('row');
++  }
++
++  /**
++   * Tests committing a transaction while savepoints are active.
++   */
++  public function testCommitWithActiveSavepoint(): void {
++    $transaction = $this->connection->startTransaction();
++    $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
++    $savepoint1 = $this->connection->startTransaction();
++    $this->assertSame(2, $this->connection->transactionManager()->stackDepth());
++    $savepoint2 = $this->connection->startTransaction();
++    $this->assertSame(3, $this->connection->transactionManager()->stackDepth());
++    $this->insertRow('row');
 +    unset($transaction);
 +    $this->assertFalse($this->connection->inTransaction());
 +    $this->assertRowPresent('row');
