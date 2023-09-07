@@ -1,5 +1,5 @@
 diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
-index 67dc4a1a1a4..97b528c25be 100644
+index 67dc4a1a1a..97b528c25b 100644
 --- a/core/lib/Drupal/Core/Database/Connection.php
 +++ b/core/lib/Drupal/Core/Database/Connection.php
 @@ -1480,7 +1480,7 @@ public function startTransaction($name = '') {
@@ -12,7 +12,7 @@ index 67dc4a1a1a4..97b528c25be 100644
      }
      if (!$this->inTransaction()) {
 diff --git a/core/lib/Drupal/Core/Database/Transaction.php b/core/lib/Drupal/Core/Database/Transaction.php
-index 47069baafba..062dd177d09 100644
+index 47069baafb..062dd177d0 100644
 --- a/core/lib/Drupal/Core/Database/Transaction.php
 +++ b/core/lib/Drupal/Core/Database/Transaction.php
 @@ -34,6 +34,11 @@ class Transaction {
@@ -69,7 +69,7 @@ index 47069baafba..062dd177d09 100644
      $this->connection->rollBack($this->name);
 diff --git a/core/lib/Drupal/Core/Database/Transaction/StackItem.php b/core/lib/Drupal/Core/Database/Transaction/StackItem.php
 new file mode 100644
-index 00000000000..30b9126e7ca
+index 0000000000..30b9126e7c
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/Transaction/StackItem.php
 @@ -0,0 +1,26 @@
@@ -100,7 +100,7 @@ index 00000000000..30b9126e7ca
 +
 +}
 diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
-index 112077b90ee..24dda69eadb 100644
+index 112077b90e..c3f33cf41a 100644
 --- a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
 +++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
 @@ -28,20 +28,15 @@ abstract class TransactionManagerBase implements TransactionManagerInterface {
@@ -175,7 +175,7 @@ index 112077b90ee..24dda69eadb 100644
    }
  
    /**
-@@ -176,39 +171,54 @@ public function push(string $name = ''): Transaction {
+@@ -176,71 +171,105 @@ public function push(string $name = ''): Transaction {
        $type = StackItemType::Savepoint;
      }
  
@@ -209,38 +209,60 @@ index 112077b90ee..24dda69eadb 100644
        return;
      }
  
-+    // If unpiling a savepoint, but that does not exist on the stack, the stack
-+    // got corrupted.
-     if ($name !== 'drupal_transaction' && !$this->has($name)) {
-       throw new TransactionOutOfOrderException();
-     }
- 
+-    if ($name !== 'drupal_transaction' && !$this->has($name)) {
+-      throw new TransactionOutOfOrderException();
+-    }
+-
+-    // Release the client transaction savepoint in case the Drupal transaction
+-    // is not a root one.
+-    if (
+-      $this->has($name)
+-      && $this->stack()[$name] === StackItemType::Savepoint
+-      && $this->getConnectionTransactionState() === ClientConnectionTransactionState::Active
+-    ) {
+-      $this->releaseClientSavepoint($name);
 +    // If we are releasing not the last savepoint but an earlier one, or
 +    // committing a root transaction while savepoints are active, all
 +    // subsequent savepoints will be released as well. The stack must be
 +    // diminished accordingly.
 +    while (($i = array_key_last($this->stack())) !== $id) {
 +      $this->removeStackItem($i);
-+    }
-+
-     // Release the client transaction savepoint in case the Drupal transaction
-     // is not a root one.
-     if (
-       $this->has($name)
--      && $this->stack()[$name] === StackItemType::Savepoint
-+      && $this->stack()[$id]->type === StackItemType::Savepoint
-       && $this->getConnectionTransactionState() === ClientConnectionTransactionState::Active
-     ) {
-       $this->releaseClientSavepoint($name);
      }
  
-     // Remove the transaction from the stack.
+-    // Remove the transaction from the stack.
 -    $this->removeStackItem($name);
-+    $this->removeStackItem($id);
++    if ($this->getConnectionTransactionState() === ClientConnectionTransactionState::Active) {
++      if ($this->stackDepth() >1 && $this->stack()[$id]->type === StackItemType::Savepoint) {
++        // Release the client transaction savepoint in case the Drupal transaction
++        // is not a root one.
++        $this->releaseClientSavepoint($name);
++      }
++      elseif ($this->stackDepth() === 1 && $this->stack()[$id]->type === StackItemType::Root) {
++        // If this was the last Drupal transaction open, we can commit the client
++        // transaction.
++        $this->processRootCommit();
++      }
++      else {
++        // The stack got corrupted.
++        throw new TransactionOutOfOrderException();
++      }
  
-     // If this was the last Drupal transaction open, we can commit the client
-     // transaction.
-@@ -223,24 +233,47 @@ public function unpile(string $name): void {
+-    // If this was the last Drupal transaction open, we can commit the client
+-    // transaction.
+-    if (
+-      $this->stackDepth() === 0
+-      && $this->getConnectionTransactionState() === ClientConnectionTransactionState::Active
+-    ) {
+-      $this->processRootCommit();
++      // Remove the transaction from the stack.
++      $this->removeStackItem($id);
++      return;
+     }
++
++    // The stack got corrupted.
++    throw new TransactionOutOfOrderException();
+   }
+ 
    /**
     * {@inheritdoc}
     */
@@ -293,7 +315,7 @@ index 112077b90ee..24dda69eadb 100644
  
      // If this was the last Drupal transaction open, we can commit the client
      // transaction.
-@@ -263,7 +296,12 @@ public function addPostTransactionCallback(callable $callback): void {
+@@ -263,7 +292,12 @@ public function addPostTransactionCallback(callable $callback): void {
     * {@inheritdoc}
     */
    public function has(string $name): bool {
@@ -308,7 +330,7 @@ index 112077b90ee..24dda69eadb 100644
  
    /**
 diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php
-index 86d5de4ac5a..1bd0cd3e5fd 100644
+index 86d5de4ac5..1bd0cd3e5f 100644
 --- a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php
 +++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php
 @@ -36,6 +36,8 @@ public function has(string $name): bool;
@@ -366,7 +388,7 @@ index 86d5de4ac5a..1bd0cd3e5fd 100644
    /**
     * Adds a root transaction end callback.
 diff --git a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
-index 18c2efcb0ca..c46e8543041 100644
+index 18c2efcb0c..c46e854304 100644
 --- a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
 +++ b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
 @@ -370,19 +370,24 @@ public function testTransactionStacking() {
