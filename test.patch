@@ -100,7 +100,7 @@ index 0000000000..30b9126e7c
 +
 +}
 diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
-index 112077b90e..57a76b660d 100644
+index 112077b90e..14208a2097 100644
 --- a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
 +++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
 @@ -28,20 +28,15 @@ abstract class TransactionManagerBase implements TransactionManagerInterface {
@@ -192,11 +192,11 @@ index 112077b90e..57a76b660d 100644
 -    $this->addStackItem($name, $type);
 +    // Define an unique id for the transaction.
 +    $id = uniqid();
-+
-+    // Add an item on the stack, increasing its depth.
-+    $this->addStackItem($id, new StackItem($name, $type));
  
 -    return new Transaction($this->connection, $name);
++    // Add an item on the stack, increasing its depth.
++    $this->addStackItem($id, new StackItem($name, $type));
++
 +    // Actually return a new Transaction object.
 +    return new Transaction($this->connection, $name, $id);
    }
@@ -342,6 +342,20 @@ index 112077b90e..57a76b660d 100644
    }
  
    /**
+@@ -410,4 +450,13 @@ protected function releaseClientSavepoint(string $name): bool {
+    */
+   abstract protected function commitClientTransaction(): bool;
+ 
++  /**
++   * Voids the client connection.
++   */
++  public function voidClientTransaction(): void {
++    $this->resetStack();
++    $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
++    $this->processPostTransactionCallbacks();
++  }
++
+ }
 diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php
 index 86d5de4ac5..1bd0cd3e5f 100644
 --- a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php
@@ -401,18 +415,42 @@ index 86d5de4ac5..1bd0cd3e5f 100644
    /**
     * Adds a root transaction end callback.
 diff --git a/core/modules/mysql/src/Driver/Database/mysql/TransactionManager.php b/core/modules/mysql/src/Driver/Database/mysql/TransactionManager.php
-index 3b7ce03f5f..ac2531e2aa 100644
+index 3b7ce03f5f..8e0af4519b 100644
 --- a/core/modules/mysql/src/Driver/Database/mysql/TransactionManager.php
 +++ b/core/modules/mysql/src/Driver/Database/mysql/TransactionManager.php
-@@ -29,6 +29,7 @@ protected function beginClientTransaction(): bool {
+@@ -29,8 +29,7 @@ protected function beginClientTransaction(): bool {
     */
    protected function processRootCommit(): void {
      if (!$this->connection->getClientConnection()->inTransaction()) {
-+      $this->resetStack();
-       $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
-       $this->processPostTransactionCallbacks();
+-      $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
+-      $this->processPostTransactionCallbacks();
++      $this->voidClientTransaction();
        return;
-@@ -66,11 +67,6 @@ protected function releaseClientSavepoint(string $name): bool {
+     }
+     parent::processRootCommit();
+@@ -41,9 +40,7 @@ protected function processRootCommit(): void {
+    */
+   protected function rollbackClientSavepoint(string $name): bool {
+     if (!$this->connection->getClientConnection()->inTransaction()) {
+-      $this->resetStack();
+-      $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
+-      $this->processPostTransactionCallbacks();
++      $this->voidClientTransaction();
+       return TRUE;
+     }
+     return parent::rollbackClientSavepoint($name);
+@@ -54,9 +51,7 @@ protected function rollbackClientSavepoint(string $name): bool {
+    */
+   protected function releaseClientSavepoint(string $name): bool {
+     if (!$this->connection->getClientConnection()->inTransaction()) {
+-      $this->resetStack();
+-      $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
+-      $this->processPostTransactionCallbacks();
++      $this->voidClientTransaction();
+       return TRUE;
+     }
+     return parent::releaseClientSavepoint($name);
+@@ -66,11 +61,6 @@ protected function releaseClientSavepoint(string $name): bool {
     * {@inheritdoc}
     */
    protected function commitClientTransaction(): bool {
@@ -424,39 +462,23 @@ index 3b7ce03f5f..ac2531e2aa 100644
      $clientCommit = $this->connection->getClientConnection()->commit();
      $this->setConnectionTransactionState($clientCommit ?
        ClientConnectionTransactionState::Committed :
-@@ -84,9 +80,11 @@ protected function commitClientTransaction(): bool {
+@@ -84,9 +74,9 @@ protected function commitClientTransaction(): bool {
     */
    protected function rollbackClientTransaction(): bool {
      if (!$this->connection->getClientConnection()->inTransaction()) {
-+      $this->resetStack();
-       $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
-       $this->processPostTransactionCallbacks();
+-      $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
+-      $this->processPostTransactionCallbacks();
        trigger_error('Rollback attempted when there is no active transaction. This can cause data integrity issues.', E_USER_WARNING);
++      $this->voidClientTransaction();
 +      return FALSE;
      }
      $clientRollback = $this->connection->getClientConnection()->rollBack();
      $this->setConnectionTransactionState($clientRollback ?
 diff --git a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
-index 18c2efcb0c..f16020e461 100644
+index 18c2efcb0c..377acccfcc 100644
 --- a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
 +++ b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
-@@ -266,6 +266,7 @@ public function testTransactionWithDdlStatement() {
-       // For database servers that do not support transactional DDL,
-       // the DDL statement should commit the transaction stack.
-       $this->cleanUp();
-+global $xxx; $xxx = true; dump(__METHOD__);
-       $transaction = $this->connection->startTransaction();
-       $this->insertRow('row');
-       $this->executeDDLStatement();
-@@ -282,6 +283,7 @@ public function testTransactionWithDdlStatement() {
-       unset($transaction);
-       $this->assertRowPresent('row');
-     }
-+$xxx = false;
-   }
- 
-   /**
-@@ -370,19 +372,24 @@ public function testTransactionStacking() {
+@@ -370,19 +370,24 @@ public function testTransactionStacking() {
      $this->assertRowPresent('outer');
      $this->assertRowPresent('inner');
  
@@ -486,7 +508,7 @@ index 18c2efcb0c..f16020e461 100644
      $this->assertRowPresent('outer');
      $this->assertRowPresent('inner');
      $this->assertRowPresent('inner-after-outer-commit');
-@@ -411,20 +418,23 @@ public function testTransactionStacking() {
+@@ -411,20 +416,23 @@ public function testTransactionStacking() {
      $this->insertRow('outer');
      $transaction2 = $this->connection->startTransaction();
      $this->insertRow('inner');
@@ -514,7 +536,7 @@ index 18c2efcb0c..f16020e461 100644
      $transaction = $this->connection->startTransaction();
      $this->insertRow('outer');
      $transaction2 = $this->connection->startTransaction();
-@@ -443,7 +453,7 @@ public function testTransactionStacking() {
+@@ -443,7 +451,7 @@ public function testTransactionStacking() {
      $this->assertFalse($this->connection->inTransaction(), 'No more in a transaction after rolling back the outer transaction');
      // Try to commit one inner transaction.
      unset($transaction3);
@@ -523,7 +545,7 @@ index 18c2efcb0c..f16020e461 100644
      // Try to rollback one inner transaction.
      try {
        $transaction->rollBack();
-@@ -576,6 +586,46 @@ public function testQueryFailureInTransaction() {
+@@ -576,6 +584,46 @@ public function testQueryFailureInTransaction() {
      $this->assertEquals('24', $saved_age);
    }
  
