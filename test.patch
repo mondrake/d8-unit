@@ -1,613 +1,297 @@
 diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
-index 67dc4a1a1a..97b528c25b 100644
+index 67dc4a1a1a4b6d81c58f0adec1d98f9f4ed142cc..e07490b63cdec892efc24966b213f6f952b5f679 100644
 --- a/core/lib/Drupal/Core/Database/Connection.php
 +++ b/core/lib/Drupal/Core/Database/Connection.php
-@@ -1480,7 +1480,7 @@ public function startTransaction($name = '') {
-   public function rollBack($savepoint_name = 'drupal_transaction') {
-     @trigger_error(__METHOD__ . '() is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Do not rollback the connection, roll back the Transaction objects instead. See https://www.drupal.org/node/3381002', E_USER_DEPRECATED);
-     if ($this->transactionManager()) {
--      $this->transactionManager()->rollback($savepoint_name);
-+      $this->transactionManager()->rollback($savepoint_name, 'bc-force-rollback');
-       return;
-     }
-     if (!$this->inTransaction()) {
-diff --git a/core/lib/Drupal/Core/Database/Transaction.php b/core/lib/Drupal/Core/Database/Transaction.php
-index 47069baafb..062dd177d0 100644
---- a/core/lib/Drupal/Core/Database/Transaction.php
-+++ b/core/lib/Drupal/Core/Database/Transaction.php
-@@ -34,6 +34,11 @@ class Transaction {
-    * A boolean value to indicate whether this transaction has been rolled back.
-    *
-    * @var bool
-+   *
-+   * @deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. There is
-+   *   no replacement.
-+   *
-+   * @see https://www.drupal.org/node/3381002
-    */
-   protected $rolledBack = FALSE;
- 
-@@ -47,7 +52,11 @@ class Transaction {
-    */
-   protected $name;
- 
--  public function __construct(Connection $connection, $name = NULL) {
-+  public function __construct(
-+    Connection $connection,
-+    $name = NULL,
-+    protected readonly string $id = '',
-+  ) {
-     if ($connection->transactionManager()) {
-       $this->connection = $connection;
-       $this->name = $name;
-@@ -76,11 +85,12 @@ public function __construct(Connection $connection, $name = NULL) {
- 
-   public function __destruct() {
-     if ($this->connection->transactionManager()) {
--      $this->connection->transactionManager()->unpile($this->name);
-+      $this->connection->transactionManager()->unpile($this->name, $this->id);
-       return;
-     }
-     // Start of BC layer.
-     // If we rolled back then the transaction would have already been popped.
-+    // @phpstan-ignore-next-line
-     if (!$this->rolledBack) {
-       // @phpstan-ignore-next-line
-       $this->connection->popTransaction($this->name);
-@@ -107,10 +117,11 @@ public function name() {
-    */
-   public function rollBack() {
-     if ($this->connection->transactionManager()) {
--      $this->connection->transactionManager()->rollback($this->name);
-+      $this->connection->transactionManager()->rollback($this->name, $this->id);
-       return;
-     }
-     // Start of BC layer.
-+    // @phpstan-ignore-next-line
-     $this->rolledBack = TRUE;
-     // @phpstan-ignore-next-line
-     $this->connection->rollBack($this->name);
-diff --git a/core/lib/Drupal/Core/Database/Transaction/StackItem.php b/core/lib/Drupal/Core/Database/Transaction/StackItem.php
-new file mode 100644
-index 0000000000..30b9126e7c
---- /dev/null
-+++ b/core/lib/Drupal/Core/Database/Transaction/StackItem.php
-@@ -0,0 +1,26 @@
-+<?php
-+
-+declare(strict_types=1);
-+
-+namespace Drupal\Core\Database\Transaction;
-+
-+/**
-+ * A value object for items on the transaction stack.
-+ */
-+final class StackItem {
-+
-+  /**
-+   * Constructor.
-+   *
-+   * @param string $name
-+   *   The name of the transaction.
-+   * @param StackItemType $type
-+   *   The stack item type.
-+   */
-+  public function __construct(
-+    public readonly string $name,
-+    public readonly StackItemType $type,
-+  ) {
-+  }
-+
-+}
-diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
-index 112077b90e..423bf027b0 100644
---- a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
-+++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
-@@ -28,20 +28,15 @@ abstract class TransactionManagerBase implements TransactionManagerInterface {
-    * The stack of Drupal transactions currently active.
-    *
-    * This is not a real LIFO (Last In, First Out) stack, where we would only
--   * remove the layers according to the order they were introduced. For commits
--   * the layer order is enforced, while for rollbacks the API allows to
--   * rollback to savepoints before the last one.
-+   * remove the layers according to the order they were introduced. For
-+   * rollbacks the layer order is enforced, while for the root transaction and
-+   * for savepoints the API allows to release any item before the last one.
-    *
--   * @var array<string,StackItemType>
--   */
--  private array $stack = [];
--
--  /**
--   * A list of Drupal transactions rolled back but not yet unpiled.
-+   * The array key is the transaction's unique id, its value a StackItem.
-    *
--   * @var array<string,true>
-+   * @var array<string,StackItem>
-    */
--  private array $rollbacks = [];
-+  private array $stack = [];
- 
-   /**
-    * A list of post-transaction callbacks.
-@@ -91,7 +86,7 @@ public function stackDepth(): int {
-    * $stack property.
-    *
-    * phpcs:ignore Drupal.Commenting.FunctionComment.InvalidReturn
--   * @return array<string,StackItemType>
-+   * @return array<string,StackItem>
-    *   The elements of the transaction stack.
-    */
-   protected function stack(): array {
-@@ -114,13 +109,13 @@ protected function resetStack(): void {
-    * Drivers should not override this method unless they also override the
-    * $stack property.
-    *
--   * @param string $name
--   *   The name of the transaction.
--   * @param \Drupal\Core\Database\Transaction\StackItemType $type
--   *   The stack item type.
-+   * @param string $id
-+   *   The id of the transaction.
-+   * @param \Drupal\Core\Database\Transaction\StackItem $item
-+   *   The stack item.
-    */
--  protected function addStackItem(string $name, StackItemType $type): void {
--    $this->stack[$name] = $type;
-+  protected function addStackItem(string $id, StackItem $item): void {
-+    $this->stack[$id] = $item;
-   }
- 
-   /**
-@@ -129,11 +124,11 @@ protected function addStackItem(string $name, StackItemType $type): void {
-    * Drivers should not override this method unless they also override the
-    * $stack property.
-    *
--   * @param string $name
--   *   The name of the transaction.
-+   * @param string $id
-+   *   The id of the transaction.
-    */
--  protected function removeStackItem(string $name): void {
--    unset($this->stack[$name]);
-+  protected function removeStackItem(string $id): void {
-+    unset($this->stack[$id]);
-   }
- 
-   /**
-@@ -176,71 +171,111 @@ public function push(string $name = ''): Transaction {
-       $type = StackItemType::Savepoint;
+@@ -1923,6 +1923,13 @@ public static function createConnectionOptionsFromUrl($url, $root) {
+       throw new \InvalidArgumentException('Minimum requirement: driver://host/database');
      }
  
--    // Push the transaction on the stack, increasing its depth.
--    $this->addStackItem($name, $type);
-+    // Define an unique id for the transaction.
-+    $id = uniqid();
-+
-+    // Add an item on the stack, increasing its depth.
-+    $this->addStackItem($id, new StackItem($name, $type));
-+global $xxx;
-+if ($xxx) dump([__METHOD__, $id, $name, $this->getConnectionTransactionState(), $this->stack]);
- 
--    return new Transaction($this->connection, $name);
-+    // Actually return a new Transaction object.
-+    return new Transaction($this->connection, $name, $id);
-   }
- 
-   /**
-    * {@inheritdoc}
-    */
--  public function unpile(string $name): void {
--    // If an already rolled back Drupal transaction, do nothing on the client
--    // connection, just cleanup the list of transactions rolled back.
--    if (isset($this->rollbacks[$name])) {
--      unset($this->rollbacks[$name]);
-+  public function unpile(string $name, string $id): void {
-+global $xxx;
-+if ($xxx) dump([__METHOD__, $id, $name, $this->getConnectionTransactionState(), $this->stack]);
-+    // If the $id does not correspond to the one in the stack for that $name,
-+    // we are facing an orphaned Transaction object (for example in case of a
-+    // DDL statement breaking an active transaction), so there is nothing more
-+    // to do.
-+    if (!isset($this->stack()[$id]) || $this->stack()[$id]->name !== $name) {
-       return;
-     }
- 
--    if ($name !== 'drupal_transaction' && !$this->has($name)) {
--      throw new TransactionOutOfOrderException();
--    }
--
--    // Release the client transaction savepoint in case the Drupal transaction
--    // is not a root one.
--    if (
--      $this->has($name)
--      && $this->stack()[$name] === StackItemType::Savepoint
--      && $this->getConnectionTransactionState() === ClientConnectionTransactionState::Active
--    ) {
--      $this->releaseClientSavepoint($name);
-+    // If we are releasing not the last savepoint but an earlier one, or
-+    // committing a root transaction while savepoints are active, all
-+    // subsequent savepoints will be released as well. The stack must be
-+    // diminished accordingly.
-+    while (($i = array_key_last($this->stack())) !== $id) {
-+      $this->removeStackItem($i);
-     }
- 
--    // Remove the transaction from the stack.
--    $this->removeStackItem($name);
-+    if ($this->getConnectionTransactionState() === ClientConnectionTransactionState::Active) {
-+      if ($this->stackDepth() >1 && $this->stack()[$id]->type === StackItemType::Savepoint) {
-+        // Release the client transaction savepoint in case the Drupal transaction
-+        // is not a root one.
-+        $this->releaseClientSavepoint($name);
-+      }
-+      elseif ($this->stackDepth() === 1 && $this->stack()[$id]->type === StackItemType::Root) {
-+        // If this was the last Drupal transaction open, we can commit the client
-+        // transaction.
-+        $this->processRootCommit();
-+      }
-+      else {
-+        // The stack got corrupted.
-+        throw new TransactionOutOfOrderException();
-+      }
- 
--    // If this was the last Drupal transaction open, we can commit the client
--    // transaction.
--    if (
--      $this->stackDepth() === 0
--      && $this->getConnectionTransactionState() === ClientConnectionTransactionState::Active
--    ) {
--      $this->processRootCommit();
-+      // Remove the transaction from the stack.
-+      $this->removeStackItem($id);
-+      return;
-     }
-+
-+    // The stack got corrupted.
-+    throw new TransactionOutOfOrderException();
-   }
- 
-   /**
-    * {@inheritdoc}
-    */
--  public function rollback(string $name): void {
-+  public function rollback(string $name, string $id): void {
-+global $xxx;
-+if ($xxx) dump([__METHOD__, $id, $name, $this->getConnectionTransactionState(), $this->stack]);
-+    // @todo remove in drupal:11.0.0.
-+    // Start of BC layer.
-+    if ($id === 'bc-force-rollback') {
-+      foreach ($this->stack() as $stackId => $item) {
-+        if ($item->name === $name) {
-+          $id = $stackId;
-+          break;
-+        }
-+      }
-+      if ($id === 'bc-force-rollback') {
-+        throw new TransactionOutOfOrderException();
-+      }
++    if (!isset($url_components['query'])) {
++      @trigger_error('Not passing a ?module=db_driver_module part in the $url argument of ' . __METHOD__ . '() is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. All database connection URLs must have the module specified. See https://www.drupal.org/node/3129492', E_USER_DEPRECATED);
 +    }
++    else {
++      parse_str($url_components['query'], $query);
++    }
++
+     $url_components += [
+       'user' => '',
+       'pass' => '',
+@@ -1938,6 +1945,7 @@ public static function createConnectionOptionsFromUrl($url, $root) {
+     $reflector = new \ReflectionClass(static::class);
+ 
+     $database = [
++      'module' => $query['module'] ?? explode('\\', $reflector->getNamespaceName())[1],
+       'driver' => $url_components['scheme'],
+       'username' => $url_components['user'],
+       'password' => $url_components['pass'],
+@@ -2006,6 +2014,9 @@ public static function createUrlFromConnectionOptions(array $connection_options)
+     if (isset($connection_options['module'])) {
+       $db_url .= '?module=' . $connection_options['module'];
+     }
++    else {
++      @trigger_error('Not passing a \'module\' option to ' . __METHOD__ . '() is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. All database connections must have the module specified. See https://www.drupal.org/node/3129492', E_USER_DEPRECATED);
++    }
+ 
+     if (isset($connection_options['prefix']) && $connection_options['prefix'] !== '') {
+       $db_url .= '#' . $connection_options['prefix'];
+diff --git a/core/lib/Drupal/Core/Database/Database.php b/core/lib/Drupal/Core/Database/Database.php
+index c641ac203ded3843e1f23ef625ca5cfb86f4b829..853f1eb3e58380554eb3a2e6ffbfa856304258b0 100644
+--- a/core/lib/Drupal/Core/Database/Database.php
++++ b/core/lib/Drupal/Core/Database/Database.php
+@@ -556,11 +556,15 @@ public static function convertDbUrlToConnectionInfo($url, $root, ?bool $include_
+     $url_component_query = $url_components['query'] ?? '';
+     parse_str($url_component_query, $query);
+ 
++    // Start of BC layer.
+     // Add the module key for core database drivers when the module key is not
+     // set.
+     if (!isset($query['module']) && in_array($driverName, ['mysql', 'pgsql', 'sqlite'], TRUE)) {
++      @trigger_error('Not passing a ?module=db_driver_module part in the $url argument of ' . __METHOD__ . '() is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. All database connection URLs must have the module specified. See https://www.drupal.org/node/3129492', E_USER_DEPRECATED);
+       $query['module'] = $driverName;
+     }
 +    // End of BC layer.
 +
-+    // If the $id does not correspond to the one in the stack for that $name,
-+    // we are facing an orphaned Transaction object (for example in case of a
-+    // DDL statement breaking an active transaction), so there is nothing more
-+    // to do.
-+    if (!isset($this->stack()[$id]) || $this->stack()[$id]->name !== $name) {
-+      return;
-+    }
-+
-     if (!$this->inTransaction()) {
-       throw new TransactionNoActiveException();
+     if (!isset($query['module'])) {
+       throw new \InvalidArgumentException("Can not convert '$url' to a database connection, the module providing the driver '{$driverName}' is not specified");
      }
+diff --git a/core/modules/sqlite/tests/src/Unit/ConnectionTest.php b/core/modules/sqlite/tests/src/Unit/ConnectionTest.php
+index 1555d83f112eac0f09584ccf0c60c5be7c7aff49..08550e9eb599842eda50588d387da0b7c5425434 100644
+--- a/core/modules/sqlite/tests/src/Unit/ConnectionTest.php
++++ b/core/modules/sqlite/tests/src/Unit/ConnectionTest.php
+@@ -40,9 +40,9 @@ public function testCreateConnectionOptionsFromUrl(string $url, string $expected
+   public function providerCreateConnectionOptionsFromUrl(): array {
+     $root = dirname(__DIR__, 8);
+     return [
+-      'sqlite relative path' => ['sqlite://localhost/tmp/test', $root . '/tmp/test'],
+-      'sqlite absolute path' => ['sqlite://localhost//tmp/test', '/tmp/test'],
+-      'in memory sqlite path' => ['sqlite://localhost/:memory:', ':memory:'],
++      'sqlite relative path' => ['sqlite://localhost/tmp/test?module=sqlite', $root . '/tmp/test'],
++      'sqlite absolute path' => ['sqlite://localhost//tmp/test?module=sqlite', '/tmp/test'],
++      'in memory sqlite path' => ['sqlite://localhost/:memory:?module=sqlite', ':memory:'],
+     ];
+   }
  
-+    // Rolled back item should match the last one in stack.
-+    if ($id !== array_key_last($this->stack())) {
-+      throw new TransactionOutOfOrderException();
-+    }
+diff --git a/core/tests/Drupal/TestSite/Commands/TestSiteInstallCommand.php b/core/tests/Drupal/TestSite/Commands/TestSiteInstallCommand.php
+index f164d5bf694cc3551811a036eb4d1f3509d9a1e7..bc4254314c798b088b6bd189f8c6384fa05ec18b 100644
+--- a/core/tests/Drupal/TestSite/Commands/TestSiteInstallCommand.php
++++ b/core/tests/Drupal/TestSite/Commands/TestSiteInstallCommand.php
+@@ -99,7 +99,7 @@ protected function configure() {
+       ->addOption('json', NULL, InputOption::VALUE_NONE, 'Output test site connection details in JSON.')
+       ->addUsage('--setup-file core/tests/Drupal/TestSite/TestSiteMultilingualInstallTestScript.php --json')
+       ->addUsage('--install-profile demo_umami --langcode fr')
+-      ->addUsage('--base-url "http://example.com" --db-url "mysql://username:password@localhost/databasename#table_prefix"');
++      ->addUsage('--base-url "http://example.com" --db-url "mysql://username:password@localhost/databasename?module=mysql#table_prefix"');
+   }
+ 
+   /**
+diff --git a/core/tests/Drupal/TestSite/Commands/TestSiteTearDownCommand.php b/core/tests/Drupal/TestSite/Commands/TestSiteTearDownCommand.php
+index a2b5f54e32034ddacf1e5b301cfab58055e3c34a..7786c439319c3a0b28ab7ff5a0309929983a036e 100644
+--- a/core/tests/Drupal/TestSite/Commands/TestSiteTearDownCommand.php
++++ b/core/tests/Drupal/TestSite/Commands/TestSiteTearDownCommand.php
+@@ -30,7 +30,7 @@ protected function configure() {
+       ->addOption('db-url', NULL, InputOption::VALUE_OPTIONAL, 'URL for database. Defaults to the environment variable SIMPLETEST_DB.', getenv('SIMPLETEST_DB'))
+       ->addOption('keep-lock', NULL, InputOption::VALUE_NONE, 'Keeps the database prefix lock. Useful for ensuring test isolation when running concurrent tests.')
+       ->addUsage('test12345678')
+-      ->addUsage('test12345678 --db-url "mysql://username:password@localhost/databasename#table_prefix"')
++      ->addUsage('test12345678 --db-url "mysql://username:password@localhost/databasename?module=mysql#table_prefix"')
+       ->addUsage('test12345678 --keep-lock');
+   }
+ 
+diff --git a/core/tests/Drupal/Tests/Core/Database/UrlConversionTest.php b/core/tests/Drupal/Tests/Core/Database/UrlConversionTest.php
+index a4795b2da0b3e8897f2111a4707756169fd60cdb..0f58dd3bf38fc397963b875ecdfd39b49f159d0a 100644
+--- a/core/tests/Drupal/Tests/Core/Database/UrlConversionTest.php
++++ b/core/tests/Drupal/Tests/Core/Database/UrlConversionTest.php
+@@ -5,6 +5,7 @@
+ use Drupal\Core\Database\Database;
+ use Drupal\Core\Extension\Exception\UnknownExtensionException;
+ use Drupal\Tests\UnitTestCase;
++use Symfony\Bridge\PhpUnit\ExpectDeprecationTrait;
+ 
+ /**
+  * Tests for database URL to/from database connection array conversions.
+@@ -21,6 +22,8 @@
+  */
+ class UrlConversionTest extends UnitTestCase {
+ 
++  use ExpectDeprecationTrait;
 +
-     // Do the client-level processing.
--    match ($this->stack()[$name]) {
-+    match ($this->stack()[$id]->type) {
-       StackItemType::Root => $this->processRootRollback(),
-       StackItemType::Savepoint => $this->rollbackClientSavepoint($name),
-     };
- 
--    // Rolled back item should match the last one in stack.
--    if ($name !== array_key_last($this->stack())) {
--      throw new TransactionOutOfOrderException();
--    }
--
--    $this->rollbacks[$name] = TRUE;
--    $this->removeStackItem($name);
-+    // Remove the transaction from the stack.
-+    $this->removeStackItem($id);
- 
-     // If this was the last Drupal transaction open, we can commit the client
-     // transaction.
-@@ -263,7 +298,12 @@ public function addPostTransactionCallback(callable $callback): void {
+   /**
     * {@inheritdoc}
     */
-   public function has(string $name): bool {
--    return isset($this->stack()[$name]);
-+    foreach ($this->stack() as $item) {
-+      if ($item->name === $name) {
-+        return TRUE;
-+      }
-+    }
-+    return FALSE;
-   }
- 
-   /**
-@@ -410,4 +450,13 @@ protected function releaseClientSavepoint(string $name): bool {
-    */
-   abstract protected function commitClientTransaction(): bool;
- 
-+  /**
-+   * Voids the client connection.
-+   */
-+  public function voidClientTransaction(): void {
-+    $this->resetStack();
-+    $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
-+    $this->processPostTransactionCallbacks();
-+  }
-+
- }
-diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php
-index 86d5de4ac5..1bd0cd3e5f 100644
---- a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php
-+++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php
-@@ -36,6 +36,8 @@ public function has(string $name): bool;
-    * This begins a client connection transaction if there is not one active,
-    * or adds a savepoint to the active one.
-    *
-+   * This method should only be called internally by a database driver.
-+   *
-    * @param string $name
-    *   (optional) The name of the savepoint.
-    *
-@@ -54,15 +56,19 @@ public function push(string $name = ''): Transaction;
-    * This method should only be called by a Transaction object going out of
-    * scope.
-    *
-+   * This method should only be called internally by a database driver.
-+   *
-    * @param string $name
--   *   (optional) The name of the savepoint.
-+   *   The name of the transaction.
-+   * @param string $id
-+   *   The id of the transaction.
-    *
-    * @throws \Drupal\Core\Database\TransactionOutOfOrderException
-    *   If a Drupal Transaction with the specified name does not exist.
-    * @throws \Drupal\Core\Database\TransactionCommitFailedException
-    *   If the commit of the root transaction failed.
-    */
--  public function unpile(string $name): void;
-+  public function unpile(string $name, string $id): void;
- 
-   /**
-    * Rolls back a Drupal transaction.
-@@ -72,8 +78,12 @@ public function unpile(string $name): void;
-    * to rolling back the client connection (or to committing it in the edge
-    * case when the root was unpiled earlier).
-    *
-+   * This method should only be called internally by a database driver.
-+   *
-    * @param string $name
--   *   (optional) The name of the savepoint.
-+   *   The name of the transaction.
-+   * @param string $id
-+   *   The id of the transaction.
-    *
-    * @throws \Drupal\Core\Database\TransactionNoActiveException
-    *   If there is no active client connection.
-@@ -83,7 +93,7 @@ public function unpile(string $name): void;
-    * @throws \Drupal\Core\Database\TransactionCommitFailedException
-    *   If the commit of the root transaction failed.
-    */
--  public function rollback(string $name): void;
-+  public function rollback(string $name, string $id): void;
- 
-   /**
-    * Adds a root transaction end callback.
-diff --git a/core/modules/mysql/src/Driver/Database/mysql/TransactionManager.php b/core/modules/mysql/src/Driver/Database/mysql/TransactionManager.php
-index 3b7ce03f5f..8e0af4519b 100644
---- a/core/modules/mysql/src/Driver/Database/mysql/TransactionManager.php
-+++ b/core/modules/mysql/src/Driver/Database/mysql/TransactionManager.php
-@@ -29,8 +29,7 @@ protected function beginClientTransaction(): bool {
-    */
-   protected function processRootCommit(): void {
-     if (!$this->connection->getClientConnection()->inTransaction()) {
--      $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
--      $this->processPostTransactionCallbacks();
-+      $this->voidClientTransaction();
-       return;
-     }
-     parent::processRootCommit();
-@@ -41,9 +40,7 @@ protected function processRootCommit(): void {
-    */
-   protected function rollbackClientSavepoint(string $name): bool {
-     if (!$this->connection->getClientConnection()->inTransaction()) {
--      $this->resetStack();
--      $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
--      $this->processPostTransactionCallbacks();
-+      $this->voidClientTransaction();
-       return TRUE;
-     }
-     return parent::rollbackClientSavepoint($name);
-@@ -54,9 +51,7 @@ protected function rollbackClientSavepoint(string $name): bool {
-    */
-   protected function releaseClientSavepoint(string $name): bool {
-     if (!$this->connection->getClientConnection()->inTransaction()) {
--      $this->resetStack();
--      $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
--      $this->processPostTransactionCallbacks();
-+      $this->voidClientTransaction();
-       return TRUE;
-     }
-     return parent::releaseClientSavepoint($name);
-@@ -66,11 +61,6 @@ protected function releaseClientSavepoint(string $name): bool {
-    * {@inheritdoc}
-    */
-   protected function commitClientTransaction(): bool {
--    if (!$this->connection->getClientConnection()->inTransaction()) {
--      $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
--      $this->processPostTransactionCallbacks();
--      return TRUE;
--    }
-     $clientCommit = $this->connection->getClientConnection()->commit();
-     $this->setConnectionTransactionState($clientCommit ?
-       ClientConnectionTransactionState::Committed :
-@@ -84,9 +74,9 @@ protected function commitClientTransaction(): bool {
-    */
-   protected function rollbackClientTransaction(): bool {
-     if (!$this->connection->getClientConnection()->inTransaction()) {
--      $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
--      $this->processPostTransactionCallbacks();
-       trigger_error('Rollback attempted when there is no active transaction. This can cause data integrity issues.', E_USER_WARNING);
-+      $this->voidClientTransaction();
-+      return FALSE;
-     }
-     $clientRollback = $this->connection->getClientConnection()->rollBack();
-     $this->setConnectionTransactionState($clientRollback ?
-diff --git a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
-index 18c2efcb0c..e9f0bfcefe 100644
---- a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
-+++ b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
-@@ -370,19 +370,24 @@ public function testTransactionStacking() {
-     $this->assertRowPresent('outer');
-     $this->assertRowPresent('inner');
- 
--    // Pop the transaction in a different order they have been pushed.
-+    // Unset the Transactions in a different order from push.
-     $this->cleanUp();
-     $transaction = $this->connection->startTransaction();
-     $this->insertRow('outer');
-     $transaction2 = $this->connection->startTransaction();
-     $this->insertRow('inner');
--    // Pop the outer transaction, nothing should happen.
-+    // Unset the outer (root) transaction, should commit.
-     unset($transaction);
-     $this->insertRow('inner-after-outer-commit');
--    $this->assertTrue($this->connection->inTransaction(), 'Still in a transaction after popping the outer transaction');
--    // Pop the inner transaction, the whole transaction should commit.
-+    // Since we have committed the outer (root) Transaction object, the inner
-+    // (savepoint) one has been dropped by the database already, and we are no
-+    // longer in an active transaction state.
-+    $this->assertFalse($this->connection->inTransaction());
-+    // Unpile the inner (savepoint) Transaction object, it should be a no-op
-+    // anyway given it was dropped by the database already, and removed from
-+    // our transaction stack.
-     unset($transaction2);
--    $this->assertFalse($this->connection->inTransaction(), 'Transaction closed after popping the inner transaction');
-+    $this->assertFalse($this->connection->inTransaction());
-     $this->assertRowPresent('outer');
-     $this->assertRowPresent('inner');
-     $this->assertRowPresent('inner-after-outer-commit');
-@@ -411,20 +416,23 @@ public function testTransactionStacking() {
-     $this->insertRow('outer');
-     $transaction2 = $this->connection->startTransaction();
-     $this->insertRow('inner');
--    // Pop the outer transaction, nothing should happen.
-+    // Unset the outer (root) transaction, should commit.
-     unset($transaction);
--    $this->assertTrue($this->connection->inTransaction(), 'Still in a transaction after popping the outer transaction');
--    // Now rollback the inner transaction, it should rollback.
-+    $this->assertFalse($this->connection->inTransaction());
-+    // Unpile the inner (savepoint) Transaction object, it should be a no-op
-+    // anyway given it was dropped by the database already, and removed from
-+    // our transaction stack.
-     $transaction2->rollBack();
-     unset($transaction2);
-     $this->assertFalse($this->connection->inTransaction(), 'Transaction closed after popping the inner transaction');
-     $this->assertRowPresent('outer');
--    $this->assertRowAbsent('inner');
-+    $this->assertRowPresent('inner');
- 
-     // Rollback the outer transaction while the inner transaction is active.
-     // In that case, an exception will be triggered because we cannot
-     // ensure that the final result will have any meaning.
-     $this->cleanUp();
-+global $xxx; $xxx = true; dump(__METHOD__);
-     $transaction = $this->connection->startTransaction();
-     $this->insertRow('outer');
-     $transaction2 = $this->connection->startTransaction();
-@@ -440,22 +448,18 @@ public function testTransactionStacking() {
-     catch (TransactionOutOfOrderException $e) {
-       // Expected exception; just continue testing.
-     }
--    $this->assertFalse($this->connection->inTransaction(), 'No more in a transaction after rolling back the outer transaction');
--    // Try to commit one inner transaction.
-+    // Rollback of the root Transaction failed, we are still in an active
-+    // client transaction.
-+    $this->assertTrue($this->connection->inTransaction());
-+    // Release latest savepoint (=inner2) transaction.
-     unset($transaction3);
--
--    // Try to rollback one inner transaction.
--    try {
--      $transaction->rollBack();
--      unset($transaction2);
--      $this->fail('Trying to commit an inner transaction resulted in an exception.');
--    }
--    catch (TransactionNoActiveException $e) {
--      // Expected exception; just continue testing.
--    }
-+    // Rollback remaining transactions in backwards order.
-+    $transaction2->rollBack();
-+    $transaction->rollBack();
-     $this->assertRowAbsent('outer');
-     $this->assertRowAbsent('inner');
-     $this->assertRowAbsent('inner2');
-+$xxx = false;
-   }
- 
-   /**
-@@ -576,6 +580,46 @@ public function testQueryFailureInTransaction() {
-     $this->assertEquals('24', $saved_age);
+@@ -51,8 +54,9 @@ public function providerConvertDbUrlToConnectionInfo() {
+     $root = dirname(__FILE__, 7);
+     return [
+       'MySql without prefix' => [
+-        'mysql://test_user:test_pass@test_host:3306/test_database',
++        'mysql://test_user:test_pass@test_host:3306/test_database?module=mysql',
+         [
++          'module' => 'mysql',
+           'driver' => 'mysql',
+           'username' => 'test_user',
+           'password' => 'test_pass',
+@@ -65,8 +69,9 @@ public function providerConvertDbUrlToConnectionInfo() {
+         FALSE,
+       ],
+       'SQLite, relative to root, without prefix' => [
+-        'sqlite://localhost/test_database',
++        'sqlite://localhost/test_database?module=sqlite',
+         [
++          'module' => 'sqlite',
+           'driver' => 'sqlite',
+           'host' => 'localhost',
+           'database' => $root . '/test_database',
+@@ -76,8 +81,9 @@ public function providerConvertDbUrlToConnectionInfo() {
+         FALSE,
+       ],
+       'MySql with prefix' => [
+-        'mysql://test_user:test_pass@test_host:3306/test_database#bar',
++        'mysql://test_user:test_pass@test_host:3306/test_database?module=mysql#bar',
+         [
++          'module' => 'mysql',
+           'driver' => 'mysql',
+           'username' => 'test_user',
+           'password' => 'test_pass',
+@@ -91,8 +97,9 @@ public function providerConvertDbUrlToConnectionInfo() {
+         FALSE,
+       ],
+       'SQLite, relative to root, with prefix' => [
+-        'sqlite://localhost/test_database#foo',
++        'sqlite://localhost/test_database?module=sqlite#foo',
+         [
++          'module' => 'sqlite',
+           'driver' => 'sqlite',
+           'host' => 'localhost',
+           'database' => $root . '/test_database',
+@@ -103,8 +110,9 @@ public function providerConvertDbUrlToConnectionInfo() {
+         FALSE,
+       ],
+       'SQLite, absolute path, without prefix' => [
+-        'sqlite://localhost//baz/test_database',
++        'sqlite://localhost//baz/test_database?module=sqlite',
+         [
++          'module' => 'sqlite',
+           'driver' => 'sqlite',
+           'host' => 'localhost',
+           'database' => '/baz/test_database',
+@@ -116,6 +124,7 @@ public function providerConvertDbUrlToConnectionInfo() {
+       'MySQL contrib test driver without prefix' => [
+         'DrivertestMysql://test_user:test_pass@test_host:3306/test_database?module=driver_test',
+         [
++          'module' => 'driver_test',
+           'driver' => 'DrivertestMysql',
+           'username' => 'test_user',
+           'password' => 'test_pass',
+@@ -140,6 +149,7 @@ public function providerConvertDbUrlToConnectionInfo() {
+       'MySQL contrib test driver with prefix' => [
+         'DrivertestMysql://test_user:test_pass@test_host:3306/test_database?module=driver_test#bar',
+         [
++          'module' => 'driver_test',
+           'driver' => 'DrivertestMysql',
+           'username' => 'test_user',
+           'password' => 'test_pass',
+@@ -165,6 +175,7 @@ public function providerConvertDbUrlToConnectionInfo() {
+       'PostgreSQL contrib test driver without prefix' => [
+         'DrivertestPgsql://test_user:test_pass@test_host:5432/test_database?module=driver_test',
+         [
++          'module' => 'driver_test',
+           'driver' => 'DrivertestPgsql',
+           'username' => 'test_user',
+           'password' => 'test_pass',
+@@ -189,6 +200,7 @@ public function providerConvertDbUrlToConnectionInfo() {
+       'PostgreSQL contrib test driver with prefix' => [
+         'DrivertestPgsql://test_user:test_pass@test_host:5432/test_database?module=driver_test#bar',
+         [
++          'module' => 'driver_test',
+           'driver' => 'DrivertestPgsql',
+           'username' => 'test_user',
+           'password' => 'test_pass',
+@@ -212,22 +224,9 @@ public function providerConvertDbUrlToConnectionInfo() {
+         TRUE,
+       ],
+       'MySql with a custom query parameter' => [
+-        'mysql://test_user:test_pass@test_host:3306/test_database?extra=value',
+-        [
+-          'driver' => 'mysql',
+-          'username' => 'test_user',
+-          'password' => 'test_pass',
+-          'host' => 'test_host',
+-          'database' => 'test_database',
+-          'port' => 3306,
+-          'namespace' => 'Drupal\mysql\Driver\Database\mysql',
+-          'autoload' => 'core/modules/mysql/src/Driver/Database/mysql/',
+-        ],
+-        FALSE,
+-      ],
+-      'MySql with the module name mysql' => [
+-        'mysql://test_user:test_pass@test_host:3306/test_database?module=mysql',
++        'mysql://test_user:test_pass@test_host:3306/test_database?module=mysql&extra=value',
+         [
++          'module' => 'mysql',
+           'driver' => 'mysql',
+           'username' => 'test_user',
+           'password' => 'test_pass',
+@@ -239,22 +238,10 @@ public function providerConvertDbUrlToConnectionInfo() {
+         ],
+         FALSE,
+       ],
+-      'PostgreSql without the module name set' => [
+-        'pgsql://test_user:test_pass@test_host/test_database',
+-        [
+-          'driver' => 'pgsql',
+-          'username' => 'test_user',
+-          'password' => 'test_pass',
+-          'host' => 'test_host',
+-          'database' => 'test_database',
+-          'namespace' => 'Drupal\pgsql\Driver\Database\pgsql',
+-          'autoload' => 'core/modules/pgsql/src/Driver/Database/pgsql/',
+-        ],
+-        FALSE,
+-      ],
+       'PostgreSql with the module name pgsql' => [
+         'pgsql://test_user:test_pass@test_host/test_database?module=pgsql',
+         [
++          'module' => 'pgsql',
+           'driver' => 'pgsql',
+           'username' => 'test_user',
+           'password' => 'test_pass',
+@@ -268,6 +255,7 @@ public function providerConvertDbUrlToConnectionInfo() {
+       'SQLite, relative to root, without prefix and with the module name sqlite' => [
+         'sqlite://localhost/test_database?module=sqlite',
+         [
++          'module' => 'sqlite',
+           'driver' => 'sqlite',
+           'host' => 'localhost',
+           'database' => $root . '/test_database',
+@@ -279,6 +267,17 @@ public function providerConvertDbUrlToConnectionInfo() {
+     ];
    }
  
 +  /**
-+   * Tests releasing a savepoint before last is safe.
++   * Tests ::convertDbUrlToConnectionInfo() deprecation for missing module.
++   *
++   * @group legacy
 +   */
-+  public function testReleaseIntermediateSavepoint(): void {
-+    $transaction = $this->connection->startTransaction();
-+    $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
-+    $savepoint1 = $this->connection->startTransaction();
-+    $this->assertSame(2, $this->connection->transactionManager()->stackDepth());
-+    $savepoint2 = $this->connection->startTransaction();
-+    $this->assertSame(3, $this->connection->transactionManager()->stackDepth());
-+    $savepoint3 = $this->connection->startTransaction();
-+    $this->assertSame(4, $this->connection->transactionManager()->stackDepth());
-+    $savepoint4 = $this->connection->startTransaction();
-+    $this->assertSame(5, $this->connection->transactionManager()->stackDepth());
-+    $this->insertRow('row');
-+    unset($savepoint2);
-+    $this->assertSame(2, $this->connection->transactionManager()->stackDepth());
-+    $this->assertRowPresent('row');
-+    unset($savepoint1);
-+    unset($transaction);
-+    $this->assertFalse($this->connection->inTransaction());
-+    $this->assertRowPresent('row');
-+  }
-+
-+  /**
-+   * Tests committing a transaction while savepoints are active.
-+   */
-+  public function testCommitWithActiveSavepoint(): void {
-+    $transaction = $this->connection->startTransaction();
-+    $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
-+    $savepoint1 = $this->connection->startTransaction();
-+    $this->assertSame(2, $this->connection->transactionManager()->stackDepth());
-+    $savepoint2 = $this->connection->startTransaction();
-+    $this->assertSame(3, $this->connection->transactionManager()->stackDepth());
-+    $this->insertRow('row');
-+    unset($transaction);
-+    $this->assertFalse($this->connection->inTransaction());
-+    $this->assertRowPresent('row');
++  public function testMissingModuleInUrlConversion(): void {
++    $this->expectDeprecation('Not passing a ?module=db_driver_module part in the $url argument of Drupal\Core\Database\Database::convertDbUrlToConnectionInfo() is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. All database connection URLs must have the module specified. See https://www.drupal.org/node/3129492');
++    $this->expectDeprecation('Not passing a ?module=db_driver_module part in the $url argument of Drupal\Core\Database\Connection::createConnectionOptionsFromUrl() is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. All database connection URLs must have the module specified. See https://www.drupal.org/node/3129492');
++    Database::convertDbUrlToConnectionInfo('pgsql://test_user:test_pass@test_host/test_database', $this->root);
 +  }
 +
    /**
-    * Tests for transaction names.
+    * Tests ::convertDbUrlToConnectionInfo() exception for invalid arguments.
+    *
+diff --git a/core/tests/Drupal/Tests/Core/Test/TestSetupTraitTest.php b/core/tests/Drupal/Tests/Core/Test/TestSetupTraitTest.php
+index b6ba4e389db9659926bb1653fa75acc6dfd3197a..dfab1d561bbc8b52b24364f1bd728100bb19df24 100644
+--- a/core/tests/Drupal/Tests/Core/Test/TestSetupTraitTest.php
++++ b/core/tests/Drupal/Tests/Core/Test/TestSetupTraitTest.php
+@@ -26,8 +26,8 @@ class TestSetupTraitTest extends UnitTestCase {
     */
+   public function testChangeDatabasePrefix() {
+     $root = dirname(__FILE__, 7);
+-    putenv('SIMPLETEST_DB=pgsql://user:pass@127.0.0.1/db');
+-    $connection_info = Database::convertDbUrlToConnectionInfo('mysql://user:pass@localhost/db', $root);
++    putenv('SIMPLETEST_DB=pgsql://user:pass@127.0.0.1/db?module=pgsql');
++    $connection_info = Database::convertDbUrlToConnectionInfo('mysql://user:pass@localhost/db?module=mysql', $root);
+     Database::addConnectionInfo('default', 'default', $connection_info);
+     $this->assertEquals('mysql', Database::getConnectionInfo()['default']['driver']);
+     $this->assertEquals('localhost', Database::getConnectionInfo()['default']['host']);
