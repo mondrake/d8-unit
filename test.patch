@@ -1,438 +1,97 @@
-diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
-index 5145a8412f..e080783e83 100644
---- a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
-+++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
-@@ -47,12 +47,23 @@ abstract class TransactionManagerBase implements TransactionManagerInterface {
-    * The array key is the transaction's unique id, its value a StackItem.
-    *
-    * @var array<string,StackItem>
--   *
--   * @todo in https://www.drupal.org/project/drupal/issues/3384995, complete
--   *   the LIFO logic extending it to the root transaction too.
-    */
-   private array $stack = [];
- 
-+  /**
-+   * A list of voided stack items.
-+   *
-+   * In some cases the active transaction can be automatically committed by the
-+   * database server (for example, MySql when a DDL statement is executed
-+   * during a transaction). In such cases we need to void the remaining items
-+   * on the stack, and we track them here.
-+   *
-+   * The array key is the transaction's unique id, its value a StackItem.
-+   *
-+   * @var array<string,StackItem>
-+   */
-+  private array $voidedItems = [];
+diff --git a/core/lib/Drupal/Core/Database/Exception/SchemaTableColumnSizeTooLargeException.php b/core/lib/Drupal/Core/Database/Exception/SchemaTableColumnSizeTooLargeException.php
+new file mode 100644
+index 0000000000..65ceb3cbe4
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/Exception/SchemaTableColumnSizeTooLargeException.php
+@@ -0,0 +1,12 @@
++<?php
 +
-   /**
-    * A list of post-transaction callbacks.
-    *
-@@ -80,6 +91,15 @@ public function __construct(
-   ) {
-   }
- 
-+  /**
-+   * Destructor.
-+   *
-+   * When destructing, $stack must have been already emptied.
-+   */
-+  public function __destruct() {
-+    assert($this->stack === [], "Transaction \$stack was not empty. " . var_export($this->stack, TRUE));
-+  }
++namespace Drupal\Core\Database\Exception;
 +
-   /**
-    * Returns the current depth of the transaction stack.
-    *
-@@ -108,16 +128,6 @@ protected function stack(): array {
-     return $this->stack;
-   }
- 
--  /**
--   * Resets the transaction stack.
--   *
--   * Drivers should not override this method unless they also override the
--   * $stack property.
--   */
--  protected function resetStack(): void {
--    $this->stack = [];
--  }
--
-   /**
-    * Adds an item to the transaction stack.
-    *
-@@ -146,6 +156,22 @@ protected function removeStackItem(string $id): void {
-     unset($this->stack[$id]);
-   }
- 
-+  /**
-+   * Voids an item from the transaction stack.
-+   *
-+   * Drivers should not override this method unless they also override the
-+   * $stack property.
-+   *
-+   * @param string $id
-+   *   The id of the transaction.
-+   */
-+  protected function voidStackItem(string $id): void {
-+    // The item should be removed from $stack and added to $voidedItems for
-+    // later processing.
-+    $this->voidedItems[$id] = $this->stack[$id];
-+    $this->removeStackItem($id);
-+  }
++use Drupal\Core\Database\DatabaseException;
++use Drupal\Core\Database\SchemaException;
 +
-   /**
-    * {@inheritdoc}
-    */
-@@ -202,45 +228,45 @@ public function push(string $name = ''): Transaction {
-   public function unpile(string $name, string $id): void {
-     // If the $id does not correspond to the one in the stack for that $name,
-     // we are facing an orphaned Transaction object (for example in case of a
--    // DDL statement breaking an active transaction), so there is nothing more
--    // to do.
-+    // DDL statement breaking an active transaction). That should be listed in
-+    // $voidedItems, so we can remove it from there.
-     if (!isset($this->stack()[$id]) || $this->stack()[$id]->name !== $name) {
-+      assert(isset($this->voidedItems[$id]), "Transaction {$id}/{$name} was out of sequence.");
-+      unset($this->voidedItems[$id]);
-       return;
-     }
++/**
++ * Exception thrown if a column size is too large on table creation.
++ */
++class SchemaTableColumnSizeTooLargeException extends SchemaException implements DatabaseException {
++}
+diff --git a/core/modules/migrate/src/Plugin/migrate/id_map/Sql.php b/core/modules/migrate/src/Plugin/migrate/id_map/Sql.php
+index c0d317ec46..7bc4db8380 100644
+--- a/core/modules/migrate/src/Plugin/migrate/id_map/Sql.php
++++ b/core/modules/migrate/src/Plugin/migrate/id_map/Sql.php
+@@ -4,6 +4,8 @@
  
--    // If unpiling a savepoint, but that does not exist on the stack, the stack
--    // got corrupted.
--    if ($name !== 'drupal_transaction' && !$this->has($name)) {
--      throw new TransactionOutOfOrderException();
-+    // If we are not releasing the last savepoint but an earlier one, or
-+    // committing a root transaction while savepoints are active, all
-+    // subsequent savepoints will be released as well. The stack must be
-+    // diminished accordingly.
-+    while (($i = array_key_last($this->stack())) != $id) {
-+      $this->voidStackItem((string) $i);
-     }
- 
--    // Release the client transaction savepoint in case the Drupal transaction
--    // is not a root one.
--    if (
--      $this->has($name)
--      && $this->stack()[$id]->type === StackItemType::Savepoint
--      && $this->getConnectionTransactionState() === ClientConnectionTransactionState::Active
--    ) {
--      // If we are not releasing the last savepoint but an earlier one, all
--      // subsequent savepoints will have been released as well. The stack must
--      // be diminished accordingly.
--      while (($i = array_key_last($this->stack())) != $id) {
--        $this->removeStackItem((string) $i);
-+    if ($this->getConnectionTransactionState() === ClientConnectionTransactionState::Active) {
-+      if ($this->stackDepth() > 1 && $this->stack()[$id]->type === StackItemType::Savepoint) {
-+        // Release the client transaction savepoint in case the Drupal
-+        // transaction is not a root one.
-+        $this->releaseClientSavepoint($name);
-+      }
-+      elseif ($this->stackDepth() === 1 && $this->stack()[$id]->type === StackItemType::Root) {
-+        // If this was the root Drupal transaction, we can commit the client
-+        // transaction.
-+        $this->processRootCommit();
-+      }
-+      else {
-+        // The stack got corrupted.
-+        throw new TransactionOutOfOrderException();
+ use Drupal\Core\Database\DatabaseException;
+ use Drupal\Core\Database\DatabaseExceptionWrapper;
++use Drupal\Core\Database\Exception\SchemaTableColumnSizeTooLargeException;
++use Drupal\Core\Database\SchemaException;
+ use Drupal\Core\Field\BaseFieldDefinition;
+ use Drupal\Core\Plugin\ContainerFactoryPluginInterface;
+ use Drupal\Core\Plugin\PluginBase;
+@@ -424,14 +426,12 @@ protected function ensureTables() {
+             ->createTable($this->mapTableName, $schema);
+           break;
+         }
+-        catch (DatabaseException $e) {
+-          $pdo_exception = $e->getPrevious();
+-          $mysql_index_error = $pdo_exception instanceof \PDOException && $pdo_exception->getCode() === '42000' && $pdo_exception->errorInfo[1] === 1071;
++        catch (SchemaTableColumnSizeTooLargeException $e) {
+           $chunk_size--;
+           // Rethrow the exception if the source IDs can not be in smaller
+           // groups.
+-          if (!$mysql_index_error || $chunk_size <= 0) {
+-            throw $e;
++          if ($chunk_size <= 0) {
++            throw $se;
+           }
+         }
        }
--      $this->releaseClientSavepoint($name);
--    }
--
--    // Remove the transaction from the stack.
--    $this->removeStackItem($id);
+diff --git a/core/modules/migrate/tests/src/Kernel/Plugin/id_map/SqlTest.php b/core/modules/migrate/tests/src/Kernel/Plugin/id_map/SqlTest.php
+index dad421fbdc..ce9f535f96 100644
+--- a/core/modules/migrate/tests/src/Kernel/Plugin/id_map/SqlTest.php
++++ b/core/modules/migrate/tests/src/Kernel/Plugin/id_map/SqlTest.php
+@@ -3,7 +3,7 @@
+ namespace Drupal\Tests\migrate\Kernel\Plugin\id_map;
  
--    // If this was the last Drupal transaction open, we can commit the client
--    // transaction.
--    if (
--      $this->stackDepth() === 0
--      && $this->getConnectionTransactionState() === ClientConnectionTransactionState::Active
--    ) {
--      $this->processRootCommit();
-+      // Remove the transaction from the stack.
-+      $this->removeStackItem($id);
-+      return;
-     }
-+
-+    // The stack got corrupted.
-+    throw new TransactionOutOfOrderException();
+ use Drupal\Core\Database\Database;
+-use Drupal\Core\Database\DatabaseExceptionWrapper;
++use Drupal\Core\Database\Exception\SchemaTableColumnSizeTooLargeException;
+ use Drupal\Tests\migrate\Kernel\MigrateTestBase;
+ use Drupal\Tests\migrate\Unit\TestSqlIdMap;
+ use Drupal\migrate\MigrateException;
+@@ -151,8 +151,8 @@ public function testFailEnsureTables($ids) {
+     // Use local id map plugin to force an error.
+     $map = new SqlIdMapTest($this->database, [], 'test', [], $migration, $this->eventDispatcher, $this->migrationPluginManager);
+ 
+-    $this->expectException(DatabaseExceptionWrapper::class);
+-    $this->expectExceptionMessage("Syntax error or access violation: 1074 Column length too big for column 'sourceid1' (max = 16383); use BLOB or TEXT instead:");
++    $this->expectException(SchemaTableColumnSizeTooLargeException::class);
++    $this->expectExceptionMessage("Column length too big for column 'sourceid1' (max = 16383); use BLOB or TEXT instead");
+     $map->ensureTables();
    }
  
-   /**
-@@ -274,19 +300,20 @@ public function rollback(string $name, string $id): void {
-       throw new TransactionNoActiveException();
+diff --git a/core/modules/mysql/src/Driver/Database/mysql/ExceptionHandler.php b/core/modules/mysql/src/Driver/Database/mysql/ExceptionHandler.php
+index bef64b9c2e..04d22e901c 100644
+--- a/core/modules/mysql/src/Driver/Database/mysql/ExceptionHandler.php
++++ b/core/modules/mysql/src/Driver/Database/mysql/ExceptionHandler.php
+@@ -5,6 +5,7 @@
+ use Drupal\Component\Utility\Unicode;
+ use Drupal\Core\Database\DatabaseExceptionWrapper;
+ use Drupal\Core\Database\ExceptionHandler as BaseExceptionHandler;
++use Drupal\Core\Database\Exception\SchemaTableColumnSizeTooLargeException;
+ use Drupal\Core\Database\IntegrityConstraintViolationException;
+ use Drupal\Core\Database\StatementInterface;
+ 
+@@ -43,6 +44,11 @@ public function handleExecutionException(\Exception $exception, StatementInterfa
+         throw new IntegrityConstraintViolationException($message, $code, $exception);
+       }
+ 
++      // A column size is too large on table creation.
++      if ($exception->getCode() === '42000' && ($exception->errorInfo[1] ?? NULL) === 1071) {
++        throw new SchemaTableColumnSizeTooLargeException($message, $code, $exception);
++      }
++
+       throw new DatabaseExceptionWrapper($message, 0, $exception);
      }
  
-+    // Rolled back item should match the last one in stack.
-+    if ($id != array_key_last($this->stack())) {
-+      throw new TransactionOutOfOrderException();
-+    }
-+
-     // Do the client-level processing.
-     match ($this->stack()[$id]->type) {
-       StackItemType::Root => $this->processRootRollback(),
-       StackItemType::Savepoint => $this->rollbackClientSavepoint($name),
-     };
- 
--    // Rolled back item should match the last one in stack.
--    if ($id != array_key_last($this->stack())) {
--      throw new TransactionOutOfOrderException();
--    }
--
--    // Remove the transaction from the stack.
--    $this->removeStackItem($id);
-+    // Remove the transaction from the stack. The Transaction object is still
-+    // active, so we need to void the stack item.
-+    $this->voidStackItem($id);
- 
-     // If this was the last Drupal transaction open, we can commit the client
-     // transaction.
-@@ -461,4 +488,21 @@ protected function releaseClientSavepoint(string $name): bool {
-    */
-   abstract protected function commitClientTransaction(): bool;
- 
-+  /**
-+   * Voids the client connection.
-+   *
-+   * In some cases the active transaction can be automatically committed by the
-+   * database server (for example, MySql when a DDL statement is executed
-+   * during a transaction). In such cases we need to void the remaining items
-+   * on the stack so that when outliving Transaction object get out of scope
-+   * the do not try operations on the database.
-+   */
-+  protected function voidClientTransaction(): void {
-+    while ($i = array_key_last($this->stack())) {
-+      $this->voidStackItem((string) $i);
-+    }
-+    $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
-+    $this->processPostTransactionCallbacks();
-+  }
-+
- }
-diff --git a/core/modules/mysql/src/Driver/Database/mysql/TransactionManager.php b/core/modules/mysql/src/Driver/Database/mysql/TransactionManager.php
-index 3b7ce03f5f..8e0af4519b 100644
---- a/core/modules/mysql/src/Driver/Database/mysql/TransactionManager.php
-+++ b/core/modules/mysql/src/Driver/Database/mysql/TransactionManager.php
-@@ -29,8 +29,7 @@ protected function beginClientTransaction(): bool {
-    */
-   protected function processRootCommit(): void {
-     if (!$this->connection->getClientConnection()->inTransaction()) {
--      $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
--      $this->processPostTransactionCallbacks();
-+      $this->voidClientTransaction();
-       return;
-     }
-     parent::processRootCommit();
-@@ -41,9 +40,7 @@ protected function processRootCommit(): void {
-    */
-   protected function rollbackClientSavepoint(string $name): bool {
-     if (!$this->connection->getClientConnection()->inTransaction()) {
--      $this->resetStack();
--      $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
--      $this->processPostTransactionCallbacks();
-+      $this->voidClientTransaction();
-       return TRUE;
-     }
-     return parent::rollbackClientSavepoint($name);
-@@ -54,9 +51,7 @@ protected function rollbackClientSavepoint(string $name): bool {
-    */
-   protected function releaseClientSavepoint(string $name): bool {
-     if (!$this->connection->getClientConnection()->inTransaction()) {
--      $this->resetStack();
--      $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
--      $this->processPostTransactionCallbacks();
-+      $this->voidClientTransaction();
-       return TRUE;
-     }
-     return parent::releaseClientSavepoint($name);
-@@ -66,11 +61,6 @@ protected function releaseClientSavepoint(string $name): bool {
-    * {@inheritdoc}
-    */
-   protected function commitClientTransaction(): bool {
--    if (!$this->connection->getClientConnection()->inTransaction()) {
--      $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
--      $this->processPostTransactionCallbacks();
--      return TRUE;
--    }
-     $clientCommit = $this->connection->getClientConnection()->commit();
-     $this->setConnectionTransactionState($clientCommit ?
-       ClientConnectionTransactionState::Committed :
-@@ -84,9 +74,9 @@ protected function commitClientTransaction(): bool {
-    */
-   protected function rollbackClientTransaction(): bool {
-     if (!$this->connection->getClientConnection()->inTransaction()) {
--      $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
--      $this->processPostTransactionCallbacks();
-       trigger_error('Rollback attempted when there is no active transaction. This can cause data integrity issues.', E_USER_WARNING);
-+      $this->voidClientTransaction();
-+      return FALSE;
-     }
-     $clientRollback = $this->connection->getClientConnection()->rollBack();
-     $this->setConnectionTransactionState($clientRollback ?
-diff --git a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
-index b0e9fc3e9b..2fc469f27a 100644
---- a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
-+++ b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
-@@ -4,7 +4,6 @@
- 
- use Drupal\Core\Database\TransactionExplicitCommitNotAllowedException;
- use Drupal\Core\Database\TransactionNameNonUniqueException;
--use Drupal\Core\Database\TransactionNoActiveException;
- use Drupal\Core\Database\TransactionOutOfOrderException;
- use PHPUnit\Framework\Error\Warning;
- 
-@@ -370,23 +369,6 @@ public function testTransactionStacking() {
-     $this->assertRowPresent('outer');
-     $this->assertRowPresent('inner');
- 
--    // Pop the transaction in a different order they have been pushed.
--    $this->cleanUp();
--    $transaction = $this->connection->startTransaction();
--    $this->insertRow('outer');
--    $transaction2 = $this->connection->startTransaction();
--    $this->insertRow('inner');
--    // Pop the outer transaction, nothing should happen.
--    unset($transaction);
--    $this->insertRow('inner-after-outer-commit');
--    $this->assertTrue($this->connection->inTransaction(), 'Still in a transaction after popping the outer transaction');
--    // Pop the inner transaction, the whole transaction should commit.
--    unset($transaction2);
--    $this->assertFalse($this->connection->inTransaction(), 'Transaction closed after popping the inner transaction');
--    $this->assertRowPresent('outer');
--    $this->assertRowPresent('inner');
--    $this->assertRowPresent('inner-after-outer-commit');
--
-     // Rollback the inner transaction.
-     $this->cleanUp();
-     $transaction = $this->connection->startTransaction();
-@@ -411,15 +393,17 @@ public function testTransactionStacking() {
-     $this->insertRow('outer');
-     $transaction2 = $this->connection->startTransaction();
-     $this->insertRow('inner');
--    // Pop the outer transaction, nothing should happen.
-+    // Unset the outer (root) transaction, should commit.
-     unset($transaction);
--    $this->assertTrue($this->connection->inTransaction(), 'Still in a transaction after popping the outer transaction');
--    // Now rollback the inner transaction, it should rollback.
-+    $this->assertFalse($this->connection->inTransaction());
-+    // Unpile the inner (savepoint) Transaction object, it should be a no-op
-+    // anyway given it was dropped by the database already, and removed from
-+    // our transaction stack.
-     $transaction2->rollBack();
-     unset($transaction2);
-     $this->assertFalse($this->connection->inTransaction(), 'Transaction closed after popping the inner transaction');
-     $this->assertRowPresent('outer');
--    $this->assertRowAbsent('inner');
-+    $this->assertRowPresent('inner');
- 
-     // Rollback the outer transaction while the inner transaction is active.
-     // In that case, an exception will be triggered because we cannot
-@@ -440,19 +424,14 @@ public function testTransactionStacking() {
-     catch (TransactionOutOfOrderException $e) {
-       // Expected exception; just continue testing.
-     }
--    $this->assertFalse($this->connection->inTransaction(), 'No more in a transaction after rolling back the outer transaction');
--    // Try to commit one inner transaction.
-+    // Rollback of the root Transaction failed, we are still in an active
-+    // client transaction.
-+    $this->assertTrue($this->connection->inTransaction());
-+    // Release latest savepoint (=inner2) transaction.
-     unset($transaction3);
--
--    // Try to rollback one inner transaction.
--    try {
--      $transaction->rollBack();
--      unset($transaction2);
--      $this->fail('Trying to commit an inner transaction resulted in an exception.');
--    }
--    catch (TransactionNoActiveException $e) {
--      // Expected exception; just continue testing.
--    }
-+    // Rollback remaining transactions in backwards order.
-+    $transaction2->rollBack();
-+    $transaction->rollBack();
-     $this->assertRowAbsent('outer');
-     $this->assertRowAbsent('inner');
-     $this->assertRowAbsent('inner2');
-@@ -580,26 +559,79 @@ public function testQueryFailureInTransaction() {
-    * Tests releasing a savepoint before last is safe.
-    */
-   public function testReleaseIntermediateSavepoint(): void {
-+    // Start root transaction. Corresponds to 'BEGIN TRANSACTION' on the
-+    // database.
-     $transaction = $this->connection->startTransaction();
-     $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
-+    // Starts a savepoint transaction. Corresponds to 'SAVEPOINT savepoint_1'
-+    // on the database.
-     $savepoint1 = $this->connection->startTransaction();
-     $this->assertSame(2, $this->connection->transactionManager()->stackDepth());
-+    // Starts a savepoint transaction. Corresponds to 'SAVEPOINT savepoint_2'
-+    // on the database.
-     $savepoint2 = $this->connection->startTransaction();
-     $this->assertSame(3, $this->connection->transactionManager()->stackDepth());
-+    // Starts a savepoint transaction. Corresponds to 'SAVEPOINT savepoint_3'
-+    // on the database.
-     $savepoint3 = $this->connection->startTransaction();
-     $this->assertSame(4, $this->connection->transactionManager()->stackDepth());
-+    // Starts a savepoint transaction. Corresponds to 'SAVEPOINT savepoint_4'
-+    // on the database.
-     $savepoint4 = $this->connection->startTransaction();
-     $this->assertSame(5, $this->connection->transactionManager()->stackDepth());
-+
-     $this->insertRow('row');
-+
-+    // Unsets a savepoint transaction. Corresponds to 'RELEASE SAVEPOINT
-+    // savepoint_2' on the database.
-     unset($savepoint2);
-+    // Since we have committed an intermediate savepoint Transaction object,
-+    // the savepoints created later have been dropped by the database already.
-     $this->assertSame(2, $this->connection->transactionManager()->stackDepth());
-     $this->assertRowPresent('row');
-+
-+    // Unsets the remaining Transaction objects. The client transaction is
-+    // eventually committed.
-     unset($savepoint1);
-     unset($transaction);
-     $this->assertFalse($this->connection->inTransaction());
-     $this->assertRowPresent('row');
-   }
- 
-+  /**
-+   * Tests committing a transaction while savepoints are active.
-+   */
-+  public function testCommitWithActiveSavepoint(): void {
-+    // Start root transaction. Corresponds to 'BEGIN TRANSACTION' on the
-+    // database.
-+    $transaction = $this->connection->startTransaction();
-+    $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
-+    // Starts a savepoint transaction. Corresponds to 'SAVEPOINT savepoint_1'
-+    // on the database.
-+    $savepoint1 = $this->connection->startTransaction();
-+    $this->assertSame(2, $this->connection->transactionManager()->stackDepth());
-+    // Starts a savepoint transaction. Corresponds to 'SAVEPOINT savepoint_2'
-+    // on the database.
-+    $savepoint2 = $this->connection->startTransaction();
-+    $this->assertSame(3, $this->connection->transactionManager()->stackDepth());
-+
-+    $this->insertRow('row');
-+
-+    // Unsets the root transaction. Corresponds to 'COMMIT' on the database.
-+    unset($transaction);
-+    // Since we have committed the outer (root) Transaction object, the inner
-+    // (savepoint) ones have been dropped by the database already, and we are
-+    // no longer in an active transaction state.
-+    $this->assertFalse($this->connection->inTransaction());
-+    $this->assertRowPresent('row');
-+    // Unpile the inner (savepoint) Transaction object, it should be a no-op
-+    // anyway given it was dropped by the database already, and removed from
-+    // our transaction stack.
-+    unset($savepoint2);
-+    $this->assertFalse($this->connection->inTransaction());
-+    $this->assertRowPresent('row');
-+  }
-+
-   /**
-    * Tests for transaction names.
-    */
