@@ -345,7 +345,7 @@ index 3b7ce03f5f..8e0af4519b 100644
      $clientRollback = $this->connection->getClientConnection()->rollBack();
      $this->setConnectionTransactionState($clientRollback ?
 diff --git a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
-index b0e9fc3e9b..3d053be1d0 100644
+index b0e9fc3e9b..1fd3c0a760 100644
 --- a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
 +++ b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
 @@ -2,9 +2,11 @@
@@ -361,7 +361,165 @@ index b0e9fc3e9b..3d053be1d0 100644
  use Drupal\Core\Database\TransactionOutOfOrderException;
  use PHPUnit\Framework\Error\Warning;
  
-@@ -370,23 +372,6 @@ public function testTransactionStacking() {
+@@ -149,26 +151,138 @@ protected function transactionInnerLayer($suffix, $rollback = FALSE, $ddl_statem
+   }
+ 
+   /**
+-   * Tests transaction rollback on a database that supports transactions.
+-   *
+-   * If the active connection does not support transactions, this test does
+-   * nothing.
++   * Tests root transaction rollback.
+    */
+-  public function testTransactionRollBackSupported() {
+-    try {
+-      // Create two nested transactions. Roll back from the inner one.
+-      $this->transactionOuterLayer('B', TRUE);
+-
+-      // Neither of the rows we inserted in the two transaction layers
+-      // should be present in the tables post-rollback.
+-      $saved_age = $this->connection->query('SELECT [age] FROM {test} WHERE [name] = :name', [':name' => 'DavidB'])->fetchField();
+-      $this->assertNotSame('24', $saved_age, 'Cannot retrieve DavidB row after commit.');
+-      $saved_age = $this->connection->query('SELECT [age] FROM {test} WHERE [name] = :name', [':name' => 'DanielB'])->fetchField();
+-      $this->assertNotSame('19', $saved_age, 'Cannot retrieve DanielB row after commit.');
+-    }
+-    catch (\Exception $e) {
+-      $this->fail($e->getMessage());
+-    }
++  public function testRollbackRoot() {
++    $this->assertFalse($this->connection->inTransaction());
++    $this->assertSame(0, $this->connection->transactionManager()->stackDepth());
++
++    $transaction = $this->connection->startTransaction();
++    $this->assertTrue($this->connection->inTransaction());
++    $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
++
++    // Insert a single row into the testing table.
++    $this->insertRow('David');
++    $this->assertRowPresent('David');
++
++    // Rollback. Since we are at the root, the transaction is closed.
++    $transaction->rollBack();
++    $this->assertRowAbsent('David');
++    $this->assertFalse($this->connection->inTransaction());
++    $this->assertSame(0, $this->connection->transactionManager()->stackDepth());
++  }
++
++  /**
++   * Tests root transaction rollback failure when savepoint is open.
++   */
++  public function testRollbackRootWithActiveSavepoint() {
++    $this->assertFalse($this->connection->inTransaction());
++    $this->assertSame(0, $this->connection->transactionManager()->stackDepth());
++
++    $transaction = $this->connection->startTransaction();
++    $this->assertTrue($this->connection->inTransaction());
++    $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
++
++    // Insert a single row into the testing table.
++    $this->insertRow('David');
++    $this->assertRowPresent('David');
++
++    // Add a savepoint.
++    $savepoint = $this->connection->startTransaction();
++    $this->assertTrue($this->connection->inTransaction());
++    $this->assertSame(2, $this->connection->transactionManager()->stackDepth());
++
++    // Rollback root. Since we a savepoint is active, this should fail.
++    $transaction->rollBack();
++    $this->assertRowAbsent('David');
++    $this->assertFalse($this->connection->inTransaction());
++    $this->assertSame(0, $this->connection->transactionManager()->stackDepth());
++  }
++
++  /**
++   * Tests savepoint transaction rollback.
++   */
++  public function testRollbackSavepoint() {
++    $this->assertFalse($this->connection->inTransaction());
++    $this->assertSame(0, $this->connection->transactionManager()->stackDepth());
++
++    $transaction = $this->connection->startTransaction();
++    $this->assertTrue($this->connection->inTransaction());
++    $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
++
++    // Insert a row.
++    $this->insertRow('David');
++    $this->assertRowPresent('David');
++
++    // Add a savepoint.
++    $savepoint = $this->connection->startTransaction();
++    $this->assertTrue($this->connection->inTransaction());
++    $this->assertSame(2, $this->connection->transactionManager()->stackDepth());
++
++    // Insert a row.
++    $this->insertRow('Roger');
++    $this->assertRowPresent('David');
++    $this->assertRowPresent('Roger');
++
++    // Rollback to savepoint. It should remain open.
++    $savepoint->rollBack();
++    $this->assertRowPresent('David');
++    $this->assertRowAbsent('Roger');
++    $this->assertTrue($this->connection->inTransaction());
++    $this->assertSame(2, $this->connection->transactionManager()->stackDepth());
++
++    // Insert a row.
++    $this->insertRow('Syd');
++
++    // Commit root.
++    unset($transaction);
++    $this->assertRowPresent('David');
++    $this->assertRowAbsent('Roger');
++    $this->assertRowPresent('Syd');
++  }
++
++  /**
++   * Tests savepoint transaction rollback failure when later savepoints exist.
++   */
++  public function testRollbackSavepointWithLaterSavepoint() {
++    $this->assertFalse($this->connection->inTransaction());
++    $this->assertSame(0, $this->connection->transactionManager()->stackDepth());
++
++    $transaction = $this->connection->startTransaction();
++    $this->assertTrue($this->connection->inTransaction());
++    $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
++
++    // Insert a row.
++    $this->insertRow('David');
++    $this->assertRowPresent('David');
++
++    // Add a savepoint.
++    $savepoint1 = $this->connection->startTransaction();
++    $this->assertTrue($this->connection->inTransaction());
++    $this->assertSame(2, $this->connection->transactionManager()->stackDepth());
++
++    // Insert a row.
++    $this->insertRow('Roger');
++    $this->assertRowPresent('David');
++    $this->assertRowPresent('Roger');
++
++    // Add a savepoint.
++    $savepoint2 = $this->connection->startTransaction();
++    $this->assertTrue($this->connection->inTransaction());
++    $this->assertSame(3, $this->connection->transactionManager()->stackDepth());
++
++    // Insert a row.
++    $this->insertRow('Syd');
++    $this->assertRowPresent('David');
++    $this->assertRowPresent('Roger');
++    $this->assertRowPresent('Syd');
++
++    // Rollback to savepoint 1. Out of order.
++    $savepoint1->rollBack();
++    $this->assertRowPresent('David');
++    $this->assertRowAbsent('Roger');
++    $this->assertTrue($this->connection->inTransaction());
++    $this->assertSame(2, $this->connection->transactionManager()->stackDepth());
+   }
+ 
+   /**
+@@ -370,23 +484,6 @@ public function testTransactionStacking() {
      $this->assertRowPresent('outer');
      $this->assertRowPresent('inner');
  
@@ -385,7 +543,7 @@ index b0e9fc3e9b..3d053be1d0 100644
      // Rollback the inner transaction.
      $this->cleanUp();
      $transaction = $this->connection->startTransaction();
-@@ -411,15 +396,17 @@ public function testTransactionStacking() {
+@@ -411,15 +508,17 @@ public function testTransactionStacking() {
      $this->insertRow('outer');
      $transaction2 = $this->connection->startTransaction();
      $this->insertRow('inner');
@@ -407,7 +565,7 @@ index b0e9fc3e9b..3d053be1d0 100644
  
      // Rollback the outer transaction while the inner transaction is active.
      // In that case, an exception will be triggered because we cannot
-@@ -440,19 +427,14 @@ public function testTransactionStacking() {
+@@ -440,19 +539,14 @@ public function testTransactionStacking() {
      catch (TransactionOutOfOrderException $e) {
        // Expected exception; just continue testing.
      }
@@ -434,7 +592,7 @@ index b0e9fc3e9b..3d053be1d0 100644
      $this->assertRowAbsent('outer');
      $this->assertRowAbsent('inner');
      $this->assertRowAbsent('inner2');
-@@ -580,26 +562,81 @@ public function testQueryFailureInTransaction() {
+@@ -580,26 +674,81 @@ public function testQueryFailureInTransaction() {
     * Tests releasing a savepoint before last is safe.
     */
    public function testReleaseIntermediateSavepoint(): void {
@@ -516,7 +674,7 @@ index b0e9fc3e9b..3d053be1d0 100644
    /**
     * Tests for transaction names.
     */
-@@ -664,6 +701,24 @@ public function rootTransactionCallback(bool $success): void {
+@@ -664,6 +813,24 @@ public function rootTransactionCallback(bool $success): void {
      $this->insertRow($this->postTransactionCallbackAction);
    }
  
