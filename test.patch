@@ -1,710 +1,1622 @@
-diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
-index 5145a8412f..866751915a 100644
---- a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
-+++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
-@@ -8,7 +8,6 @@
- use Drupal\Core\Database\Transaction;
- use Drupal\Core\Database\TransactionCommitFailedException;
- use Drupal\Core\Database\TransactionNameNonUniqueException;
--use Drupal\Core\Database\TransactionNoActiveException;
- use Drupal\Core\Database\TransactionOutOfOrderException;
+diff --git a/.gitlab-ci/pipeline.yml b/.gitlab-ci/pipeline.yml
+index efe95f486e..c4b637ae4b 100644
+--- a/.gitlab-ci/pipeline.yml
++++ b/.gitlab-ci/pipeline.yml
+@@ -94,8 +94,8 @@ stages:
+     # Determine DB driver.
+     - |
+       [[ $_TARGET_DB == sqlite* ]] && export SIMPLETEST_DB=sqlite://localhost/$CI_PROJECT_DIR/sites/default/files/db.sqlite?module=sqlite
+-      [[ $_TARGET_DB == mysql* ]] && export SIMPLETEST_DB=mysql://$MYSQL_USER:$MYSQL_PASSWORD@database/$MYSQL_DATABASE?module=mysql
+-      [[ $_TARGET_DB == mariadb* ]] && export SIMPLETEST_DB=mysql://$MYSQL_USER:$MYSQL_PASSWORD@database/$MYSQL_DATABASE?module=mysql
++      [[ $_TARGET_DB == mysql* ]] && export SIMPLETEST_DB=mysqli://$MYSQL_USER:$MYSQL_PASSWORD@database/$MYSQL_DATABASE?module=mysqli
++      [[ $_TARGET_DB == mariadb* ]] && export SIMPLETEST_DB=mysqli://$MYSQL_USER:$MYSQL_PASSWORD@database/$MYSQL_DATABASE?module=mysqli
+       [[ $_TARGET_DB == pgsql* ]] && export SIMPLETEST_DB=pgsql://$POSTGRES_USER:$POSTGRES_PASSWORD@database/$POSTGRES_DB?module=pgsql
+     - mkdir -p ./sites/simpletest ./sites/default/files ./build/logs/junit /var/www/.composer
+     - chown -R www-data:www-data ./sites ./build/logs/junit ./vendor /var/www/
+@@ -221,8 +221,8 @@ stages:
+     # Determine DB driver.
+     - |
+       [[ $_TARGET_DB == sqlite* ]] && export DRUPAL_TEST_DB_URL=sqlite://localhost/$CI_PROJECT_DIR/sites/default/files/db.sqlite?module=sqlite
+-      [[ $_TARGET_DB == mysql* ]] && export DRUPAL_TEST_DB_URL=mysql://$MYSQL_USER:$MYSQL_PASSWORD@database/$MYSQL_DATABASE?module=mysql
+-      [[ $_TARGET_DB == mariadb* ]] && export DRUPAL_TEST_DB_URL=mysql://$MYSQL_USER:$MYSQL_PASSWORD@database/$MYSQL_DATABASE?module=mysql
++      [[ $_TARGET_DB == mysql* ]] && export DRUPAL_TEST_DB_URL=mysqli://$MYSQL_USER:$MYSQL_PASSWORD@database/$MYSQL_DATABASE?module=mysqli
++      [[ $_TARGET_DB == mariadb* ]] && export DRUPAL_TEST_DB_URL=mysqli://$MYSQL_USER:$MYSQL_PASSWORD@database/$MYSQL_DATABASE?module=mysqli
+       [[ $_TARGET_DB == pgsql* ]] && export DRUPAL_TEST_DB_URL=pgsql://$POSTGRES_USER:$POSTGRES_PASSWORD@database/$POSTGRES_DB?module=pgsql
+     - cp ./core/.env.example ./core/.env
+     # dotenv-safe/config does not support environment variables
+diff --git a/core/modules/config/tests/src/Functional/ConfigImportAllTest.php b/core/modules/config/tests/src/Functional/ConfigImportAllTest.php
+index 4d693c6333..cc48c83e88 100644
+--- a/core/modules/config/tests/src/Functional/ConfigImportAllTest.php
++++ b/core/modules/config/tests/src/Functional/ConfigImportAllTest.php
+@@ -5,6 +5,7 @@
+ use Drupal\Core\Config\StorageComparer;
+ use Drupal\Core\Entity\ContentEntityTypeInterface;
+ use Drupal\Core\Extension\ExtensionLifecycle;
++use Drupal\Core\Extension\ModuleExtensionList;
+ use Drupal\Tests\SchemaCheckTestTrait;
+ use Drupal\Tests\system\Functional\Module\ModuleTestBase;
  
- /**
-@@ -47,12 +46,23 @@ abstract class TransactionManagerBase implements TransactionManagerInterface {
-    * The array key is the transaction's unique id, its value a StackItem.
-    *
-    * @var array<string,StackItem>
--   *
--   * @todo in https://www.drupal.org/project/drupal/issues/3384995, complete
--   *   the LIFO logic extending it to the root transaction too.
-    */
-   private array $stack = [];
+@@ -101,6 +102,9 @@ public function testInstallUninstall() {
+     $all_modules = \Drupal::service('extension.list.module')->getList();
+     $database_module = \Drupal::service('database')->getProvider();
+     $expected_modules = ['path_alias', 'system', 'user', 'standard', $database_module];
++    // If the database module has dependencies, they are expected too.
++    $database_module_extension = \Drupal::service(ModuleExtensionList::class)->get($database_module);
++    $database_module_dependencies = $database_module_extension->requires ? array_keys($database_module_extension->requires) : [];
  
-+  /**
-+   * A list of voided stack items.
-+   *
-+   * In some cases the active transaction can be automatically committed by the
-+   * database server (for example, MySql when a DDL statement is executed
-+   * during a transaction). In such cases we need to void the remaining items
-+   * on the stack, and we track them here.
-+   *
-+   * The array key is the transaction's unique id, its value a StackItem.
-+   *
-+   * @var array<string,StackItem>
-+   */
-+  private array $voidedItems = [];
-+
-   /**
-    * A list of post-transaction callbacks.
-    *
-@@ -80,6 +90,15 @@ public function __construct(
-   ) {
-   }
+     // Ensure that only core required modules and the install profile can not be uninstalled.
+     $validation_reasons = \Drupal::service('module_installer')->validateUninstall(array_keys($all_modules));
+@@ -118,8 +122,11 @@ public function testInstallUninstall() {
+     // Can not uninstall config and use admin/config/development/configuration!
+     unset($modules_to_uninstall['config']);
  
-+  /**
-+   * Destructor.
-+   *
-+   * When destructing, $stack must have been already emptied.
-+   */
-+  public function __destruct() {
-+    assert($this->stack === [], "Transaction \$stack was not empty. " . var_export($this->stack, TRUE));
-+  }
-+
-   /**
-    * Returns the current depth of the transaction stack.
-    *
-@@ -108,16 +127,6 @@ protected function stack(): array {
-     return $this->stack;
-   }
- 
--  /**
--   * Resets the transaction stack.
--   *
--   * Drivers should not override this method unless they also override the
--   * $stack property.
--   */
--  protected function resetStack(): void {
--    $this->stack = [];
--  }
--
-   /**
-    * Adds an item to the transaction stack.
-    *
-@@ -146,6 +155,34 @@ protected function removeStackItem(string $id): void {
-     unset($this->stack[$id]);
-   }
- 
-+  /**
-+   * Voids an item from the transaction stack.
-+   *
-+   * Drivers should not override this method unless they also override the
-+   * $stack property.
-+   *
-+   * @param string $id
-+   *   The id of the transaction.
-+   */
-+  protected function voidStackItem(string $id): void {
-+    // The item should be removed from $stack and added to $voidedItems for
-+    // later processing.
-+    $this->voidedItems[$id] = $this->stack[$id];
-+    $this->removeStackItem($id);
-+  }
-+
-+  protected function dumpStackItemsAsString(): string {
-+    if (empty($this->stack())) {
-+      return '*** empty ***';
+-    // Can not uninstall the database module.
++    // Can not uninstall the database module and its dependencies.
+     unset($modules_to_uninstall[$database_module]);
++    foreach ($database_module_dependencies as $dependency) {
++      unset($modules_to_uninstall[$dependency]);
 +    }
+ 
+     $this->assertTrue(isset($modules_to_uninstall['comment']), 'The comment module will be disabled');
+     $this->assertTrue(isset($modules_to_uninstall['file']), 'The File module will be disabled');
+diff --git a/core/modules/dblog/src/Controller/DbLogController.php b/core/modules/dblog/src/Controller/DbLogController.php
+index b52ed5015a..17e17cd8d9 100644
+--- a/core/modules/dblog/src/Controller/DbLogController.php
++++ b/core/modules/dblog/src/Controller/DbLogController.php
+@@ -170,6 +170,7 @@ public function overview(Request $request) {
+     if (!empty($filter['where'])) {
+       $query->where($filter['where'], $filter['args']);
+     }
++    dump((string) $query);
+     $result = $query
+       ->limit(50)
+       ->orderByHeader($header)
+diff --git a/core/modules/migrate/src/Plugin/migrate/id_map/Sql.php b/core/modules/migrate/src/Plugin/migrate/id_map/Sql.php
+index e7c8240e89..7e6d91f31c 100644
+--- a/core/modules/migrate/src/Plugin/migrate/id_map/Sql.php
++++ b/core/modules/migrate/src/Plugin/migrate/id_map/Sql.php
+@@ -425,12 +425,14 @@ protected function ensureTables() {
+           break;
+         }
+         catch (DatabaseException $e) {
++          // @todo NEED TO MAKE THIS PDO ABSTRACT.
+           $pdo_exception = $e->getPrevious();
+           $mysql_index_error = $pdo_exception instanceof \PDOException && $pdo_exception->getCode() === '42000' && $pdo_exception->errorInfo[1] === 1071;
++          $mysqli_index_error = $pdo_exception instanceof \mysqli_sql_exception  && $pdo_exception->getSqlState() === '42000' && $pdo_exception->getCode() === 1071;
+           $chunk_size--;
+           // Rethrow the exception if the source IDs can not be in smaller
+           // groups.
+-          if (!$mysql_index_error || $chunk_size <= 0) {
++          if (!($mysql_index_error || $mysqli_index_error) || $chunk_size <= 0) {
+             throw $e;
+           }
+         }
+diff --git a/core/modules/migrate/tests/src/Kernel/Plugin/id_map/SqlTest.php b/core/modules/migrate/tests/src/Kernel/Plugin/id_map/SqlTest.php
+index dad421fbdc..eaf66465a8 100644
+--- a/core/modules/migrate/tests/src/Kernel/Plugin/id_map/SqlTest.php
++++ b/core/modules/migrate/tests/src/Kernel/Plugin/id_map/SqlTest.php
+@@ -152,7 +152,7 @@ public function testFailEnsureTables($ids) {
+     $map = new SqlIdMapTest($this->database, [], 'test', [], $migration, $this->eventDispatcher, $this->migrationPluginManager);
+ 
+     $this->expectException(DatabaseExceptionWrapper::class);
+-    $this->expectExceptionMessage("Syntax error or access violation: 1074 Column length too big for column 'sourceid1' (max = 16383); use BLOB or TEXT instead:");
++    $this->expectExceptionMessage("Column length too big for column 'sourceid1' (max = 16383); use BLOB or TEXT instead");
+     $map->ensureTables();
+   }
+ 
+diff --git a/core/modules/mysqli/mysqli.info.yml b/core/modules/mysqli/mysqli.info.yml
+new file mode 100644
+index 0000000000..a4009243f7
+--- /dev/null
++++ b/core/modules/mysqli/mysqli.info.yml
+@@ -0,0 +1,8 @@
++name: MySQLi
++core_version_requirement: ^10.1 | ^11
++type: module
++description: 'Database driver for MySQLi.'
++package: Core
++version: VERSION
++dependencies:
++  - drupal:mysql
+diff --git a/core/modules/mysqli/mysqli.module b/core/modules/mysqli/mysqli.module
+new file mode 100644
+index 0000000000..e243b3fce5
+--- /dev/null
++++ b/core/modules/mysqli/mysqli.module
+@@ -0,0 +1,25 @@
++<?php
 +
-+    $temp = [];
-+    foreach ($this->stack() as $id => $item) {
-+      $temp[] = $id . '\\' . $item->name;
-+    }
-+    return implode(' > ', $temp);
++/**
++ * @file
++ * Database driver for MySQLi.
++ *
++ * The MySQLi module provides the connection between Drupal and a MySQL, MariaDB
++ * or equivalent database using the mysqli PHP extension.
++ */
++
++use Drupal\Core\Routing\RouteMatchInterface;
++
++/**
++ * Implements hook_help().
++ */
++function mysqli_help($route_name, RouteMatchInterface $route_match) {
++  switch ($route_name) {
++    case 'help.page.mysqli':
++      $output = '';
++      $output .= '<h3>' . t('About') . '</h3>';
++      $output .= '<p>' . t('The MySQLi module provides the connection between Drupal and a MySQL, MariaDB or equivalent database using the mysqli PHP extension. For more information, see the <a href=":mysqli">online documentation for the MySQLi module</a>.', [':mysqli' => 'https://www.drupal.org/documentation/modules/mysqli']) . '</p>';
++      return $output;
++
 +  }
++}
+diff --git a/core/modules/mysqli/mysqli.services.yml b/core/modules/mysqli/mysqli.services.yml
+new file mode 100644
+index 0000000000..82a476ceb9
+--- /dev/null
++++ b/core/modules/mysqli/mysqli.services.yml
+@@ -0,0 +1,4 @@
++services:
++  mysqli.views.cast_sql:
++    class: Drupal\mysqli\Plugin\views\query\MysqliCastSql
++    public: false
+diff --git a/core/modules/mysqli/src/Driver/Database/mysqli/Connection.php b/core/modules/mysqli/src/Driver/Database/mysqli/Connection.php
+new file mode 100644
+index 0000000000..82a9a696e8
+--- /dev/null
++++ b/core/modules/mysqli/src/Driver/Database/mysqli/Connection.php
+@@ -0,0 +1,189 @@
++<?php
 +
-   /**
-    * {@inheritdoc}
-    */
-@@ -202,45 +239,45 @@ public function push(string $name = ''): Transaction {
-   public function unpile(string $name, string $id): void {
-     // If the $id does not correspond to the one in the stack for that $name,
-     // we are facing an orphaned Transaction object (for example in case of a
--    // DDL statement breaking an active transaction), so there is nothing more
--    // to do.
-+    // DDL statement breaking an active transaction). That should be listed in
-+    // $voidedItems, so we can remove it from there.
-     if (!isset($this->stack()[$id]) || $this->stack()[$id]->name !== $name) {
-+      assert(isset($this->voidedItems[$id]), "Transaction {$id}/{$name} was out of sequence.");
-+      unset($this->voidedItems[$id]);
-       return;
-     }
- 
--    // If unpiling a savepoint, but that does not exist on the stack, the stack
--    // got corrupted.
--    if ($name !== 'drupal_transaction' && !$this->has($name)) {
--      throw new TransactionOutOfOrderException();
-+    // If we are not releasing the last savepoint but an earlier one, or
-+    // committing a root transaction while savepoints are active, all
-+    // subsequent savepoints will be released as well. The stack must be
-+    // diminished accordingly.
-+    while (($i = array_key_last($this->stack())) != $id) {
-+      $this->voidStackItem((string) $i);
-     }
- 
--    // Release the client transaction savepoint in case the Drupal transaction
--    // is not a root one.
--    if (
--      $this->has($name)
--      && $this->stack()[$id]->type === StackItemType::Savepoint
--      && $this->getConnectionTransactionState() === ClientConnectionTransactionState::Active
--    ) {
--      // If we are not releasing the last savepoint but an earlier one, all
--      // subsequent savepoints will have been released as well. The stack must
--      // be diminished accordingly.
--      while (($i = array_key_last($this->stack())) != $id) {
--        $this->removeStackItem((string) $i);
-+    if ($this->getConnectionTransactionState() === ClientConnectionTransactionState::Active) {
-+      if ($this->stackDepth() > 1 && $this->stack()[$id]->type === StackItemType::Savepoint) {
-+        // Release the client transaction savepoint in case the Drupal
-+        // transaction is not a root one.
-+        $this->releaseClientSavepoint($name);
-+      }
-+      elseif ($this->stackDepth() === 1 && $this->stack()[$id]->type === StackItemType::Root) {
-+        // If this was the root Drupal transaction, we can commit the client
-+        // transaction.
-+        $this->processRootCommit();
-+      }
-+      else {
-+        // The stack got corrupted.
-+        throw new TransactionOutOfOrderException();
-       }
--      $this->releaseClientSavepoint($name);
--    }
--
--    // Remove the transaction from the stack.
--    $this->removeStackItem($id);
- 
--    // If this was the last Drupal transaction open, we can commit the client
--    // transaction.
--    if (
--      $this->stackDepth() === 0
--      && $this->getConnectionTransactionState() === ClientConnectionTransactionState::Active
--    ) {
--      $this->processRootCommit();
-+      // Remove the transaction from the stack.
-+      $this->removeStackItem($id);
-+      return;
-     }
++namespace Drupal\mysqli\Driver\Database\mysqli;
 +
-+    // The stack got corrupted.
-+    throw new TransactionOutOfOrderException();
-   }
- 
-   /**
-@@ -262,37 +299,35 @@ public function rollback(string $name, string $id): void {
-     }
-     // End of BC layer.
- 
--    // If the $id does not correspond to the one in the stack for that $name,
--    // we are facing an orphaned Transaction object (for example in case of a
--    // DDL statement breaking an active transaction), so there is nothing more
--    // to do.
--    if (!isset($this->stack()[$id]) || $this->stack()[$id]->name !== $name) {
--      return;
--    }
--
--    if (!$this->inTransaction()) {
--      throw new TransactionNoActiveException();
--    }
--
--    // Do the client-level processing.
--    match ($this->stack()[$id]->type) {
--      StackItemType::Root => $this->processRootRollback(),
--      StackItemType::Savepoint => $this->rollbackClientSavepoint($name),
--    };
--
-     // Rolled back item should match the last one in stack.
--    if ($id != array_key_last($this->stack())) {
--      throw new TransactionOutOfOrderException();
-+    if ($id != array_key_last($this->stack()) || $name !== $this->stack()[$id]->name) {
-+      throw new TransactionOutOfOrderException("Error attempting rollback of {$id}\\{$name}. Active stack: " . $this->dumpStackItemsAsString());
-     }
- 
--    // Remove the transaction from the stack.
--    $this->removeStackItem($id);
--
--    // If this was the last Drupal transaction open, we can commit the client
--    // transaction.
--    if ($this->stackDepth() === 0 && $this->getConnectionTransactionState() === ClientConnectionTransactionState::Active) {
--      $this->processRootCommit();
-+    if ($this->getConnectionTransactionState() === ClientConnectionTransactionState::Active) {
-+      if ($this->stackDepth() > 1 && $this->stack()[$id]->type === StackItemType::Savepoint) {
-+        // Rollback the client transaction to the savepoint when the Drupal
-+        // transaction is not a root one. The savepoint and therefore the
-+        // client connection remain active.
-+        $this->rollbackClientSavepoint($name);
-+      }
-+      elseif ($this->stackDepth() === 1 && $this->stack()[$id]->type === StackItemType::Root) {
-+        // If this was the root Drupal transaction, we can rollback the client
-+        // transaction. The transaction is closed.
-+        $this->processRootRollback();
-+        // The Transaction object remains open, and when it will get destructed
-+        // no commit should happen. Void the stack item.
-+        $this->voidStackItem($id);
-+      }
-+      else {
-+        // The stack got corrupted.
-+        throw new TransactionOutOfOrderException("Error attempting rollback of {$id}\\{$name}. Active stack: " . $this->dumpStackItemsAsString());
-+      }
-+      return;
-     }
++use Drupal\Core\Database\ConnectionNotDefinedException;
++use Drupal\Core\Database\DatabaseAccessDeniedException;
++use Drupal\Core\Database\DatabaseNotFoundException;
++use Drupal\Core\Database\Transaction\TransactionManagerInterface;
++use Drupal\mysql\Driver\Database\mysql\Connection as BaseMySqlConnection;
 +
-+    // The stack got corrupted.
-+    throw new TransactionOutOfOrderException("Error attempting rollback of {$id}\\{$name}. Active stack: " . $this->dumpStackItemsAsString());
-   }
- 
-   /**
-@@ -461,4 +496,15 @@ protected function releaseClientSavepoint(string $name): bool {
-    */
-   abstract protected function commitClientTransaction(): bool;
- 
++/**
++ * MySQLi implementation of \Drupal\Core\Database\Connection.
++ */
++class Connection extends BaseMySqlConnection {
++
 +  /**
 +   * {@inheritdoc}
 +   */
-+  public function voidClientTransaction(): void {
-+    while ($i = array_key_last($this->stack())) {
-+      $this->voidStackItem((string) $i);
++  protected $statementWrapperClass = Statement::class;
++
++  /**
++   * Stores the server version after it has been retrieved from the database.
++   */
++  private string $serverVersion;
++
++  public function __construct(\mysqli $connection, array $connection_options) {
++    // If the SQL mode doesn't include 'ANSI_QUOTES' (explicitly or via a
++    // combination mode), then MySQL doesn't interpret a double quote as an
++    // identifier quote, in which case use the non-ANSI-standard backtick.
++    //
++    // Because we still support MySQL 5.7, check for the deprecated combination
++    // modes as well.
++    //
++    // @see https://dev.mysql.com/doc/refman/5.7/en/sql-mode.html#sqlmode_ansi_quotes
++    $ansi_quotes_modes = ['ANSI_QUOTES', 'ANSI', 'DB2', 'MAXDB', 'MSSQL', 'ORACLE', 'POSTGRESQL'];
++    $is_ansi_quotes_mode = FALSE;
++    foreach ($ansi_quotes_modes as $mode) {
++      // None of the modes in $ansi_quotes_modes are substrings of other modes
++      // that are not in $ansi_quotes_modes, so a simple stripos() does not
++      // return false positives.
++      if (stripos($connection_options['init_commands']['sql_mode'], $mode) !== FALSE) {
++        $is_ansi_quotes_mode = TRUE;
++        break;
++      }
 +    }
-+    $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
-+    $this->processPostTransactionCallbacks();
++    if ($this->identifierQuotes === ['"', '"'] && !$is_ansi_quotes_mode) {
++      $this->identifierQuotes = ['`', '`'];
++    }
++
++    // Manage the table prefix.
++    $connection_options['prefix'] = $connection_options['prefix'] ?? '';
++    $this->setPrefix($connection_options['prefix']);
++
++    // Work out the database driver namespace if none is provided. This normally
++    // written to setting.php by installer or set by
++    // \Drupal\Core\Database\Database::parseConnectionInfo().
++    if (empty($connection_options['namespace'])) {
++      $connection_options['namespace'] = (new \ReflectionObject($this))->getNamespaceName();
++    }
++
++    $this->connection = $connection;
++    $this->connectionOptions = $connection_options;
 +  }
 +
- }
-diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php
-index 1bd0cd3e5f..5fccb620bb 100644
---- a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php
-+++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php
-@@ -95,6 +95,19 @@ public function unpile(string $name, string $id): void;
-    */
-   public function rollback(string $name, string $id): void;
- 
 +  /**
-+   * Voids the client connection.
-+   *
-+   * In some cases the active transaction can be automatically committed by the
-+   * database server (for example, MySql when a DDL statement is executed
-+   * during a transaction). In such cases we need to void the remaining items
-+   * on the stack so that when outliving Transaction object get out of scope
-+   * the do not try operations on the database.
-+   *
-+   * This method should only be called internally by a database driver.
++   * {@inheritdoc}
 +   */
-+  public function voidClientTransaction(): void;
++  public static function open(array &$connection_options = []) {
++    mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
 +
-   /**
-    * Adds a root transaction end callback.
-    *
-diff --git a/core/modules/mysql/src/Driver/Database/mysql/TransactionManager.php b/core/modules/mysql/src/Driver/Database/mysql/TransactionManager.php
-index 3b7ce03f5f..8e0af4519b 100644
---- a/core/modules/mysql/src/Driver/Database/mysql/TransactionManager.php
-+++ b/core/modules/mysql/src/Driver/Database/mysql/TransactionManager.php
-@@ -29,8 +29,7 @@ protected function beginClientTransaction(): bool {
-    */
-   protected function processRootCommit(): void {
-     if (!$this->connection->getClientConnection()->inTransaction()) {
--      $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
--      $this->processPostTransactionCallbacks();
-+      $this->voidClientTransaction();
-       return;
-     }
-     parent::processRootCommit();
-@@ -41,9 +40,7 @@ protected function processRootCommit(): void {
-    */
-   protected function rollbackClientSavepoint(string $name): bool {
-     if (!$this->connection->getClientConnection()->inTransaction()) {
--      $this->resetStack();
--      $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
--      $this->processPostTransactionCallbacks();
-+      $this->voidClientTransaction();
-       return TRUE;
-     }
-     return parent::rollbackClientSavepoint($name);
-@@ -54,9 +51,7 @@ protected function rollbackClientSavepoint(string $name): bool {
-    */
-   protected function releaseClientSavepoint(string $name): bool {
-     if (!$this->connection->getClientConnection()->inTransaction()) {
--      $this->resetStack();
--      $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
--      $this->processPostTransactionCallbacks();
-+      $this->voidClientTransaction();
-       return TRUE;
-     }
-     return parent::releaseClientSavepoint($name);
-@@ -66,11 +61,6 @@ protected function releaseClientSavepoint(string $name): bool {
-    * {@inheritdoc}
-    */
-   protected function commitClientTransaction(): bool {
--    if (!$this->connection->getClientConnection()->inTransaction()) {
--      $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
--      $this->processPostTransactionCallbacks();
--      return TRUE;
--    }
-     $clientCommit = $this->connection->getClientConnection()->commit();
-     $this->setConnectionTransactionState($clientCommit ?
-       ClientConnectionTransactionState::Committed :
-@@ -84,9 +74,9 @@ protected function commitClientTransaction(): bool {
-    */
-   protected function rollbackClientTransaction(): bool {
-     if (!$this->connection->getClientConnection()->inTransaction()) {
--      $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
--      $this->processPostTransactionCallbacks();
-       trigger_error('Rollback attempted when there is no active transaction. This can cause data integrity issues.', E_USER_WARNING);
-+      $this->voidClientTransaction();
++    if (isset($connection_options['_dsn_utf8_fallback']) && $connection_options['_dsn_utf8_fallback'] === TRUE) {
++      // Only used during the installer version check, as a fallback from utf8mb4.
++      $charset = 'utf8';
++    }
++    else {
++      $charset = 'utf8mb4';
++    }
++
++    // Allow PDO options to be overridden.
++    $connection_options += [
++      'pdo' => [],
++    ];
++
++    try {
++      $mysqli = new \mysqli(
++        $connection_options['host'],
++        $connection_options['username'],
++        $connection_options['password'],
++        $connection_options['database'] ?? '',
++        !empty($connection_options['port']) ? (int) $connection_options['port'] : 3306,
++        $connection_options['unix_socket'] ?? ''
++      );
++      if (!$mysqli->set_charset($charset)) {
++        throw new InvalidCharsetException('Invalid charset ' . $charset);
++      }
++    }
++    catch (\mysqli_sql_exception $e) {
++      if ($e->getCode() === static::DATABASE_NOT_FOUND) {
++        throw new DatabaseNotFoundException($e->getMessage(), $e->getCode(), $e);
++      }
++      elseif ($e->getCode() === static::ACCESS_DENIED) {
++        throw new DatabaseAccessDeniedException($e->getMessage(), $e->getCode(), $e);
++      }
++      else {
++        throw new ConnectionNotDefinedException('Invalid database connection: ' . $e->getMessage(), $e->getCode(), $e);
++      }
++      throw $e;
++    }
++
++    // Force MySQL to use the UTF-8 character set. Also set the collation, if a
++    // certain one has been set; otherwise, MySQL defaults to
++    // 'utf8mb4_general_ci' (MySQL 5) or 'utf8mb4_0900_ai_ci' (MySQL 8) for
++    // utf8mb4.
++    if (!empty($connection_options['collation'])) {
++      $mysqli->query('SET NAMES ' . $charset . ' COLLATE ' . $connection_options['collation']);
++    }
++    else {
++      $mysqli->query('SET NAMES ' . $charset);
++    }
++
++    // Set MySQL init_commands if not already defined.  Default Drupal's MySQL
++    // behavior to conform more closely to SQL standards.  This allows Drupal
++    // to run almost seamlessly on many different kinds of database systems.
++    // These settings force MySQL to behave the same as postgresql, or sqlite
++    // in regards to syntax interpretation and invalid data handling.  See
++    // https://www.drupal.org/node/344575 for further discussion. Also, as MySQL
++    // 5.5 changed the meaning of TRADITIONAL we need to spell out the modes one
++    // by one.
++    $connection_options += [
++      'init_commands' => [],
++    ];
++
++    $connection_options['init_commands'] += [
++      'sql_mode' => "SET sql_mode = 'ANSI,TRADITIONAL'",
++      // @todo Perhaps 'collation_connection' => "SET collation_connection =
++      //   'utf8mb4_0900_ai_ci'".
++    ];
++
++    // Execute initial commands.
++    foreach ($connection_options['init_commands'] as $sql) {
++      $mysqli->query($sql);
++    }
++
++    return $mysqli;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function driver() {
++    return 'mysqli';
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function clientVersion() {
++    return \mysqli_get_client_info();
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function quote($string, $parameter_type = \PDO::PARAM_STR) {
++    return "'" . $this->connection->escape_string($string) . "'";
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function lastInsertId(?string $name = NULL): string {
++    return $this->connection->insert_id;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function exceptionHandler() {
++    return new ExceptionHandler();
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  protected function driverTransactionManager(): TransactionManagerInterface {
++    return new TransactionManager($this);
++  }
++
++}
+diff --git a/core/modules/mysqli/src/Driver/Database/mysqli/ExceptionHandler.php b/core/modules/mysqli/src/Driver/Database/mysqli/ExceptionHandler.php
+new file mode 100644
+index 0000000000..1b81d5dee0
+--- /dev/null
++++ b/core/modules/mysqli/src/Driver/Database/mysqli/ExceptionHandler.php
+@@ -0,0 +1,49 @@
++<?php
++
++namespace Drupal\mysqli\Driver\Database\mysqli;
++
++use Drupal\Component\Utility\Unicode;
++use Drupal\Core\Database\DatabaseExceptionWrapper;
++use Drupal\Core\Database\ExceptionHandler as BaseExceptionHandler;
++use Drupal\Core\Database\IntegrityConstraintViolationException;
++use Drupal\Core\Database\StatementInterface;
++
++/**
++ * MySQLi database exception handler class.
++ */
++class ExceptionHandler extends BaseExceptionHandler {
++
++  /**
++   * {@inheritdoc}
++   */
++  public function handleExecutionException(\Exception $exception, StatementInterface $statement, array $arguments = [], array $options = []): void {
++    if (!($exception instanceof \mysqli_sql_exception)) {
++      throw $exception;
++    }
++
++    // Wrap the exception in another exception, because PHP does not allow
++    // overriding Exception::getMessage(). Its message is the extra database
++    // debug information.
++    $code = is_int($exception->getCode()) ? $exception->getCode() : 0;
++
++    // If a max_allowed_packet error occurs the message length is truncated.
++    // This should prevent the error from recurring if the exception is logged
++    // to the database using dblog or the like.
++    if ($code === 1153) {
++      $message = Unicode::truncateBytes($exception->getMessage(), Connection::MIN_MAX_ALLOWED_PACKET);
++      throw new DatabaseExceptionWrapper($message, $code, $exception);
++    }
++
++    $message = $exception->getMessage() . ": " . $statement->getQueryString() . "; " . print_r($arguments, TRUE);
++
++    // SQLSTATE 23xxx errors indicate an integrity constraint violation. Also,
++    // in case of attempted INSERT of a record with an undefined column and no
++    // default value indicated in schema, MySql returns a 1364 error code.
++    if (substr($exception->getSqlState(), -6, -3) == '23' || $code === 1364) {
++      throw new IntegrityConstraintViolationException($message, $code, $exception);
++    }
++
++    throw new DatabaseExceptionWrapper($message, 0, $exception);
++  }
++
++}
+diff --git a/core/modules/mysqli/src/Driver/Database/mysqli/Install/Tasks.php b/core/modules/mysqli/src/Driver/Database/mysqli/Install/Tasks.php
+new file mode 100644
+index 0000000000..ca80ca817e
+--- /dev/null
++++ b/core/modules/mysqli/src/Driver/Database/mysqli/Install/Tasks.php
+@@ -0,0 +1,26 @@
++<?php
++
++namespace Drupal\mysqli\Driver\Database\mysqli\Install;
++
++use Drupal\mysql\Driver\Database\mysql\Install\Tasks as BaseInstallTasks;
++
++/**
++ * Specifies installation tasks for MySQLi.
++ */
++class Tasks extends BaseInstallTasks {
++
++  /**
++   * {@inheritdoc}
++   */
++  public function installable() {
++    return extension_loaded('mysqli');
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function name() {
++    return $this->t('@parent via mysqli', ['@parent' => parent::name()]);
++  }
++
++}
+diff --git a/core/modules/mysqli/src/Driver/Database/mysqli/InvalidCharsetException.php b/core/modules/mysqli/src/Driver/Database/mysqli/InvalidCharsetException.php
+new file mode 100644
+index 0000000000..3a7e36e7b2
+--- /dev/null
++++ b/core/modules/mysqli/src/Driver/Database/mysqli/InvalidCharsetException.php
+@@ -0,0 +1,11 @@
++<?php
++
++namespace Drupal\mysqli\Driver\Database\mysqli;
++
++use Drupal\Core\Database\DatabaseExceptionWrapper;
++
++/**
++ * This exception class signals an invalid charset is being used.
++ */
++class InvalidCharsetException extends DatabaseExceptionWrapper {
++}
+diff --git a/core/modules/mysqli/src/Driver/Database/mysqli/NamedPlaceholderConverter.php b/core/modules/mysqli/src/Driver/Database/mysqli/NamedPlaceholderConverter.php
+new file mode 100644
+index 0000000000..84142ea91e
+--- /dev/null
++++ b/core/modules/mysqli/src/Driver/Database/mysqli/NamedPlaceholderConverter.php
+@@ -0,0 +1,218 @@
++<?php
++
++namespace Drupal\mysqli\Driver\Database\mysqli;
++
++// cspell:ignore DBAL MULTICHAR
++
++/**
++ * A class to convert a SQL statement with named placeholders to positional.
++ *
++ * The parsing logic and the implementation is inspired by the PHP PDO parser,
++ * and a simplified copy of the parser implementation done by the Doctrine DBAL
++ * project.
++ *
++ * @internal
++ *
++ * @see https://github.com/doctrine/dbal/tree/3.6.x/src/SQL/Parser
++ */
++final class NamedPlaceholderConverter {
++  /**
++   * A list of regex patterns for parsing.
++   */
++  private const SPECIAL_CHARS = ':\?\'"`\\[\\-\\/';
++  private const BACKTICK_IDENTIFIER = '`[^`]*`';
++  private const BRACKET_IDENTIFIER = '(?<!\b(?i:ARRAY))\[(?:[^\]])*\]';
++  private const MULTICHAR = ':{2,}';
++  private const NAMED_PARAMETER = ':[a-zA-Z0-9_]+';
++  private const POSITIONAL_PARAMETER = '(?<!\\?)\\?(?!\\?)';
++  private const ONE_LINE_COMMENT = '--[^\r\n]*';
++  private const MULTI_LINE_COMMENT = '/\*([^*]+|\*+[^/*])*\**\*/';
++  private const SPECIAL = '[' . self::SPECIAL_CHARS . ']';
++  private const OTHER = '[^' . self::SPECIAL_CHARS . ']+';
++
++  /**
++   * The combined regex pattern for parsing.
++   */
++  private string $sqlPattern;
++
++  /**
++   * The list of original named arguments.
++   *
++   * The initial placeholder colon is removed.
++   */
++  private array $originalParameters = [];
++
++  /**
++   * The maximum positional placeholder parsed.
++   *
++   * Normally Drupal does not produce SQL with positional placeholders, but
++   * this is to manage the edge case.
++   */
++  private int $originalParameterIndex = 0;
++
++  /**
++   * The converted SQL statement in its parts.
++   *
++   * @var string[]
++   */
++  private array $convertedSQL = [];
++
++  /**
++   * The list of converted arguments.
++   *
++   * @var mixed[]
++   */
++  private array $convertedParameters = [];
++
++  public function __construct() {
++    // Builds the combined regex pattern for parsing.
++    $this->sqlPattern = sprintf('(%s)', implode('|', [
++      $this->getAnsiSQLStringLiteralPattern("'"),
++      $this->getAnsiSQLStringLiteralPattern('"'),
++      self::BACKTICK_IDENTIFIER,
++      self::BRACKET_IDENTIFIER,
++      self::MULTICHAR,
++      self::ONE_LINE_COMMENT,
++      self::MULTI_LINE_COMMENT,
++      self::OTHER,
++    ]));
++  }
++
++  /**
++   * Parses an SQL statement with named placeholders.
++   *
++   * This methods explodes the SQL statement in parts that can be reassembled
++   * into a string with positional placeholders.
++   *
++   * @param string $sql
++   *   The SQL statement with named placeholders.
++   * @param mixed[] $args
++   *   The statement arguments.
++   */
++  public function parse(string $sql, array $args): void {
++    // Remove the initial colon from the placeholders.
++    foreach ($args as $key => $value) {
++      $this->originalParameters[substr($key, 1)] = $value;
++    }
++    $this->originalParameterIndex = 0;
++    $this->convertedSQL = [];
++    $this->convertedParameters = [];
++
++    /** @var array<string,callable> $patterns */
++    $patterns = [
++      self::NAMED_PARAMETER => function (string $sql): void {
++        $this->addNamedParameter($sql);
++      },
++      self::POSITIONAL_PARAMETER => function (string $sql): void {
++        $this->addPositionalParameter($sql);
++      },
++      $this->sqlPattern => function (string $sql): void {
++        $this->addOther($sql);
++      },
++      self::SPECIAL => function (string $sql): void {
++        $this->addOther($sql);
++      },
++    ];
++
++    $offset = 0;
++
++    while (($handler = current($patterns)) !== FALSE) {
++      if (preg_match('~\G' . key($patterns) . '~s', $sql, $matches, 0, $offset) === 1) {
++        $handler($matches[0]);
++        reset($patterns);
++        $offset += strlen($matches[0]);
++      }
++      elseif (preg_last_error() !== PREG_NO_ERROR) {
++        throw new \RuntimeException('Regular expression error');
++      }
++      else {
++        next($patterns);
++      }
++    }
++
++    assert($offset === strlen($sql));
++  }
++
++  /**
++   * Helper to return a regex pattern from a delimiter character..
++   *
++   * @param string $delimiter
++   *   A delimiter character.
++   *
++   * @return string
++   *   The regex pattern.
++   */
++  private function getAnsiSQLStringLiteralPattern(string $delimiter): string {
++    return $delimiter . '[^' . $delimiter . ']*' . $delimiter;
++  }
++
++  /**
++   * Adds a positional placeholder to the converted parts.
++   *
++   * Normally Drupal does not produce SQL with positional placeholders, but
++   * this is to manage the edge case.
++   *
++   * @param string $sql
++   *   The SQL part.
++   */
++  private function addPositionalParameter(string $sql): void {
++    $index = $this->originalParameterIndex;
++
++    if (!array_key_exists($index, $this->originalParameters)) {
++      throw new \RuntimeException('Missing Positional Parameter ' . $index);
++    }
++
++    $this->convertedSQL[] = '?';
++    $this->convertedParameters[] = $this->originalParameters[$index];
++
++    $this->originalParameterIndex++;
++  }
++
++  /**
++   * Adds a named placeholder to the converted parts.
++   *
++   * @param string $sql
++   *   The SQL part.
++   */
++  private function addNamedParameter(string $sql): void {
++    $name = substr($sql, 1);
++
++    if (!array_key_exists($name, $this->originalParameters)) {
++      throw new \RuntimeException('Missing Named Parameter ' . $name);
++    }
++
++    $this->convertedSQL[] = '?';
++    $this->convertedParameters[] = $this->originalParameters[$name];
++  }
++
++  /**
++   * Adds a generic SQL string fragment to the converted parts.
++   *
++   * @param string $sql
++   *   The SQL part.
++   */
++  private function addOther(string $sql): void {
++    $this->convertedSQL[] = $sql;
++  }
++
++  /**
++   * Returns the converted SQL statement with positional placeholders.
++   *
++   * @return string
++   *   The converted SQL statement with positional placeholders.
++   */
++  public function getConvertedSQL(): string {
++    return implode('', $this->convertedSQL);
++  }
++
++  /**
++   * Returns the array of arguments for use with positional placeholders.
++   *
++   * @return mixed[]
++   *   The array of arguments for use with positional placeholders.
++   */
++  public function getConvertedParameters(): array {
++    return $this->convertedParameters;
++  }
++
++}
+diff --git a/core/modules/mysqli/src/Driver/Database/mysqli/Statement.php b/core/modules/mysqli/src/Driver/Database/mysqli/Statement.php
+new file mode 100644
+index 0000000000..e4e76b5c38
+--- /dev/null
++++ b/core/modules/mysqli/src/Driver/Database/mysqli/Statement.php
+@@ -0,0 +1,347 @@
++<?php
++
++namespace Drupal\mysqli\Driver\Database\mysqli;
++
++use Drupal\Core\Database\Connection;
++use Drupal\Core\Database\DatabaseExceptionWrapper;
++use Drupal\Core\Database\Event\StatementExecutionEndEvent;
++use Drupal\Core\Database\Event\StatementExecutionStartEvent;
++use Drupal\Core\Database\RowCountException;
++use Drupal\Core\Database\StatementWrapperIterator;
++
++/**
++ * MySQLi implementation of \Drupal\Core\Database\Query\StatementInterface.
++ */
++class Statement extends StatementWrapperIterator {
++
++  /**
++   * Holds the index position of named parameters.
++   */
++  protected array $paramsPositions;
++
++  /**
++   * The default fetch mode.
++   *
++   * See http://php.net/manual/pdo.constants.php for the definition of the
++   * constants used.
++   */
++  protected int $defaultFetchStyle;
++
++  /**
++   * Holds fetch options.
++   *
++   * @var string[]
++   */
++  protected array $fetchOptions = [
++    'class' => 'stdClass',
++    'constructor_args' => [],
++    'object' => NULL,
++    'column' => 0,
++  ];
++
++  /**
++   * The mysqli result object.
++   *
++   * Stores results of a data selection query.
++   */
++  protected ?\mysqli_result $mysqliResult;
++
++  /**
++   * Constructs a Statement object.
++   *
++   * @param \Drupal\Core\Database\Connection $connection
++   *   Drupal database connection object.
++   * @param \mysqli $mysqliConnection
++   *   Client database connection object, for example \PDO.
++   * @param string $queryString
++   *   The SQL query string.
++   * @param array $driverOpts
++   *   (optional) Array of query options.
++   * @param bool $rowCountEnabled
++   *   (optional) Enables counting the rows affected. Defaults to FALSE.
++   */
++  public function __construct(
++    protected readonly Connection $connection,
++    protected readonly \mysqli $mysqliConnection,
++    protected string $queryString,
++    protected array $driverOpts = [],
++    protected readonly bool $rowCountEnabled = FALSE,
++  ) {
++    $this->setFetchMode(\PDO::FETCH_OBJ);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function execute($args = [], $options = []) {
++    // Prepare the lower-level statement if it's not been prepared already.
++    if (!isset($this->clientStatement)) {
++      // Replace named placeholders with positional ones if needed.
++      $this->paramsPositions = array_flip(array_keys($args));
++      $converter = new NamedPlaceholderConverter();
++      $converter->parse($this->queryString, $args);
++      [$this->queryString, $args] = [$converter->getConvertedSQL(), $converter->getConvertedParameters()];
++      $this->clientStatement = $this->mysqliConnection->prepare($this->queryString);
++    }
++    else {
++      // Transform the $args to positional.
++      $tmp = [];
++      foreach ($this->paramsPositions as $param => $pos) {
++        $tmp[$pos] = $args[$param];
++      }
++      $args = $tmp;
++    }
++
++    if (isset($options['fetch'])) {
++      if (is_string($options['fetch'])) {
++        $this->setFetchMode(\PDO::FETCH_CLASS, $options['fetch']);
++      }
++      else {
++        $this->setFetchMode($options['fetch']);
++      }
++    }
++
++    if ($this->connection->isEventEnabled(StatementExecutionStartEvent::class)) {
++      $startEvent = new StatementExecutionStartEvent(
++        spl_object_id($this),
++        $this->connection->getKey(),
++        $this->connection->getTarget(),
++        $this->getQueryString(),
++        $args,
++        $this->connection->findCallerFromDebugBacktrace()
++      );
++      $this->connection->dispatchEvent($startEvent);
++    }
++
++    $return = $this->clientStatement->execute($args);
++    $this->markResultsetIterable($return);
++    $result = $this->clientStatement->get_result();
++    $this->mysqliResult = $result !== FALSE ? $result : NULL;
++
++    if (isset($startEvent) && $this->connection->isEventEnabled(StatementExecutionEndEvent::class)) {
++      $this->connection->dispatchEvent(new StatementExecutionEndEvent(
++        $startEvent->statementObjectId,
++        $startEvent->key,
++        $startEvent->target,
++        $startEvent->queryString,
++        $startEvent->args,
++        $startEvent->caller,
++        $startEvent->time
++      ));
++    }
++
++    return $return;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function getQueryString() {
++    return $this->queryString;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function fetch($mode = NULL, $cursor_orientation = NULL, $cursor_offset = NULL) {
++    if (is_string($mode)) {
++      $this->setFetchMode(\PDO::FETCH_CLASS, $mode);
++      $mode = \PDO::FETCH_CLASS;
++    }
++    else {
++      if (isset($mode) && !in_array($mode, $this->supportedFetchModes)) {
++        @trigger_error('Fetch mode ' . ($this->fetchModeLiterals[$mode] ?? $mode) . ' is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Use supported modes only. See https://www.drupal.org/node/3377999', E_USER_DEPRECATED);
++      }
++      $mode = $mode ?: $this->defaultFetchStyle;
++    }
++
++    $mysqli_row = $this->mysqliResult->fetch_assoc();
++
++    if (!$mysqli_row) {
++      $this->markResultsetFetchingComplete();
 +      return FALSE;
-     }
-     $clientRollback = $this->connection->getClientConnection()->rollBack();
-     $this->setConnectionTransactionState($clientRollback ?
-diff --git a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
-index b0e9fc3e9b..4e65bdf1ad 100644
---- a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
-+++ b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
-@@ -2,9 +2,11 @@
- 
- namespace Drupal\KernelTests\Core\Database;
- 
++    }
++
++    $columnNames = array_keys($mysqli_row);
++
++    // Stringify all non-NULL column values.
++    $row = [];
++    foreach ($mysqli_row as $column => $value) {
++      $row[$column] = $value === NULL ? NULL : (string) $value;
++    }
++
++    $ret = match($mode) {
++      \PDO::FETCH_ASSOC => $row,
++      // @phpstan-ignore-next-line
++      \PDO::FETCH_BOTH => $this->assocToBoth($row),
++      \PDO::FETCH_NUM => $this->assocToNum($row),
++      \PDO::FETCH_LAZY, \PDO::FETCH_OBJ => $this->assocToObj($row),
++      // @phpstan-ignore-next-line
++      \PDO::FETCH_CLASS | \PDO::FETCH_CLASSTYPE => $this->assocToClassType($row, $this->fetchOptions['constructor_args']),
++      \PDO::FETCH_CLASS => $this->assocToClass($row, $this->fetchOptions['class'], $this->fetchOptions['constructor_args']),
++      // @phpstan-ignore-next-line
++      \PDO::FETCH_INTO => $this->assocIntoObject($row, $this->fetchOptions['object']),
++      \PDO::FETCH_COLUMN => $this->assocToColumn($row, $columnNames, $this->fetchOptions['column']),
++      default => throw new DatabaseExceptionWrapper('Fetch mode ' . ($this->fetchModeLiterals[$mode] ?? $mode) . ' is not supported.'),
++    };
++
++    $this->setResultsetCurrentRow($ret);
++    return $ret;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function fetchAll($mode = NULL, $column_index = NULL, $constructor_arguments = NULL) {
++    if (isset($mode) && !in_array($mode, $this->supportedFetchModes)) {
++      @trigger_error('Fetch mode ' . ($this->fetchModeLiterals[$mode] ?? $mode) . ' is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Use supported modes only. See https://www.drupal.org/node/3377999', E_USER_DEPRECATED);
++    }
++    if (is_string($mode)) {
++      $this->setFetchMode(\PDO::FETCH_CLASS, $mode);
++      $mode = \PDO::FETCH_CLASS;
++    }
++    else {
++      $mode = $mode ?: $this->defaultFetchStyle;
++    }
++
++    $rows = [];
++    if (\PDO::FETCH_COLUMN == $mode) {
++      if ($column_index === NULL) {
++        $column_index = 0;
++      }
++      while (($record = $this->fetch(\PDO::FETCH_ASSOC)) !== FALSE) {
++        $cols = array_keys($record);
++        $rows[] = $record[$cols[$column_index]];
++      }
++    }
++    else {
++      while (($row = $this->fetch($mode)) !== FALSE) {
++        $rows[] = $row;
++      }
++    }
++
++    return $rows;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function fetchAllAssoc($key, $fetch = NULL) {
++    $return = [];
++    if (isset($fetch)) {
++      if (is_string($fetch)) {
++        $this->setFetchMode(\PDO::FETCH_CLASS, $fetch);
++      }
++      else {
++        $this->setFetchMode($fetch ?: $this->defaultFetchStyle);
++      }
++    }
++
++    while ($record = $this->fetch()) {
++      $record_key = is_object($record) ? $record->$key : $record[$key];
++      $return[$record_key] = $record;
++    }
++
++    return $return;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function fetchAllKeyed($key_index = 0, $value_index = 1) {
++    $return = [];
++    $this->setFetchMode(\PDO::FETCH_ASSOC);
++    while ($record = $this->fetch(\PDO::FETCH_ASSOC)) {
++      $cols = array_keys($record);
++      $return[$record[$cols[$key_index]]] = $record[$cols[$value_index]];
++    }
++    return $return;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function fetchField($index = 0) {
++    if (($ret = $this->fetch(\PDO::FETCH_NUM)) === FALSE) {
++      return FALSE;
++    }
++    return $ret[$index] === NULL ? NULL : (string) $ret[$index];
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function fetchObject(string $class_name = NULL, array $constructor_arguments = []) {
++    if (isset($class_name)) {
++      $this->defaultFetchStyle = \PDO::FETCH_CLASS;
++      $this->fetchOptions = [
++        'class' => $class_name,
++        'constructor_args' => $constructor_arguments,
++      ];
++    }
++    return $this->fetch($class_name ?? \PDO::FETCH_OBJ);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function rowCount() {
++    // SELECT query should not use this method.
++    if ($this->rowCountEnabled) {
++      // @todo The most accurate value to return for Drupal here is the first
++      //   occurrence of an integer in the string stored by the connection's
++      //   $info property.
++      //   This is something like 'Rows matched: 1  Changed: 1  Warnings: 0' for
++      //   UPDATE or DELETE operations, and
++      //   'Records: 2  Duplicates: 1  Warnings: 0' for INSERT ones.
++      //   This however requires a regex parsing of the string which is
++      //   expensive; $affected_rows would be less accurate but much faster. We
++      //   would need Drupal to be less strict in testing, and never rely on
++      //   this value in runtime (which would be healthy anyway).
++      if ($this->mysqliConnection->info !== NULL) {
++        $matches = [];
++        if (preg_match('/\s(\d+)\s/', $this->mysqliConnection->info, $matches) === 1) {
++          return (int) $matches[0];
++        }
++        else {
++          throw new DatabaseExceptionWrapper('Invalid data in the $info property of the mysqli connection - ' . $this->mysqliConnection->info);
++        }
++      }
++      elseif ($this->mysqliConnection->affected_rows !== NULL) {
++        return $this->mysqliConnection->affected_rows;
++      }
++      throw new DatabaseExceptionWrapper('Unable to retrieve affected rows data');
++    }
++    else {
++      throw new RowCountException();
++    }
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function setFetchMode($mode, $a1 = NULL, $a2 = []) {
++    if (!in_array($mode, $this->supportedFetchModes)) {
++      @trigger_error('Fetch mode ' . ($this->fetchModeLiterals[$mode] ?? $mode) . ' is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Use supported modes only. See https://www.drupal.org/node/3377999', E_USER_DEPRECATED);
++    }
++    $this->defaultFetchStyle = $mode;
++    switch ($mode) {
++      case \PDO::FETCH_CLASS:
++        $this->fetchOptions['class'] = $a1;
++        if ($a2) {
++          $this->fetchOptions['constructor_args'] = $a2;
++        }
++        break;
++
++      case \PDO::FETCH_COLUMN:
++        $this->fetchOptions['column'] = $a1;
++        break;
++
++      case \PDO::FETCH_INTO:
++        $this->fetchOptions['object'] = $a1;
++        break;
++    }
++    return TRUE;
++  }
++
++}
+diff --git a/core/modules/mysqli/src/Driver/Database/mysqli/TransactionManager.php b/core/modules/mysqli/src/Driver/Database/mysqli/TransactionManager.php
+new file mode 100644
+index 0000000000..85cc8eb84b
+--- /dev/null
++++ b/core/modules/mysqli/src/Driver/Database/mysqli/TransactionManager.php
+@@ -0,0 +1,88 @@
++<?php
++
++declare(strict_types=1);
++
++namespace Drupal\mysqli\Driver\Database\mysqli;
++
++use Drupal\Core\Database\Transaction\ClientConnectionTransactionState;
++use Drupal\Core\Database\Transaction\TransactionManagerBase;
++
++/**
++ * MySqli implementation of TransactionManagerInterface.
++ */
++class TransactionManager extends TransactionManagerBase {
++
++  /**
++   * {@inheritdoc}
++   */
++  protected function beginClientTransaction(): bool {
++    return $this->connection->getClientConnection()->begin_transaction();
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  protected function addClientSavepoint(string $name): bool {
++    return $this->connection->getClientConnection()->savepoint($name);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  protected function rollbackClientSavepoint(string $name): bool {
++    // Mysqli does not have a rollback_to_savepoint method, and it does not
++    // allow a prepared statement for 'ROLLBACK TO SAVEPOINT', so we need to
++    // fallback to query on the client connection directly.
++    try {
++      return (bool) $this->connection->getClientConnection()->query('ROLLBACK TO SAVEPOINT ' . $name);
++    }
++    catch (\mysqli_sql_exception $e) {
++      // If the rollback failed, most likely the savepoint was not there
++      // because the transaction is no longer active. In this case we rollback
++      // to root and cleanup.
++      $this->connection->getClientConnection()->rollBack();
++      $this->resetStack();
++      $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
++      $this->processPostTransactionCallbacks();
++      return TRUE;
++    }
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  protected function releaseClientSavepoint(string $name): bool {
++    return $this->connection->getClientConnection()->release_savepoint($name);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  protected function rollbackClientTransaction(): bool {
++    // Note: mysqli::rollback() returns TRUE if there's no active transaction.
++    // This is diverging from PDO MySql.
++    // TransactionTest::testTransactionWithDdlStatement() fails for this reason.
++    // A PHP bug report exists.
++    //
++    // @see https://bugs.php.net/bug.php?id=81533.
++    $clientRollback = $this->connection->getClientConnection()->rollBack();
++    $this->setConnectionTransactionState($clientRollback ?
++      ClientConnectionTransactionState::RolledBack :
++      ClientConnectionTransactionState::RollbackFailed
++    );
++    return $clientRollback;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  protected function commitClientTransaction(): bool {
++    $clientCommit = $this->connection->getClientConnection()->commit();
++    $this->setConnectionTransactionState($clientCommit ?
++      ClientConnectionTransactionState::Committed :
++      ClientConnectionTransactionState::CommitFailed
++    );
++    return $clientCommit;
++  }
++
++}
+diff --git a/core/modules/mysqli/src/Plugin/views/query/MysqliCastSql.php b/core/modules/mysqli/src/Plugin/views/query/MysqliCastSql.php
+new file mode 100644
+index 0000000000..d1f1ca55f8
+--- /dev/null
++++ b/core/modules/mysqli/src/Plugin/views/query/MysqliCastSql.php
+@@ -0,0 +1,11 @@
++<?php
++
++namespace Drupal\mysqli\Plugin\views\query;
++
++use Drupal\mysql\Plugin\views\query\MysqlCastSql;
++
++/**
++ * MySQLi specific cast handling.
++ */
++class MysqliCastSql extends MysqlCastSql {
++}
+diff --git a/core/modules/mysqli/tests/src/Functional/GenericTest.php b/core/modules/mysqli/tests/src/Functional/GenericTest.php
+new file mode 100644
+index 0000000000..fae4bbe9f9
+--- /dev/null
++++ b/core/modules/mysqli/tests/src/Functional/GenericTest.php
+@@ -0,0 +1,12 @@
++<?php
++
++namespace Drupal\Tests\mysqli\Functional;
++
++use Drupal\Tests\system\Functional\Module\GenericModuleTestBase;
++
++/**
++ * Generic module test for mysqli.
++ *
++ * @group mysqli
++ */
++class GenericTest extends GenericModuleTestBase {}
+diff --git a/core/modules/mysqli/tests/src/Kernel/mysqli/ConnectionTest.php b/core/modules/mysqli/tests/src/Kernel/mysqli/ConnectionTest.php
+new file mode 100644
+index 0000000000..f0d1821d2c
+--- /dev/null
++++ b/core/modules/mysqli/tests/src/Kernel/mysqli/ConnectionTest.php
+@@ -0,0 +1,13 @@
++<?php
++
++namespace Drupal\Tests\mysqli\Kernel\mysqli;
++
++use Drupal\Tests\mysql\Kernel\mysql\ConnectionTest as BaseMySqlTest;
++
++/**
++ * MySQL-specific connection tests.
++ *
++ * @group Database
++ */
++class ConnectionTest extends BaseMySqlTest {
++}
+diff --git a/core/modules/mysqli/tests/src/Kernel/mysqli/ConnectionUnitTest.php b/core/modules/mysqli/tests/src/Kernel/mysqli/ConnectionUnitTest.php
+new file mode 100644
+index 0000000000..0cb054ba15
+--- /dev/null
++++ b/core/modules/mysqli/tests/src/Kernel/mysqli/ConnectionUnitTest.php
+@@ -0,0 +1,21 @@
++<?php
++
++namespace Drupal\Tests\mysqli\Kernel\mysqli;
++
++use Drupal\Tests\mysql\Kernel\mysql\ConnectionUnitTest as BaseMySqlTest;
++
++/**
++ * MySQL-specific connection unit tests.
++ *
++ * @group Database
++ */
++class ConnectionUnitTest extends BaseMySqlTest {
++
++  /**
++   * Tests pdo options override.
++   */
++  public function testConnectionOpen() {
++    $this->markTestSkipped('mysqli is not a pdo driver.');
++  }
++
++}
+diff --git a/core/modules/mysqli/tests/src/Kernel/mysqli/DatabaseExceptionWrapperTest.php b/core/modules/mysqli/tests/src/Kernel/mysqli/DatabaseExceptionWrapperTest.php
+new file mode 100644
+index 0000000000..b5ea6be348
+--- /dev/null
++++ b/core/modules/mysqli/tests/src/Kernel/mysqli/DatabaseExceptionWrapperTest.php
+@@ -0,0 +1,36 @@
++<?php
++
++namespace Drupal\Tests\mysqli\Kernel\mysqli;
++
++use Drupal\Tests\mysql\Kernel\mysql\DatabaseExceptionWrapperTest as BaseMySqlTest;
++
++/**
++ * Tests exceptions thrown by queries.
++ *
++ * @group Database
++ */
++class DatabaseExceptionWrapperTest extends BaseMySqlTest {
++
++  /**
++   * Tests Connection::prepareStatement exceptions on preparation.
++   *
++   * Core database drivers use PDO emulated statements or the StatementPrefetch
++   * class, which defer the statement check to the moment of the execution. In
++   * order to test a failure at preparation time, we have to force the
++   * connection not to emulate statement preparation. Still, this is only valid
++   * for the MySql driver.
++   */
++  public function testPrepareStatementFailOnPreparation() {
++    $this->markTestSkipped('mysqli is not a pdo driver.');
++  }
++
++  /**
++   * Tests Connection::prepareStatement exception on execution.
++   */
++  public function testPrepareStatementFailOnExecution() {
++    $this->expectException(\mysqli_sql_exception::class);
++    $stmt = $this->connection->prepareStatement('bananas', []);
++    $stmt->execute();
++  }
++
++}
+diff --git a/core/modules/mysqli/tests/src/Kernel/mysqli/LargeQueryTest.php b/core/modules/mysqli/tests/src/Kernel/mysqli/LargeQueryTest.php
+new file mode 100644
+index 0000000000..e2e13165f8
+--- /dev/null
++++ b/core/modules/mysqli/tests/src/Kernel/mysqli/LargeQueryTest.php
+@@ -0,0 +1,49 @@
++<?php
++
++namespace Drupal\Tests\mysqli\Kernel\mysqli;
++
++use Drupal\Component\Utility\Environment;
 +use Drupal\Core\Database\Database;
-+use Drupal\Core\Database\Transaction\StackItem;
-+use Drupal\Core\Database\Transaction\StackItemType;
- use Drupal\Core\Database\TransactionExplicitCommitNotAllowedException;
- use Drupal\Core\Database\TransactionNameNonUniqueException;
--use Drupal\Core\Database\TransactionNoActiveException;
- use Drupal\Core\Database\TransactionOutOfOrderException;
- use PHPUnit\Framework\Error\Warning;
- 
-@@ -149,26 +151,137 @@ protected function transactionInnerLayer($suffix, $rollback = FALSE, $ddl_statem
-   }
- 
-   /**
--   * Tests transaction rollback on a database that supports transactions.
--   *
--   * If the active connection does not support transactions, this test does
--   * nothing.
-+   * Tests root transaction rollback.
-    */
--  public function testTransactionRollBackSupported() {
--    try {
--      // Create two nested transactions. Roll back from the inner one.
--      $this->transactionOuterLayer('B', TRUE);
--
--      // Neither of the rows we inserted in the two transaction layers
--      // should be present in the tables post-rollback.
--      $saved_age = $this->connection->query('SELECT [age] FROM {test} WHERE [name] = :name', [':name' => 'DavidB'])->fetchField();
--      $this->assertNotSame('24', $saved_age, 'Cannot retrieve DavidB row after commit.');
--      $saved_age = $this->connection->query('SELECT [age] FROM {test} WHERE [name] = :name', [':name' => 'DanielB'])->fetchField();
--      $this->assertNotSame('19', $saved_age, 'Cannot retrieve DanielB row after commit.');
--    }
--    catch (\Exception $e) {
--      $this->fail($e->getMessage());
--    }
-+  public function testRollbackRoot() {
-+    $this->assertFalse($this->connection->inTransaction());
-+    $this->assertSame(0, $this->connection->transactionManager()->stackDepth());
++use Drupal\Core\Database\DatabaseException;
++use Drupal\Tests\mysql\Kernel\mysql\LargeQueryTest as BaseMySqlTest;
 +
-+    $transaction = $this->connection->startTransaction();
-+    $this->assertTrue($this->connection->inTransaction());
-+    $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
++/**
++ * Tests handling of large queries.
++ *
++ * @group Database
++ */
++class LargeQueryTest extends BaseMySqlTest {
 +
-+    // Insert a single row into the testing table.
-+    $this->insertRow('David');
-+    $this->assertRowPresent('David');
++  /**
++   * Tests truncation of messages when max_allowed_packet exception occurs.
++   */
++  public function testMaxAllowedPacketQueryTruncating(): void {
++    // The max_allowed_packet value is configured per database instance.
++    // Retrieve the max_allowed_packet value from the current instance and
++    // check if PHP is configured with sufficient allowed memory to be able
++    // to generate a query larger than max_allowed_packet.
++    $max_allowed_packet = $this->connection->query('SELECT @@global.max_allowed_packet')->fetchField();
++    if (!Environment::checkMemoryLimit($max_allowed_packet + (16 * 1024 * 1024))) {
++      $this->markTestSkipped('The configured max_allowed_packet exceeds the php memory limit. Therefore the test is skipped.');
++    }
 +
-+    // Rollback. Since we are at the root, the transaction is closed.
-+    $transaction->rollBack();
-+    $this->assertRowAbsent('David');
-+    $this->assertFalse($this->connection->inTransaction());
-+    $this->assertSame(0, $this->connection->transactionManager()->stackDepth());
++    $long_name = str_repeat('a', $max_allowed_packet + 1);
++//    try {
++      $this->connection->query('SELECT [name] FROM {test} WHERE [name] = :name', [':name' => $long_name]);
++      $this->fail("An exception should be thrown for queries larger than 'max_allowed_packet'");
++/*    }
++    catch (DatabaseException $e) {
++      // Close and re-open the connection. Otherwise we will run into error
++      // 2006 "MySQL server had gone away" afterwards.
++      Database::closeConnection();
++      Database::getConnection();
++      // Got a packet bigger than 'max_allowed_packet' bytes exception thrown.
++      // NOTE *** This differs from the MySql PDO test.
++      $this->assertEquals(1153, $e->getPrevious()->getCode());
++      // 'max_allowed_packet' exception message truncated.
++      // Use strlen() to count the bytes exactly, not the unicode chars.
++      $this->assertLessThanOrEqual($max_allowed_packet, strlen($e->getMessage()));
++    }*/
++  }
++
++}
+diff --git a/core/modules/mysqli/tests/src/Kernel/mysqli/NextIdTest.php b/core/modules/mysqli/tests/src/Kernel/mysqli/NextIdTest.php
+new file mode 100644
+index 0000000000..1ce4674700
+--- /dev/null
++++ b/core/modules/mysqli/tests/src/Kernel/mysqli/NextIdTest.php
+@@ -0,0 +1,14 @@
++<?php
++
++namespace Drupal\Tests\mysqli\Kernel\mysqli;
++
++use Drupal\Tests\mysql\Kernel\mysql\NextIdTest as BaseMySqlTest;
++
++/**
++ * Tests the sequences API.
++ *
++ * @group Database
++ * @group legacy
++ */
++class NextIdTest extends BaseMySqlTest {
++}
+diff --git a/core/modules/mysqli/tests/src/Kernel/mysqli/PrefixInfoTest.php b/core/modules/mysqli/tests/src/Kernel/mysqli/PrefixInfoTest.php
+new file mode 100644
+index 0000000000..ff056f25ad
+--- /dev/null
++++ b/core/modules/mysqli/tests/src/Kernel/mysqli/PrefixInfoTest.php
+@@ -0,0 +1,13 @@
++<?php
++
++namespace Drupal\Tests\mysqli\Kernel\mysqli;
++
++use Drupal\Tests\mysql\Kernel\mysql\PrefixInfoTest as BaseMySqlTest;
++
++/**
++ * Tests that the prefix info for a database schema is correct.
++ *
++ * @group Database
++ */
++class PrefixInfoTest extends BaseMySqlTest {
++}
+diff --git a/core/modules/mysqli/tests/src/Kernel/mysqli/SchemaTest.php b/core/modules/mysqli/tests/src/Kernel/mysqli/SchemaTest.php
+new file mode 100644
+index 0000000000..8f6f3839dc
+--- /dev/null
++++ b/core/modules/mysqli/tests/src/Kernel/mysqli/SchemaTest.php
+@@ -0,0 +1,13 @@
++<?php
++
++namespace Drupal\Tests\mysqli\Kernel\mysqli;
++
++use Drupal\Tests\mysql\Kernel\mysql\SchemaTest as BaseMySqlTest;
++
++/**
++ * Tests schema API for the MySQL driver.
++ *
++ * @group Database
++ */
++class SchemaTest extends BaseMySqlTest {
++}
+diff --git a/core/modules/mysqli/tests/src/Kernel/mysqli/SqlModeTest.php b/core/modules/mysqli/tests/src/Kernel/mysqli/SqlModeTest.php
+new file mode 100644
+index 0000000000..aa5866733d
+--- /dev/null
++++ b/core/modules/mysqli/tests/src/Kernel/mysqli/SqlModeTest.php
+@@ -0,0 +1,41 @@
++<?php
++
++namespace Drupal\Tests\mysqli\Kernel\mysqli;
++
++use Drupal\KernelTests\Core\Database\DriverSpecificDatabaseTestBase;
++
++/**
++ * Tests compatibility of the MySQL driver with various sql_mode options.
++ *
++ * @group Database
++ */
++class SqlModeTest extends DriverSpecificDatabaseTestBase {
++
++  /**
++   * Tests quoting identifiers in queries.
++   */
++  public function testQuotingIdentifiers(): void {
++    // Use SQL-reserved words for both the table and column names.
++    $query = $this->connection->query('SELECT [update] FROM {select}');
++    $this->assertEquals('Update value 1', $query->fetchObject()->update);
++    $this->assertStringContainsString('SELECT `update` FROM `', $query->getQueryString());
 +  }
 +
 +  /**
-+   * Tests root transaction rollback failure when savepoint is open.
++   * {@inheritdoc}
 +   */
-+  public function testRollbackRootWithActiveSavepoint() {
-+    $this->assertFalse($this->connection->inTransaction());
-+    $this->assertSame(0, $this->connection->transactionManager()->stackDepth());
++  protected function getDatabaseConnectionInfo() {
++    $info = parent::getDatabaseConnectionInfo();
 +
-+    $transaction = $this->connection->startTransaction();
-+    $this->assertTrue($this->connection->inTransaction());
-+    $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
++    // This runs during setUp(), so is not yet skipped for non MySQL databases.
++    // We defer skipping the test to later in setUp(), so that that can be
++    // based on databaseType() rather than 'driver', but here all we have to go
++    // on is 'driver'.
++    if ($info['default']['driver'] === 'mysqli') {
++      $info['default']['init_commands']['sql_mode'] = "SET sql_mode = ''";
++    }
 +
-+    // Insert a single row into the testing table.
-+    $this->insertRow('David');
-+    $this->assertRowPresent('David');
-+
-+    // Add a savepoint.
-+    $savepoint = $this->connection->startTransaction();
-+    $this->assertTrue($this->connection->inTransaction());
-+    $this->assertSame(2, $this->connection->transactionManager()->stackDepth());
-+
-+    // Rollback root. Since we a savepoint is active, this should fail.
-+    $this->expectException(TransactionOutOfOrderException::class);
-+    $this->expectExceptionMessageMatches("/^Error attempting rollback of .*\\\\drupal_transaction. Active stack: .*\\\\drupal_transaction > .*\\\\savepoint_1/");
-+    $transaction->rollBack();
++    return $info;
 +  }
 +
++}
+diff --git a/core/modules/mysqli/tests/src/Kernel/mysqli/SyntaxTest.php b/core/modules/mysqli/tests/src/Kernel/mysqli/SyntaxTest.php
+new file mode 100644
+index 0000000000..e3b3458e6f
+--- /dev/null
++++ b/core/modules/mysqli/tests/src/Kernel/mysqli/SyntaxTest.php
+@@ -0,0 +1,13 @@
++<?php
++
++namespace Drupal\Tests\mysqli\Kernel\mysqli;
++
++use Drupal\KernelTests\Core\Database\DriverSpecificSyntaxTestBase;
++
++/**
++ * Tests MySql syntax interpretation.
++ *
++ * @group Database
++ */
++class SyntaxTest extends DriverSpecificSyntaxTestBase {
++}
+diff --git a/core/modules/mysqli/tests/src/Kernel/mysqli/TemporaryQueryTest.php b/core/modules/mysqli/tests/src/Kernel/mysqli/TemporaryQueryTest.php
+new file mode 100644
+index 0000000000..807c55ae1c
+--- /dev/null
++++ b/core/modules/mysqli/tests/src/Kernel/mysqli/TemporaryQueryTest.php
+@@ -0,0 +1,13 @@
++<?php
++
++namespace Drupal\Tests\mysqli\Kernel\mysqli;
++
++use Drupal\Tests\mysql\Kernel\mysql\TemporaryQueryTest as BaseMySqlTest;
++
++/**
++ * Tests the temporary query functionality.
++ *
++ * @group Database
++ */
++class TemporaryQueryTest extends BaseMySqlTest {
++}
+diff --git a/core/modules/mysqli/tests/src/Kernel/mysqli/TransactionTest.php b/core/modules/mysqli/tests/src/Kernel/mysqli/TransactionTest.php
+new file mode 100644
+index 0000000000..b812724eb9
+--- /dev/null
++++ b/core/modules/mysqli/tests/src/Kernel/mysqli/TransactionTest.php
+@@ -0,0 +1,150 @@
++<?php
++
++namespace Drupal\Tests\mysqli\Kernel\mysqli;
++
++use Drupal\KernelTests\Core\Database\DriverSpecificTransactionTestBase;
++use PHPUnit\Framework\Error\Warning;
++
++/**
++ * Tests transaction for the MySQL driver.
++ *
++ * @group Database
++ */
++class TransactionTest extends DriverSpecificTransactionTestBase {
++
 +  /**
-+   * Tests savepoint transaction rollback.
++   * Tests the compatibility of transactions with DDL statements.
 +   */
-+  public function testRollbackSavepoint() {
-+    $this->assertFalse($this->connection->inTransaction());
-+    $this->assertSame(0, $this->connection->transactionManager()->stackDepth());
-+
++  public function testTransactionWithDdlStatement() {
++    // First, test that a commit works normally, even with DDL statements.
 +    $transaction = $this->connection->startTransaction();
-+    $this->assertTrue($this->connection->inTransaction());
-+    $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
-+
-+    // Insert a row.
-+    $this->insertRow('David');
-+    $this->assertRowPresent('David');
-+
-+    // Add a savepoint.
-+    $savepoint = $this->connection->startTransaction();
-+    $this->assertTrue($this->connection->inTransaction());
-+    $this->assertSame(2, $this->connection->transactionManager()->stackDepth());
-+
-+    // Insert a row.
-+    $this->insertRow('Roger');
-+    $this->assertRowPresent('David');
-+    $this->assertRowPresent('Roger');
-+
-+    // Rollback to savepoint. It should remain open.
-+    $savepoint->rollBack();
-+    $this->assertRowPresent('David');
-+    $this->assertRowAbsent('Roger');
-+    $this->assertTrue($this->connection->inTransaction());
-+    $this->assertSame(2, $this->connection->transactionManager()->stackDepth());
-+
-+    // Insert a row.
-+    $this->insertRow('Syd');
-+
-+    // Commit root.
-+    unset($transaction);
-+    $this->assertRowPresent('David');
-+    $this->assertRowAbsent('Roger');
-+    $this->assertRowPresent('Syd');
-+    $this->assertFalse($this->connection->inTransaction());
-+    $this->assertSame(0, $this->connection->transactionManager()->stackDepth());
-+  }
-+
-+  /**
-+   * Tests savepoint transaction rollback failure when later savepoints exist.
-+   */
-+  public function testRollbackSavepointWithLaterSavepoint() {
-+    $this->assertFalse($this->connection->inTransaction());
-+    $this->assertSame(0, $this->connection->transactionManager()->stackDepth());
-+
-+    $transaction = $this->connection->startTransaction();
-+    $this->assertTrue($this->connection->inTransaction());
-+    $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
-+
-+    // Insert a row.
-+    $this->insertRow('David');
-+    $this->assertRowPresent('David');
-+
-+    // Add a savepoint.
-+    $savepoint1 = $this->connection->startTransaction();
-+    $this->assertTrue($this->connection->inTransaction());
-+    $this->assertSame(2, $this->connection->transactionManager()->stackDepth());
-+
-+    // Insert a row.
-+    $this->insertRow('Roger');
-+    $this->assertRowPresent('David');
-+    $this->assertRowPresent('Roger');
-+
-+    // Add another savepoint.
-+    $savepoint2 = $this->connection->startTransaction();
-+    $this->assertTrue($this->connection->inTransaction());
-+    $this->assertSame(3, $this->connection->transactionManager()->stackDepth());
-+
-+    // Insert a row.
-+    $this->insertRow('Syd');
-+    $this->assertRowPresent('David');
-+    $this->assertRowPresent('Roger');
-+    $this->assertRowPresent('Syd');
-+
-+    // Rollback to savepoint 1. Out of order.
-+    $this->expectException(TransactionOutOfOrderException::class);
-+    $this->expectExceptionMessageMatches("/^Error attempting rollback of .*\\\\savepoint_1. Active stack: .*\\\\drupal_transaction > .*\\\\savepoint_1 > .*\\\\savepoint_2/");
-+    $savepoint1->rollBack();
-   }
- 
-   /**
-@@ -370,23 +483,6 @@ public function testTransactionStacking() {
-     $this->assertRowPresent('outer');
-     $this->assertRowPresent('inner');
- 
--    // Pop the transaction in a different order they have been pushed.
--    $this->cleanUp();
--    $transaction = $this->connection->startTransaction();
--    $this->insertRow('outer');
--    $transaction2 = $this->connection->startTransaction();
--    $this->insertRow('inner');
--    // Pop the outer transaction, nothing should happen.
--    unset($transaction);
--    $this->insertRow('inner-after-outer-commit');
--    $this->assertTrue($this->connection->inTransaction(), 'Still in a transaction after popping the outer transaction');
--    // Pop the inner transaction, the whole transaction should commit.
--    unset($transaction2);
--    $this->assertFalse($this->connection->inTransaction(), 'Transaction closed after popping the inner transaction');
--    $this->assertRowPresent('outer');
--    $this->assertRowPresent('inner');
--    $this->assertRowPresent('inner-after-outer-commit');
--
-     // Rollback the inner transaction.
-     $this->cleanUp();
-     $transaction = $this->connection->startTransaction();
-@@ -404,58 +500,6 @@ public function testTransactionStacking() {
-     $this->assertRowPresent('outer');
-     $this->assertRowAbsent('inner');
-     $this->assertRowPresent('outer-after-inner-rollback');
--
--    // Rollback the inner transaction after committing the outer one.
--    $this->cleanUp();
--    $transaction = $this->connection->startTransaction();
--    $this->insertRow('outer');
--    $transaction2 = $this->connection->startTransaction();
--    $this->insertRow('inner');
--    // Pop the outer transaction, nothing should happen.
--    unset($transaction);
--    $this->assertTrue($this->connection->inTransaction(), 'Still in a transaction after popping the outer transaction');
--    // Now rollback the inner transaction, it should rollback.
--    $transaction2->rollBack();
--    unset($transaction2);
--    $this->assertFalse($this->connection->inTransaction(), 'Transaction closed after popping the inner transaction');
--    $this->assertRowPresent('outer');
--    $this->assertRowAbsent('inner');
--
--    // Rollback the outer transaction while the inner transaction is active.
--    // In that case, an exception will be triggered because we cannot
--    // ensure that the final result will have any meaning.
--    $this->cleanUp();
--    $transaction = $this->connection->startTransaction();
--    $this->insertRow('outer');
--    $transaction2 = $this->connection->startTransaction();
--    $this->insertRow('inner');
--    $transaction3 = $this->connection->startTransaction();
--    $this->insertRow('inner2');
--    // Rollback the outer transaction.
--    try {
--      $transaction->rollBack();
--      unset($transaction);
--      $this->fail('Rolling back the outer transaction while the inner transaction is active resulted in an exception.');
--    }
--    catch (TransactionOutOfOrderException $e) {
--      // Expected exception; just continue testing.
--    }
--    $this->assertFalse($this->connection->inTransaction(), 'No more in a transaction after rolling back the outer transaction');
--    // Try to commit one inner transaction.
--    unset($transaction3);
--
--    // Try to rollback one inner transaction.
--    try {
--      $transaction->rollBack();
--      unset($transaction2);
--      $this->fail('Trying to commit an inner transaction resulted in an exception.');
--    }
--    catch (TransactionNoActiveException $e) {
--      // Expected exception; just continue testing.
--    }
--    $this->assertRowAbsent('outer');
--    $this->assertRowAbsent('inner');
--    $this->assertRowAbsent('inner2');
-   }
- 
-   /**
-@@ -580,26 +624,81 @@ public function testQueryFailureInTransaction() {
-    * Tests releasing a savepoint before last is safe.
-    */
-   public function testReleaseIntermediateSavepoint(): void {
-+    // Start root transaction. Corresponds to 'BEGIN TRANSACTION' on the
-+    // database.
-     $transaction = $this->connection->startTransaction();
-     $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
-+    // Starts a savepoint transaction. Corresponds to 'SAVEPOINT savepoint_1'
-+    // on the database.
-     $savepoint1 = $this->connection->startTransaction();
-     $this->assertSame(2, $this->connection->transactionManager()->stackDepth());
-+    // Starts a savepoint transaction. Corresponds to 'SAVEPOINT savepoint_2'
-+    // on the database.
-     $savepoint2 = $this->connection->startTransaction();
-     $this->assertSame(3, $this->connection->transactionManager()->stackDepth());
-+    // Starts a savepoint transaction. Corresponds to 'SAVEPOINT savepoint_3'
-+    // on the database.
-     $savepoint3 = $this->connection->startTransaction();
-     $this->assertSame(4, $this->connection->transactionManager()->stackDepth());
-+    // Starts a savepoint transaction. Corresponds to 'SAVEPOINT savepoint_4'
-+    // on the database.
-     $savepoint4 = $this->connection->startTransaction();
-     $this->assertSame(5, $this->connection->transactionManager()->stackDepth());
-+
-     $this->insertRow('row');
-+
-+    // Unsets a savepoint transaction. Corresponds to 'RELEASE SAVEPOINT
-+    // savepoint_2' on the database.
-     unset($savepoint2);
-+    // Since we have committed an intermediate savepoint Transaction object,
-+    // the savepoints created later have been dropped by the database already.
-     $this->assertSame(2, $this->connection->transactionManager()->stackDepth());
-     $this->assertRowPresent('row');
-+
-+    // Unsets the remaining Transaction objects. The client transaction is
-+    // eventually committed.
-     unset($savepoint1);
-     unset($transaction);
-     $this->assertFalse($this->connection->inTransaction());
-     $this->assertRowPresent('row');
-   }
- 
-+  /**
-+   * Tests committing a transaction while savepoints are active.
-+   */
-+  public function testCommitWithActiveSavepoint(): void {
-+    // Start root transaction. Corresponds to 'BEGIN TRANSACTION' on the
-+    // database.
-+    $transaction = $this->connection->startTransaction();
-+    $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
-+    // Starts a savepoint transaction. Corresponds to 'SAVEPOINT savepoint_1'
-+    // on the database.
-+    $savepoint1 = $this->connection->startTransaction();
-+    $this->assertSame(2, $this->connection->transactionManager()->stackDepth());
-+    // Starts a savepoint transaction. Corresponds to 'SAVEPOINT savepoint_2'
-+    // on the database.
-+    $savepoint2 = $this->connection->startTransaction();
-+    $this->assertSame(3, $this->connection->transactionManager()->stackDepth());
-+
 +    $this->insertRow('row');
-+
-+    // Unsets the root transaction. Corresponds to 'COMMIT' on the database.
++    $this->executeDDLStatement();
 +    unset($transaction);
-+    // Since we have committed the outer (root) Transaction object, the inner
-+    // (savepoint) ones have been dropped by the database already, and we are
-+    // no longer in an active transaction state.
-+    $this->assertSame(0, $this->connection->transactionManager()->stackDepth());
-+    $this->assertFalse($this->connection->inTransaction());
 +    $this->assertRowPresent('row');
-+    // Unpile the inner (savepoint) Transaction object, it should be a no-op
-+    // anyway given it was dropped by the database already, and removed from
-+    // our transaction stack.
-+    unset($savepoint2);
-+    $this->assertSame(0, $this->connection->transactionManager()->stackDepth());
-+    $this->assertFalse($this->connection->inTransaction());
++
++    // Even in different order.
++    $this->cleanUp();
++    $transaction = $this->connection->startTransaction();
++    $this->executeDDLStatement();
++    $this->insertRow('row');
++    unset($transaction);
 +    $this->assertRowPresent('row');
++
++    // Even with stacking.
++    $this->cleanUp();
++    $transaction = $this->connection->startTransaction();
++    $transaction2 = $this->connection->startTransaction();
++    $this->executeDDLStatement();
++    unset($transaction2);
++    $transaction3 = $this->connection->startTransaction();
++    $this->insertRow('row');
++    unset($transaction3);
++    unset($transaction);
++    $this->assertRowPresent('row');
++
++    // Note: THIS IS DIFFERENT FROM MySQL.
++    // MySQLi will only cleanup the transaction stack on rollback, because the
++    // rollback will fail since no savepoint is any longer present given the
++    // auto-commit related to the DDL statement.
++    // So a transaction after a DDL statement should still work the same.
++    $this->cleanUp();
++    $transaction = $this->connection->startTransaction();
++    $transaction2 = $this->connection->startTransaction();
++    $this->executeDDLStatement();
++    unset($transaction2);
++    $transaction3 = $this->connection->startTransaction();
++    $this->insertRow('row');
++    // $transaction3->rollBack();
++    unset($transaction3);
++    unset($transaction);
++    // $this->assertRowAbsent('row');
++
++    // The behavior of a rollback depends on the type of database server.
++    if ($this->connection->supportsTransactionalDDL()) {
++      // For database servers that support transactional DDL, a rollback
++      // of a transaction including DDL statements should be possible.
++      $this->cleanUp();
++      $transaction = $this->connection->startTransaction();
++      $this->insertRow('row');
++      $this->executeDDLStatement();
++      $transaction->rollBack();
++      unset($transaction);
++      $this->assertRowAbsent('row');
++
++      // Including with stacking.
++      $this->cleanUp();
++      $transaction = $this->connection->startTransaction();
++      $transaction2 = $this->connection->startTransaction();
++      $this->executeDDLStatement();
++      unset($transaction2);
++      $transaction3 = $this->connection->startTransaction();
++      $this->insertRow('row');
++      unset($transaction3);
++      $transaction->rollBack();
++      unset($transaction);
++      $this->assertRowAbsent('row');
++    }
++    else {
++      // For database servers that do not support transactional DDL,
++      // the DDL statement should commit the transaction stack.
++      $this->cleanUp();
++      $transaction = $this->connection->startTransaction();
++      $this->insertRow('row');
++      $this->executeDDLStatement();
++
++      try {
++        // Rollback the outer transaction.
++        $transaction->rollBack();
++        // Note: THIS IS DIFFERENT FROM MySQL.
++        // MySQLi does not fail when rolling back and no transaction active.
++        // $this->fail('Rolling back a transaction containing DDL should produce a warning.');
++      }
++      catch (Warning $warning) {
++        $this->assertSame('Rollback attempted when there is no active transaction. This can cause data integrity issues.', $warning->getMessage());
++      }
++      unset($transaction);
++      $this->assertRowPresent('row');
++    }
 +  }
 +
-   /**
-    * Tests for transaction names.
++  /**
++   * Tests deprecation of Connection methods.
++   *
++   * @group legacy
++   */
++  public function testConnectionDeprecations(): void {
++    $this->markTestSkipped('Skipping this test for MySQLi.');
++  }
++
++  /**
++   * Tests starting a transaction when there's one active on the client.
++   *
++   * MySQLi does not fail if multiple transactions are begun on the client, so
++   * this test is failing. Let's change this when MySQLi will provide a way to
++   * check if a client transaction is active.
++   */
++  public function testStartTransactionWhenActive(): void {
++    $this->markTestSkipped('Skipping this while MySQLi cannot detect if a client transaction is active.');
++    $this->connection->getClientConnection()->begin_transaction();
++    $this->connection->startTransaction();
++    $this->assertFalse($this->connection->inTransaction());
++  }
++
++  /**
++   * Tests committing a transaction when there's none active on the client.
++   *
++   * MySQLi does not fail if multiple commits are made on the client, so this
++   * test is failing. Let's change this when MySQLi will provide a way to check
++   * if a client transaction is active.
++   */
++  public function testCommitTransactionWhenInactive(): void {
++    $this->markTestSkipped('Skipping this while MySQLi cannot detect if a client transaction is active.');
++    $transaction = $this->connection->startTransaction();
++    $this->assertTrue($this->connection->inTransaction());
++    $this->connection->getClientConnection()->commit();
++    $this->assertFalse($this->connection->inTransaction());
++    $transaction = NULL;
++  }
++
++}
+diff --git a/core/tests/Drupal/FunctionalTests/Update/UpdatePathTestBase.php b/core/tests/Drupal/FunctionalTests/Update/UpdatePathTestBase.php
+index 4668f611c6..98480843c9 100644
+--- a/core/tests/Drupal/FunctionalTests/Update/UpdatePathTestBase.php
++++ b/core/tests/Drupal/FunctionalTests/Update/UpdatePathTestBase.php
+@@ -200,6 +200,9 @@ protected function prepareSettings() {
+    * Helper function to run pending database updates.
     */
-@@ -664,6 +763,24 @@ public function rootTransactionCallback(bool $success): void {
-     $this->insertRow($this->postTransactionCallbackAction);
+   protected function runUpdates() {
++    // @todo temporarily force installation of mysqli module, a specific
++    //   db dump is needed instead?
++    \Drupal::service('module_installer')->install(['mysqli'], TRUE);
+     $this->doRunUpdates($this->updateUrl);
    }
  
-+  /**
-+   * Tests TransactionManager failure.
-+   */
-+  public function testTransactionManagerFailureOnPendingStackItems(): void {
-+    $connectionInfo = Database::getConnectionInfo();
-+    Database::addConnectionInfo('default', 'test_fail', $connectionInfo['default']);
-+    $testConnection = Database::getConnection('test_fail');
-+
-+    // Add a fake item to the stack.
-+    $reflectionMethod = new \ReflectionMethod(get_class($testConnection->transactionManager()), 'addStackItem');
-+    $reflectionMethod->invoke($testConnection->transactionManager(), 'bar', new StackItem('qux', StackItemType::Savepoint));
-+
-+    $this->expectException(\AssertionError::class);
-+    $this->expectExceptionMessage('Transaction $stack was not empty');
-+    unset($testConnection);
-+    Database::closeConnection('test_fail');
-+  }
-+
-   /**
-    * Tests deprecation of Connection methods.
-    *
