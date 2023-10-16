@@ -1,287 +1,245 @@
-diff --git a/core/modules/mysqli/mysqli.info.yml b/core/modules/mysqli/mysqli.info.yml
-new file mode 100644
-index 0000000000..a4009243f7
---- /dev/null
-+++ b/core/modules/mysqli/mysqli.info.yml
-@@ -0,0 +1,8 @@
-+name: MySQLi
-+core_version_requirement: ^10.1 | ^11
-+type: module
-+description: 'Database driver for MySQLi.'
-+package: Core
-+version: VERSION
-+dependencies:
-+  - drupal:mysql
-diff --git a/core/modules/mysqli/mysqli.module b/core/modules/mysqli/mysqli.module
-new file mode 100644
-index 0000000000..e243b3fce5
---- /dev/null
-+++ b/core/modules/mysqli/mysqli.module
-@@ -0,0 +1,25 @@
-+<?php
-+
-+/**
-+ * @file
-+ * Database driver for MySQLi.
-+ *
-+ * The MySQLi module provides the connection between Drupal and a MySQL, MariaDB
-+ * or equivalent database using the mysqli PHP extension.
-+ */
-+
-+use Drupal\Core\Routing\RouteMatchInterface;
-+
-+/**
-+ * Implements hook_help().
-+ */
-+function mysqli_help($route_name, RouteMatchInterface $route_match) {
-+  switch ($route_name) {
-+    case 'help.page.mysqli':
-+      $output = '';
-+      $output .= '<h3>' . t('About') . '</h3>';
-+      $output .= '<p>' . t('The MySQLi module provides the connection between Drupal and a MySQL, MariaDB or equivalent database using the mysqli PHP extension. For more information, see the <a href=":mysqli">online documentation for the MySQLi module</a>.', [':mysqli' => 'https://www.drupal.org/documentation/modules/mysqli']) . '</p>';
-+      return $output;
-+
-+  }
-+}
-diff --git a/core/modules/mysqli/mysqli.services.yml b/core/modules/mysqli/mysqli.services.yml
-new file mode 100644
-index 0000000000..82a476ceb9
---- /dev/null
-+++ b/core/modules/mysqli/mysqli.services.yml
-@@ -0,0 +1,4 @@
-+services:
-+  mysqli.views.cast_sql:
-+    class: Drupal\mysqli\Plugin\views\query\MysqliCastSql
-+    public: false
-diff --git a/core/modules/mysqli/src/Driver/Database/mysqli/Connection.php b/core/modules/mysqli/src/Driver/Database/mysqli/Connection.php
-new file mode 100644
-index 0000000000..23b79b502d
---- /dev/null
-+++ b/core/modules/mysqli/src/Driver/Database/mysqli/Connection.php
-@@ -0,0 +1,192 @@
-+<?php
-+
-+namespace Drupal\mysqli\Driver\Database\mysqli;
-+
-+use Drupal\Core\Database\ConnectionNotDefinedException;
-+use Drupal\Core\Database\DatabaseAccessDeniedException;
-+use Drupal\Core\Database\DatabaseNotFoundException;
-+use Drupal\Core\Database\Transaction\TransactionManagerInterface;
-+use Drupal\mysql\Driver\Database\mysql\Connection as BaseMySqlConnection;
-+
-+/**
-+ * MySQLi implementation of \Drupal\Core\Database\Connection.
-+ */
-+class Connection extends BaseMySqlConnection {
-+
+diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
+index 97b528c25b..fa8fa6d47c 100644
+--- a/core/lib/Drupal/Core/Database/Connection.php
++++ b/core/lib/Drupal/Core/Database/Connection.php
+@@ -859,6 +859,59 @@ public function query($query, array $args = [], $options = []) {
+     }
+   }
+ 
 +  /**
-+   * {@inheritdoc}
++   * Executes a data definition language (DDL) statement.
++   *
++   * This method allows to void an active transaction when the driver does
++   * not support transactional DDL.
++   *
++   * @param string $sql
++   *   The DDL statement to execute. This is a SQL string that may contain
++   *   placeholders.
++   * @param array $arguments
++   *   (Optional) The associative array of arguments for the prepared
++   *   statement.
++   * @param array $options
++   *   (Optional) An associative array of options to control how the query is
++   *   run. The given options will be merged with self::defaultOptions().
 +   */
-+  protected $statementWrapperClass = Statement::class;
-+
-+  /**
-+   * Stores the server version after it has been retrieved from the database.
-+   */
-+  private string $serverVersion;
-+
-+  public function __construct(\mysqli $connection, array $connection_options) {
-+    // If the SQL mode doesn't include 'ANSI_QUOTES' (explicitly or via a
-+    // combination mode), then MySQL doesn't interpret a double quote as an
-+    // identifier quote, in which case use the non-ANSI-standard backtick.
-+    //
-+    // Because we still support MySQL 5.7, check for the deprecated combination
-+    // modes as well.
-+    //
-+    // @see https://dev.mysql.com/doc/refman/5.7/en/sql-mode.html#sqlmode_ansi_quotes
-+    $ansi_quotes_modes = ['ANSI_QUOTES', 'ANSI', 'DB2', 'MAXDB', 'MSSQL', 'ORACLE', 'POSTGRESQL'];
-+    $is_ansi_quotes_mode = FALSE;
-+    foreach ($ansi_quotes_modes as $mode) {
-+      // None of the modes in $ansi_quotes_modes are substrings of other modes
-+      // that are not in $ansi_quotes_modes, so a simple stripos() does not
-+      // return false positives.
-+      if (stripos($connection_options['init_commands']['sql_mode'], $mode) !== FALSE) {
-+        $is_ansi_quotes_mode = TRUE;
-+        break;
-+      }
-+    }
-+    if ($this->identifierQuotes === ['"', '"'] && !$is_ansi_quotes_mode) {
-+      $this->identifierQuotes = ['`', '`'];
-+    }
-+
-+    // Manage the table prefix.
-+    $connection_options['prefix'] = $connection_options['prefix'] ?? '';
-+    $this->setPrefix($connection_options['prefix']);
-+
-+    // Work out the database driver namespace if none is provided. This normally
-+    // written to setting.php by installer or set by
-+    // \Drupal\Core\Database\Database::parseConnectionInfo().
-+    if (empty($connection_options['namespace'])) {
-+      $connection_options['namespace'] = (new \ReflectionObject($this))->getNamespaceName();
-+    }
-+
-+    $this->connection = $connection;
-+    $this->connectionOptions = $connection_options;
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public static function open(array &$connection_options = []) {
-+    // Sets mysqli error reporting mode to report errors from mysqli function
-+    // calls and to throw mysqli_sql_exception for errors.
-+    // @see https://www.php.net/manual/en/mysqli-driver.report-mode.php
-+    mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
-+
-+    if (isset($connection_options['_dsn_utf8_fallback']) && $connection_options['_dsn_utf8_fallback'] === TRUE) {
-+      // Only used during the installer version check, as a fallback from utf8mb4.
-+      $charset = 'utf8';
++  public function executeDdlStatement(string $sql, array $arguments = [], array $options = []): void {
++    if (count($arguments) > 0) {
++      $this->query($sql, $arguments, $options);
 +    }
 +    else {
-+      $charset = 'utf8mb4';
++      $this->executeSql($sql, $options);
 +    }
 +
-+    // Allow PDO options to be overridden.
-+    $connection_options += [
-+      'pdo' => [],
-+    ];
++    // DDL statements when in a transaction force a commit in some databases.
++    // Void the transaction in that case.
++    if (!$this->transactionalDDLSupport && $this->transactionManager()->inTransaction()) {
++      $this->transactionManager()->voidClientTransaction();
++    }
++  }
 +
++  /**
++   * Executes an SQL statement, directly through the client connection.
++   *
++   * This method does not allow placeholders. It assumes the client connection
++   * is \PDO. Non-PDO based drivers need to override this method.
++   *
++   * @param string $sql
++   *   The SQL statement to execute.
++   * @param array $options
++   *   (Optional) An associative array of options. The given options will be
++   *    merged with self::defaultOptions().
++   */
++  protected function executeSql(string $sql, array $options = []): void {
++    $sql = $this->preprocessStatement($sql, $options);
 +    try {
-+      $mysqli = new \mysqli(
-+        $connection_options['host'],
-+        $connection_options['username'],
-+        $connection_options['password'],
-+        $connection_options['database'] ?? '',
-+        !empty($connection_options['port']) ? (int) $connection_options['port'] : 3306,
-+        $connection_options['unix_socket'] ?? ''
-+      );
-+      if (!$mysqli->set_charset($charset)) {
-+        throw new InvalidCharsetException('Invalid charset ' . $charset);
-+      }
++      $this->getClientConnection()->exec($sql);
 +    }
-+    catch (\mysqli_sql_exception $e) {
-+      if ($e->getCode() === static::DATABASE_NOT_FOUND) {
-+        throw new DatabaseNotFoundException($e->getMessage(), $e->getCode(), $e);
-+      }
-+      elseif ($e->getCode() === static::ACCESS_DENIED) {
-+        throw new DatabaseAccessDeniedException($e->getMessage(), $e->getCode(), $e);
-+      }
-+      else {
-+        throw new ConnectionNotDefinedException('Invalid database connection: ' . $e->getMessage(), $e->getCode(), $e);
-+      }
-+      throw $e;
++    catch (\Exception $e) {
++      $this->exceptionHandler()->handleExecuteSqlException($e, $sql, $options);
 +    }
++  }
 +
-+    // Force MySQL to use the UTF-8 character set. Also set the collation, if a
-+    // certain one has been set; otherwise, MySQL defaults to
-+    // 'utf8mb4_general_ci' (MySQL 5) or 'utf8mb4_0900_ai_ci' (MySQL 8) for
-+    // utf8mb4.
-+    if (!empty($connection_options['collation'])) {
-+      $mysqli->query('SET NAMES ' . $charset . ' COLLATE ' . $connection_options['collation']);
+   /**
+    * Expands out shorthand placeholders.
+    *
+diff --git a/core/lib/Drupal/Core/Database/ExceptionHandler.php b/core/lib/Drupal/Core/Database/ExceptionHandler.php
+index 5dfd41f41c..8acb2f0588 100644
+--- a/core/lib/Drupal/Core/Database/ExceptionHandler.php
++++ b/core/lib/Drupal/Core/Database/ExceptionHandler.php
+@@ -55,18 +55,52 @@ public function handleStatementException(\Exception $exception, string $sql, arr
+    */
+   public function handleExecutionException(\Exception $exception, StatementInterface $statement, array $arguments = [], array $options = []): void {
+     if ($exception instanceof \PDOException) {
+-      // Wrap the exception in another exception, because PHP does not allow
+-      // overriding Exception::getMessage(). Its message is the extra database
+-      // debug information.
+-      $message = $exception->getMessage() . ": " . $statement->getQueryString() . "; " . print_r($arguments, TRUE);
+-      // Match all SQLSTATE 23xxx errors.
+-      if (substr($exception->getCode(), -6, -3) == '23') {
+-        throw new IntegrityConstraintViolationException($message, $exception->getCode(), $exception);
+-      }
+-      throw new DatabaseExceptionWrapper($message, 0, $exception);
++      $this->throwExecutionException($exception, $exception->getMessage() . ": " . $statement->getQueryString() . "; " . print_r($arguments, TRUE));
+     }
++    throw $exception;
++  }
+ 
++  /**
++   * Handles exceptions thrown during direct execution of an SQL statement.
++   *
++   * @param \Exception $exception
++   *   The exception to be handled.
++   * @param string $sql
++   *   The SQL statement executed.
++   * @param array $options
++   *   An associative array of options to control how the database operation is
++   *   run.
++   *
++   * @throws \Drupal\Core\Database\DatabaseExceptionWrapper
++   * @throws \Drupal\Core\Database\IntegrityConstraintViolationException
++   */
++  public function handleExecuteSqlException(\Exception $exception, string $sql, array $options = []): void {
++    if ($exception instanceof \PDOException) {
++      $this->throwExecutionException($exception, $exception->getMessage() . ": " . $sql);
 +    }
+     throw $exception;
+   }
+ 
++  /**
++   * Re-throws the appropriate exception.
++   *
++   * @param \Exception $exception
++   *   The exception to be handled.
++   * @param string $message
++   *   The message to be included in the exception.
++   *
++   * @throws \Drupal\Core\Database\DatabaseExceptionWrapper
++   * @throws \Drupal\Core\Database\IntegrityConstraintViolationException
++   */
++  protected function throwExecutionException(\Exception $exception, string $message): void {
++    // Wrap the exception in another exception, because PHP does not allow
++    // overriding Exception::getMessage(). Its message is the extra database
++    // debug information.
++    // Match all SQLSTATE 23xxx errors.
++    if (substr($exception->getCode(), -6, -3) == '23') {
++      throw new IntegrityConstraintViolationException($message, $exception->getCode(), $exception);
++    }
++    throw new DatabaseExceptionWrapper($message, 0, $exception);
++  }
++
+ }
+diff --git a/core/lib/Drupal/Core/Database/Query/Truncate.php b/core/lib/Drupal/Core/Database/Query/Truncate.php
+index 01f0c9d47d..359769830f 100644
+--- a/core/lib/Drupal/Core/Database/Query/Truncate.php
++++ b/core/lib/Drupal/Core/Database/Query/Truncate.php
+@@ -48,13 +48,23 @@ public function __construct(Connection $connection, $table, array $options = [])
+    * @see https://learnsql.com/blog/difference-between-truncate-delete-and-drop-table-in-sql
+    */
+   public function execute() {
+-    $stmt = $this->connection->prepareStatement((string) $this, $this->queryOptions, TRUE);
+-    try {
+-      $stmt->execute([], $this->queryOptions);
+-      return $stmt->rowCount();
++    // In most cases, TRUNCATE is not a transaction safe statement as it is a
++    // DDL statement which results in an implicit COMMIT. When we are in a
++    // transaction, fallback to the slower, but transactional, DELETE.
++    // PostgreSQL also locks the entire table for a TRUNCATE strongly reducing
++    // the concurrency with other transactions.
++    if ($this->connection->inTransaction()) {
++      $stmt = $this->connection->prepareStatement((string) $this, $this->queryOptions, TRUE);
++      try {
++        $stmt->execute([], $this->queryOptions);
++        return $stmt->rowCount();
++      }
++      catch (\Exception $e) {
++        $this->connection->exceptionHandler()->handleExecutionException($e, $stmt, [], $this->queryOptions);
++      }
+     }
+-    catch (\Exception $e) {
+-      $this->connection->exceptionHandler()->handleExecutionException($e, $stmt, [], $this->queryOptions);
 +    else {
-+      $mysqli->query('SET NAMES ' . $charset);
-+    }
-+
-+    // Set MySQL init_commands if not already defined.  Default Drupal's MySQL
-+    // behavior to conform more closely to SQL standards.  This allows Drupal
-+    // to run almost seamlessly on many different kinds of database systems.
-+    // These settings force MySQL to behave the same as postgresql, or sqlite
-+    // in regards to syntax interpretation and invalid data handling.  See
-+    // https://www.drupal.org/node/344575 for further discussion. Also, as MySQL
-+    // 5.5 changed the meaning of TRADITIONAL we need to spell out the modes one
-+    // by one.
-+    $connection_options += [
-+      'init_commands' => [],
-+    ];
-+
-+    $connection_options['init_commands'] += [
-+      'sql_mode' => "SET sql_mode = 'ANSI,TRADITIONAL'",
-+      // @todo Perhaps 'collation_connection' => "SET collation_connection =
-+      //   'utf8mb4_0900_ai_ci'".
-+    ];
-+
-+    // Execute initial commands.
-+    foreach ($connection_options['init_commands'] as $sql) {
-+      $mysqli->query($sql);
-+    }
-+
-+    return $mysqli;
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function driver() {
-+    return 'mysqli';
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function clientVersion() {
-+    return \mysqli_get_client_info();
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function quote($string, $parameter_type = \PDO::PARAM_STR) {
-+    return "'" . $this->connection->escape_string($string) . "'";
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function lastInsertId(?string $name = NULL): string {
-+    return $this->connection->insert_id;
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function exceptionHandler() {
-+    return new ExceptionHandler();
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  protected function driverTransactionManager(): TransactionManagerInterface {
-+    return new TransactionManager($this);
-+  }
-+
-+}
-diff --git a/core/modules/mysqli/src/Driver/Database/mysqli/ExceptionHandler.php b/core/modules/mysqli/src/Driver/Database/mysqli/ExceptionHandler.php
-new file mode 100644
-index 0000000000..6f66796013
---- /dev/null
-+++ b/core/modules/mysqli/src/Driver/Database/mysqli/ExceptionHandler.php
-@@ -0,0 +1,59 @@
-+<?php
-+
-+namespace Drupal\mysqli\Driver\Database\mysqli;
-+
-+use Drupal\Component\Utility\Unicode;
-+use Drupal\Core\Database\DatabaseExceptionWrapper;
-+use Drupal\Core\Database\ExceptionHandler as BaseExceptionHandler;
-+use Drupal\Core\Database\Exception\SchemaTableColumnSizeTooLargeException;
-+use Drupal\Core\Database\Exception\SchemaTableKeyTooLargeException;
-+use Drupal\Core\Database\IntegrityConstraintViolationException;
-+use Drupal\Core\Database\StatementInterface;
-+
-+/**
-+ * MySQLi database exception handler class.
-+ */
-+class ExceptionHandler extends BaseExceptionHandler {
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function handleExecutionException(\Exception $exception, StatementInterface $statement, array $arguments = [], array $options = []): void {
-+    if (!($exception instanceof \mysqli_sql_exception)) {
-+      throw $exception;
-+    }
-+
++      $this->connection->executeDdlStatement((string) $this, [], $this->queryOptions);
+     }
+ 
+     return NULL;
+@@ -70,11 +80,6 @@ public function __toString() {
+     // Create a sanitized comment string to prepend to the query.
+     $comments = $this->connection->makeComment($this->comments);
+ 
+-    // In most cases, TRUNCATE is not a transaction safe statement as it is a
+-    // DDL statement which results in an implicit COMMIT. When we are in a
+-    // transaction, fallback to the slower, but transactional, DELETE.
+-    // PostgreSQL also locks the entire table for a TRUNCATE strongly reducing
+-    // the concurrency with other transactions.
+     if ($this->connection->inTransaction()) {
+       return $comments . 'DELETE FROM {' . $this->connection->escapeTable($this->table) . '}';
+     }
+diff --git a/core/lib/Drupal/Core/Database/Schema.php b/core/lib/Drupal/Core/Database/Schema.php
+index 9153cd9ef8..ac2cb24618 100644
+--- a/core/lib/Drupal/Core/Database/Schema.php
++++ b/core/lib/Drupal/Core/Database/Schema.php
+@@ -614,7 +614,7 @@ public function createTable($name, $table) {
+     }
+     $statements = $this->createTableSql($name, $table);
+     foreach ($statements as $statement) {
+-      $this->connection->query($statement);
++      $this->connection->executeDdlStatement($statement);
+     }
+   }
+ 
+diff --git a/core/modules/mysql/src/Driver/Database/mysql/ExceptionHandler.php b/core/modules/mysql/src/Driver/Database/mysql/ExceptionHandler.php
+index 7926175e0d..d06a35ce16 100644
+--- a/core/modules/mysql/src/Driver/Database/mysql/ExceptionHandler.php
++++ b/core/modules/mysql/src/Driver/Database/mysql/ExceptionHandler.php
+@@ -8,7 +8,6 @@
+ use Drupal\Core\Database\Exception\SchemaTableColumnSizeTooLargeException;
+ use Drupal\Core\Database\Exception\SchemaTableKeyTooLargeException;
+ use Drupal\Core\Database\IntegrityConstraintViolationException;
+-use Drupal\Core\Database\StatementInterface;
+ 
+ /**
+  * MySql database exception handler class.
+@@ -18,45 +17,39 @@ class ExceptionHandler extends BaseExceptionHandler {
+   /**
+    * {@inheritdoc}
+    */
+-  public function handleExecutionException(\Exception $exception, StatementInterface $statement, array $arguments = [], array $options = []): void {
+-    if ($exception instanceof \PDOException) {
+-      // Wrap the exception in another exception, because PHP does not allow
+-      // overriding Exception::getMessage(). Its message is the extra database
+-      // debug information.
+-      $code = is_int($exception->getCode()) ? $exception->getCode() : 0;
+-
+-      // If a max_allowed_packet error occurs the message length is truncated.
+-      // This should prevent the error from recurring if the exception is logged
+-      // to the database using dblog or the like.
+-      if (($exception->errorInfo[1] ?? NULL) === 1153) {
+-        $message = Unicode::truncateBytes($exception->getMessage(), Connection::MIN_MAX_ALLOWED_PACKET);
+-        throw new DatabaseExceptionWrapper($message, $code, $exception);
+-      }
+-
+-      $message = $exception->getMessage() . ": " . $statement->getQueryString() . "; " . print_r($arguments, TRUE);
+-
+-      // SQLSTATE 23xxx errors indicate an integrity constraint violation. Also,
+-      // in case of attempted INSERT of a record with an undefined column and no
+-      // default value indicated in schema, MySql returns a 1364 error code.
+-      if (
+-        substr($exception->getCode(), -6, -3) == '23' ||
+-        ($exception->errorInfo[1] ?? NULL) === 1364
+-      ) {
+-        throw new IntegrityConstraintViolationException($message, $code, $exception);
+-      }
+-
+-      if ($exception->getCode() === '42000') {
+-        match ($exception->errorInfo[1]) {
+-          1071 => throw new SchemaTableKeyTooLargeException($message, $code, $exception),
+-          1074 => throw new SchemaTableColumnSizeTooLargeException($message, $code, $exception),
+-          default => throw new DatabaseExceptionWrapper($message, 0, $exception),
+-        };
+-      }
+-
+-      throw new DatabaseExceptionWrapper($message, 0, $exception);
++  protected function throwExecutionException(\Exception $exception, string $message): void {
 +    // Wrap the exception in another exception, because PHP does not allow
 +    // overriding Exception::getMessage(). Its message is the extra database
 +    // debug information.
@@ -290,22 +248,24 @@ index 0000000000..6f66796013
 +    // If a max_allowed_packet error occurs the message length is truncated.
 +    // This should prevent the error from recurring if the exception is logged
 +    // to the database using dblog or the like.
-+    if ($code === 1153) {
++    if (($exception->errorInfo[1] ?? NULL) === 1153) {
 +      $message = Unicode::truncateBytes($exception->getMessage(), Connection::MIN_MAX_ALLOWED_PACKET);
 +      throw new DatabaseExceptionWrapper($message, $code, $exception);
-+    }
-+
-+    $message = $exception->getMessage() . ": " . $statement->getQueryString() . "; " . print_r($arguments, TRUE);
-+
+     }
+ 
+-    throw $exception;
 +    // SQLSTATE 23xxx errors indicate an integrity constraint violation. Also,
 +    // in case of attempted INSERT of a record with an undefined column and no
 +    // default value indicated in schema, MySql returns a 1364 error code.
-+    if (substr($exception->getSqlState(), -6, -3) == '23' || $code === 1364) {
++    if (
++      substr($exception->getCode(), -6, -3) == '23' ||
++      ($exception->errorInfo[1] ?? NULL) === 1364
++    ) {
 +      throw new IntegrityConstraintViolationException($message, $code, $exception);
 +    }
 +
-+    if ($exception->getSqlState() === '42000') {
-+      match ($code) {
++    if ($exception->getCode() === '42000') {
++      match ($exception->errorInfo[1]) {
 +        1071 => throw new SchemaTableKeyTooLargeException($message, $code, $exception),
 +        1074 => throw new SchemaTableColumnSizeTooLargeException($message, $code, $exception),
 +        default => throw new DatabaseExceptionWrapper($message, 0, $exception),
@@ -313,1566 +273,465 @@ index 0000000000..6f66796013
 +    }
 +
 +    throw new DatabaseExceptionWrapper($message, 0, $exception);
-+  }
-+
-+}
-diff --git a/core/modules/mysqli/src/Driver/Database/mysqli/Install/Tasks.php b/core/modules/mysqli/src/Driver/Database/mysqli/Install/Tasks.php
-new file mode 100644
-index 0000000000..ca80ca817e
---- /dev/null
-+++ b/core/modules/mysqli/src/Driver/Database/mysqli/Install/Tasks.php
-@@ -0,0 +1,26 @@
-+<?php
-+
-+namespace Drupal\mysqli\Driver\Database\mysqli\Install;
-+
-+use Drupal\mysql\Driver\Database\mysql\Install\Tasks as BaseInstallTasks;
-+
-+/**
-+ * Specifies installation tasks for MySQLi.
-+ */
-+class Tasks extends BaseInstallTasks {
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function installable() {
-+    return extension_loaded('mysqli');
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function name() {
-+    return $this->t('@parent via mysqli', ['@parent' => parent::name()]);
-+  }
-+
-+}
-diff --git a/core/modules/mysqli/src/Driver/Database/mysqli/InvalidCharsetException.php b/core/modules/mysqli/src/Driver/Database/mysqli/InvalidCharsetException.php
-new file mode 100644
-index 0000000000..3a7e36e7b2
---- /dev/null
-+++ b/core/modules/mysqli/src/Driver/Database/mysqli/InvalidCharsetException.php
-@@ -0,0 +1,11 @@
-+<?php
-+
-+namespace Drupal\mysqli\Driver\Database\mysqli;
-+
-+use Drupal\Core\Database\DatabaseExceptionWrapper;
-+
-+/**
-+ * This exception class signals an invalid charset is being used.
-+ */
-+class InvalidCharsetException extends DatabaseExceptionWrapper {
-+}
-diff --git a/core/modules/mysqli/src/Driver/Database/mysqli/NamedPlaceholderConverter.php b/core/modules/mysqli/src/Driver/Database/mysqli/NamedPlaceholderConverter.php
-new file mode 100644
-index 0000000000..a2e51e87d6
---- /dev/null
-+++ b/core/modules/mysqli/src/Driver/Database/mysqli/NamedPlaceholderConverter.php
-@@ -0,0 +1,224 @@
-+<?php
-+
-+namespace Drupal\mysqli\Driver\Database\mysqli;
-+
-+// cspell:ignore DBAL MULTICHAR
-+
-+/**
-+ * A class to convert a SQL statement with named placeholders to positional.
-+ *
-+ * The parsing logic and the implementation is inspired by the PHP PDO parser,
-+ * and a simplified copy of the parser implementation done by the Doctrine DBAL
-+ * project.
-+ *
-+ * @internal
-+ *
-+ * @see https://github.com/doctrine/dbal/blob/3.6.x/src/SQL/Parser.php
-+ */
-+final class NamedPlaceholderConverter {
-+  /**
-+   * A list of regex patterns for parsing.
-+   */
-+  private const SPECIAL_CHARS = ':\?\'"`\\[\\-\\/';
-+  private const BACKTICK_IDENTIFIER = '`[^`]*`';
-+  private const BRACKET_IDENTIFIER = '(?<!\b(?i:ARRAY))\[(?:[^\]])*\]';
-+  private const MULTICHAR = ':{2,}';
-+  private const NAMED_PARAMETER = ':[a-zA-Z0-9_]+';
-+  private const POSITIONAL_PARAMETER = '(?<!\\?)\\?(?!\\?)';
-+  private const ONE_LINE_COMMENT = '--[^\r\n]*';
-+  private const MULTI_LINE_COMMENT = '/\*([^*]+|\*+[^/*])*\**\*/';
-+  private const SPECIAL = '[' . self::SPECIAL_CHARS . ']';
-+  private const OTHER = '[^' . self::SPECIAL_CHARS . ']+';
-+
-+  /**
-+   * The combined regex pattern for parsing.
-+   */
-+  private string $sqlPattern;
-+
-+  /**
-+   * The list of original named arguments.
-+   *
-+   * The initial placeholder colon is removed.
-+   */
-+  private array $originalParameters = [];
-+
-+  /**
-+   * The maximum positional placeholder parsed.
-+   *
-+   * Normally Drupal does not produce SQL with positional placeholders, but
-+   * this is to manage the edge case.
-+   */
-+  private int $originalParameterIndex = 0;
-+
-+  /**
-+   * The converted SQL statement in its parts.
-+   *
-+   * @var string[]
-+   */
-+  private array $convertedSQL = [];
-+
-+  /**
-+   * The list of converted arguments.
-+   *
-+   * @var mixed[]
-+   */
-+  private array $convertedParameters = [];
-+
-+  public function __construct() {
-+    // Builds the combined regex pattern for parsing.
-+    $this->sqlPattern = sprintf('(%s)', implode('|', [
-+      $this->getAnsiSQLStringLiteralPattern("'"),
-+      $this->getAnsiSQLStringLiteralPattern('"'),
-+      self::BACKTICK_IDENTIFIER,
-+      self::BRACKET_IDENTIFIER,
-+      self::MULTICHAR,
-+      self::ONE_LINE_COMMENT,
-+      self::MULTI_LINE_COMMENT,
-+      self::OTHER,
-+    ]));
-+  }
-+
-+  /**
-+   * Parses an SQL statement with named placeholders.
-+   *
-+   * This methods explodes the SQL statement in parts that can be reassembled
-+   * into a string with positional placeholders.
-+   *
-+   * @param string $sql
-+   *   The SQL statement with named placeholders.
-+   * @param mixed[] $args
-+   *   The statement arguments.
-+   */
-+  public function parse(string $sql, array $args): void {
-+    foreach ($args as $key => $value) {
-+      if (is_int($key)) {
-+        // Positional placeholder; edge case.
-+        $this->originalParameters[$key] = $value;
-+      }
-+      else {
-+        // Named placeholder like ':placeholder'; remove the initial colon.
-+        $this->originalParameters[substr($key, 1)] = $value;
-+      }
-+    }
-+    $this->originalParameterIndex = 0;
-+    $this->convertedSQL = [];
-+    $this->convertedParameters = [];
-+
-+    /** @var array<string,callable> $patterns */
-+    $patterns = [
-+      self::NAMED_PARAMETER => function (string $sql): void {
-+        $this->addNamedParameter($sql);
-+      },
-+      self::POSITIONAL_PARAMETER => function (string $sql): void {
-+        $this->addPositionalParameter($sql);
-+      },
-+      $this->sqlPattern => function (string $sql): void {
-+        $this->addOther($sql);
-+      },
-+      self::SPECIAL => function (string $sql): void {
-+        $this->addOther($sql);
-+      },
-+    ];
-+
-+    $offset = 0;
-+
-+    while (($handler = current($patterns)) !== FALSE) {
-+      if (preg_match('~\G' . key($patterns) . '~s', $sql, $matches, 0, $offset) === 1) {
-+        $handler($matches[0]);
-+        reset($patterns);
-+        $offset += strlen($matches[0]);
-+      }
-+      elseif (preg_last_error() !== PREG_NO_ERROR) {
-+        throw new \RuntimeException('Regular expression error');
-+      }
-+      else {
-+        next($patterns);
-+      }
-+    }
-+
-+    assert($offset === strlen($sql));
-+  }
-+
-+  /**
-+   * Helper to return a regex pattern from a delimiter character..
-+   *
-+   * @param string $delimiter
-+   *   A delimiter character.
-+   *
-+   * @return string
-+   *   The regex pattern.
-+   */
-+  private function getAnsiSQLStringLiteralPattern(string $delimiter): string {
-+    return $delimiter . '[^' . $delimiter . ']*' . $delimiter;
-+  }
-+
-+  /**
-+   * Adds a positional placeholder to the converted parts.
-+   *
-+   * Normally Drupal does not produce SQL with positional placeholders, but
-+   * this is to manage the edge case.
-+   *
-+   * @param string $sql
-+   *   The SQL part.
-+   */
-+  private function addPositionalParameter(string $sql): void {
-+    $index = $this->originalParameterIndex;
-+
-+    if (!array_key_exists($index, $this->originalParameters)) {
-+      throw new \RuntimeException('Missing Positional Parameter ' . $index);
-+    }
-+
-+    $this->convertedSQL[] = '?';
-+    $this->convertedParameters[] = $this->originalParameters[$index];
-+
-+    $this->originalParameterIndex++;
-+  }
-+
-+  /**
-+   * Adds a named placeholder to the converted parts.
-+   *
-+   * @param string $sql
-+   *   The SQL part.
-+   */
-+  private function addNamedParameter(string $sql): void {
-+    $name = substr($sql, 1);
-+
-+    if (!array_key_exists($name, $this->originalParameters)) {
-+      throw new \RuntimeException('Missing Named Parameter ' . $name);
-+    }
-+
-+    $this->convertedSQL[] = '?';
-+    $this->convertedParameters[] = $this->originalParameters[$name];
-+  }
-+
-+  /**
-+   * Adds a generic SQL string fragment to the converted parts.
-+   *
-+   * @param string $sql
-+   *   The SQL part.
-+   */
-+  private function addOther(string $sql): void {
-+    $this->convertedSQL[] = $sql;
-+  }
-+
-+  /**
-+   * Returns the converted SQL statement with positional placeholders.
-+   *
-+   * @return string
-+   *   The converted SQL statement with positional placeholders.
-+   */
-+  public function getConvertedSQL(): string {
-+    return implode('', $this->convertedSQL);
-+  }
-+
-+  /**
-+   * Returns the array of arguments for use with positional placeholders.
-+   *
-+   * @return mixed[]
-+   *   The array of arguments for use with positional placeholders.
-+   */
-+  public function getConvertedParameters(): array {
-+    return $this->convertedParameters;
-+  }
-+
-+}
-diff --git a/core/modules/mysqli/src/Driver/Database/mysqli/Statement.php b/core/modules/mysqli/src/Driver/Database/mysqli/Statement.php
-new file mode 100644
-index 0000000000..64491ecc58
---- /dev/null
-+++ b/core/modules/mysqli/src/Driver/Database/mysqli/Statement.php
-@@ -0,0 +1,357 @@
-+<?php
-+
-+namespace Drupal\mysqli\Driver\Database\mysqli;
-+
-+use Drupal\Core\Database\Connection;
-+use Drupal\Core\Database\DatabaseExceptionWrapper;
-+use Drupal\Core\Database\Event\StatementExecutionEndEvent;
-+use Drupal\Core\Database\Event\StatementExecutionStartEvent;
-+use Drupal\Core\Database\RowCountException;
-+use Drupal\Core\Database\StatementWrapperIterator;
-+
-+/**
-+ * MySQLi implementation of \Drupal\Core\Database\Query\StatementInterface.
-+ */
-+class Statement extends StatementWrapperIterator {
-+
-+  /**
-+   * Holds the index position of named parameters.
-+   *
-+   * The mysqli driver only allows positional placeholders '?', whereas in
-+   * Drupal the SQL is generated with named placeholders ':name'. In order to
-+   * execute the SQL, the string containing the named placeholders is converted
-+   * to using positional ones, and the position (index) of each named
-+   * placeholder in the string is stored here.
-+   */
-+  protected array $paramsPositions;
-+
-+  /**
-+   * The default fetch mode.
-+   *
-+   * See http://php.net/manual/pdo.constants.php for the definition of the
-+   * constants used.
-+   */
-+  protected int $defaultFetchStyle;
-+
-+  /**
-+   * Holds fetch options.
-+   *
-+   * @var string[]
-+   */
-+  protected array $fetchOptions = [
-+    'class' => 'stdClass',
-+    'constructor_args' => [],
-+    'object' => NULL,
-+    'column' => 0,
-+  ];
-+
-+  /**
-+   * The mysqli result object.
-+   *
-+   * Stores results of a data selection query.
-+   */
-+  protected ?\mysqli_result $mysqliResult;
-+
-+  /**
-+   * Constructs a Statement object.
-+   *
-+   * @param \Drupal\Core\Database\Connection $connection
-+   *   Drupal database connection object.
-+   * @param \mysqli $mysqliConnection
-+   *   Client database connection object, for example \PDO.
-+   * @param string $queryString
-+   *   The SQL query string.
-+   * @param array $driverOpts
-+   *   (optional) Array of query options.
-+   * @param bool $rowCountEnabled
-+   *   (optional) Enables counting the rows affected. Defaults to FALSE.
-+   */
-+  public function __construct(
-+    protected readonly Connection $connection,
-+    protected readonly \mysqli $mysqliConnection,
-+    protected string $queryString,
-+    protected array $driverOpts = [],
-+    protected readonly bool $rowCountEnabled = FALSE,
-+  ) {
-+    $this->setFetchMode(\PDO::FETCH_OBJ);
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function execute($args = [], $options = []) {
-+    // Prepare the lower-level statement if it's not been prepared already.
-+    if (!isset($this->clientStatement)) {
-+      // Replace named placeholders with positional ones if needed.
-+      $this->paramsPositions = array_flip(array_keys($args));
-+      $converter = new NamedPlaceholderConverter();
-+      $converter->parse($this->queryString, $args);
-+      [$this->queryString, $args] = [$converter->getConvertedSQL(), $converter->getConvertedParameters()];
-+      $this->clientStatement = $this->mysqliConnection->prepare($this->queryString);
-+    }
-+    else {
-+      // Transform the $args to positional.
-+      $tmp = [];
-+      foreach ($this->paramsPositions as $param => $pos) {
-+        $tmp[$pos] = $args[$param];
-+      }
-+      $args = $tmp;
-+    }
-+
-+    if (isset($options['fetch'])) {
-+      if (is_string($options['fetch'])) {
-+        $this->setFetchMode(\PDO::FETCH_CLASS, $options['fetch']);
-+      }
-+      else {
-+        $this->setFetchMode($options['fetch']);
-+      }
-+    }
-+
-+    if ($this->connection->isEventEnabled(StatementExecutionStartEvent::class)) {
-+      $startEvent = new StatementExecutionStartEvent(
-+        spl_object_id($this),
-+        $this->connection->getKey(),
-+        $this->connection->getTarget(),
-+        $this->getQueryString(),
-+        $args,
-+        $this->connection->findCallerFromDebugBacktrace()
-+      );
-+      $this->connection->dispatchEvent($startEvent);
-+    }
-+
-+    // In mysqli, the results of the statement execution are returned in a
-+    // different object than the statement itself.
-+    $return = $this->clientStatement->execute($args);
-+    $this->markResultsetIterable($return);
-+    $result = $this->clientStatement->get_result();
-+    $this->mysqliResult = $result !== FALSE ? $result : NULL;
-+
-+    if (isset($startEvent) && $this->connection->isEventEnabled(StatementExecutionEndEvent::class)) {
-+      $this->connection->dispatchEvent(new StatementExecutionEndEvent(
-+        $startEvent->statementObjectId,
-+        $startEvent->key,
-+        $startEvent->target,
-+        $startEvent->queryString,
-+        $startEvent->args,
-+        $startEvent->caller,
-+        $startEvent->time
-+      ));
-+    }
-+
-+    return $return;
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function getQueryString() {
-+    return $this->queryString;
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function fetch($mode = NULL, $cursor_orientation = NULL, $cursor_offset = NULL) {
-+    if (is_string($mode)) {
-+      $this->setFetchMode(\PDO::FETCH_CLASS, $mode);
-+      $mode = \PDO::FETCH_CLASS;
-+    }
-+    else {
-+      if (isset($mode) && !in_array($mode, $this->supportedFetchModes)) {
-+        @trigger_error('Fetch mode ' . ($this->fetchModeLiterals[$mode] ?? $mode) . ' is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Use supported modes only. See https://www.drupal.org/node/3377999', E_USER_DEPRECATED);
-+      }
-+      $mode = $mode ?: $this->defaultFetchStyle;
-+    }
-+
-+    $mysqli_row = $this->mysqliResult->fetch_assoc();
-+
-+    if (!$mysqli_row) {
-+      $this->markResultsetFetchingComplete();
-+      return FALSE;
-+    }
-+
-+    $columnNames = array_keys($mysqli_row);
-+
-+    // Stringify all non-NULL column values.
-+    $row = [];
-+    foreach ($mysqli_row as $column => $value) {
-+      $row[$column] = $value === NULL ? NULL : (string) $value;
-+    }
-+
-+    $returnValue = match($mode) {
-+      \PDO::FETCH_ASSOC => $row,
-+      // @phpstan-ignore-next-line
-+      \PDO::FETCH_BOTH => $this->assocToBoth($row),
-+      \PDO::FETCH_NUM => $this->assocToNum($row),
-+      \PDO::FETCH_LAZY, \PDO::FETCH_OBJ => $this->assocToObj($row),
-+      // @phpstan-ignore-next-line
-+      \PDO::FETCH_CLASS | \PDO::FETCH_CLASSTYPE => $this->assocToClassType($row, $this->fetchOptions['constructor_args']),
-+      \PDO::FETCH_CLASS => $this->assocToClass($row, $this->fetchOptions['class'], $this->fetchOptions['constructor_args']),
-+      // @phpstan-ignore-next-line
-+      \PDO::FETCH_INTO => $this->assocIntoObject($row, $this->fetchOptions['object']),
-+      \PDO::FETCH_COLUMN => $this->assocToColumn($row, $columnNames, $this->fetchOptions['column']),
-+      default => throw new DatabaseExceptionWrapper('Fetch mode ' . ($this->fetchModeLiterals[$mode] ?? $mode) . ' is not supported.'),
-+    };
-+
-+    $this->setResultsetCurrentRow($returnValue);
-+    return $returnValue;
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function fetchAll($mode = NULL, $column_index = NULL, $constructor_arguments = NULL) {
-+    if (isset($mode) && !in_array($mode, $this->supportedFetchModes)) {
-+      @trigger_error('Fetch mode ' . ($this->fetchModeLiterals[$mode] ?? $mode) . ' is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Use supported modes only. See https://www.drupal.org/node/3377999', E_USER_DEPRECATED);
-+    }
-+    if (is_string($mode)) {
-+      $this->setFetchMode(\PDO::FETCH_CLASS, $mode);
-+      $mode = \PDO::FETCH_CLASS;
-+    }
-+    else {
-+      $mode = $mode ?: $this->defaultFetchStyle;
-+    }
-+
-+    $rows = [];
-+    if (\PDO::FETCH_COLUMN == $mode) {
-+      // When fetching a column's value across the entire dataset, fetch
-+      // through it and pick the requested column value for each row.
-+      if ($column_index === NULL) {
-+        $column_index = 0;
-+      }
-+      while (($record = $this->fetch(\PDO::FETCH_ASSOC)) !== FALSE) {
-+        $cols = array_keys($record);
-+        $rows[] = $record[$cols[$column_index]];
-+      }
-+    }
-+    else {
-+      while (($row = $this->fetch($mode)) !== FALSE) {
-+        $rows[] = $row;
-+      }
-+    }
-+
-+    return $rows;
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function fetchAllAssoc($key, $fetch = NULL) {
-+    $return = [];
-+    if (isset($fetch)) {
-+      if (is_string($fetch)) {
-+        $this->setFetchMode(\PDO::FETCH_CLASS, $fetch);
-+      }
-+      else {
-+        $this->setFetchMode($fetch ?: $this->defaultFetchStyle);
-+      }
-+    }
-+
-+    while ($record = $this->fetch()) {
-+      $record_key = is_object($record) ? $record->$key : $record[$key];
-+      $return[$record_key] = $record;
-+    }
-+
-+    return $return;
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function fetchAllKeyed($key_index = 0, $value_index = 1) {
-+    $return = [];
-+    $this->setFetchMode(\PDO::FETCH_ASSOC);
-+    while ($record = $this->fetch(\PDO::FETCH_ASSOC)) {
-+      $cols = array_keys($record);
-+      $return[$record[$cols[$key_index]]] = $record[$cols[$value_index]];
-+    }
-+    return $return;
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function fetchField($index = 0) {
-+    if (($ret = $this->fetch(\PDO::FETCH_NUM)) === FALSE) {
-+      return FALSE;
-+    }
-+    return $ret[$index] === NULL ? NULL : (string) $ret[$index];
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function fetchObject(string $class_name = NULL, array $constructor_arguments = []) {
-+    if (isset($class_name)) {
-+      $this->defaultFetchStyle = \PDO::FETCH_CLASS;
-+      $this->fetchOptions = [
-+        'class' => $class_name,
-+        'constructor_args' => $constructor_arguments,
-+      ];
-+    }
-+    return $this->fetch($class_name ?? \PDO::FETCH_OBJ);
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function rowCount() {
-+    // SELECT query should not use this method.
-+    if ($this->rowCountEnabled) {
-+      // @todo The most accurate value to return for Drupal here is the first
-+      //   occurrence of an integer in the string stored by the connection's
-+      //   $info property.
-+      //   This is something like 'Rows matched: 1  Changed: 1  Warnings: 0' for
-+      //   UPDATE or DELETE operations, and
-+      //   'Records: 2  Duplicates: 1  Warnings: 0' for INSERT ones.
-+      //   This however requires a regex parsing of the string which is
-+      //   expensive; $affected_rows would be less accurate but much faster. We
-+      //   would need Drupal to be less strict in testing, and never rely on
-+      //   this value in runtime (which would be healthy anyway).
-+      if ($this->mysqliConnection->info !== NULL) {
-+        $matches = [];
-+        if (preg_match('/\s(\d+)\s/', $this->mysqliConnection->info, $matches) === 1) {
-+          return (int) $matches[0];
-+        }
-+        else {
-+          throw new DatabaseExceptionWrapper('Invalid data in the $info property of the mysqli connection - ' . $this->mysqliConnection->info);
-+        }
-+      }
-+      elseif ($this->mysqliConnection->affected_rows !== NULL) {
-+        return $this->mysqliConnection->affected_rows;
-+      }
-+      throw new DatabaseExceptionWrapper('Unable to retrieve affected rows data');
-+    }
-+    else {
-+      throw new RowCountException();
-+    }
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function setFetchMode($mode, $a1 = NULL, $a2 = []) {
-+    if (!in_array($mode, $this->supportedFetchModes)) {
-+      @trigger_error('Fetch mode ' . ($this->fetchModeLiterals[$mode] ?? $mode) . ' is deprecated in drupal:10.2.0 and is removed from drupal:11.0.0. Use supported modes only. See https://www.drupal.org/node/3377999', E_USER_DEPRECATED);
-+    }
-+    $this->defaultFetchStyle = $mode;
-+    switch ($mode) {
-+      case \PDO::FETCH_CLASS:
-+        $this->fetchOptions['class'] = $a1;
-+        if ($a2) {
-+          $this->fetchOptions['constructor_args'] = $a2;
-+        }
-+        break;
-+
-+      case \PDO::FETCH_COLUMN:
-+        $this->fetchOptions['column'] = $a1;
-+        break;
-+
-+      case \PDO::FETCH_INTO:
-+        $this->fetchOptions['object'] = $a1;
-+        break;
-+    }
-+    return TRUE;
-+  }
-+
-+}
-diff --git a/core/modules/mysqli/src/Driver/Database/mysqli/TransactionManager.php b/core/modules/mysqli/src/Driver/Database/mysqli/TransactionManager.php
-new file mode 100644
-index 0000000000..51395dac57
---- /dev/null
-+++ b/core/modules/mysqli/src/Driver/Database/mysqli/TransactionManager.php
-@@ -0,0 +1,85 @@
-+<?php
-+
-+declare(strict_types=1);
-+
-+namespace Drupal\mysqli\Driver\Database\mysqli;
-+
+   }
+ 
+ }
+diff --git a/core/modules/mysql/src/Driver/Database/mysql/Schema.php b/core/modules/mysql/src/Driver/Database/mysql/Schema.php
+index d0076f3481..24c2f29f65 100644
+--- a/core/modules/mysql/src/Driver/Database/mysql/Schema.php
++++ b/core/modules/mysql/src/Driver/Database/mysql/Schema.php
+@@ -377,7 +377,7 @@ public function renameTable($table, $new_name) {
+     }
+ 
+     $info = $this->getPrefixInfo($new_name);
+-    $this->connection->query('ALTER TABLE {' . $table . '} RENAME TO [' . $info['table'] . ']');
++    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} RENAME TO [' . $info['table'] . ']');
+   }
+ 
+   /**
+@@ -388,7 +388,7 @@ public function dropTable($table) {
+       return FALSE;
+     }
+ 
+-    $this->connection->query('DROP TABLE {' . $table . '}');
++    $this->connection->executeDdlStatement('DROP TABLE {' . $table . '}');
+     return TRUE;
+   }
+ 
+@@ -426,7 +426,7 @@ public function addField($table, $field, $spec, $keys_new = []) {
+ 
+       $query .= ', ADD ' . implode(', ADD ', $keys_sql);
+     }
+-    $this->connection->query($query);
++    $this->connection->executeDdlStatement($query);
+     if (isset($spec['initial_from_field'])) {
+       if (isset($spec['initial'])) {
+         $expression = 'COALESCE(' . $spec['initial_from_field'] . ', :default_initial_value)';
+@@ -471,7 +471,7 @@ public function dropField($table, $field) {
+       $this->dropPrimaryKey($table);
+     }
+ 
+-    $this->connection->query('ALTER TABLE {' . $table . '} DROP [' . $field . ']');
++    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} DROP [' . $field . ']');
+     return TRUE;
+   }
+ 
+@@ -496,7 +496,7 @@ public function addPrimaryKey($table, $fields) {
+       throw new SchemaObjectExistsException("Cannot add primary key to table '$table': primary key already exists.");
+     }
+ 
+-    $this->connection->query('ALTER TABLE {' . $table . '} ADD PRIMARY KEY (' . $this->createKeySql($fields) . ')');
++    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} ADD PRIMARY KEY (' . $this->createKeySql($fields) . ')');
+   }
+ 
+   /**
+@@ -507,7 +507,7 @@ public function dropPrimaryKey($table) {
+       return FALSE;
+     }
+ 
+-    $this->connection->query('ALTER TABLE {' . $table . '} DROP PRIMARY KEY');
++    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} DROP PRIMARY KEY');
+     return TRUE;
+   }
+ 
+@@ -533,7 +533,7 @@ public function addUniqueKey($table, $name, $fields) {
+       throw new SchemaObjectExistsException("Cannot add unique key '$name' to table '$table': unique key already exists.");
+     }
+ 
+-    $this->connection->query('ALTER TABLE {' . $table . '} ADD UNIQUE KEY [' . $name . '] (' . $this->createKeySql($fields) . ')');
++    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} ADD UNIQUE KEY [' . $name . '] (' . $this->createKeySql($fields) . ')');
+   }
+ 
+   /**
+@@ -544,7 +544,7 @@ public function dropUniqueKey($table, $name) {
+       return FALSE;
+     }
+ 
+-    $this->connection->query('ALTER TABLE {' . $table . '} DROP KEY [' . $name . ']');
++    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} DROP KEY [' . $name . ']');
+     return TRUE;
+   }
+ 
+@@ -562,7 +562,7 @@ public function addIndex($table, $name, $fields, array $spec) {
+     $spec['indexes'][$name] = $fields;
+     $indexes = $this->getNormalizedIndexes($spec);
+ 
+-    $this->connection->query('ALTER TABLE {' . $table . '} ADD INDEX [' . $name . '] (' . $this->createKeySql($indexes[$name]) . ')');
++    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} ADD INDEX [' . $name . '] (' . $this->createKeySql($indexes[$name]) . ')');
+   }
+ 
+   /**
+@@ -573,7 +573,7 @@ public function dropIndex($table, $name) {
+       return FALSE;
+     }
+ 
+-    $this->connection->query('ALTER TABLE {' . $table . '} DROP INDEX [' . $name . ']');
++    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} DROP INDEX [' . $name . ']');
+     return TRUE;
+   }
+ 
+@@ -625,11 +625,11 @@ public function changeField($table, $field, $field_new, $spec, $keys_new = []) {
+     if ($keys_sql = $this->createKeysSql($keys_new)) {
+       $sql .= ', ADD ' . implode(', ADD ', $keys_sql);
+     }
+-    $this->connection->query($sql);
++    $this->connection->executeDdlStatement($sql);
+ 
+     if ($spec['type'] === 'serial') {
+       $max = $this->connection->query('SELECT MAX(`' . $field_new . '`) FROM {' . $table . '}')->fetchField();
+-      $this->connection->query("ALTER TABLE {" . $table . "} AUTO_INCREMENT = " . ($max + 1));
++      $this->connection->executeDdlStatement("ALTER TABLE {" . $table . "} AUTO_INCREMENT = " . ($max + 1));
+     }
+   }
+ 
+diff --git a/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php b/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php
+index a7a389a67f..5c872827d8 100644
+--- a/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php
++++ b/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php
+@@ -586,7 +586,7 @@ public function renameTable($table, $new_name) {
+         preg_match('/^' . preg_quote($table_name) . '__(.*)__' . preg_quote($index_type) . '/', $index->indexname, $matches);
+         $index_name = $matches[1];
+       }
+-      $this->connection->query('ALTER INDEX "' . $this->defaultSchema . '"."' . $index->indexname . '" RENAME TO ' . $this->ensureIdentifiersLength($new_name, $index_name, $index_type));
++      $this->connection->executeDdlStatement('ALTER INDEX "' . $this->defaultSchema . '"."' . $index->indexname . '" RENAME TO ' . $this->ensureIdentifiersLength($new_name, $index_name, $index_type));
+     }
+ 
+     // Ensure the new table name does not include schema syntax.
+@@ -608,11 +608,11 @@ public function renameTable($table, $new_name) {
+         // subsequent table renames.
+         $new_sequence = $this->ensureIdentifiersLength($new_name, $field, 'seq', '_');
+ 
+-        $this->connection->query('ALTER SEQUENCE ' . $old_sequence . ' RENAME TO ' . $new_sequence);
++        $this->connection->executeDdlStatement('ALTER SEQUENCE ' . $old_sequence . ' RENAME TO ' . $new_sequence);
+       }
+     }
+     // Now rename the table.
+-    $this->connection->query('ALTER TABLE {' . $table . '} RENAME TO ' . $prefixInfo['table']);
++    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} RENAME TO ' . $prefixInfo['table']);
+     $this->resetTableInformation($table);
+   }
+ 
+@@ -624,7 +624,7 @@ public function dropTable($table) {
+       return FALSE;
+     }
+ 
+-    $this->connection->query('DROP TABLE {' . $table . '}');
++    $this->connection->executeDdlStatement('DROP TABLE {' . $table . '}');
+     $this->resetTableInformation($table);
+     return TRUE;
+   }
+@@ -653,7 +653,7 @@ public function addField($table, $field, $spec, $new_keys = []) {
+     }
+     $query = 'ALTER TABLE {' . $table . '} ADD COLUMN ';
+     $query .= $this->createFieldSql($field, $this->processField($spec));
+-    $this->connection->query($query);
++    $this->connection->executeDdlStatement($query);
+     if (isset($spec['initial_from_field'])) {
+       if (isset($spec['initial'])) {
+         $expression = 'COALESCE(' . $spec['initial_from_field'] . ', :default_initial_value)';
+@@ -673,7 +673,7 @@ public function addField($table, $field, $spec, $new_keys = []) {
+         ->execute();
+     }
+     if ($fixnull) {
+-      $this->connection->query("ALTER TABLE {" . $table . "} ALTER $field SET NOT NULL");
++      $this->connection->executeDdlStatement("ALTER TABLE {" . $table . "} ALTER $field SET NOT NULL");
+     }
+     if (isset($new_keys)) {
+       // Make sure to drop the existing primary key before adding a new one.
+@@ -686,7 +686,7 @@ public function addField($table, $field, $spec, $new_keys = []) {
+     }
+     // Add column comment.
+     if (!empty($spec['description'])) {
+-      $this->connection->query('COMMENT ON COLUMN {' . $table . '}.' . $field . ' IS ' . $this->prepareComment($spec['description']));
++      $this->connection->executeDdlStatement('COMMENT ON COLUMN {' . $table . '}.' . $field . ' IS ' . $this->prepareComment($spec['description']));
+     }
+     $this->resetTableInformation($table);
+   }
+@@ -699,7 +699,7 @@ public function dropField($table, $field) {
+       return FALSE;
+     }
+ 
+-    $this->connection->query('ALTER TABLE {' . $table . '} DROP COLUMN "' . $field . '"');
++    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} DROP COLUMN "' . $field . '"');
+     $this->resetTableInformation($table);
+     return TRUE;
+   }
+@@ -773,7 +773,7 @@ public function addPrimaryKey($table, $fields) {
+       throw new SchemaObjectExistsException("Cannot add primary key to table '$table': primary key already exists.");
+     }
+ 
+-    $this->connection->query('ALTER TABLE {' . $table . '} ADD CONSTRAINT ' . $this->ensureIdentifiersLength($table, '', 'pkey') . ' PRIMARY KEY (' . $this->createPrimaryKeySql($fields) . ')');
++    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} ADD CONSTRAINT ' . $this->ensureIdentifiersLength($table, '', 'pkey') . ' PRIMARY KEY (' . $this->createPrimaryKeySql($fields) . ')');
+     $this->resetTableInformation($table);
+   }
+ 
+@@ -785,7 +785,7 @@ public function dropPrimaryKey($table) {
+       return FALSE;
+     }
+ 
+-    $this->connection->query('ALTER TABLE {' . $table . '} DROP CONSTRAINT ' . $this->ensureIdentifiersLength($table, '', 'pkey'));
++    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} DROP CONSTRAINT ' . $this->ensureIdentifiersLength($table, '', 'pkey'));
+     $this->resetTableInformation($table);
+     return TRUE;
+   }
+@@ -814,7 +814,7 @@ public function addUniqueKey($table, $name, $fields) {
+     // Use the createPrimaryKeySql(), which already discards any prefix lengths
+     // passed as part of the key column specifiers. (Postgres doesn't support
+     // setting a prefix length for PRIMARY or UNIQUE indices.)
+-    $this->connection->query('ALTER TABLE {' . $table . '} ADD CONSTRAINT ' . $this->ensureIdentifiersLength($table, $name, 'key') . ' UNIQUE (' . $this->createPrimaryKeySql($fields) . ')');
++    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} ADD CONSTRAINT ' . $this->ensureIdentifiersLength($table, $name, 'key') . ' UNIQUE (' . $this->createPrimaryKeySql($fields) . ')');
+     $this->resetTableInformation($table);
+   }
+ 
+@@ -826,7 +826,7 @@ public function dropUniqueKey($table, $name) {
+       return FALSE;
+     }
+ 
+-    $this->connection->query('ALTER TABLE {' . $table . '} DROP CONSTRAINT ' . $this->ensureIdentifiersLength($table, $name, 'key'));
++    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} DROP CONSTRAINT ' . $this->ensureIdentifiersLength($table, $name, 'key'));
+     $this->resetTableInformation($table);
+     return TRUE;
+   }
+@@ -842,7 +842,7 @@ public function addIndex($table, $name, $fields, array $spec) {
+       throw new SchemaObjectExistsException("Cannot add index '$name' to table '$table': index already exists.");
+     }
+ 
+-    $this->connection->query($this->_createIndexSql($table, $name, $fields));
++    $this->connection->executeDdlStatement($this->_createIndexSql($table, $name, $fields));
+     $this->resetTableInformation($table);
+   }
+ 
+@@ -854,7 +854,7 @@ public function dropIndex($table, $name) {
+       return FALSE;
+     }
+ 
+-    $this->connection->query('DROP INDEX ' . $this->defaultSchema . '.' . $this->ensureIdentifiersLength($table, $name, 'idx'));
++    $this->connection->executeDdlStatement('DROP INDEX ' . $this->defaultSchema . '.' . $this->ensureIdentifiersLength($table, $name, 'idx'));
+     $this->resetTableInformation($table);
+     return TRUE;
+   }
+@@ -933,15 +933,15 @@ public function changeField($table, $field, $field_new, $spec, $new_keys = []) {
+     if (!empty($seq_name)) {
+       // We need to add CASCADE otherwise we cannot alter the sequence because
+       // the table depends on it.
+-      $this->connection->query('DROP SEQUENCE IF EXISTS ' . $seq_name . ' CASCADE');
++      $this->connection->executeDdlStatement('DROP SEQUENCE IF EXISTS ' . $seq_name . ' CASCADE');
+     }
+ 
+     foreach ($field_info as $check) {
+-      $this->connection->query('ALTER TABLE {' . $table . '} DROP CONSTRAINT [' . $check . ']');
++      $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} DROP CONSTRAINT [' . $check . ']');
+     }
+ 
+     // Remove old default.
+-    $this->connection->query('ALTER TABLE {' . $table . '} ALTER COLUMN [' . $field . '] DROP DEFAULT');
++    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} ALTER COLUMN [' . $field . '] DROP DEFAULT');
+ 
+     // Convert field type.
+     // Usually, we do this via a simple typecast 'USING fieldname::type'. But
+@@ -951,10 +951,10 @@ public function changeField($table, $field, $field_new, $spec, $new_keys = []) {
+     $is_bytea = !empty($table_information->blob_fields[$field]);
+     if ($spec['pgsql_type'] != 'bytea') {
+       if ($is_bytea) {
+-        $this->connection->query('ALTER TABLE {' . $table . '} ALTER [' . $field . '] TYPE ' . $field_def . ' USING convert_from([' . $field . ']' . ", 'UTF8')");
++        $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} ALTER [' . $field . '] TYPE ' . $field_def . ' USING convert_from([' . $field . ']' . ", 'UTF8')");
+       }
+       else {
+-        $this->connection->query('ALTER TABLE {' . $table . '} ALTER [' . $field . '] TYPE ' . $field_def . ' USING [' . $field . ']::' . $field_def);
++        $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} ALTER [' . $field . '] TYPE ' . $field_def . ' USING [' . $field . ']::' . $field_def);
+       }
+     }
+     else {
+@@ -963,7 +963,7 @@ public function changeField($table, $field, $field_new, $spec, $new_keys = []) {
+         // Convert to a bytea type by using the SQL replace() function to
+         // convert any single backslashes in the field content to double
+         // backslashes ('\' to '\\').
+-        $this->connection->query('ALTER TABLE {' . $table . '} ALTER [' . $field . '] TYPE ' . $field_def . ' USING decode(replace("' . $field . '"' . ", E'\\\\', E'\\\\\\\\'), 'escape');");
++        $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} ALTER [' . $field . '] TYPE ' . $field_def . ' USING decode(replace("' . $field . '"' . ", E'\\\\', E'\\\\\\\\'), 'escape');");
+       }
+     }
+ 
+@@ -974,7 +974,7 @@ public function changeField($table, $field, $field_new, $spec, $new_keys = []) {
+       else {
+         $null_action = 'DROP NOT NULL';
+       }
+-      $this->connection->query('ALTER TABLE {' . $table . '} ALTER [' . $field . '] ' . $null_action);
++      $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} ALTER [' . $field . '] ' . $null_action);
+     }
+ 
+     if (in_array($spec['pgsql_type'], ['serial', 'bigserial'])) {
+@@ -982,31 +982,31 @@ public function changeField($table, $field, $field_new, $spec, $new_keys = []) {
+       // not when altering. Because of that, the sequence needs to be created
+       // and initialized by hand.
+       $seq = $this->connection->makeSequenceName($table, $field_new);
+-      $this->connection->query("CREATE SEQUENCE " . $seq . " OWNED BY {" . $table . "}.[" . $field_new . ']');
++      $this->connection->executeDdlStatement("CREATE SEQUENCE " . $seq . " OWNED BY {" . $table . "}.[" . $field_new . ']');
+       // Set sequence to maximal field value to not conflict with existing
+       // entries.
+       $this->connection->query("SELECT setval('" . $seq . "', MAX([" . $field . "])) FROM {" . $table . "}");
+-      $this->connection->query('ALTER TABLE {' . $table . '} ALTER [' . $field . '] SET DEFAULT nextval(' . $this->connection->quote($seq) . ')');
++      $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} ALTER [' . $field . '] SET DEFAULT nextval(' . $this->connection->quote($seq) . ')');
+     }
+ 
+     // Rename the column if necessary.
+     if ($field != $field_new) {
+-      $this->connection->query('ALTER TABLE {' . $table . '} RENAME [' . $field . '] TO [' . $field_new . ']');
++      $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} RENAME [' . $field . '] TO [' . $field_new . ']');
+     }
+ 
+     // Add unsigned check if necessary.
+     if (!empty($spec['unsigned'])) {
+-      $this->connection->query('ALTER TABLE {' . $table . '} ADD CHECK ([' . $field_new . '] >= 0)');
++      $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} ADD CHECK ([' . $field_new . '] >= 0)');
+     }
+ 
+     // Add default if necessary.
+     if (isset($spec['default'])) {
+-      $this->connection->query('ALTER TABLE {' . $table . '} ALTER COLUMN [' . $field_new . '] SET DEFAULT ' . $this->escapeDefaultValue($spec['default']));
++      $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} ALTER COLUMN [' . $field_new . '] SET DEFAULT ' . $this->escapeDefaultValue($spec['default']));
+     }
+ 
+     // Change description if necessary.
+     if (!empty($spec['description'])) {
+-      $this->connection->query('COMMENT ON COLUMN {' . $table . '}.[' . $field_new . '] IS ' . $this->prepareComment($spec['description']));
++      $this->connection->executeDdlStatement('COMMENT ON COLUMN {' . $table . '}.[' . $field_new . '] IS ' . $this->prepareComment($spec['description']));
+     }
+ 
+     if (isset($new_keys)) {
+diff --git a/core/modules/sqlite/src/Driver/Database/sqlite/Schema.php b/core/modules/sqlite/src/Driver/Database/sqlite/Schema.php
+index eb836eb453..e4b75f73e1 100644
+--- a/core/modules/sqlite/src/Driver/Database/sqlite/Schema.php
++++ b/core/modules/sqlite/src/Driver/Database/sqlite/Schema.php
+@@ -272,7 +272,7 @@ public function renameTable($table, $new_name) {
+     // the table with curly braces in case the db_prefix contains a reference
+     // to a database outside of our existing database.
+     $info = $this->getPrefixInfo($new_name);
+-    $this->connection->query('ALTER TABLE {' . $table . '} RENAME TO [' . $info['table'] . ']');
++    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} RENAME TO [' . $info['table'] . ']');
+ 
+     // Drop the indexes, there is no RENAME INDEX command in SQLite.
+     if (!empty($schema['unique keys'])) {
+@@ -289,7 +289,7 @@ public function renameTable($table, $new_name) {
+     // Recreate the indexes.
+     $statements = $this->createIndexSql($new_name, $schema);
+     foreach ($statements as $statement) {
+-      $this->connection->query($statement);
++      $this->connection->executeDdlStatement($statement);
+     }
+   }
+ 
+@@ -301,7 +301,7 @@ public function dropTable($table) {
+       return FALSE;
+     }
+     $this->connection->tableDropped = TRUE;
+-    $this->connection->query('DROP TABLE {' . $table . '}');
++    $this->connection->executeDdlStatement('DROP TABLE {' . $table . '}');
+     return TRUE;
+   }
+ 
+@@ -326,7 +326,7 @@ public function addField($table, $field, $specification, $keys_new = []) {
+       // When we don't have to create new keys and we are not creating a
+       // NOT NULL column without a default value, we can use the quicker version.
+       $query = 'ALTER TABLE {' . $table . '} ADD ' . $this->createFieldSql($field, $this->processField($specification));
+-      $this->connection->query($query);
++      $this->connection->executeDdlStatement($query);
+ 
+       // Apply the initial value if set.
+       if (isset($specification['initial_from_field'])) {
+@@ -683,7 +683,7 @@ public function addIndex($table, $name, $fields, array $spec) {
+     $schema['indexes'][$name] = $fields;
+     $statements = $this->createIndexSql($table, $schema);
+     foreach ($statements as $statement) {
+-      $this->connection->query($statement);
++      $this->connection->executeDdlStatement($statement);
+     }
+   }
+ 
+@@ -706,7 +706,7 @@ public function dropIndex($table, $name) {
+ 
+     $info = $this->getPrefixInfo($table);
+ 
+-    $this->connection->query('DROP INDEX [' . $info['schema'] . '].[' . $info['table'] . '_' . $name . ']');
++    $this->connection->executeDdlStatement('DROP INDEX [' . $info['schema'] . '].[' . $info['table'] . '_' . $name . ']');
+     return TRUE;
+   }
+ 
+@@ -724,7 +724,7 @@ public function addUniqueKey($table, $name, $fields) {
+     $schema['unique keys'][$name] = $fields;
+     $statements = $this->createIndexSql($table, $schema);
+     foreach ($statements as $statement) {
+-      $this->connection->query($statement);
++      $this->connection->executeDdlStatement($statement);
+     }
+   }
+ 
+@@ -738,7 +738,7 @@ public function dropUniqueKey($table, $name) {
+ 
+     $info = $this->getPrefixInfo($table);
+ 
+-    $this->connection->query('DROP INDEX [' . $info['schema'] . '].[' . $info['table'] . '_' . $name . ']');
++    $this->connection->executeDdlStatement('DROP INDEX [' . $info['schema'] . '].[' . $info['table'] . '_' . $name . ']');
+     return TRUE;
+   }
+ 
+diff --git a/core/tests/Drupal/KernelTests/Core/Cache/EndOfTransactionQueriesTest.php b/core/tests/Drupal/KernelTests/Core/Cache/EndOfTransactionQueriesTest.php
+index 83ea69e10f..457d42ba1c 100644
+--- a/core/tests/Drupal/KernelTests/Core/Cache/EndOfTransactionQueriesTest.php
++++ b/core/tests/Drupal/KernelTests/Core/Cache/EndOfTransactionQueriesTest.php
+@@ -79,7 +79,9 @@ public function testEntitySave(): void {
+       $executed_statements[] = $log['query'];
+     }
+     $last_statement_index = max(array_keys($executed_statements));
++dump(['$executed_statements', $executed_statements, $last_statement_index]);
+     $cachetag_statements = array_keys($this->getStatementsForTable($executed_statements, 'cachetags'));
++dump(['$cachetag_statements', $cachetag_statements, $last_statement_index - count($cachetag_statements) + 1]);
+     $this->assertSame($last_statement_index - count($cachetag_statements) + 1, min($cachetag_statements), 'All of the last queries in the transaction are for the "cachetags" table.');
+ 
+     // Verify that a nested entity save occurred.
+diff --git a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
+index 3d053be1d0..030ffd6380 100644
+--- a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
++++ b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
+@@ -3,12 +3,12 @@
+ namespace Drupal\KernelTests\Core\Database;
+ 
+ use Drupal\Core\Database\Database;
 +use Drupal\Core\Database\Transaction\ClientConnectionTransactionState;
-+use Drupal\Core\Database\Transaction\TransactionManagerBase;
-+
-+/**
-+ * MySqli implementation of TransactionManagerInterface.
-+ */
-+class TransactionManager extends TransactionManagerBase {
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  protected function beginClientTransaction(): bool {
-+    return $this->connection->getClientConnection()->begin_transaction();
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  protected function addClientSavepoint(string $name): bool {
-+    return $this->connection->getClientConnection()->savepoint($name);
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  protected function rollbackClientSavepoint(string $name): bool {
-+    // Mysqli does not have a rollback_to_savepoint method, and it does not
-+    // allow a prepared statement for 'ROLLBACK TO SAVEPOINT', so we need to
-+    // fallback to query on the client connection directly.
-+    try {
-+      return (bool) $this->connection->getClientConnection()->query('ROLLBACK TO SAVEPOINT ' . $name);
-+    }
-+    catch (\mysqli_sql_exception $e) {
-+      // If the rollback failed, most likely the savepoint was not there
-+      // because the transaction is no longer active. In this case we void the
-+      // transaction stack.
-+      $this->voidClientTransaction();
-+      return TRUE;
-+    }
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  protected function releaseClientSavepoint(string $name): bool {
-+    return $this->connection->getClientConnection()->release_savepoint($name);
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  protected function rollbackClientTransaction(): bool {
-+    // Note: mysqli::rollback() returns TRUE if there's no active transaction.
-+    // This is diverging from PDO MySql.
-+    // TransactionTest::testTransactionWithDdlStatement() fails for this reason.
-+    // A PHP bug report exists.
-+    //
-+    // @see https://bugs.php.net/bug.php?id=81533.
-+    $clientRollback = $this->connection->getClientConnection()->rollBack();
-+    $this->setConnectionTransactionState($clientRollback ?
-+      ClientConnectionTransactionState::RolledBack :
-+      ClientConnectionTransactionState::RollbackFailed
-+    );
-+    return $clientRollback;
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  protected function commitClientTransaction(): bool {
-+    $clientCommit = $this->connection->getClientConnection()->commit();
-+    $this->setConnectionTransactionState($clientCommit ?
-+      ClientConnectionTransactionState::Committed :
-+      ClientConnectionTransactionState::CommitFailed
-+    );
-+    return $clientCommit;
-+  }
-+
-+}
-diff --git a/core/modules/mysqli/src/Plugin/views/query/MysqliCastSql.php b/core/modules/mysqli/src/Plugin/views/query/MysqliCastSql.php
-new file mode 100644
-index 0000000000..d1f1ca55f8
---- /dev/null
-+++ b/core/modules/mysqli/src/Plugin/views/query/MysqliCastSql.php
-@@ -0,0 +1,11 @@
-+<?php
-+
-+namespace Drupal\mysqli\Plugin\views\query;
-+
-+use Drupal\mysql\Plugin\views\query\MysqlCastSql;
-+
-+/**
-+ * MySQLi specific cast handling.
-+ */
-+class MysqliCastSql extends MysqlCastSql {
-+}
-diff --git a/core/modules/mysqli/tests/src/Functional/GenericTest.php b/core/modules/mysqli/tests/src/Functional/GenericTest.php
-new file mode 100644
-index 0000000000..fae4bbe9f9
---- /dev/null
-+++ b/core/modules/mysqli/tests/src/Functional/GenericTest.php
-@@ -0,0 +1,12 @@
-+<?php
-+
-+namespace Drupal\Tests\mysqli\Functional;
-+
-+use Drupal\Tests\system\Functional\Module\GenericModuleTestBase;
-+
-+/**
-+ * Generic module test for mysqli.
-+ *
-+ * @group mysqli
-+ */
-+class GenericTest extends GenericModuleTestBase {}
-diff --git a/core/modules/mysqli/tests/src/Kernel/mysqli/ConnectionTest.php b/core/modules/mysqli/tests/src/Kernel/mysqli/ConnectionTest.php
-new file mode 100644
-index 0000000000..f0d1821d2c
---- /dev/null
-+++ b/core/modules/mysqli/tests/src/Kernel/mysqli/ConnectionTest.php
-@@ -0,0 +1,13 @@
-+<?php
-+
-+namespace Drupal\Tests\mysqli\Kernel\mysqli;
-+
-+use Drupal\Tests\mysql\Kernel\mysql\ConnectionTest as BaseMySqlTest;
-+
-+/**
-+ * MySQL-specific connection tests.
-+ *
-+ * @group Database
-+ */
-+class ConnectionTest extends BaseMySqlTest {
-+}
-diff --git a/core/modules/mysqli/tests/src/Kernel/mysqli/ConnectionUnitTest.php b/core/modules/mysqli/tests/src/Kernel/mysqli/ConnectionUnitTest.php
-new file mode 100644
-index 0000000000..0cb054ba15
---- /dev/null
-+++ b/core/modules/mysqli/tests/src/Kernel/mysqli/ConnectionUnitTest.php
-@@ -0,0 +1,21 @@
-+<?php
-+
-+namespace Drupal\Tests\mysqli\Kernel\mysqli;
-+
-+use Drupal\Tests\mysql\Kernel\mysql\ConnectionUnitTest as BaseMySqlTest;
-+
-+/**
-+ * MySQL-specific connection unit tests.
-+ *
-+ * @group Database
-+ */
-+class ConnectionUnitTest extends BaseMySqlTest {
-+
-+  /**
-+   * Tests pdo options override.
-+   */
-+  public function testConnectionOpen() {
-+    $this->markTestSkipped('mysqli is not a pdo driver.');
-+  }
-+
-+}
-diff --git a/core/modules/mysqli/tests/src/Kernel/mysqli/DatabaseExceptionWrapperTest.php b/core/modules/mysqli/tests/src/Kernel/mysqli/DatabaseExceptionWrapperTest.php
-new file mode 100644
-index 0000000000..b5ea6be348
---- /dev/null
-+++ b/core/modules/mysqli/tests/src/Kernel/mysqli/DatabaseExceptionWrapperTest.php
-@@ -0,0 +1,36 @@
-+<?php
-+
-+namespace Drupal\Tests\mysqli\Kernel\mysqli;
-+
-+use Drupal\Tests\mysql\Kernel\mysql\DatabaseExceptionWrapperTest as BaseMySqlTest;
-+
-+/**
-+ * Tests exceptions thrown by queries.
-+ *
-+ * @group Database
-+ */
-+class DatabaseExceptionWrapperTest extends BaseMySqlTest {
-+
-+  /**
-+   * Tests Connection::prepareStatement exceptions on preparation.
-+   *
-+   * Core database drivers use PDO emulated statements or the StatementPrefetch
-+   * class, which defer the statement check to the moment of the execution. In
-+   * order to test a failure at preparation time, we have to force the
-+   * connection not to emulate statement preparation. Still, this is only valid
-+   * for the MySql driver.
-+   */
-+  public function testPrepareStatementFailOnPreparation() {
-+    $this->markTestSkipped('mysqli is not a pdo driver.');
-+  }
-+
-+  /**
-+   * Tests Connection::prepareStatement exception on execution.
-+   */
-+  public function testPrepareStatementFailOnExecution() {
-+    $this->expectException(\mysqli_sql_exception::class);
-+    $stmt = $this->connection->prepareStatement('bananas', []);
-+    $stmt->execute();
-+  }
-+
-+}
-diff --git a/core/modules/mysqli/tests/src/Kernel/mysqli/LargeQueryTest.php b/core/modules/mysqli/tests/src/Kernel/mysqli/LargeQueryTest.php
-new file mode 100644
-index 0000000000..eba0950221
---- /dev/null
-+++ b/core/modules/mysqli/tests/src/Kernel/mysqli/LargeQueryTest.php
-@@ -0,0 +1,56 @@
-+<?php
-+
-+namespace Drupal\Tests\mysqli\Kernel\mysqli;
-+
-+use Drupal\Component\Utility\Environment;
-+use Drupal\Core\Database\Database;
-+use Drupal\Core\Database\DatabaseExceptionWrapper;
-+use Drupal\Tests\mysql\Kernel\mysql\LargeQueryTest as BaseMySqlTest;
-+
-+/**
-+ * Tests handling of large queries.
-+ *
-+ * @group Database
-+ */
-+class LargeQueryTest extends BaseMySqlTest {
-+
-+  /**
-+   * Tests truncation of messages when max_allowed_packet exception occurs.
-+   */
-+  public function testMaxAllowedPacketQueryTruncating(): void {
-+    $connectionInfo = Database::getConnectionInfo('default');
-+    Database::addConnectionInfo('default', 'testMaxAllowedPacketQueryTruncating', $connectionInfo['default']);
-+    $testConnection = Database::getConnection('testMaxAllowedPacketQueryTruncating');
-+
-+    // The max_allowed_packet value is configured per database instance.
-+    // Retrieve the max_allowed_packet value from the current instance and
-+    // check if PHP is configured with sufficient allowed memory to be able
-+    // to generate a query larger than max_allowed_packet.
-+    $max_allowed_packet = $testConnection->query('SELECT @@global.max_allowed_packet')->fetchField();
-+    if (!Environment::checkMemoryLimit($max_allowed_packet + (16 * 1024 * 1024))) {
-+      $this->markTestSkipped('The configured max_allowed_packet exceeds the php memory limit. Therefore the test is skipped.');
-+    }
-+
-+    $long_name = str_repeat('a', $max_allowed_packet + 1);
-+    try {
-+      $testConnection->query('SELECT [name] FROM {test} WHERE [name] = :name', [':name' => $long_name]);
-+      $this->fail("An exception should be thrown for queries larger than 'max_allowed_packet'");
-+    }
-+    catch (\Throwable $e) {
-+      dump([$e, $max_allowed_packet]);
-+      // throw $e;
-+      // Close and re-open the connection. Otherwise we will run into error
-+      // 2006 "MySQL server had gone away" afterwards.
-+      Database::closeConnection('testMaxAllowedPacketQueryTruncating');
-+      // Database::getConnection();
-+      $this->assertInstanceOf(DatabaseExceptionWrapper::class, $e);
-+      // Got a packet bigger than 'max_allowed_packet' bytes exception thrown.
-+      // NOTE *** This differs from the MySql PDO test.
-+      $this->assertEquals(1153, $e->getCode());
-+      // 'max_allowed_packet' exception message truncated.
-+      // Use strlen() to count the bytes exactly, not the unicode chars.
-+      $this->assertLessThanOrEqual($max_allowed_packet, strlen($e->getMessage()));
-+    }
-+  }
-+
-+}
-diff --git a/core/modules/mysqli/tests/src/Kernel/mysqli/NextIdTest.php b/core/modules/mysqli/tests/src/Kernel/mysqli/NextIdTest.php
-new file mode 100644
-index 0000000000..1ce4674700
---- /dev/null
-+++ b/core/modules/mysqli/tests/src/Kernel/mysqli/NextIdTest.php
-@@ -0,0 +1,14 @@
-+<?php
-+
-+namespace Drupal\Tests\mysqli\Kernel\mysqli;
-+
-+use Drupal\Tests\mysql\Kernel\mysql\NextIdTest as BaseMySqlTest;
-+
-+/**
-+ * Tests the sequences API.
-+ *
-+ * @group Database
-+ * @group legacy
-+ */
-+class NextIdTest extends BaseMySqlTest {
-+}
-diff --git a/core/modules/mysqli/tests/src/Kernel/mysqli/PrefixInfoTest.php b/core/modules/mysqli/tests/src/Kernel/mysqli/PrefixInfoTest.php
-new file mode 100644
-index 0000000000..ff056f25ad
---- /dev/null
-+++ b/core/modules/mysqli/tests/src/Kernel/mysqli/PrefixInfoTest.php
-@@ -0,0 +1,13 @@
-+<?php
-+
-+namespace Drupal\Tests\mysqli\Kernel\mysqli;
-+
-+use Drupal\Tests\mysql\Kernel\mysql\PrefixInfoTest as BaseMySqlTest;
-+
-+/**
-+ * Tests that the prefix info for a database schema is correct.
-+ *
-+ * @group Database
-+ */
-+class PrefixInfoTest extends BaseMySqlTest {
-+}
-diff --git a/core/modules/mysqli/tests/src/Kernel/mysqli/SchemaTest.php b/core/modules/mysqli/tests/src/Kernel/mysqli/SchemaTest.php
-new file mode 100644
-index 0000000000..8f6f3839dc
---- /dev/null
-+++ b/core/modules/mysqli/tests/src/Kernel/mysqli/SchemaTest.php
-@@ -0,0 +1,13 @@
-+<?php
-+
-+namespace Drupal\Tests\mysqli\Kernel\mysqli;
-+
-+use Drupal\Tests\mysql\Kernel\mysql\SchemaTest as BaseMySqlTest;
-+
-+/**
-+ * Tests schema API for the MySQL driver.
-+ *
-+ * @group Database
-+ */
-+class SchemaTest extends BaseMySqlTest {
-+}
-diff --git a/core/modules/mysqli/tests/src/Kernel/mysqli/SqlModeTest.php b/core/modules/mysqli/tests/src/Kernel/mysqli/SqlModeTest.php
-new file mode 100644
-index 0000000000..aa5866733d
---- /dev/null
-+++ b/core/modules/mysqli/tests/src/Kernel/mysqli/SqlModeTest.php
-@@ -0,0 +1,41 @@
-+<?php
-+
-+namespace Drupal\Tests\mysqli\Kernel\mysqli;
-+
-+use Drupal\KernelTests\Core\Database\DriverSpecificDatabaseTestBase;
-+
-+/**
-+ * Tests compatibility of the MySQL driver with various sql_mode options.
-+ *
-+ * @group Database
-+ */
-+class SqlModeTest extends DriverSpecificDatabaseTestBase {
-+
-+  /**
-+   * Tests quoting identifiers in queries.
-+   */
-+  public function testQuotingIdentifiers(): void {
-+    // Use SQL-reserved words for both the table and column names.
-+    $query = $this->connection->query('SELECT [update] FROM {select}');
-+    $this->assertEquals('Update value 1', $query->fetchObject()->update);
-+    $this->assertStringContainsString('SELECT `update` FROM `', $query->getQueryString());
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  protected function getDatabaseConnectionInfo() {
-+    $info = parent::getDatabaseConnectionInfo();
-+
-+    // This runs during setUp(), so is not yet skipped for non MySQL databases.
-+    // We defer skipping the test to later in setUp(), so that that can be
-+    // based on databaseType() rather than 'driver', but here all we have to go
-+    // on is 'driver'.
-+    if ($info['default']['driver'] === 'mysqli') {
-+      $info['default']['init_commands']['sql_mode'] = "SET sql_mode = ''";
-+    }
-+
-+    return $info;
-+  }
-+
-+}
-diff --git a/core/modules/mysqli/tests/src/Kernel/mysqli/SyntaxTest.php b/core/modules/mysqli/tests/src/Kernel/mysqli/SyntaxTest.php
-new file mode 100644
-index 0000000000..e3b3458e6f
---- /dev/null
-+++ b/core/modules/mysqli/tests/src/Kernel/mysqli/SyntaxTest.php
-@@ -0,0 +1,13 @@
-+<?php
-+
-+namespace Drupal\Tests\mysqli\Kernel\mysqli;
-+
-+use Drupal\KernelTests\Core\Database\DriverSpecificSyntaxTestBase;
-+
-+/**
-+ * Tests MySql syntax interpretation.
-+ *
-+ * @group Database
-+ */
-+class SyntaxTest extends DriverSpecificSyntaxTestBase {
-+}
-diff --git a/core/modules/mysqli/tests/src/Kernel/mysqli/TemporaryQueryTest.php b/core/modules/mysqli/tests/src/Kernel/mysqli/TemporaryQueryTest.php
-new file mode 100644
-index 0000000000..807c55ae1c
---- /dev/null
-+++ b/core/modules/mysqli/tests/src/Kernel/mysqli/TemporaryQueryTest.php
-@@ -0,0 +1,13 @@
-+<?php
-+
-+namespace Drupal\Tests\mysqli\Kernel\mysqli;
-+
-+use Drupal\Tests\mysql\Kernel\mysql\TemporaryQueryTest as BaseMySqlTest;
-+
-+/**
-+ * Tests the temporary query functionality.
-+ *
-+ * @group Database
-+ */
-+class TemporaryQueryTest extends BaseMySqlTest {
-+}
-diff --git a/core/modules/mysqli/tests/src/Kernel/mysqli/TransactionTest.php b/core/modules/mysqli/tests/src/Kernel/mysqli/TransactionTest.php
-new file mode 100644
-index 0000000000..b812724eb9
---- /dev/null
-+++ b/core/modules/mysqli/tests/src/Kernel/mysqli/TransactionTest.php
-@@ -0,0 +1,150 @@
-+<?php
-+
-+namespace Drupal\Tests\mysqli\Kernel\mysqli;
-+
-+use Drupal\KernelTests\Core\Database\DriverSpecificTransactionTestBase;
-+use PHPUnit\Framework\Error\Warning;
-+
-+/**
-+ * Tests transaction for the MySQL driver.
-+ *
-+ * @group Database
-+ */
-+class TransactionTest extends DriverSpecificTransactionTestBase {
-+
-+  /**
-+   * Tests the compatibility of transactions with DDL statements.
-+   */
-+  public function testTransactionWithDdlStatement() {
-+    // First, test that a commit works normally, even with DDL statements.
-+    $transaction = $this->connection->startTransaction();
-+    $this->insertRow('row');
-+    $this->executeDDLStatement();
-+    unset($transaction);
-+    $this->assertRowPresent('row');
-+
-+    // Even in different order.
-+    $this->cleanUp();
-+    $transaction = $this->connection->startTransaction();
-+    $this->executeDDLStatement();
-+    $this->insertRow('row');
-+    unset($transaction);
-+    $this->assertRowPresent('row');
-+
-+    // Even with stacking.
-+    $this->cleanUp();
-+    $transaction = $this->connection->startTransaction();
-+    $transaction2 = $this->connection->startTransaction();
-+    $this->executeDDLStatement();
-+    unset($transaction2);
-+    $transaction3 = $this->connection->startTransaction();
-+    $this->insertRow('row');
-+    unset($transaction3);
-+    unset($transaction);
-+    $this->assertRowPresent('row');
-+
-+    // Note: THIS IS DIFFERENT FROM MySQL.
-+    // MySQLi will only cleanup the transaction stack on rollback, because the
-+    // rollback will fail since no savepoint is any longer present given the
-+    // auto-commit related to the DDL statement.
-+    // So a transaction after a DDL statement should still work the same.
-+    $this->cleanUp();
-+    $transaction = $this->connection->startTransaction();
-+    $transaction2 = $this->connection->startTransaction();
-+    $this->executeDDLStatement();
-+    unset($transaction2);
-+    $transaction3 = $this->connection->startTransaction();
-+    $this->insertRow('row');
-+    // $transaction3->rollBack();
-+    unset($transaction3);
-+    unset($transaction);
-+    // $this->assertRowAbsent('row');
-+
-+    // The behavior of a rollback depends on the type of database server.
-+    if ($this->connection->supportsTransactionalDDL()) {
-+      // For database servers that support transactional DDL, a rollback
-+      // of a transaction including DDL statements should be possible.
-+      $this->cleanUp();
-+      $transaction = $this->connection->startTransaction();
-+      $this->insertRow('row');
-+      $this->executeDDLStatement();
-+      $transaction->rollBack();
-+      unset($transaction);
-+      $this->assertRowAbsent('row');
-+
-+      // Including with stacking.
-+      $this->cleanUp();
-+      $transaction = $this->connection->startTransaction();
-+      $transaction2 = $this->connection->startTransaction();
-+      $this->executeDDLStatement();
-+      unset($transaction2);
-+      $transaction3 = $this->connection->startTransaction();
-+      $this->insertRow('row');
-+      unset($transaction3);
-+      $transaction->rollBack();
-+      unset($transaction);
-+      $this->assertRowAbsent('row');
-+    }
-+    else {
-+      // For database servers that do not support transactional DDL,
-+      // the DDL statement should commit the transaction stack.
-+      $this->cleanUp();
-+      $transaction = $this->connection->startTransaction();
-+      $this->insertRow('row');
-+      $this->executeDDLStatement();
-+
-+      try {
-+        // Rollback the outer transaction.
-+        $transaction->rollBack();
-+        // Note: THIS IS DIFFERENT FROM MySQL.
-+        // MySQLi does not fail when rolling back and no transaction active.
-+        // $this->fail('Rolling back a transaction containing DDL should produce a warning.');
-+      }
-+      catch (Warning $warning) {
-+        $this->assertSame('Rollback attempted when there is no active transaction. This can cause data integrity issues.', $warning->getMessage());
-+      }
-+      unset($transaction);
+ use Drupal\Core\Database\Transaction\StackItem;
+ use Drupal\Core\Database\Transaction\StackItemType;
+ use Drupal\Core\Database\TransactionExplicitCommitNotAllowedException;
+ use Drupal\Core\Database\TransactionNameNonUniqueException;
+ use Drupal\Core\Database\TransactionOutOfOrderException;
+-use PHPUnit\Framework\Error\Warning;
+ 
+ /**
+  * Tests the transaction abstraction system.
+@@ -269,18 +269,19 @@ public function testTransactionWithDdlStatement() {
+       // the DDL statement should commit the transaction stack.
+       $this->cleanUp();
+       $transaction = $this->connection->startTransaction();
++      $reflectionMethod = new \ReflectionMethod(get_class($this->connection->transactionManager()), 'getConnectionTransactionState');
++      $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
++      $this->assertEquals(ClientConnectionTransactionState::Active, $reflectionMethod->invoke($this->connection->transactionManager()));
+       $this->insertRow('row');
++
+       $this->executeDDLStatement();
++      $this->assertSame(0, $this->connection->transactionManager()->stackDepth());
++      $this->assertEquals(ClientConnectionTransactionState::Voided, $reflectionMethod->invoke($this->connection->transactionManager()));
 +      $this->assertRowPresent('row');
-+    }
-+  }
-+
-+  /**
-+   * Tests deprecation of Connection methods.
-+   *
-+   * @group legacy
-+   */
-+  public function testConnectionDeprecations(): void {
-+    $this->markTestSkipped('Skipping this test for MySQLi.');
-+  }
-+
-+  /**
-+   * Tests starting a transaction when there's one active on the client.
-+   *
-+   * MySQLi does not fail if multiple transactions are begun on the client, so
-+   * this test is failing. Let's change this when MySQLi will provide a way to
-+   * check if a client transaction is active.
-+   */
-+  public function testStartTransactionWhenActive(): void {
-+    $this->markTestSkipped('Skipping this while MySQLi cannot detect if a client transaction is active.');
-+    $this->connection->getClientConnection()->begin_transaction();
-+    $this->connection->startTransaction();
-+    $this->assertFalse($this->connection->inTransaction());
-+  }
-+
-+  /**
-+   * Tests committing a transaction when there's none active on the client.
-+   *
-+   * MySQLi does not fail if multiple commits are made on the client, so this
-+   * test is failing. Let's change this when MySQLi will provide a way to check
-+   * if a client transaction is active.
-+   */
-+  public function testCommitTransactionWhenInactive(): void {
-+    $this->markTestSkipped('Skipping this while MySQLi cannot detect if a client transaction is active.');
-+    $transaction = $this->connection->startTransaction();
-+    $this->assertTrue($this->connection->inTransaction());
-+    $this->connection->getClientConnection()->commit();
-+    $this->assertFalse($this->connection->inTransaction());
-+    $transaction = NULL;
-+  }
-+
-+}
-diff --git a/core/modules/mysqli/tests/src/Unit/NamedPlaceholderConverterTest.php b/core/modules/mysqli/tests/src/Unit/NamedPlaceholderConverterTest.php
-new file mode 100644
-index 0000000000..038756d8af
---- /dev/null
-+++ b/core/modules/mysqli/tests/src/Unit/NamedPlaceholderConverterTest.php
-@@ -0,0 +1,337 @@
-+<?php
-+
-+declare(strict_types=1);
-+
-+namespace Drupal\Tests\mysqli\Unit;
-+
-+use Drupal\mysqli\Driver\Database\mysqli\NamedPlaceholderConverter;
-+use Drupal\Tests\UnitTestCase;
-+
-+/**
-+ * @coversDefaultClass \Drupal\mysqli\Driver\Database\mysqli\NamedPlaceholderConverter
-+ * @group Database
-+ */
-+class NamedPlaceholderConverterTest extends UnitTestCase {
-+
-+  /**
-+   * @covers ::parse
-+   * @dataProvider statementsWithParametersProvider
-+   */
-+  public function testParse(string $sql, array $parameters, string $expectedSql, array $expectedParameters): void {
-+    $converter = new NamedPlaceholderConverter();
-+    $converter->parse($sql, $parameters);
-+    $this->assertSame($expectedSql, $converter->getConvertedSQL());
-+    $this->assertSame($expectedParameters, $converter->getConvertedParameters());
-+  }
-+
-+  public static function statementsWithParametersProvider(): iterable {
-+    yield [
-+      'SELECT ?',
-+      ['foo'],
-+      'SELECT ?',
-+      ['foo'],
-+    ];
-+
-+    yield [
-+      'SELECT * FROM Foo WHERE bar IN (?, ?, ?)',
-+      ['baz', 'qux', 'fred'],
-+      'SELECT * FROM Foo WHERE bar IN (?, ?, ?)',
-+      ['baz', 'qux', 'fred'],
-+    ];
-+
-+    yield [
-+      'SELECT ? FROM ?',
-+      ['baz', 'qux'],
-+      'SELECT ? FROM ?',
-+      ['baz', 'qux'],
-+    ];
-+
-+    yield [
-+      'SELECT "?" FROM foo WHERE bar = ?',
-+      ['baz'],
-+      'SELECT "?" FROM foo WHERE bar = ?',
-+      ['baz'],
-+    ];
-+
-+    yield [
-+      "SELECT '?' FROM foo WHERE bar = ?",
-+      ['baz'],
-+      "SELECT '?' FROM foo WHERE bar = ?",
-+      ['baz'],
-+    ];
-+
-+    yield [
-+      'SELECT `?` FROM foo WHERE bar = ?',
-+      ['baz'],
-+      'SELECT `?` FROM foo WHERE bar = ?',
-+      ['baz'],
-+    ];
-+
-+    yield [
-+      'SELECT [?] FROM foo WHERE bar = ?',
-+      ['baz'],
-+      'SELECT [?] FROM foo WHERE bar = ?',
-+      ['baz'],
-+    ];
-+
-+    yield [
-+      'SELECT * FROM foo WHERE jsonb_exists_any(foo.bar, ARRAY[?])',
-+      ['baz'],
-+      'SELECT * FROM foo WHERE jsonb_exists_any(foo.bar, ARRAY[?])',
-+      ['baz'],
-+    ];
-+
-+    yield [
-+      "SELECT 'foo-bar?' FROM foo WHERE bar = ?",
-+      ['baz'],
-+      "SELECT 'foo-bar?' FROM foo WHERE bar = ?",
-+      ['baz'],
-+    ];
-+
-+    yield [
-+      'SELECT "foo-bar?" FROM foo WHERE bar = ?',
-+      ['baz'],
-+      'SELECT "foo-bar?" FROM foo WHERE bar = ?',
-+      ['baz'],
-+    ];
-+
-+    yield [
-+      'SELECT `foo-bar?` FROM foo WHERE bar = ?',
-+      ['baz'],
-+      'SELECT `foo-bar?` FROM foo WHERE bar = ?',
-+      ['baz'],
-+    ];
-+
-+    yield [
-+      'SELECT [foo-bar?] FROM foo WHERE bar = ?',
-+      ['baz'],
-+      'SELECT [foo-bar?] FROM foo WHERE bar = ?',
-+      ['baz'],
-+    ];
-+
-+    yield [
-+      'SELECT :foo FROM :bar',
-+      [':foo' => 'baz', ':bar' => 'qux'],
-+      'SELECT ? FROM ?',
-+      ['baz', 'qux'],
-+    ];
-+
-+    yield [
-+      'SELECT * FROM Foo WHERE bar IN (:name1, :name2)',
-+      [':name1' => 'baz', ':name2' => 'qux'],
-+      'SELECT * FROM Foo WHERE bar IN (?, ?)',
-+      ['baz', 'qux'],
-+    ];
-+
-+    yield [
-+      'SELECT ":foo" FROM Foo WHERE bar IN (:name1, :name2)',
-+      [':name1' => 'baz', ':name2' => 'qux'],
-+      'SELECT ":foo" FROM Foo WHERE bar IN (?, ?)',
-+      ['baz', 'qux'],
-+    ];
-+
-+    yield [
-+      "SELECT ':foo' FROM Foo WHERE bar IN (:name1, :name2)",
-+      [':name1' => 'baz', ':name2' => 'qux'],
-+      "SELECT ':foo' FROM Foo WHERE bar IN (?, ?)",
-+      ['baz', 'qux'],
-+    ];
-+
-+    yield [
-+      'SELECT :foo_id',
-+      [':foo_id' => 'bar'],
-+      'SELECT ?',
-+      ['bar'],
-+    ];
-+
-+    yield [
-+      'SELECT @rank := 1 AS rank, :foo AS foo FROM :bar',
-+      [':foo' => 'baz', ':bar' => 'qux'],
-+      'SELECT @rank := 1 AS rank, ? AS foo FROM ?',
-+      ['baz', 'qux'],
-+    ];
-+
-+    yield [
-+      'SELECT * FROM Foo WHERE bar > :start_date AND baz > :start_date',
-+      [':start_date' => 'qux'],
-+      'SELECT * FROM Foo WHERE bar > ? AND baz > ?',
-+      ['qux', 'qux'],
-+    ];
-+
-+    yield [
-+      'SELECT foo::date as date FROM Foo WHERE bar > :start_date AND baz > :start_date',
-+      [':start_date' => 'qux'],
-+      'SELECT foo::date as date FROM Foo WHERE bar > ? AND baz > ?',
-+      ['qux', 'qux'],
-+    ];
-+
-+    yield [
-+      'SELECT `d.ns:col_name` FROM my_table d WHERE `d.date` >= :param1',
-+      [':param1' => 'qux'],
-+      'SELECT `d.ns:col_name` FROM my_table d WHERE `d.date` >= ?',
-+      ['qux'],
-+    ];
-+
-+    yield [
-+      'SELECT [d.ns:col_name] FROM my_table d WHERE [d.date] >= :param1',
-+      [':param1' => 'qux'],
-+      'SELECT [d.ns:col_name] FROM my_table d WHERE [d.date] >= ?',
-+      ['qux'],
-+    ];
-+
-+    yield [
-+      'SELECT * FROM foo WHERE jsonb_exists_any(foo.bar, ARRAY[:foo])',
-+      'SELECT * FROM foo WHERE jsonb_exists_any(foo.bar, ARRAY[{:foo}])',
-+    ];
-+
-+    yield [
-+      'SELECT * FROM foo WHERE jsonb_exists_any(foo.bar, array[:foo])',
-+      'SELECT * FROM foo WHERE jsonb_exists_any(foo.bar, array[{:foo}])',
-+    ];
-+
-+    yield [
-+      "SELECT table.column1, ARRAY['3'] FROM schema.table table WHERE table.f1 = :foo AND ARRAY['3']",
-+      "SELECT table.column1, ARRAY['3'] FROM schema.table table WHERE table.f1 = {:foo} AND ARRAY['3']",
-+    ];
-+
-+    yield [
-+      "SELECT table.column1, ARRAY['3']::integer[] FROM schema.table table"
-+        . " WHERE table.f1 = :foo AND ARRAY['3']::integer[]",
-+      "SELECT table.column1, ARRAY['3']::integer[] FROM schema.table table"
-+        . " WHERE table.f1 = {:foo} AND ARRAY['3']::integer[]",
-+    ];
-+
-+    yield [
-+      "SELECT table.column1, ARRAY[:foo] FROM schema.table table WHERE table.f1 = :bar AND ARRAY['3']",
-+      "SELECT table.column1, ARRAY[{:foo}] FROM schema.table table WHERE table.f1 = {:bar} AND ARRAY['3']",
-+    ];
-+
-+    yield [
-+      'SELECT table.column1, ARRAY[:foo]::integer[] FROM schema.table table'
-+        . " WHERE table.f1 = :bar AND ARRAY['3']::integer[]",
-+      'SELECT table.column1, ARRAY[{:foo}]::integer[] FROM schema.table table'
-+        . " WHERE table.f1 = {:bar} AND ARRAY['3']::integer[]",
-+    ];
-+
-+        yield 'Quotes inside literals escaped by doubling' => [
-+            <<<'SQL'
-+SELECT * FROM foo
-+WHERE bar = ':not_a_param1 ''":not_a_param2"'''
-+   OR bar=:a_param1
-+   OR bar=:a_param2||':not_a_param3'
-+   OR bar=':not_a_param4 '':not_a_param5'' :not_a_param6'
-+   OR bar=''
-+   OR bar=:a_param3
-+SQL
-+,
-+            <<<'SQL'
-+SELECT * FROM foo
-+WHERE bar = ':not_a_param1 ''":not_a_param2"'''
-+   OR bar={:a_param1}
-+   OR bar={:a_param2}||':not_a_param3'
-+   OR bar=':not_a_param4 '':not_a_param5'' :not_a_param6'
-+   OR bar=''
-+   OR bar={:a_param3}
-+SQL
-+,
-+        ];
-+
-+        yield [
-+            'SELECT data.age AS age, data.id AS id, data.name AS name, data.id AS id FROM test_data data'
-+                . " WHERE (data.description LIKE :condition_0 ESCAPE '\\\\')"
-+                . " AND (data.description LIKE :condition_1 ESCAPE '\\\\') ORDER BY id ASC",
-+            'SELECT data.age AS age, data.id AS id, data.name AS name, data.id AS id FROM test_data data'
-+                . " WHERE (data.description LIKE {:condition_0} ESCAPE '\\\\')"
-+                . " AND (data.description LIKE {:condition_1} ESCAPE '\\\\') ORDER BY id ASC",
-+        ];
-+
-+        yield [
-+            'SELECT data.age AS age, data.id AS id, data.name AS name, data.id AS id FROM test_data data'
-+                . ' WHERE (data.description LIKE :condition_0 ESCAPE "\\\\")'
-+                . ' AND (data.description LIKE :condition_1 ESCAPE "\\\\") ORDER BY id ASC',
-+            'SELECT data.age AS age, data.id AS id, data.name AS name, data.id AS id FROM test_data data'
-+                . ' WHERE (data.description LIKE {:condition_0} ESCAPE "\\\\")'
-+                . ' AND (data.description LIKE {:condition_1} ESCAPE "\\\\") ORDER BY id ASC',
-+        ];
-+
-+        yield 'Combined single and double quotes' => [
-+            <<<'SQL'
-+SELECT data.age AS age, data.id AS id, data.name AS name, data.id AS id
-+  FROM test_data data
-+ WHERE (data.description LIKE :condition_0 ESCAPE "\\")
-+   AND (data.description LIKE :condition_1 ESCAPE '\\') ORDER BY id ASC
-+SQL
-+,
-+            <<<'SQL'
-+SELECT data.age AS age, data.id AS id, data.name AS name, data.id AS id
-+  FROM test_data data
-+ WHERE (data.description LIKE {:condition_0} ESCAPE "\\")
-+   AND (data.description LIKE {:condition_1} ESCAPE '\\') ORDER BY id ASC
-+SQL
-+,
-+        ];
-+
-+        yield [
-+            'SELECT data.age AS age, data.id AS id, data.name AS name, data.id AS id FROM test_data data'
-+                . ' WHERE (data.description LIKE :condition_0 ESCAPE `\\\\`)'
-+                . ' AND (data.description LIKE :condition_1 ESCAPE `\\\\`) ORDER BY id ASC',
-+            'SELECT data.age AS age, data.id AS id, data.name AS name, data.id AS id FROM test_data data'
-+                . ' WHERE (data.description LIKE {:condition_0} ESCAPE `\\\\`)'
-+                . ' AND (data.description LIKE {:condition_1} ESCAPE `\\\\`) ORDER BY id ASC',
-+        ];
-+
-+        yield 'Combined single quotes and backticks' => [
-+            <<<'SQL'
-+SELECT data.age AS age, data.id AS id, data.name AS name, data.id AS id
-+  FROM test_data data
-+ WHERE (data.description LIKE :condition_0 ESCAPE '\\')
-+   AND (data.description LIKE :condition_1 ESCAPE `\\`) ORDER BY id ASC
-+SQL
-+,
-+            <<<'SQL'
-+SELECT data.age AS age, data.id AS id, data.name AS name, data.id AS id
-+  FROM test_data data
-+ WHERE (data.description LIKE {:condition_0} ESCAPE '\\')
-+   AND (data.description LIKE {:condition_1} ESCAPE `\\`) ORDER BY id ASC
-+SQL
-+,
-+        ];
-+
-+        yield 'Placeholders inside comments' => [
-+            <<<'SQL'
-+/*
-+ * test placeholder ?
-+ */
-+SELECT dummy as "dummy?"
-+  FROM DUAL
-+ WHERE '?' = '?'
-+-- AND dummy <> ?
-+   AND dummy = ?
-+SQL
-+,
-+            <<<'SQL'
-+/*
-+ * test placeholder ?
-+ */
-+SELECT dummy as "dummy?"
-+  FROM DUAL
-+ WHERE '?' = '?'
-+-- AND dummy <> ?
-+   AND dummy = {?}
-+SQL
-+,
-+        ];
-+
-+        yield 'Escaped question' => [
-+            <<<'SQL'
-+SELECT '{"a":null}'::jsonb ?? :key
-+SQL
-+,
-+            <<<'SQL'
-+SELECT '{"a":null}'::jsonb ?? {:key}
-+SQL
-+,
-+        ];
-+    }
-+
-+}
+ 
+-      try {
+-        // Rollback the outer transaction.
+-        $transaction->rollBack();
+-        // @see \Drupal\mysql\Driver\Database\mysql\TransactionManager::rollbackClientTransaction()
+-        $this->fail('Rolling back a transaction containing DDL should produce a warning.');
+-      }
+-      catch (Warning $warning) {
+-        $this->assertSame('Rollback attempted when there is no active transaction. This can cause data integrity issues.', $warning->getMessage());
+-      }
++      // Rollback the outer transaction. Nothing happens as the transaction was
++      // voided.
++      $transaction->rollBack();
+       unset($transaction);
+       $this->assertRowPresent('row');
+     }
