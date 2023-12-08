@@ -19,7 +19,7 @@ index 0205f7dd65..34bb51689d 100644
        elseif ($this->stackDepth() === 1 && $this->stack()[$id]->type === StackItemType::Root) {
          // If this was the root Drupal transaction, we can rollback the client
 diff --git a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
-index b8a71abba1..5d91cbd8ee 100644
+index b8a71abba1..30a6c5d53e 100644
 --- a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
 +++ b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
 @@ -175,6 +175,50 @@ public function testRollbackRoot() {
@@ -90,10 +90,65 @@ index b8a71abba1..5d91cbd8ee 100644
  
      // Insert a row.
      $this->insertRow('Syd');
-@@ -252,6 +296,61 @@ public function testRollbackSavepoint() {
+@@ -252,6 +296,116 @@ public function testRollbackSavepoint() {
      $this->assertSame(0, $this->connection->transactionManager()->stackDepth());
    }
  
++  /**
++   * Tests savepoint transaction commit after rollback.
++   */
++  public function testRollbackTwiceSameSavepoint() {
++    $this->assertFalse($this->connection->inTransaction());
++    $this->assertSame(0, $this->connection->transactionManager()->stackDepth());
++
++    // Start root transaction. Corresponds to 'BEGIN TRANSACTION' on the
++    // database.
++    $transaction = $this->connection->startTransaction();
++    $this->assertTrue($this->connection->inTransaction());
++    $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
++
++    // Insert a row.
++    $this->insertRow('David');
++    $this->assertRowPresent('David');
++
++    // Starts a savepoint transaction. Corresponds to 'SAVEPOINT savepoint_1'
++    // on the database.
++    $savepoint = $this->connection->startTransaction();
++    $this->assertTrue($this->connection->inTransaction());
++    $this->assertSame(2, $this->connection->transactionManager()->stackDepth());
++
++    // Insert a row.
++    $this->insertRow('Roger');
++    $this->assertRowPresent('David');
++    $this->assertRowPresent('Roger');
++
++    // Rollback savepoint. It should get released too. Corresponds to 'ROLLBACK
++    // TO savepoint_1' plus 'RELEASE savepoint_1' on the database.
++    $savepoint->rollBack();
++    $this->assertRowPresent('David');
++    $this->assertRowAbsent('Roger');
++    $this->assertTrue($this->connection->inTransaction());
++    $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
++
++    // Insert a row.
++    $this->insertRow('Syd');
++
++    // Try committing savepoint. Should fail since it was released already.
++    try {
++      $savepoint->commit();
++      $this->fail('Expected TransactionOutOfOrderException was not thrown');
++    }
++    catch (\Exception $e) {
++      $this->assertInstanceOf(TransactionOutOfOrderException::class, $e);
++      $this->assertMatchesRegularExpression("/^Error attempting rollback of .*\\\\savepoint_1\\. Active stack: .*\\\\drupal_transaction/", $e->getMessage());
++    }
++    $this->assertRowPresent('David');
++    $this->assertRowAbsent('Roger');
++    $this->assertRowPresent('Syd');
++    $this->assertTrue($this->connection->inTransaction());
++    $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
++  }
++
 +  /**
 +   * Tests savepoint transaction duplicated rollback.
 +   */
