@@ -1,28 +1,5 @@
-diff --git a/core/lib/Drupal/Core/Cache/DatabaseBackend.php b/core/lib/Drupal/Core/Cache/DatabaseBackend.php
-index 29e4fe5c7b..e457091baa 100644
---- a/core/lib/Drupal/Core/Cache/DatabaseBackend.php
-+++ b/core/lib/Drupal/Core/Cache/DatabaseBackend.php
-@@ -487,6 +487,7 @@ protected function normalizeCid($cid) {
-    * @internal
-    */
-   public function schemaDefinition() {
-+    $s = $this->connection->schema();
-     $schema = [
-       'description' => 'Storage for the cache API.',
-       'fields' => [
-@@ -540,8 +541,8 @@ public function schemaDefinition() {
-         ],
-       ],
-       'indexes' => [
--        'expire' => ['expire'],
--        'created' => ['created'],
-+        'expire' => $s->index('expire', 'expire'),
-+        'created' => $s->index('created','created'),
-       ],
-       'primary key' => ['cid'],
-     ];
 diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
-index cdaf0d19dd..8c7c527c75 100644
+index cdaf0d19dd..036d16ac91 100644
 --- a/core/lib/Drupal/Core/Database/Connection.php
 +++ b/core/lib/Drupal/Core/Database/Connection.php
 @@ -4,6 +4,8 @@
@@ -68,7 +45,7 @@ index cdaf0d19dd..8c7c527c75 100644
 +      $this->query($sql, $arguments, $options);
 +    }
 +    else {
-+//dump(['EXEC', $sql, \Drupal::hasService('event_dispatcher') ? '' : '*** NO DISPATCHER ***']);
++dump(['EXEC', $sql, \Drupal::hasService('event_dispatcher') ? '' : '*** NO DISPATCHER ***']);
 +      $this->executeSql($sql, $options);
 +    }
 +
@@ -241,27 +218,22 @@ index 01f0c9d47d..359769830f 100644
        return $comments . 'DELETE FROM {' . $this->connection->escapeTable($this->table) . '}';
      }
 diff --git a/core/lib/Drupal/Core/Database/Schema.php b/core/lib/Drupal/Core/Database/Schema.php
-index 9530c8fbf8..1a6c993dcd 100644
+index 9530c8fbf8..e3a5fa1a87 100644
 --- a/core/lib/Drupal/Core/Database/Schema.php
 +++ b/core/lib/Drupal/Core/Database/Schema.php
-@@ -3,6 +3,7 @@
- namespace Drupal\Core\Database;
- 
- use Drupal\Core\Database\Query\PlaceholderInterface;
-+use Drupal\Core\Database\Schema\Index;
- 
- /**
-  * Provides a base implementation for Database Schema.
-@@ -438,7 +439,7 @@ abstract public function dropUniqueKey($table, $name);
+@@ -436,9 +436,9 @@ abstract public function dropUniqueKey($table, $name);
+    *
+    * @param $table
     *   The table to be altered.
-    * @param $name
+-   * @param $name
++   * @param string|Index $name
     *   The name of the index.
 -   * @param $fields
-+   * @param array|Index $fields
++   * @param array $fields
     *   An array of field names or field information; if field information is
     *   passed, it's an array whose first element is the field name and whose
     *   second is the maximum length in the index. For example, the following
-@@ -616,7 +617,7 @@ public function createTable($name, $table) {
+@@ -616,7 +616,7 @@ public function createTable($name, $table) {
      }
      $statements = $this->createTableSql($name, $table);
      foreach ($statements as $statement) {
@@ -270,20 +242,58 @@ index 9530c8fbf8..1a6c993dcd 100644
      }
    }
  
-@@ -725,4 +726,8 @@ protected function ensureNotNullPrimaryKey(array $primary_key, array $fields) {
-     }
-   }
- 
-+  public function index(string $name, string|array ...$columns): Index {
-+    return new Index($name, $columns);
+diff --git a/core/lib/Drupal/Core/Database/Schema/DataDefinitionBase.php b/core/lib/Drupal/Core/Database/Schema/DataDefinitionBase.php
+new file mode 100644
+index 0000000000..a641a4a408
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/Schema/DataDefinitionBase.php
+@@ -0,0 +1,20 @@
++<?php
++
++declare(strict_types=1);
++
++namespace Drupal\Core\Database\Schema;
++
++/**
++ * Describes the definition of a database object.
++ */
++class DataDefinitionBase implements DatabaseElementDefinitionInterface {
++
++  public function setDriverDataDefinition(string $driver, DriverDataDefinitionInterface $dataDefinition): void {
++    return;
 +  }
 +
- }
-diff --git a/core/lib/Drupal/Core/Database/Schema/DatabaseElementInterface.php b/core/lib/Drupal/Core/Database/Schema/DatabaseElementInterface.php
++  public function getDriverDataDefinition(string $driver): ?DriverDataDefinitionInterface {
++    return NULL;
++  }
++
++}
+diff --git a/core/lib/Drupal/Core/Database/Schema/DataDefinitionInterface.php b/core/lib/Drupal/Core/Database/Schema/DataDefinitionInterface.php
 new file mode 100644
-index 0000000000..43a9722322
+index 0000000000..c4ed3b5c08
 --- /dev/null
-+++ b/core/lib/Drupal/Core/Database/Schema/DatabaseElementInterface.php
++++ b/core/lib/Drupal/Core/Database/Schema/DataDefinitionInterface.php
+@@ -0,0 +1,15 @@
++<?php
++
++declare(strict_types=1);
++
++namespace Drupal\Core\Database\Schema;
++
++/**
++ * Interface for objects describing database elements.
++ */
++interface DataDefinitionInterface {
++
++  public function setDriverDataDefinition(string $driver, DriverDataDefinitionInterface $dataDefinition): void;
++  public function getDriverDataDefinition(string $driver): ?DriverDataDefinitionInterface;
++
++}
+diff --git a/core/lib/Drupal/Core/Database/Schema/DriverDataDefinitionInterface.php b/core/lib/Drupal/Core/Database/Schema/DriverDataDefinitionInterface.php
+new file mode 100644
+index 0000000000..068b6069b7
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/Schema/DriverDataDefinitionInterface.php
 @@ -0,0 +1,11 @@
 +<?php
 +
@@ -294,11 +304,11 @@ index 0000000000..43a9722322
 +/**
 + * Interface for objects describing database elements.
 + */
-+interface DatabaseElementInterface {
++interface DriverDataDefinitionInterface {
 +}
 diff --git a/core/lib/Drupal/Core/Database/Schema/Index.php b/core/lib/Drupal/Core/Database/Schema/Index.php
 new file mode 100644
-index 0000000000..0e16df18b5
+index 0000000000..a95768d8dd
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/Schema/Index.php
 @@ -0,0 +1,21 @@
@@ -311,14 +321,14 @@ index 0000000000..0e16df18b5
 +/**
 + * Describes a database index.
 + */
-+class Index implements DatabaseElementInterface {
++class Index extends DataDefinitionBase {
 +
 +  /**
 +   * Constructor.
 +   */
 +  public function __construct(
-+    protected string $name,
-+    protected array $columns,
++    public readonly string $name,
++    public readonly array $columns,
 +  ) {
 +  }
 +
@@ -832,6 +842,21 @@ index 64bdffa8c8..4531e34cc7 100644
      return TRUE;
    }
  
+diff --git a/core/modules/system/system.install b/core/modules/system/system.install
+index 079fa6cbf7..2bef9a6e18 100644
+--- a/core/modules/system/system.install
++++ b/core/modules/system/system.install
+@@ -1669,8 +1669,8 @@ function system_schema() {
+       'sid',
+     ],
+     'indexes' => [
+-      'timestamp' => ['timestamp'],
+-      'uid' => ['uid'],
++      'timestamp' => new Index('timestamp', ['timestamp']),
++      'uid' => new Index('uid', ['uid']),
+     ],
+     'foreign keys' => [
+       'session_user' => [
 diff --git a/core/tests/Drupal/KernelTests/Core/Cache/EndOfTransactionQueriesTest.php b/core/tests/Drupal/KernelTests/Core/Cache/EndOfTransactionQueriesTest.php
 index 83ea69e10f..65f5b5f0df 100644
 --- a/core/tests/Drupal/KernelTests/Core/Cache/EndOfTransactionQueriesTest.php
