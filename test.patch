@@ -272,18 +272,22 @@ index 01f0c9d47d..359769830f 100644
        return $comments . 'DELETE FROM {' . $this->connection->escapeTable($this->table) . '}';
      }
 diff --git a/core/lib/Drupal/Core/Database/Schema.php b/core/lib/Drupal/Core/Database/Schema.php
-index 9530c8fbf8..1d096a898e 100644
+index 9530c8fbf8..3ac6ed6934 100644
 --- a/core/lib/Drupal/Core/Database/Schema.php
 +++ b/core/lib/Drupal/Core/Database/Schema.php
-@@ -2,6 +2,7 @@
+@@ -2,7 +2,11 @@
  
  namespace Drupal\Core\Database;
  
 +use Drupal\Core\Database\Event\SchemaIndexDefinitionEvent;
  use Drupal\Core\Database\Query\PlaceholderInterface;
++use Drupal\Core\Database\SchemaDefinition\Index as IndexDefinition;
++use Drupal\Core\Database\SchemaDefinition\IndexColumn as IndexColumnDefinition;
++use Drupal\Core\Database\SchemaDefinition\PrimaryKey as PrimaryKeyDefinition;
  
  /**
-@@ -46,6 +47,7 @@ abstract class Schema implements PlaceholderInterface {
+  * Provides a base implementation for Database Schema.
+@@ -46,6 +50,7 @@ abstract class Schema implements PlaceholderInterface {
    public function __construct($connection) {
      $this->uniqueIdentifier = uniqid('', TRUE);
      $this->connection = $connection;
@@ -291,7 +295,7 @@ index 9530c8fbf8..1d096a898e 100644
    }
  
    /**
-@@ -436,8 +438,8 @@ abstract public function dropUniqueKey($table, $name);
+@@ -436,8 +441,8 @@ abstract public function dropUniqueKey($table, $name);
     *
     * @param $table
     *   The table to be altered.
@@ -302,7 +306,7 @@ index 9530c8fbf8..1d096a898e 100644
     * @param $fields
     *   An array of field names or field information; if field information is
     *   passed, it's an array whose first element is the field name and whose
-@@ -616,7 +618,7 @@ public function createTable($name, $table) {
+@@ -616,7 +621,7 @@ public function createTable($name, $table) {
      }
      $statements = $this->createTableSql($name, $table);
      foreach ($statements as $statement) {
@@ -311,6 +315,43 @@ index 9530c8fbf8..1d096a898e 100644
      }
    }
  
+@@ -725,4 +730,36 @@ protected function ensureNotNullPrimaryKey(array $primary_key, array $fields) {
+     }
+   }
+ 
++  final protected function convertIndexColumnsToSchemaDefinition(array $columns): array {
++    $return = [];
++    foreach ($columns as $key => $columnDefinition) {
++      if (!$columnDefinition instanceof IndexColumnDefinition) {
++        $return[] = $columnDefinition;
++      }
++      elseif (is_array($columnDefinition)) {
++        $return[] = new IndexColumnDefinition($columnDefinition[0], $columnDefinition[1]);
++      }
++      else {
++        $return[] = new IndexColumnDefinition($columnDefinition);
++      }
++    }
++    return $return;
++  }
++
++  final protected function convertPrimaryKeyToSchemaDefinition(PrimaryKeyDefinition|array $primaryKey): PrimaryKeyDefinition {
++    if ($primaryKey instanceof PrimaryKeyDefinition) {
++      return $primaryKey;
++    }
++    $columns = $this->convertIndexColumnsToSchemaDefinition($primaryKey);
++    return new PrimaryKeyDefinition($columns);
++  }
++
++  final protected function convertIndexesToSchemaDefinition(array $indexes): array {
++
++  }
++
++  final protected function convertIndexToSchemaDefinition(string $name, array $columns): IndexDefinition {
++
++  }
++
+ }
 diff --git a/core/lib/Drupal/Core/Database/Schema/IndexColumn.php b/core/lib/Drupal/Core/Database/Schema/IndexColumn.php
 new file mode 100644
 index 0000000000..c234838190
@@ -626,7 +667,7 @@ index 7926175e0d..d06a35ce16 100644
  
  }
 diff --git a/core/modules/mysql/src/Driver/Database/mysql/Schema.php b/core/modules/mysql/src/Driver/Database/mysql/Schema.php
-index 199acc9141..a599ac5507 100644
+index 199acc9141..446dbec8ae 100644
 --- a/core/modules/mysql/src/Driver/Database/mysql/Schema.php
 +++ b/core/modules/mysql/src/Driver/Database/mysql/Schema.php
 @@ -2,10 +2,18 @@
@@ -648,29 +689,22 @@ index 199acc9141..a599ac5507 100644
  use Drupal\Component\Utility\Unicode;
  
  /**
-@@ -272,7 +280,8 @@ protected function createKeysSql($spec) {
+@@ -272,7 +280,9 @@ protected function createKeysSql($spec) {
      $keys = [];
  
      if (!empty($spec['primary key'])) {
 -      $keys[] = 'PRIMARY KEY (' . $this->createKeySql($spec['primary key']) . ')';
++      $primaryKeyDefinition = $this->convertPrimaryKeyToSchemaDefinition($spec['primary key']);
 +      $primaryKey = $this->initPrimaryKeyElement($spec['primary key']);
 +      $keys[] = 'PRIMARY KEY (' . $this->createKeySql($primaryKey->definition->columns) . ')';
      }
      if (!empty($spec['unique keys'])) {
        foreach ($spec['unique keys'] as $key => $fields) {
-@@ -289,6 +298,33 @@ protected function createKeysSql($spec) {
+@@ -289,6 +299,25 @@ protected function createKeysSql($spec) {
      return $keys;
    }
  
-+  protected function initPrimaryKeyElement(array $columns): PrimaryKey {
-+    $cols = [];
-+    foreach ($columns as $key => $columnDefinition) {
-+      if (!$columnDefinition instanceof IndexColumnDefinition) {
-+        $columnDefinition = new IndexColumnDefinition($columnDefinition);
-+      }
-+      $cols[] = new IndexColumn($columnDefinition);
-+    }
-+    $primaryKeyDefinition = new PrimaryKeyDefinition($cols);
++  protected function initPrimaryKeyElement(PrimaryKeyDefinition $primaryKeyDefinition): PrimaryKey {
 +    $primaryKey = new PrimaryKey($primaryKeyDefinition);
 +    $this->connection->dispatchEvent(new SchemaPrimaryKeyDefinitionEvent($primaryKey));
 +    return $primaryKey;
@@ -692,7 +726,7 @@ index 199acc9141..a599ac5507 100644
    /**
     * Gets normalized indexes from a table specification.
     *
-@@ -305,9 +341,9 @@ protected function createKeysSql($spec) {
+@@ -305,9 +334,9 @@ protected function createKeysSql($spec) {
     *   Thrown if field specification is missing.
     */
    protected function getNormalizedIndexes(array $spec) {
@@ -705,7 +739,7 @@ index 199acc9141..a599ac5507 100644
          // Get the name of the field from the index specification.
          $field_name = is_array($index_field) ? $index_field[0] : $index_field;
          // Check whether the field is defined in the table specification.
-@@ -318,7 +354,7 @@ protected function getNormalizedIndexes(array $spec) {
+@@ -318,7 +347,7 @@ protected function getNormalizedIndexes(array $spec) {
              // Check whether we need to shorten the index.
              if ((!isset($mysql_field['type']) || $mysql_field['type'] != 'varchar_ascii') && (!isset($mysql_field['length']) || $mysql_field['length'] > 191)) {
                // Limit the index length to 191 characters.
@@ -714,7 +748,7 @@ index 199acc9141..a599ac5507 100644
              }
            }
          }
-@@ -327,6 +363,7 @@ protected function getNormalizedIndexes(array $spec) {
+@@ -327,6 +356,7 @@ protected function getNormalizedIndexes(array $spec) {
          }
        }
      }
@@ -722,7 +756,7 @@ index 199acc9141..a599ac5507 100644
      return $indexes;
    }
  
-@@ -353,9 +390,13 @@ protected function shortenIndex(&$index) {
+@@ -353,9 +383,13 @@ protected function shortenIndex(&$index) {
    }
  
    protected function createKeySql($fields) {
@@ -737,7 +771,7 @@ index 199acc9141..a599ac5507 100644
          $return[] = '[' . $field[0] . '] (' . $field[1] . ')';
        }
        else {
-@@ -377,7 +418,7 @@ public function renameTable($table, $new_name) {
+@@ -377,7 +411,7 @@ public function renameTable($table, $new_name) {
      }
  
      $info = $this->getPrefixInfo($new_name);
@@ -746,7 +780,7 @@ index 199acc9141..a599ac5507 100644
    }
  
    /**
-@@ -388,7 +429,7 @@ public function dropTable($table) {
+@@ -388,7 +422,7 @@ public function dropTable($table) {
        return FALSE;
      }
  
@@ -755,7 +789,7 @@ index 199acc9141..a599ac5507 100644
      return TRUE;
    }
  
-@@ -426,7 +467,7 @@ public function addField($table, $field, $spec, $keys_new = []) {
+@@ -426,7 +460,7 @@ public function addField($table, $field, $spec, $keys_new = []) {
  
        $query .= ', ADD ' . implode(', ADD ', $keys_sql);
      }
@@ -764,7 +798,7 @@ index 199acc9141..a599ac5507 100644
      if (isset($spec['initial_from_field'])) {
        if (isset($spec['initial'])) {
          $expression = 'COALESCE(' . $spec['initial_from_field'] . ', :default_initial_value)';
-@@ -471,7 +512,7 @@ public function dropField($table, $field) {
+@@ -471,7 +505,7 @@ public function dropField($table, $field) {
        $this->dropPrimaryKey($table);
      }
  
@@ -773,7 +807,7 @@ index 199acc9141..a599ac5507 100644
      return TRUE;
    }
  
-@@ -496,7 +537,7 @@ public function addPrimaryKey($table, $fields) {
+@@ -496,7 +530,7 @@ public function addPrimaryKey($table, $fields) {
        throw new SchemaObjectExistsException("Cannot add primary key to table '$table': primary key already exists.");
      }
  
@@ -782,7 +816,7 @@ index 199acc9141..a599ac5507 100644
    }
  
    /**
-@@ -507,7 +548,7 @@ public function dropPrimaryKey($table) {
+@@ -507,7 +541,7 @@ public function dropPrimaryKey($table) {
        return FALSE;
      }
  
@@ -791,7 +825,7 @@ index 199acc9141..a599ac5507 100644
      return TRUE;
    }
  
-@@ -533,7 +574,7 @@ public function addUniqueKey($table, $name, $fields) {
+@@ -533,7 +567,7 @@ public function addUniqueKey($table, $name, $fields) {
        throw new SchemaObjectExistsException("Cannot add unique key '$name' to table '$table': unique key already exists.");
      }
  
@@ -800,7 +834,7 @@ index 199acc9141..a599ac5507 100644
    }
  
    /**
-@@ -544,7 +585,7 @@ public function dropUniqueKey($table, $name) {
+@@ -544,7 +578,7 @@ public function dropUniqueKey($table, $name) {
        return FALSE;
      }
  
@@ -809,7 +843,7 @@ index 199acc9141..a599ac5507 100644
      return TRUE;
    }
  
-@@ -562,7 +603,7 @@ public function addIndex($table, $name, $fields, array $spec) {
+@@ -562,7 +596,7 @@ public function addIndex($table, $name, $fields, array $spec) {
      $spec['indexes'][$name] = $fields;
      $indexes = $this->getNormalizedIndexes($spec);
  
@@ -818,7 +852,7 @@ index 199acc9141..a599ac5507 100644
    }
  
    /**
-@@ -573,7 +614,7 @@ public function dropIndex($table, $name) {
+@@ -573,7 +607,7 @@ public function dropIndex($table, $name) {
        return FALSE;
      }
  
@@ -827,7 +861,7 @@ index 199acc9141..a599ac5507 100644
      return TRUE;
    }
  
-@@ -625,11 +666,11 @@ public function changeField($table, $field, $field_new, $spec, $keys_new = []) {
+@@ -625,11 +659,11 @@ public function changeField($table, $field, $field_new, $spec, $keys_new = []) {
      if ($keys_sql = $this->createKeysSql($keys_new)) {
        $sql .= ', ADD ' . implode(', ADD ', $keys_sql);
      }
