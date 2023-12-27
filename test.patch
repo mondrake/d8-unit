@@ -180,10 +180,10 @@ index 9530c8fbf8..7e8e151a7a 100644
  }
 diff --git a/core/lib/Drupal/Core/Database/Schema/Index.php b/core/lib/Drupal/Core/Database/Schema/Index.php
 new file mode 100644
-index 0000000000..23dec3a2a8
+index 0000000000..0a7bc34f7e
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/Schema/Index.php
-@@ -0,0 +1,36 @@
+@@ -0,0 +1,35 @@
 +<?php
 +
 +declare(strict_types=1);
@@ -205,7 +205,6 @@ index 0000000000..23dec3a2a8
 +  ) {
 +    parent::__construct($definition);
 +    $this->name = $definition->name;
-+dump([__METHOD__, $this]);
 +    foreach ($definition->columns as $column) {
 +      $this->columns[] = new IndexColumn($column);
 +    }
@@ -484,7 +483,7 @@ index c20d7f1833..2d6807174a 100644
      public: false
 +  Drupal\mysql\EventSubscriber\SchemaDataDefinitionSubscriber: ~
 diff --git a/core/modules/mysql/src/Driver/Database/mysql/Schema.php b/core/modules/mysql/src/Driver/Database/mysql/Schema.php
-index 199acc9141..87ee710bd3 100644
+index 199acc9141..d5137601d9 100644
 --- a/core/modules/mysql/src/Driver/Database/mysql/Schema.php
 +++ b/core/modules/mysql/src/Driver/Database/mysql/Schema.php
 @@ -2,10 +2,18 @@
@@ -506,10 +505,11 @@ index 199acc9141..87ee710bd3 100644
  use Drupal\Component\Utility\Unicode;
  
  /**
-@@ -84,10 +92,20 @@ protected function buildTableNameCondition($table_name, $operator = '=', $add_pr
+@@ -84,10 +92,21 @@ protected function buildTableNameCondition($table_name, $operator = '=', $add_pr
     * {@inheritdoc}
     */
    protected function createTableSql($name, $table) {
++    // INIT START.
 +    if (!empty($table->spec['primary key'])) {
 +      $table->primaryKey = $this->initPrimaryKeyElement($table->spec['primary key']);
 +    }
@@ -518,7 +518,7 @@ index 199acc9141..87ee710bd3 100644
 +        $table->indexes[] = $this->initIndexElement($index);
 +      }
 +    }
-+dump([__METHOD__, $table]);
++    // INIT END.
 +
      $info = $this->connection->getConnectionOptions();
  
@@ -528,7 +528,7 @@ index 199acc9141..87ee710bd3 100644
        'mysql_engine' => 'InnoDB',
        'mysql_character_set' => 'utf8mb4',
      ];
-@@ -95,13 +113,13 @@ protected function createTableSql($name, $table) {
+@@ -95,15 +114,15 @@ protected function createTableSql($name, $table) {
      $sql = "CREATE TABLE {" . $name . "} (\n";
  
      // Add the SQL statement for each field.
@@ -543,9 +543,12 @@ index 199acc9141..87ee710bd3 100644
 +    if ($table->primaryKey) {
 +      $this->ensureNotNullPrimaryKey($table->primaryKey->getColumnNames(), $table->spec['fields']);
      }
-     $keys = $this->createKeysSql($table);
+-    $keys = $this->createKeysSql($table);
++    $keys = $this->createKeysSql($table->spec, $table);
      if (count($keys)) {
-@@ -111,7 +129,7 @@ protected function createTableSql($name, $table) {
+       $sql .= implode(", \n", $keys) . ", \n";
+     }
+@@ -111,7 +130,7 @@ protected function createTableSql($name, $table) {
      // Remove the last comma and space.
      $sql = substr($sql, 0, -3) . "\n) ";
  
@@ -554,7 +557,7 @@ index 199acc9141..87ee710bd3 100644
      // By default, MySQL uses the default collation for new tables, which is
      // 'utf8mb4_general_ci' (MySQL 5) or 'utf8mb4_0900_ai_ci' (MySQL 8) for
      // utf8mb4. If an alternate collation has been set, it needs to be
-@@ -122,8 +140,8 @@ protected function createTableSql($name, $table) {
+@@ -122,8 +141,8 @@ protected function createTableSql($name, $table) {
      }
  
      // Add table comment.
@@ -565,31 +568,34 @@ index 199acc9141..87ee710bd3 100644
      }
  
      return [$sql];
-@@ -271,16 +289,18 @@ public function getFieldTypeMap() {
-   protected function createKeysSql($spec) {
+@@ -268,20 +287,21 @@ public function getFieldTypeMap() {
+     return $map;
+   }
+ 
+-  protected function createKeysSql($spec) {
++  protected function createKeysSql($spec, $table) {
      $keys = [];
  
 -    if (!empty($spec['primary key'])) {
 -      $keys[] = 'PRIMARY KEY (' . $this->createKeySql($spec['primary key']) . ')';
-+    if ($spec->primaryKey) {
-+      $keys[] = 'PRIMARY KEY (' . $this->createKeySql($spec->primaryKey->columns) . ')';
++    if ($table->primaryKey) {
++      $keys[] = 'PRIMARY KEY (' . $this->createKeySql($table->primaryKey->columns) . ')';
      }
--    if (!empty($spec['unique keys'])) {
--      foreach ($spec['unique keys'] as $key => $fields) {
-+    if (!empty($spec->spec['unique keys'])) {
-+      foreach ($spec->spec['unique keys'] as $key => $fields) {
+     if (!empty($spec['unique keys'])) {
+       foreach ($spec['unique keys'] as $key => $fields) {
          $keys[] = 'UNIQUE KEY [' . $key . '] (' . $this->createKeySql($fields) . ')';
        }
      }
 -    if (!empty($spec['indexes'])) {
 -      $indexes = $this->getNormalizedIndexes($spec);
-+    if ($spec->indexes) {
-+dump([__METHOD__, $spec->indexes]);
-+      $indexes = $this->getNormalizedIndexes($spec->indexes);
-+dump([__METHOD__, $indexes]);
-       foreach ($indexes as $index => $fields) {
+-      foreach ($indexes as $index => $fields) {
++    if ($table->indexes) {
++      $table->indexes = $this->getNormalizedIndexes($spec, $table->indexes);
++dump([__METHOD__, 'out', $table->indexes]);
++      foreach ($table->indexes as $index => $fields) {
          $keys[] = 'INDEX [' . $index . '] (' . $this->createKeySql($fields) . ')';
        }
+     }
 @@ -289,6 +309,18 @@ protected function createKeysSql($spec) {
      return $keys;
    }
@@ -609,18 +615,23 @@ index 199acc9141..87ee710bd3 100644
    /**
     * Gets normalized indexes from a table specification.
     *
-@@ -305,9 +337,8 @@ protected function createKeysSql($spec) {
+@@ -304,12 +336,11 @@ protected function createKeysSql($spec) {
+    * @throws \Drupal\Core\Database\SchemaException
     *   Thrown if field specification is missing.
     */
-   protected function getNormalizedIndexes(array $spec) {
+-  protected function getNormalizedIndexes(array $spec) {
 -    $indexes = $spec['indexes'] ?? [];
 -    foreach ($indexes as $index_name => $index_fields) {
 -      foreach ($index_fields as $index_key => $index_field) {
++  protected function getNormalizedIndexes(array $spec, array $indexes) {
 +    foreach ($indexes as $index) {
 +      foreach ($index->columns as $index_key => $index_field) {
          // Get the name of the field from the index specification.
-         $field_name = is_array($index_field) ? $index_field[0] : $index_field;
+-        $field_name = is_array($index_field) ? $index_field[0] : $index_field;
++        $field_name = $index_field->name;
          // Check whether the field is defined in the table specification.
+         if (isset($spec['fields'][$field_name])) {
+           // Get the MySQL type from the processed field.
 @@ -318,7 +349,7 @@ protected function getNormalizedIndexes(array $spec) {
              // Check whether we need to shorten the index.
              if ((!isset($mysql_field['type']) || $mysql_field['type'] != 'varchar_ascii') && (!isset($mysql_field['length']) || $mysql_field['length'] > 191)) {
@@ -630,15 +641,7 @@ index 199acc9141..87ee710bd3 100644
              }
            }
          }
-@@ -327,6 +358,7 @@ protected function getNormalizedIndexes(array $spec) {
-         }
-       }
-     }
-+dump([__METHOD__, 'out', $indexes]);
-     return $indexes;
-   }
- 
-@@ -355,7 +387,10 @@ protected function shortenIndex(&$index) {
+@@ -355,7 +386,10 @@ protected function shortenIndex(&$index) {
    protected function createKeySql($fields) {
      $return = [];
      foreach ($fields as $field) {
