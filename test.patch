@@ -80,10 +80,10 @@ index 0000000000..3b0046a3a9
 +
 +}
 diff --git a/core/lib/Drupal/Core/Database/Schema.php b/core/lib/Drupal/Core/Database/Schema.php
-index 9530c8fbf8..32c44fbfb7 100644
+index 9530c8fbf8..34dd633674 100644
 --- a/core/lib/Drupal/Core/Database/Schema.php
 +++ b/core/lib/Drupal/Core/Database/Schema.php
-@@ -2,13 +2,23 @@
+@@ -2,13 +2,20 @@
  
  namespace Drupal\Core\Database;
  
@@ -93,9 +93,6 @@ index 9530c8fbf8..32c44fbfb7 100644
  use Drupal\Core\Database\Query\PlaceholderInterface;
 +use Drupal\Core\Database\Schema\Table;
 +use Drupal\Core\Database\SchemaDefinition\ConvertDefinitionTrait;
-+use Drupal\Core\Database\SchemaDefinition\Index as IndexDefinition;
-+use Drupal\Core\Database\SchemaDefinition\KeyColumn as KeyColumnDefinition;
-+use Drupal\Core\Database\SchemaDefinition\PrimaryKey as PrimaryKeyDefinition;
  
  /**
   * Provides a base implementation for Database Schema.
@@ -107,7 +104,7 @@ index 9530c8fbf8..32c44fbfb7 100644
    /**
     * The database connection.
     *
-@@ -46,6 +56,11 @@ abstract class Schema implements PlaceholderInterface {
+@@ -46,6 +53,11 @@ abstract class Schema implements PlaceholderInterface {
    public function __construct($connection) {
      $this->uniqueIdentifier = uniqid('', TRUE);
      $this->connection = $connection;
@@ -119,18 +116,7 @@ index 9530c8fbf8..32c44fbfb7 100644
    }
  
    /**
-@@ -436,8 +451,8 @@ abstract public function dropUniqueKey($table, $name);
-    *
-    * @param $table
-    *   The table to be altered.
--   * @param $name
--   *   The name of the index.
-+   * @param string|\Drupal\Core\Database\Schema\Index $name
-+   *   The name of the index, or an Index object.
-    * @param $fields
-    *   An array of field names or field information; if field information is
-    *   passed, it's an array whose first element is the field name and whose
-@@ -614,6 +629,8 @@ public function createTable($name, $table) {
+@@ -614,6 +626,8 @@ public function createTable($name, $table) {
      if ($this->tableExists($name)) {
        throw new SchemaObjectExistsException("Table '$name' already exists.");
      }
@@ -139,7 +125,7 @@ index 9530c8fbf8..32c44fbfb7 100644
      $statements = $this->createTableSql($name, $table);
      foreach ($statements as $statement) {
        $this->connection->query($statement);
-@@ -627,7 +644,7 @@ public function createTable($name, $table) {
+@@ -627,7 +641,7 @@ public function createTable($name, $table) {
     *
     * @param string $name
     *   The name of the table to create.
@@ -150,10 +136,10 @@ index 9530c8fbf8..32c44fbfb7 100644
     * @return array
 diff --git a/core/lib/Drupal/Core/Database/Schema/Index.php b/core/lib/Drupal/Core/Database/Schema/Index.php
 new file mode 100644
-index 0000000000..5408083219
+index 0000000000..9c08367ad7
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/Schema/Index.php
-@@ -0,0 +1,35 @@
+@@ -0,0 +1,31 @@
 +<?php
 +
 +declare(strict_types=1);
@@ -181,11 +167,7 @@ index 0000000000..5408083219
 +  }
 +
 +  public function getColumnNames(): array {
-+    $ret = [];
-+    foreach ($this->columns as $column) {
-+      $ret[] = $column->name;
-+    }
-+    return $ret;
++    return array_map(fn(KeyColumn $column): string => $column->name, $this->columns);
 +  }
 +
 +}
@@ -222,10 +204,10 @@ index 0000000000..3353efaf3f
 +}
 diff --git a/core/lib/Drupal/Core/Database/Schema/PrimaryKey.php b/core/lib/Drupal/Core/Database/Schema/PrimaryKey.php
 new file mode 100644
-index 0000000000..8b614e3e92
+index 0000000000..62e271f099
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/Schema/PrimaryKey.php
-@@ -0,0 +1,33 @@
+@@ -0,0 +1,20 @@
 +<?php
 +
 +declare(strict_types=1);
@@ -241,21 +223,8 @@ index 0000000000..8b614e3e92
 +
 +  public array $columns = [];
 +
-+  public function __construct(
-+    PrimaryKeyDefinition $definition,
-+  ) {
-+    parent::__construct($definition);
-+    foreach ($definition->columns as $column) {
-+      $this->columns[] = new KeyColumn($column);
-+    }
-+  }
-+
 +  public function getColumnNames(): array {
-+    $ret = [];
-+    foreach ($this->columns as $column) {
-+      $ret[] = $column->name;
-+    }
-+    return $ret;
++    return array_map(fn(KeyColumn $column): string => $column->name, $this->columns);
 +  }
 +
 +}
@@ -692,15 +661,17 @@ index 199acc9141..5a8d3ba912 100644
        else {
 diff --git a/core/modules/mysql/src/EventSubscriber/SchemaDataDefinitionSubscriber.php b/core/modules/mysql/src/EventSubscriber/SchemaDataDefinitionSubscriber.php
 new file mode 100644
-index 0000000000..1f163a6c3b
+index 0000000000..7e0e3837a1
 --- /dev/null
 +++ b/core/modules/mysql/src/EventSubscriber/SchemaDataDefinitionSubscriber.php
-@@ -0,0 +1,32 @@
+@@ -0,0 +1,48 @@
 +<?php
 +
 +namespace Drupal\mysql\EventSubscriber;
 +
 +use Drupal\Core\Database\Event\SchemaIndexDefinitionEvent;
++use Drupal\Core\Database\Event\SchemaKeyColumnDefinitionEvent;
++use Drupal\Core\Database\Event\SchemaPrimaryKeyDefinitionEvent;
 +use Symfony\Component\EventDispatcher\EventSubscriberInterface;
 +
 +/**
@@ -714,6 +685,7 @@ index 0000000000..1f163a6c3b
 +  public static function getSubscribedEvents(): array {
 +    return [
 +//      SchemaIndexDefinitionEvent::class => 'onIndexDefinition',
++      SchemaPrimaryKeyDefinitionEvent::class => 'onPrimaryKeyDefinition',
 +    ];
 +  }
 +
@@ -725,6 +697,19 @@ index 0000000000..1f163a6c3b
 +   */
 +  public function onIndexDefinition(SchemaIndexDefinitionEvent $event): void {
 +dump(__METHOD__, $event);
++  }
++
++  /**
++   * Subscribes to a primary key definition event.
++   *
++   * @param \Drupal\Core\Database\Event\SchemaPrimaryKeyDefinitionEvent $event
++   *   The database event.
++   */
++  public function onPrimaryKeyDefinition(SchemaPrimaryKeyDefinitionEvent $event): void {
++dump(__METHOD__, $event);
++    foreach ($event->primaryKey->definition->columns as $column) {
++      $event->primaryKey->columns[] = new KeyColumn($column);
++    }
 +  }
 +
 +}
