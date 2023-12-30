@@ -165,10 +165,10 @@ index 0000000000..5c523a82c9
 +}
 diff --git a/core/lib/Drupal/Core/Database/Schema/KeyColumn.php b/core/lib/Drupal/Core/Database/Schema/KeyColumn.php
 new file mode 100644
-index 0000000000..3353efaf3f
+index 0000000000..42ee4f8a3b
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/Schema/KeyColumn.php
-@@ -0,0 +1,25 @@
+@@ -0,0 +1,17 @@
 +<?php
 +
 +declare(strict_types=1);
@@ -184,14 +184,6 @@ index 0000000000..3353efaf3f
 +
 +  public string $name;
 +  public ?int $length;
-+
-+  public function __construct(
-+    KeyColumnDefinition $definition,
-+  ) {
-+    parent::__construct($definition);
-+    $this->name = $definition->name;
-+    $this->length = $definition->length;
-+  }
 +
 +}
 diff --git a/core/lib/Drupal/Core/Database/Schema/PrimaryKey.php b/core/lib/Drupal/Core/Database/Schema/PrimaryKey.php
@@ -222,7 +214,7 @@ index 0000000000..62e271f099
 +}
 diff --git a/core/lib/Drupal/Core/Database/Schema/SchemaElementBase.php b/core/lib/Drupal/Core/Database/Schema/SchemaElementBase.php
 new file mode 100644
-index 0000000000..70ec78b271
+index 0000000000..22a570d973
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/Schema/SchemaElementBase.php
 @@ -0,0 +1,19 @@
@@ -239,7 +231,7 @@ index 0000000000..70ec78b271
 + */
 +class SchemaElementBase implements SchemaElementInterface {
 +
-+  public function __construct(
++  final public function __construct(
 +    public readonly SchemaDefinitionInterface $definition,
 +  ) {
 +  }
@@ -361,7 +353,7 @@ index 0000000000..0a9e72dff1
 +}
 diff --git a/core/lib/Drupal/Core/Database/SchemaDefinition/KeyBase.php b/core/lib/Drupal/Core/Database/SchemaDefinition/KeyBase.php
 new file mode 100644
-index 0000000000..d8af1fe07a
+index 0000000000..ca9c743602
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/SchemaDefinition/KeyBase.php
 @@ -0,0 +1,33 @@
@@ -374,7 +366,7 @@ index 0000000000..d8af1fe07a
 +/**
 + * Base class for table keys (primary, unique, index).
 + */
-+class KeyBase implements SchemaDefinitionInterface {
++abstract class KeyBase implements SchemaDefinitionInterface {
 +
 +  public readonly array $columns;
 +
@@ -468,19 +460,20 @@ index 0000000000..2d3489f872
 +interface SchemaDefinitionInterface {
 +}
 diff --git a/core/modules/mysql/mysql.services.yml b/core/modules/mysql/mysql.services.yml
-index c20d7f1833..2d6807174a 100644
+index c20d7f1833..f2cbede8aa 100644
 --- a/core/modules/mysql/mysql.services.yml
 +++ b/core/modules/mysql/mysql.services.yml
-@@ -1,4 +1,7 @@
+@@ -1,4 +1,8 @@
  services:
 +  _defaults:
 +    autoconfigure: true
++    autowire: true
    mysql.views.cast_sql:
      class: Drupal\mysql\Plugin\views\query\MysqlCastSql
      public: false
 +  Drupal\mysql\EventSubscriber\SchemaDataDefinitionSubscriber: ~
 diff --git a/core/modules/mysql/src/Driver/Database/mysql/Schema.php b/core/modules/mysql/src/Driver/Database/mysql/Schema.php
-index 199acc9141..ab69710a22 100644
+index 199acc9141..27eb89fd74 100644
 --- a/core/modules/mysql/src/Driver/Database/mysql/Schema.php
 +++ b/core/modules/mysql/src/Driver/Database/mysql/Schema.php
 @@ -2,10 +2,18 @@
@@ -502,7 +495,17 @@ index 199acc9141..ab69710a22 100644
  use Drupal\Component\Utility\Unicode;
  
  /**
-@@ -84,10 +92,21 @@ protected function buildTableNameCondition($table_name, $operator = '=', $add_pr
+@@ -80,14 +88,31 @@ protected function buildTableNameCondition($table_name, $operator = '=', $add_pr
+     return $condition;
+   }
+ 
++  protected function initIndexElement(IndexDefinition $indexDefinition): Index {
++    $index = new Index($indexDefinition);
++    $this->connection->dispatchEvent(new SchemaIndexDefinitionEvent($index));
++    return $index;
++  }
++
+   /**
     * {@inheritdoc}
     */
    protected function createTableSql($name, $table) {
@@ -512,7 +515,7 @@ index 199acc9141..ab69710a22 100644
 +    }
 +    if (!empty($table->spec['indexes'])) {
 +      foreach ($table->spec['indexes'] as $index) {
-+        $table->indexes[] = $this->initIndexElement($index);
++        $table->indexes[] = $this->connection->dispatchEvent(new SchemaIndexDefinitionEvent(new Index($index)))->index;
 +      }
 +    }
 +    // INIT END.
@@ -525,7 +528,7 @@ index 199acc9141..ab69710a22 100644
        'mysql_engine' => 'InnoDB',
        'mysql_character_set' => 'utf8mb4',
      ];
-@@ -95,15 +114,15 @@ protected function createTableSql($name, $table) {
+@@ -95,15 +120,15 @@ protected function createTableSql($name, $table) {
      $sql = "CREATE TABLE {" . $name . "} (\n";
  
      // Add the SQL statement for each field.
@@ -545,7 +548,7 @@ index 199acc9141..ab69710a22 100644
      if (count($keys)) {
        $sql .= implode(", \n", $keys) . ", \n";
      }
-@@ -111,7 +130,7 @@ protected function createTableSql($name, $table) {
+@@ -111,7 +136,7 @@ protected function createTableSql($name, $table) {
      // Remove the last comma and space.
      $sql = substr($sql, 0, -3) . "\n) ";
  
@@ -554,7 +557,7 @@ index 199acc9141..ab69710a22 100644
      // By default, MySQL uses the default collation for new tables, which is
      // 'utf8mb4_general_ci' (MySQL 5) or 'utf8mb4_0900_ai_ci' (MySQL 8) for
      // utf8mb4. If an alternate collation has been set, it needs to be
-@@ -122,8 +141,8 @@ protected function createTableSql($name, $table) {
+@@ -122,8 +147,8 @@ protected function createTableSql($name, $table) {
      }
  
      // Add table comment.
@@ -565,7 +568,7 @@ index 199acc9141..ab69710a22 100644
      }
  
      return [$sql];
-@@ -268,27 +287,33 @@ public function getFieldTypeMap() {
+@@ -268,21 +293,21 @@ public function getFieldTypeMap() {
      return $map;
    }
  
@@ -594,18 +597,6 @@ index 199acc9141..ab69710a22 100644
        }
      }
  
-     return $keys;
-   }
- 
-+  protected function initIndexElement(IndexDefinition $indexDefinition): Index {
-+    $index = new Index($indexDefinition);
-+    $this->connection->dispatchEvent(new SchemaIndexDefinitionEvent($index));
-+    return $index;
-+  }
-+
-   /**
-    * Gets normalized indexes from a table specification.
-    *
 @@ -304,12 +329,11 @@ protected function createKeysSql($spec) {
     * @throws \Drupal\Core\Database\SchemaException
     *   Thrown if field specification is missing.
@@ -647,10 +638,10 @@ index 199acc9141..ab69710a22 100644
        else {
 diff --git a/core/modules/mysql/src/EventSubscriber/SchemaDataDefinitionSubscriber.php b/core/modules/mysql/src/EventSubscriber/SchemaDataDefinitionSubscriber.php
 new file mode 100644
-index 0000000000..efb98a1b31
+index 0000000000..48dae58a18
 --- /dev/null
 +++ b/core/modules/mysql/src/EventSubscriber/SchemaDataDefinitionSubscriber.php
-@@ -0,0 +1,51 @@
+@@ -0,0 +1,75 @@
 +<?php
 +
 +namespace Drupal\mysql\EventSubscriber;
@@ -660,6 +651,7 @@ index 0000000000..efb98a1b31
 +use Drupal\Core\Database\Event\SchemaPrimaryKeyDefinitionEvent;
 +use Drupal\Core\Database\Schema\KeyColumn;
 +use Symfony\Component\EventDispatcher\EventSubscriberInterface;
++use Symfony\Contracts\EventDispatcher\EventDispatcherInterface;
 +
 +/**
 + * Response subscriber to schema data definition events.
@@ -667,11 +659,23 @@ index 0000000000..efb98a1b31
 +class SchemaDataDefinitionSubscriber implements EventSubscriberInterface {
 +
 +  /**
++   * Constructor.
++   *
++   * @param \Symfony\Contracts\EventDispatcher\EventDispatcherInterface $eventDispatcher
++   *   The event dispatcher.
++   */
++  public function __construct(
++    public readonly EventDispatcherInterface $eventDispatcher,
++  ) {
++  }
++
++  /**
 +   * {@inheritdoc}
 +   */
 +  public static function getSubscribedEvents(): array {
 +    return [
 +      SchemaIndexDefinitionEvent::class => 'onIndexDefinition',
++      SchemaKeyColumnDefinitionEvent::class => 'onKeyColumnDefinition',
 +      SchemaPrimaryKeyDefinitionEvent::class => 'onPrimaryKeyDefinition',
 +    ];
 +  }
@@ -685,8 +689,19 @@ index 0000000000..efb98a1b31
 +  public function onIndexDefinition(SchemaIndexDefinitionEvent $event): void {
 +    $event->index->name = $event->index->definition->name;
 +    foreach ($event->index->definition->columns as $column) {
-+      $event->index->columns[] = new KeyColumn($column);
++      $event->index->columns[] = $this->eventDispatcher->dispatch(new SchemaKeyColumnDefinitionEvent(new KeyColumn($column)))->column;
 +    }
++  }
++
++  /**
++   * Subscribes to a key column definition event.
++   *
++   * @param \Drupal\Core\Database\Event\SchemaKeyColumnDefinitionEvent $event
++   *   The database event.
++   */
++  public function onKeyColumnDefinition(SchemaKeyColumnDefinitionEvent $event): void {
++    $event->keyColumn->name = $event->keyColumn->definition->name;
++    $event->keyColumn->length = $event->keyColumn->definition->length;
 +  }
 +
 +  /**
@@ -697,7 +712,7 @@ index 0000000000..efb98a1b31
 +   */
 +  public function onPrimaryKeyDefinition(SchemaPrimaryKeyDefinitionEvent $event): void {
 +    foreach ($event->primaryKey->definition->columns as $column) {
-+      $event->primaryKey->columns[] = new KeyColumn($column);
++      $event->primaryKey->columns[] = $this->eventDispatcher->dispatch(new SchemaKeyColumnDefinitionEvent(new KeyColumn($column)))->column;
 +    }
 +  }
 +
