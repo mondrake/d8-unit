@@ -80,10 +80,10 @@ index 0000000000..3b0046a3a9
 +
 +}
 diff --git a/core/lib/Drupal/Core/Database/Schema.php b/core/lib/Drupal/Core/Database/Schema.php
-index 9530c8fbf8..f6da9e37e7 100644
+index 9530c8fbf8..32c44fbfb7 100644
 --- a/core/lib/Drupal/Core/Database/Schema.php
 +++ b/core/lib/Drupal/Core/Database/Schema.php
-@@ -2,7 +2,14 @@
+@@ -2,13 +2,23 @@
  
  namespace Drupal\Core\Database;
  
@@ -92,13 +92,22 @@ index 9530c8fbf8..f6da9e37e7 100644
 +use Drupal\Core\Database\Event\SchemaPrimaryKeyDefinitionEvent;
  use Drupal\Core\Database\Query\PlaceholderInterface;
 +use Drupal\Core\Database\Schema\Table;
++use Drupal\Core\Database\SchemaDefinition\ConvertDefinitionTrait;
 +use Drupal\Core\Database\SchemaDefinition\Index as IndexDefinition;
 +use Drupal\Core\Database\SchemaDefinition\KeyColumn as KeyColumnDefinition;
 +use Drupal\Core\Database\SchemaDefinition\PrimaryKey as PrimaryKeyDefinition;
  
  /**
   * Provides a base implementation for Database Schema.
-@@ -46,6 +53,11 @@ abstract class Schema implements PlaceholderInterface {
+  */
+ abstract class Schema implements PlaceholderInterface {
+ 
++  use ConvertDefinitionTrait;
++
+   /**
+    * The database connection.
+    *
+@@ -46,6 +56,11 @@ abstract class Schema implements PlaceholderInterface {
    public function __construct($connection) {
      $this->uniqueIdentifier = uniqid('', TRUE);
      $this->connection = $connection;
@@ -110,7 +119,7 @@ index 9530c8fbf8..f6da9e37e7 100644
    }
  
    /**
-@@ -436,8 +448,8 @@ abstract public function dropUniqueKey($table, $name);
+@@ -436,8 +451,8 @@ abstract public function dropUniqueKey($table, $name);
     *
     * @param $table
     *   The table to be altered.
@@ -121,7 +130,7 @@ index 9530c8fbf8..f6da9e37e7 100644
     * @param $fields
     *   An array of field names or field information; if field information is
     *   passed, it's an array whose first element is the field name and whose
-@@ -614,6 +626,8 @@ public function createTable($name, $table) {
+@@ -614,6 +629,8 @@ public function createTable($name, $table) {
      if ($this->tableExists($name)) {
        throw new SchemaObjectExistsException("Table '$name' already exists.");
      }
@@ -130,7 +139,7 @@ index 9530c8fbf8..f6da9e37e7 100644
      $statements = $this->createTableSql($name, $table);
      foreach ($statements as $statement) {
        $this->connection->query($statement);
-@@ -627,7 +641,7 @@ public function createTable($name, $table) {
+@@ -627,7 +644,7 @@ public function createTable($name, $table) {
     *
     * @param string $name
     *   The name of the table to create.
@@ -139,43 +148,6 @@ index 9530c8fbf8..f6da9e37e7 100644
     *   A Schema API table definition array.
     *
     * @return array
-@@ -725,4 +739,36 @@ protected function ensureNotNullPrimaryKey(array $primary_key, array $fields) {
-     }
-   }
- 
-+  final protected function convertTableToSchemaDefinition(array $spec): array {
-+    if (!empty($spec['primary key'])) {
-+      $spec['primary key'] = $this->convertPrimaryKeyToSchemaDefinition($spec['primary key']);
-+    }
-+    if (!empty($spec['indexes'])) {
-+      $spec['indexes'] = $this->convertIndexesToSchemaDefinition($spec['indexes']);
-+    }
-+    return $spec;
-+  }
-+
-+  final protected function convertPrimaryKeyToSchemaDefinition(PrimaryKeyDefinition|array $primaryKey): PrimaryKeyDefinition {
-+    if ($primaryKey instanceof PrimaryKeyDefinition) {
-+      return $primaryKey;
-+    }
-+    return new PrimaryKeyDefinition($primaryKey);
-+  }
-+
-+  final protected function convertIndexesToSchemaDefinition(array $indexes): array {
-+    $return = [];
-+    foreach ($indexes as $key => $indexDefinition) {
-+      $return[] = $this->convertIndexToSchemaDefinition($key, $indexDefinition);
-+    }
-+    return $return;
-+  }
-+
-+  final protected function convertIndexToSchemaDefinition(string $name, IndexDefinition|array $index): IndexDefinition {
-+    if ($index instanceof IndexDefinition) {
-+      return $index;
-+    }
-+    return new IndexDefinition($name, $index);
-+  }
-+
- }
 diff --git a/core/lib/Drupal/Core/Database/Schema/Index.php b/core/lib/Drupal/Core/Database/Schema/Index.php
 new file mode 100644
 index 0000000000..5408083219
@@ -355,6 +327,56 @@ index 0000000000..ee1d37656a
 +    public string $name,
 +    public array $spec,
 +  ) {
++  }
++
++}
+diff --git a/core/lib/Drupal/Core/Database/SchemaDefinition/ConvertDefinitionTrait.php b/core/lib/Drupal/Core/Database/SchemaDefinition/ConvertDefinitionTrait.php
+new file mode 100644
+index 0000000000..8bba948537
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/SchemaDefinition/ConvertDefinitionTrait.php
+@@ -0,0 +1,44 @@
++<?php
++
++declare(strict_types=1);
++
++namespace Drupal\Core\Database\SchemaDefinition;
++
++/**
++ * Interface for objects describing database elements.
++ */
++trait ConvertDefinitionTrait {
++
++  final protected function convertTableToSchemaDefinition(array $spec): array {
++    if (!empty($spec['primary key'])) {
++      $spec['primary key'] = $this->convertPrimaryKeyToSchemaDefinition($spec['primary key']);
++    }
++    if (!empty($spec['indexes'])) {
++      $spec['indexes'] = $this->convertIndexesToSchemaDefinition($spec['indexes']);
++    }
++    return $spec;
++  }
++
++  final protected function convertPrimaryKeyToSchemaDefinition(PrimaryKey|array $primaryKey): PrimaryKey {
++    if ($primaryKey instanceof PrimaryKey) {
++      return $primaryKey;
++    }
++    return new PrimaryKey($primaryKey);
++  }
++
++  final protected function convertIndexesToSchemaDefinition(array $indexes): array {
++    $return = [];
++    foreach ($indexes as $key => $indexDefinition) {
++      $return[] = $this->convertIndexToSchemaDefinition($key, $indexDefinition);
++    }
++    return $return;
++  }
++
++  final protected function convertIndexToSchemaDefinition(string $name, Index|array $index): Index {
++    if ($index instanceof Index) {
++      return $index;
++    }
++    return new Index($name, $index);
 +  }
 +
 +}
