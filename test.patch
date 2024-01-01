@@ -1,9 +1,54 @@
+diff --git a/core/lib/Drupal/Core/Database/Schema.php b/core/lib/Drupal/Core/Database/Schema.php
+index 9530c8fbf8..94ead3f762 100644
+--- a/core/lib/Drupal/Core/Database/Schema.php
++++ b/core/lib/Drupal/Core/Database/Schema.php
+@@ -3,12 +3,16 @@
+ namespace Drupal\Core\Database;
+ 
+ use Drupal\Core\Database\Query\PlaceholderInterface;
++use Drupal\Core\Database\SchemaDefinition\ConvertDefinitionTrait;
++use Drupal\Core\Database\SchemaDefinition\Table as TableDefinition;
+ 
+ /**
+  * Provides a base implementation for Database Schema.
+  */
+ abstract class Schema implements PlaceholderInterface {
+ 
++  use ConvertDefinitionTrait;
++
+   /**
+    * The database connection.
+    *
+@@ -602,8 +606,8 @@ abstract public function changeField($table, $field, $field_new, $spec, $keys_ne
+    *
+    * @param $name
+    *   The name of the table to create.
+-   * @param $table
+-   *   A Schema API table definition array.
++   * @param array|\Drupal\Core\Database\SchemaDefinition\Table $table
++   *   A Schema API table definition.
+    *
+    * @throws \Drupal\Core\Database\SchemaObjectExistsException
+    *   If the specified table already exists.
+@@ -614,7 +618,12 @@ public function createTable($name, $table) {
+     if ($this->tableExists($name)) {
+       throw new SchemaObjectExistsException("Table '$name' already exists.");
+     }
++    if ($table instanceof TableDefinition) {
++      $name = $table->name;
++      $table = $this->convertTableToArrayDefinition($table);
++    }
+     $statements = $this->createTableSql($name, $table);
++dump([__METHOD__, $table, $statements]);
+     foreach ($statements as $statement) {
+       $this->connection->query($statement);
+     }
 diff --git a/core/lib/Drupal/Core/Database/SchemaDefinition/Column.php b/core/lib/Drupal/Core/Database/SchemaDefinition/Column.php
 new file mode 100644
-index 0000000000..b61dfb69d6
+index 0000000000..3dac9ea47b
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/SchemaDefinition/Column.php
-@@ -0,0 +1,31 @@
+@@ -0,0 +1,32 @@
 +<?php
 +
 +declare(strict_types=1);
@@ -31,16 +76,17 @@ index 0000000000..b61dfb69d6
 +    public readonly Property|int $precision = Property::Undefined,
 +    public readonly Property|int $scale = Property::Undefined,
 +    public readonly Property|bool $binary = Property::Undefined,
++    public readonly Property|array $dbSpecificType = Property::Undefined,
 +  ) {
 +  }
 +
 +}
 diff --git a/core/lib/Drupal/Core/Database/SchemaDefinition/ConvertDefinitionTrait.php b/core/lib/Drupal/Core/Database/SchemaDefinition/ConvertDefinitionTrait.php
 new file mode 100644
-index 0000000000..11b7605d7d
+index 0000000000..f7f7990ad4
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/SchemaDefinition/ConvertDefinitionTrait.php
-@@ -0,0 +1,34 @@
+@@ -0,0 +1,85 @@
 +<?php
 +
 +declare(strict_types=1);
@@ -48,9 +94,60 @@ index 0000000000..11b7605d7d
 +namespace Drupal\Core\Database\SchemaDefinition;
 +
 +/**
-+ * Interface for objects describing database elements.
++ * A helper trait to convert SchemaDefinition objects to legacy array.
 + */
 +trait ConvertDefinitionTrait {
++
++  final protected function convertTableToArrayDefinition(Table $table): array {
++    $spec = [];
++    if ($table->description !== Property::Undefined) {
++      $spec['description'] = $table->description;
++    }
++    $spec['fields'] = $this->convertColumnsToArrayDefinition($table->columns);
++    if ($table->primaryKey !== Property::Undefined) {
++      $spec['primary key'] = $this->convertPrimaryKeyToArrayDefinition($table->primaryKey);
++    }
++    if ($table->uniqueKeys !== Property::Undefined) {
++      $spec['unique keys'] = $this->convertUniqueKeysToArrayDefinition($table->uniqueKeys);
++    }
++    if ($table->indexes !== Property::Undefined) {
++      $spec['indexes'] = $this->convertIndexesToArrayDefinition($table->indexes);
++    }
++    if ($table->foreignKeys !== Property::Undefined) {
++      $spec['foreign keys'] = $this->convertForeignKeysToArrayDefinition($table->foreignKeys);
++    }
++    return $spec;
++  }
++
++  final protected function convertColumnsToArrayDefinition(array $columns): array {
++    $spec = [];
++    return $spec;
++  }
++
++  final protected function convertColumnToArrayDefinition(Column $column): array {
++    $spec = [];
++    return $spec;
++  }
++
++  final protected function convertPrimaryKeyToArrayDefinition(PrimaryKey $primaryKey): array {
++    $spec = [];
++    return $spec;
++  }
++
++  final protected function convertUniqueKeysToArrayDefinition(array $uniqueKeys): array {
++    $spec = [];
++    return $spec;
++  }
++
++  final protected function convertIndexesToArrayDefinition(array $indexes): array {
++    $spec = [];
++    return $spec;
++  }
++
++  final protected function convertForeignKeysToArrayDefinition(array $foreignKeys): array {
++    $spec = [];
++    return $spec;
++  }
 +
 +  final protected function convertTableToSchemaDefinition(array $spec): array {
 +    if (!empty($spec['primary key'])) {
@@ -328,20 +425,8 @@ index 0000000000..68a3b7e052
 +  }
 +
 +}
-diff --git a/core/lib/Drupal/Core/Extension/ModuleInstaller.php b/core/lib/Drupal/Core/Extension/ModuleInstaller.php
-index 289ecffe41..d8e738989c 100644
---- a/core/lib/Drupal/Core/Extension/ModuleInstaller.php
-+++ b/core/lib/Drupal/Core/Extension/ModuleInstaller.php
-@@ -656,6 +656,7 @@ public function validateUninstall(array $module_list) {
-    */
-   protected function installSchema(string $module): void {
-     $tables = $this->moduleHandler->invoke($module, 'schema') ?? [];
-+dump($tables);
-     $schema = $this->connection->schema();
-     foreach ($tables as $name => $table) {
-       $schema->createTable($name, $table);
 diff --git a/core/modules/system/system.install b/core/modules/system/system.install
-index 079fa6cbf7..f778c2107c 100644
+index 079fa6cbf7..4002134e4c 100644
 --- a/core/modules/system/system.install
 +++ b/core/modules/system/system.install
 @@ -13,6 +13,12 @@
@@ -357,7 +442,7 @@ index 079fa6cbf7..f778c2107c 100644
  use Drupal\Core\DrupalKernel;
  use Drupal\Core\Extension\ExtensionLifecycle;
  use Drupal\Core\Entity\EntityTypeInterface;
-@@ -1616,69 +1622,77 @@ function system_schema() {
+@@ -1616,69 +1622,83 @@ function system_schema() {
    // @deprecated The sequences table has been deprecated in drupal:10.2.0 and is
    // removed from drupal:12.0.0. See https://www.drupal.org/node/3220378.
    // @todo: Remove sequences table in Drupal 12. See https://www.drupal.org/i/3335756
@@ -473,8 +558,14 @@ index 079fa6cbf7..f778c2107c 100644
 -      'uid' => ['uid'],
 +    primaryKey: new PrimaryKey(['sid']),
 +    indexes: [
-+      new Index('timestamp', ['timestamp']),
-+      new Index('uid', ['uid']),
++      new Index(
++        name: 'timestamp',
++        columns: ['timestamp'],
++      ),
++      new Index(
++        name: 'uid',
++        columns: ['uid'],
++      ),
      ],
 -    'foreign keys' => [
 -      'session_user' => [
