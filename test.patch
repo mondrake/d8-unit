@@ -1,19 +1,36 @@
 diff --git a/core/lib/Drupal/Core/Batch/BatchStorage.php b/core/lib/Drupal/Core/Batch/BatchStorage.php
-index a7733535ba..b2cd20cdbb 100644
+index a7733535ba..12f2fc2871 100644
 --- a/core/lib/Drupal/Core/Batch/BatchStorage.php
 +++ b/core/lib/Drupal/Core/Batch/BatchStorage.php
-@@ -6,6 +6,10 @@
+@@ -6,10 +6,17 @@
  use Drupal\Core\Access\CsrfTokenGenerator;
  use Drupal\Core\Database\Connection;
  use Drupal\Core\Database\DatabaseException;
 +use Drupal\Core\Database\SchemaDefinition\Column;
++use Drupal\Core\Database\SchemaDefinition\ConvertDefinitionTrait;
 +use Drupal\Core\Database\SchemaDefinition\Index;
 +use Drupal\Core\Database\SchemaDefinition\PrimaryKey;
 +use Drupal\Core\Database\SchemaDefinition\Table;
  use Symfony\Component\HttpFoundation\Session\SessionInterface;
  
  class BatchStorage implements BatchStorageInterface {
-@@ -232,38 +236,46 @@ protected function catchException(\Exception $e) {
+ 
++  use ConvertDefinitionTrait;
++
+   /**
+    * The table name.
+    */
+@@ -195,6 +202,9 @@ protected function ensureTableExists() {
+     try {
+       $database_schema = $this->connection->schema();
+       $schema_definition = $this->schemaDefinition();
++      if (!$this->connection->supportsSchemaDefinition()) {
++        $schema_definition = $this->convertTableToArrayDefinition($schema_definition);
++      }
+       $database_schema->createTable(static::TABLE_NAME, $schema_definition);
+     }
+     // If another process has already created the batch table, attempting to
+@@ -232,38 +242,46 @@ protected function catchException(\Exception $e) {
     * @internal
     */
    public function schemaDefinition() {
@@ -90,69 +107,48 @@ index a7733535ba..b2cd20cdbb 100644
    }
  
  }
-diff --git a/core/lib/Drupal/Core/Database/Schema.php b/core/lib/Drupal/Core/Database/Schema.php
-index 9530c8fbf8..de2b822ac4 100644
---- a/core/lib/Drupal/Core/Database/Schema.php
-+++ b/core/lib/Drupal/Core/Database/Schema.php
-@@ -3,12 +3,16 @@
- namespace Drupal\Core\Database;
+diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
+index cdaf0d19dd..498c6d829a 100644
+--- a/core/lib/Drupal/Core/Database/Connection.php
++++ b/core/lib/Drupal/Core/Database/Connection.php
+@@ -1767,6 +1767,19 @@ public function supportsTransactionalDDL() {
+     return $this->transactionalDDLSupport;
+   }
  
- use Drupal\Core\Database\Query\PlaceholderInterface;
-+use Drupal\Core\Database\SchemaDefinition\ConvertDefinitionTrait;
-+use Drupal\Core\Database\SchemaDefinition\Table as TableDefinition;
- 
- /**
-  * Provides a base implementation for Database Schema.
-  */
- abstract class Schema implements PlaceholderInterface {
- 
-+  use ConvertDefinitionTrait;
++  /**
++   * Determines if this driver can handle SchemaDefinition objects.
++   *
++   * @return bool
++   *   TRUE if this driver can handle SchemaDefinition objects directly, FALSE
++   *   if they have to be converted to the legacy array-based specifications.
++   *
++   * @internal
++   */
++  public function supportsSchemaDefinition(): bool {
++    return FALSE;
++  }
 +
    /**
-    * The database connection.
+    * Returns the name of the database engine accessed by this driver.
     *
-@@ -480,6 +484,9 @@ abstract public function dropUniqueKey($table, $name);
-    *   Note that the above is a partial table definition and that we would
-    *   usually pass a complete table definition as obtained through
-    *   hook_schema() instead.
-+   * @param \Drupal\Core\Database\SchemaDefinition\Table|null $tableDefinition
-+   *   (Optional) The table specification (see above) as a SchemaDefinition
-+   *   object.
-    *
-    * @see schemaapi
-    * @see hook_schema()
-@@ -491,7 +498,7 @@ abstract public function dropUniqueKey($table, $name);
-    *
-    * @todo remove the $spec argument whenever schema introspection is added.
-    */
--  abstract public function addIndex($table, $name, $fields, array $spec);
-+   abstract public function addIndex($table, $name, $fields, array $spec, /* ?TableDefinition $tableDefinition */);
- 
-   /**
-    * Drop an index.
-@@ -602,8 +609,8 @@ abstract public function changeField($table, $field, $field_new, $spec, $keys_ne
-    *
-    * @param $name
-    *   The name of the table to create.
--   * @param $table
--   *   A Schema API table definition array.
-+   * @param array|\Drupal\Core\Database\SchemaDefinition\Table $table
-+   *   A Schema API table definition.
-    *
-    * @throws \Drupal\Core\Database\SchemaObjectExistsException
-    *   If the specified table already exists.
-@@ -614,6 +621,11 @@ public function createTable($name, $table) {
-     if ($this->tableExists($name)) {
-       throw new SchemaObjectExistsException("Table '$name' already exists.");
-     }
-+    if ($table instanceof TableDefinition) {
-+      assert($name === $table->name, "The value of the \$name argument '{$name}' must be equal to the \$name property of the \$table argument; found '{$table->name}'.");
-+      $name = $table->name;
-+      $table = $this->convertTableToArrayDefinition($table);
-+    }
-     $statements = $this->createTableSql($name, $table);
-     foreach ($statements as $statement) {
-       $this->connection->query($statement);
+diff --git a/core/lib/Drupal/Core/Database/Exception/SchemaDefinitionException.php b/core/lib/Drupal/Core/Database/Exception/SchemaDefinitionException.php
+new file mode 100644
+index 0000000000..fc0b178ac6
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/Exception/SchemaDefinitionException.php
+@@ -0,0 +1,12 @@
++<?php
++
++namespace Drupal\Core\Database\Exception;
++
++use Drupal\Core\Database\DatabaseException;
++use Drupal\Core\Database\SchemaException;
++
++/**
++ * Exception thrown by the Schema Definition API.
++ */
++class SchemaDefinitionException extends SchemaException implements DatabaseException {
++}
 diff --git a/core/lib/Drupal/Core/Database/SchemaDefinition/Column.php b/core/lib/Drupal/Core/Database/SchemaDefinition/Column.php
 new file mode 100644
 index 0000000000..5dea84a4ae
@@ -254,10 +250,10 @@ index 0000000000..5dea84a4ae
 +}
 diff --git a/core/lib/Drupal/Core/Database/SchemaDefinition/ConvertDefinitionTrait.php b/core/lib/Drupal/Core/Database/SchemaDefinition/ConvertDefinitionTrait.php
 new file mode 100644
-index 0000000000..673b397841
+index 0000000000..776f4d6391
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/SchemaDefinition/ConvertDefinitionTrait.php
-@@ -0,0 +1,183 @@
+@@ -0,0 +1,185 @@
 +<?php
 +
 +declare(strict_types=1);
@@ -276,23 +272,25 @@ index 0000000000..673b397841
 +   *
 +   * @internal
 +   */
-+  final protected function convertTableToArrayDefinition(Table $table): array {
++  final protected static function convertTableToArrayDefinition(Table $table): array {
 +    $spec = [];
 +    if ($table->description !== Property::Undefined) {
 +      $spec['description'] = $table->description;
 +    }
-+    $spec['fields'] = $this->convertColumnsToArrayDefinition($table->columns);
++    if ($table->columns !== Property::Undefined) {
++      $spec['fields'] = self::convertColumnsToArrayDefinition($table->columns);
++    }
 +    if ($table->primaryKey !== Property::Undefined) {
-+      $spec['primary key'] = $this->convertPrimaryKeyToArrayDefinition($table->primaryKey);
++      $spec['primary key'] = self::convertPrimaryKeyToArrayDefinition($table->primaryKey);
 +    }
 +    if ($table->uniqueKeys !== Property::Undefined) {
-+      $spec['unique keys'] = $this->convertUniqueKeysToArrayDefinition($table->uniqueKeys);
++      $spec['unique keys'] = self::convertUniqueKeysToArrayDefinition($table->uniqueKeys);
 +    }
 +    if ($table->indexes !== Property::Undefined) {
-+      $spec['indexes'] = $this->convertIndexesToArrayDefinition($table->indexes);
++      $spec['indexes'] = self::convertIndexesToArrayDefinition($table->indexes);
 +    }
 +    if ($table->foreignKeys !== Property::Undefined) {
-+      $spec['foreign keys'] = $this->convertForeignKeysToArrayDefinition($table->foreignKeys);
++      $spec['foreign keys'] = self::convertForeignKeysToArrayDefinition($table->foreignKeys);
 +    }
 +    return $spec;
 +  }
@@ -302,10 +300,10 @@ index 0000000000..673b397841
 +   *
 +   * @internal
 +   */
-+  final protected function convertColumnsToArrayDefinition(array $columns): array {
++  final protected static function convertColumnsToArrayDefinition(array $columns): array {
 +    $spec = [];
 +    foreach ($columns as $column) {
-+      $spec[$column->name] = $this->convertColumnToArrayDefinition($column);
++      $spec[$column->name] = self::convertColumnToArrayDefinition($column);
 +    }
 +    return $spec;
 +  }
@@ -315,7 +313,7 @@ index 0000000000..673b397841
 +   *
 +   * @internal
 +   */
-+  final protected function convertColumnToArrayDefinition(Column $column): array {
++  final protected static function convertColumnToArrayDefinition(Column $column): array {
 +    $spec = [];
 +    if ($column->type !== Property::Undefined) {
 +      $spec['type'] = $column->type;
@@ -363,10 +361,10 @@ index 0000000000..673b397841
 +   *
 +   * @internal
 +   */
-+  final protected function convertKeyColumnsToArrayDefinition(array $columns): array {
++  final protected static function convertKeyColumnsToArrayDefinition(array $columns): array {
 +    $spec = [];
 +    foreach ($columns as $column) {
-+      $spec[] = $this->convertKeyColumnToArrayDefinition($column);
++      $spec[] = self::convertKeyColumnToArrayDefinition($column);
 +    }
 +    return $spec;
 +  }
@@ -376,7 +374,7 @@ index 0000000000..673b397841
 +   *
 +   * @internal
 +   */
-+  final protected function convertKeyColumnToArrayDefinition(KeyColumn $column): string|array {
++  final protected static function convertKeyColumnToArrayDefinition(KeyColumn $column): string|array {
 +    if ($column->length !== NULL) {
 +      return [$column->name, $column->length];
 +    }
@@ -388,8 +386,8 @@ index 0000000000..673b397841
 +   *
 +   * @internal
 +   */
-+  final protected function convertPrimaryKeyToArrayDefinition(PrimaryKey $primaryKey): array {
-+    return $this->convertKeyColumnsToArrayDefinition($primaryKey->columns);
++  final protected static function convertPrimaryKeyToArrayDefinition(PrimaryKey $primaryKey): array {
++    return self::convertKeyColumnsToArrayDefinition($primaryKey->columns);
 +  }
 +
 +  /**
@@ -397,10 +395,10 @@ index 0000000000..673b397841
 +   *
 +   * @internal
 +   */
-+  final protected function convertUniqueKeysToArrayDefinition(array $uniqueKeys): array {
++  final protected static function convertUniqueKeysToArrayDefinition(array $uniqueKeys): array {
 +    $spec = [];
 +    foreach ($uniqueKeys as $uniqueKey) {
-+      $spec[$uniqueKey->name] = $this->convertKeyColumnsToArrayDefinition($uniqueKey->columns);
++      $spec[$uniqueKey->name] = self::convertKeyColumnsToArrayDefinition($uniqueKey->columns);
 +    }
 +    return $spec;
 +  }
@@ -410,10 +408,10 @@ index 0000000000..673b397841
 +   *
 +   * @internal
 +   */
-+  final protected function convertIndexesToArrayDefinition(array $indexes): array {
++  final protected static function convertIndexesToArrayDefinition(array $indexes): array {
 +    $spec = [];
 +    foreach ($indexes as $index) {
-+      $spec[$index->name] = $this->convertKeyColumnsToArrayDefinition($index->columns);
++      $spec[$index->name] = self::convertKeyColumnsToArrayDefinition($index->columns);
 +    }
 +    return $spec;
 +  }
@@ -423,11 +421,11 @@ index 0000000000..673b397841
 +   *
 +   * @internal
 +   */
-+  final protected function convertForeignKeysToArrayDefinition(array $foreignKeys): array {
++  final protected static function convertForeignKeysToArrayDefinition(array $foreignKeys): array {
 +    $spec = [];
 +    foreach ($foreignKeys as $foreignKey) {
-+      $cols = $this->convertKeyColumnsToArrayDefinition($foreignKey->columns);
-+      $foreignCols = $this->convertKeyColumnsToArrayDefinition($foreignKey->foreignColumns);
++      $cols = self::convertKeyColumnsToArrayDefinition($foreignKey->columns);
++      $foreignCols = self::convertKeyColumnsToArrayDefinition($foreignKey->foreignColumns);
 +      $match = [];
 +      for ($i = 0; $i < count($cols); $i++) {
 +        $match[$cols[$i]] = $foreignCols[$i];
@@ -443,10 +441,10 @@ index 0000000000..673b397841
 +}
 diff --git a/core/lib/Drupal/Core/Database/SchemaDefinition/ForeignKey.php b/core/lib/Drupal/Core/Database/SchemaDefinition/ForeignKey.php
 new file mode 100644
-index 0000000000..2c17718be8
+index 0000000000..4c9541fbeb
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/SchemaDefinition/ForeignKey.php
-@@ -0,0 +1,28 @@
+@@ -0,0 +1,47 @@
 +<?php
 +
 +declare(strict_types=1);
@@ -458,10 +456,29 @@ index 0000000000..2c17718be8
 + */
 +final class ForeignKey extends KeyBase {
 +
++  /**
++   * The foreign key columns.
++   *
++   * @var KeyColumn[]
++   *   The list of KeyColumn objects of the foreign table.
++   */
 +  public readonly array $foreignColumns;
 +
 +  /**
 +   * Constructor.
++   *
++   * @param string $name
++   *   The foreign key name.
++   * @param string $foreignTable
++   *   The foreign (referenced) table name.
++   * @param list<KeyColumn|string|array{0:string, 1:int}> $columns
++   *   A mix of key column specifiers, being KeyColumn objects, strings naming
++   *   columns, or arrays of two elements, column name and length, specifying a
++   *   prefix of the named column.
++   * @param list<KeyColumn|string|array{0:string, 1:int}> $foreignColumns
++   *   A mix of key column specifiers of the foreign (referenced) table, being
++   *   KeyColumn objects, strings naming columns, or arrays of two elements,
++   *   column name and length, specifying a prefix of the named column.
 +   */
 +  public function __construct(
 +    public readonly string $name,
@@ -477,10 +494,10 @@ index 0000000000..2c17718be8
 +}
 diff --git a/core/lib/Drupal/Core/Database/SchemaDefinition/Index.php b/core/lib/Drupal/Core/Database/SchemaDefinition/Index.php
 new file mode 100644
-index 0000000000..0a9e72dff1
+index 0000000000..e5292b5f60
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/SchemaDefinition/Index.php
-@@ -0,0 +1,22 @@
+@@ -0,0 +1,29 @@
 +<?php
 +
 +declare(strict_types=1);
@@ -494,6 +511,13 @@ index 0000000000..0a9e72dff1
 +
 +  /**
 +   * Constructor.
++   *
++   * @param string $name
++   *   The index name.
++   * @param list<KeyColumn|string|array{0:string, 1:int}> $columns
++   *   A mix of key column specifiers, being KeyColumn objects, strings naming
++   *   columns, or arrays of two elements, column name and length, specifying a
++   *   prefix of the named column.
 +   */
 +  public function __construct(
 +    public readonly string $name,
@@ -505,10 +529,10 @@ index 0000000000..0a9e72dff1
 +}
 diff --git a/core/lib/Drupal/Core/Database/SchemaDefinition/KeyBase.php b/core/lib/Drupal/Core/Database/SchemaDefinition/KeyBase.php
 new file mode 100644
-index 0000000000..010b6cbd40
+index 0000000000..b135d4ed37
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/SchemaDefinition/KeyBase.php
-@@ -0,0 +1,50 @@
+@@ -0,0 +1,59 @@
 +<?php
 +
 +declare(strict_types=1);
@@ -520,13 +544,21 @@ index 0000000000..010b6cbd40
 + */
 +abstract class KeyBase implements SchemaDefinitionInterface {
 +
++  /**
++   * The key columns.
++   *
++   * @var KeyColumn[]
++   *   The list of KeyColumn objects.
++   */
 +  public readonly array $columns;
 +
 +  /**
 +   * Constructor.
 +   *
-+   * @param KeyColumn[] $columns
-+   *   An array of one or more key column specifiers.
++   * @param list<KeyColumn|string|array{0:string, 1:int}> $columns
++   *   A mix of key column specifiers, being KeyColumn objects, strings naming
++   *   columns, or arrays of two elements, column name and length, specifying a
++   *   prefix of the named column.
 +   */
 +  public function __construct(array $columns) {
 +    $this->columns = $this->buildColumns($columns);
@@ -536,8 +568,9 @@ index 0000000000..010b6cbd40
 +   * Builds an array of KeyColumn objects from a mixed list of columns.
 +   *
 +   * @param list<KeyColumn|string|array{0:string, 1:int}> $rawColumns
-+   *   The list can be of a mix of KeyColumn objects, strings representing
-+   *   column names, or arrays to represent limited length keys.
++   *   A mix of key column specifiers, being KeyColumn objects, strings naming
++   *   columns, or arrays of two elements, column name and length, specifying a
++   *   prefix of the named column.
 +   *
 +   * @return KeyColumn[]
 +   *   The normalized list of KeyColumn objects.
@@ -561,10 +594,10 @@ index 0000000000..010b6cbd40
 +}
 diff --git a/core/lib/Drupal/Core/Database/SchemaDefinition/KeyColumn.php b/core/lib/Drupal/Core/Database/SchemaDefinition/KeyColumn.php
 new file mode 100644
-index 0000000000..314a7c7e05
+index 0000000000..d54b7e3f1f
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/SchemaDefinition/KeyColumn.php
-@@ -0,0 +1,21 @@
+@@ -0,0 +1,26 @@
 +<?php
 +
 +declare(strict_types=1);
@@ -578,6 +611,11 @@ index 0000000000..314a7c7e05
 +
 +  /**
 +   * Constructor.
++   *
++   * @param string $name
++   *   The column name.
++   * @param int|null $length
++   *   (Optional) if set, specifies a prefix of the named column.
 +   */
 +  public function __construct(
 +    public readonly string $name,
@@ -588,10 +626,10 @@ index 0000000000..314a7c7e05
 +}
 diff --git a/core/lib/Drupal/Core/Database/SchemaDefinition/PrimaryKey.php b/core/lib/Drupal/Core/Database/SchemaDefinition/PrimaryKey.php
 new file mode 100644
-index 0000000000..2df0b3ee6b
+index 0000000000..a176fad02f
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/SchemaDefinition/PrimaryKey.php
-@@ -0,0 +1,22 @@
+@@ -0,0 +1,24 @@
 +<?php
 +
 +declare(strict_types=1);
@@ -606,8 +644,10 @@ index 0000000000..2df0b3ee6b
 +  /**
 +   * Constructor.
 +   *
-+   * @param KeyColumn[] $columns
-+   *   An array of one or more key column specifiers that form the primary key.
++   * @param list<KeyColumn|string|array{0:string, 1:int}> $columns
++   *   A mix of key column specifiers, being KeyColumn objects, strings naming
++   *   columns, or arrays of two elements, column name and length, specifying a
++   *   prefix of the named column.
 +   */
 +  public function __construct(array $columns) {
 +    parent::__construct($columns);
@@ -653,10 +693,10 @@ index 0000000000..2d3489f872
 +}
 diff --git a/core/lib/Drupal/Core/Database/SchemaDefinition/Table.php b/core/lib/Drupal/Core/Database/SchemaDefinition/Table.php
 new file mode 100644
-index 0000000000..76b36b019d
+index 0000000000..e31fd72ebd
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/SchemaDefinition/Table.php
-@@ -0,0 +1,45 @@
+@@ -0,0 +1,48 @@
 +<?php
 +
 +declare(strict_types=1);
@@ -673,8 +713,11 @@ index 0000000000..76b36b019d
 +   *
 +   * @param string $name
 +   *   The table name.
-+   * @param Column[] $columns
-+   *   An array that describes the table's database columns.
++   * @param Property|Column[] $columns
++   *   (Optional) An array that describes the table's database columns. This is
++   *   normally mandatory. Some methods in the Schema API - for example
++   *   Schema::addField() - require partial table definition, so this is
++   *   optional to support it.
 +   * @param Property|string $description
 +   *   (Optional) A string in non-markup plain text describing this table and
 +   *   its purpose. References to other tables should be enclosed in curly
@@ -692,7 +735,7 @@ index 0000000000..76b36b019d
 +   */
 +  public function __construct(
 +    public readonly string $name,
-+    public readonly array $columns,
++    public readonly Property|array $columns = Property::Undefined,
 +    public readonly Property|string $description = Property::Undefined,
 +    public readonly Property|PrimaryKey $primaryKey = Property::Undefined,
 +    public readonly Property|array $uniqueKeys = Property::Undefined,
@@ -704,10 +747,10 @@ index 0000000000..76b36b019d
 +}
 diff --git a/core/lib/Drupal/Core/Database/SchemaDefinition/UniqueKey.php b/core/lib/Drupal/Core/Database/SchemaDefinition/UniqueKey.php
 new file mode 100644
-index 0000000000..68a3b7e052
+index 0000000000..7bb8e49142
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/SchemaDefinition/UniqueKey.php
-@@ -0,0 +1,22 @@
+@@ -0,0 +1,29 @@
 +<?php
 +
 +declare(strict_types=1);
@@ -721,6 +764,13 @@ index 0000000000..68a3b7e052
 +
 +  /**
 +   * Constructor.
++   *
++   * @param string $name
++   *   The unique key name.
++   * @param list<KeyColumn|string|array{0:string, 1:int}> $columns
++   *   A mix of key column specifiers, being KeyColumn objects, strings naming
++   *   columns, or arrays of two elements, column name and length, specifying a
++   *   prefix of the named column.
 +   */
 +  public function __construct(
 +    public readonly string $name,
@@ -731,340 +781,66 @@ index 0000000000..68a3b7e052
 +
 +}
 diff --git a/core/lib/Drupal/Core/Extension/ModuleInstaller.php b/core/lib/Drupal/Core/Extension/ModuleInstaller.php
-index 289ecffe41..a9a3eb2c0b 100644
+index 289ecffe41..54223c37ae 100644
 --- a/core/lib/Drupal/Core/Extension/ModuleInstaller.php
 +++ b/core/lib/Drupal/Core/Extension/ModuleInstaller.php
-@@ -5,6 +5,7 @@
+@@ -5,6 +5,9 @@
  use Drupal\Core\Cache\Cache;
  use Drupal\Core\Cache\CacheBackendInterface;
  use Drupal\Core\Database\Connection;
++use Drupal\Core\Database\Exception\SchemaDefinitionException;
++use Drupal\Core\Database\SchemaDefinition\ConvertDefinitionTrait;
 +use Drupal\Core\Database\SchemaDefinition\Table;
  use Drupal\Core\DrupalKernelInterface;
  use Drupal\Core\Entity\EntityStorageException;
  use Drupal\Core\Entity\FieldableEntityInterface;
-@@ -658,6 +659,9 @@ protected function installSchema(string $module): void {
-     $tables = $this->moduleHandler->invoke($module, 'schema') ?? [];
-     $schema = $this->connection->schema();
-     foreach ($tables as $name => $table) {
-+      if ($table instanceof Table) {
-+        assert($name === $table->name, "The '{$name}' key returned by the {$module}_schema() function must be equal to the Table::\$name property; found '{$table->name}'.");
-+      }
-       $schema->createTable($name, $table);
-     }
-   }
-diff --git a/core/modules/mysql/src/Driver/Database/mysql/Schema.php b/core/modules/mysql/src/Driver/Database/mysql/Schema.php
-index 199acc9141..dd0276fca3 100644
---- a/core/modules/mysql/src/Driver/Database/mysql/Schema.php
-+++ b/core/modules/mysql/src/Driver/Database/mysql/Schema.php
-@@ -6,6 +6,7 @@
- use Drupal\Core\Database\SchemaObjectExistsException;
- use Drupal\Core\Database\SchemaObjectDoesNotExistException;
- use Drupal\Core\Database\Schema as DatabaseSchema;
-+use Drupal\Core\Database\SchemaDefinition\Table as TableDefinition;
- use Drupal\Component\Utility\Unicode;
- 
- /**
-@@ -551,7 +552,7 @@ public function dropUniqueKey($table, $name) {
-   /**
-    * {@inheritdoc}
-    */
--  public function addIndex($table, $name, $fields, array $spec) {
-+  public function addIndex($table, $name, $fields, array $spec, ?TableDefinition $tableDefinition = NULL) {
-     if (!$this->tableExists($table)) {
-       throw new SchemaObjectDoesNotExistException("Cannot add index '$name' to table '$table': table doesn't exist.");
-     }
-@@ -559,6 +560,11 @@ public function addIndex($table, $name, $fields, array $spec) {
-       throw new SchemaObjectExistsException("Cannot add index '$name' to table '$table': index already exists.");
-     }
- 
-+    if ($tableDefinition instanceof TableDefinition) {
-+      assert($table === $tableDefinition->name, "The value of the \$name argument '{$name}' must be equal to the \$name property of the \$tableDefinition argument; found '{$tableDefinition->name}'.");
-+      $spec = $this->convertTableToArrayDefinition($tableDefinition);
-+    }
-+
-     $spec['indexes'][$name] = $fields;
-     $indexes = $this->getNormalizedIndexes($spec);
- 
-diff --git a/core/modules/mysql/tests/src/Kernel/mysql/SchemaTest.php b/core/modules/mysql/tests/src/Kernel/mysql/SchemaTest.php
-index a5818db96b..24b9b28338 100644
---- a/core/modules/mysql/tests/src/Kernel/mysql/SchemaTest.php
-+++ b/core/modules/mysql/tests/src/Kernel/mysql/SchemaTest.php
-@@ -5,6 +5,10 @@
- use Drupal\Component\Utility\Unicode;
- use Drupal\Core\Database\Exception\SchemaTableColumnSizeTooLargeException;
- use Drupal\Core\Database\Exception\SchemaTableKeyTooLargeException;
-+use Drupal\Core\Database\SchemaDefinition\Column as ColumnDefinition;
-+use Drupal\Core\Database\SchemaDefinition\ConvertDefinitionTrait;
-+use Drupal\Core\Database\SchemaDefinition\Index as IndexDefinition;
-+use Drupal\Core\Database\SchemaDefinition\Table as TableDefinition;
- use Drupal\Core\Database\SchemaException;
- use Drupal\Core\Database\SchemaObjectDoesNotExistException;
- use Drupal\Core\Database\SchemaObjectExistsException;
-@@ -17,6 +21,8 @@
+@@ -28,6 +31,8 @@
   */
- class SchemaTest extends DriverSpecificSchemaTestBase {
+ class ModuleInstaller implements ModuleInstallerInterface {
  
 +  use ConvertDefinitionTrait;
 +
    /**
-    * {@inheritdoc}
-    */
-@@ -49,16 +55,18 @@ protected function assertCollation(): void {
-    * {@inheritdoc}
-    */
-   public function testTableWithSpecificDataType(): void {
--    $table_specification = [
--      'description' => 'Schema table description.',
--      'fields' => [
--        'timestamp'  => [
--          'mysql_type' => 'timestamp',
--          'not null' => FALSE,
--          'default' => NULL,
--        ],
-+    $table_specification = new TableDefinition(
-+      name: 'test_timestamp',
-+      description: 'Schema table description.',
-+      columns: [
-+        new ColumnDefinition(
-+          name: 'timestamp',
-+          dbSpecificType: ['mysql' => 'timestamp'],
-+          notNull: FALSE,
-+          default: NULL,
-+        ),
-       ],
--    ];
-+    );
-     $this->schema->createTable('test_timestamp', $table_specification);
-     $this->assertTrue($this->schema->tableExists('test_timestamp'));
+    * The module handler.
+    *
+@@ -658,6 +663,17 @@ protected function installSchema(string $module): void {
+     $tables = $this->moduleHandler->invoke($module, 'schema') ?? [];
+     $schema = $this->connection->schema();
+     foreach ($tables as $name => $table) {
++      if ($table instanceof Table) {
++        if (is_int($name)) {
++          $name = $table->name;
++        }
++        if ($name !== $table->name) {
++          throw new SchemaDefinitionException("The '{$name}' key returned by the {$module}_schema() function must be equal to the Table::\$name property; found '{$table->name}'");
++        }
++        if (!$this->connection->supportsSchemaDefinition()) {
++          $table = $this->convertTableToArrayDefinition($table);
++        }
++      }
+       $schema->createTable($name, $table);
+     }
    }
-@@ -69,60 +77,14 @@ public function testTableWithSpecificDataType(): void {
-    * @see \Drupal\mysql\Driver\Database\mysql\Schema::getNormalizedIndexes()
-    */
-   public function testIndexLength(): void {
--    $table_specification = [
--      'fields' => [
--        'id'  => [
--          'type' => 'int',
--          'default' => NULL,
--        ],
--        'test_field_text'  => [
--          'type' => 'text',
--          'not null' => TRUE,
--        ],
--        'test_field_string_long'  => [
--          'type' => 'varchar',
--          'length' => 255,
--          'not null' => TRUE,
--        ],
--        'test_field_string_ascii_long'  => [
--          'type' => 'varchar_ascii',
--          'length' => 255,
--        ],
--        'test_field_string_short'  => [
--          'type' => 'varchar',
--          'length' => 128,
--          'not null' => TRUE,
--        ],
--      ],
--      'indexes' => [
--        'test_regular' => [
--          'test_field_text',
--          'test_field_string_long',
--          'test_field_string_ascii_long',
--          'test_field_string_short',
--        ],
--        'test_length' => [
--          ['test_field_text', 128],
--          ['test_field_string_long', 128],
--          ['test_field_string_ascii_long', 128],
--          ['test_field_string_short', 128],
--        ],
--        'test_mixed' => [
--          ['test_field_text', 200],
--          'test_field_string_long',
--          ['test_field_string_ascii_long', 200],
--          'test_field_string_short',
--        ],
--      ],
--    ];
-+    $table_specification = $this->buildTableIndexLengthDefinition();
-     $this->schema->createTable('test_table_index_length', $table_specification);
- 
-     // Ensure expected exception thrown when adding index with missing info.
-     $expected_exception_message = "MySQL needs the 'test_field_text' field specification in order to normalize the 'test_regular' index";
--    $missing_field_spec = $table_specification;
--    unset($missing_field_spec['fields']['test_field_text']);
-+    $missing_field_spec = $this->buildTableIndexLengthDefinition(FALSE);
-     try {
--      $this->schema->addIndex('test_table_index_length', 'test_separate', [['test_field_text', 200]], $missing_field_spec);
-+      $this->schema->addIndex('test_table_index_length', 'test_separate', [['test_field_text', 200]], [], $missing_field_spec);
-       $this->fail('SchemaException not thrown when adding index with missing information.');
-     }
-     catch (SchemaException $e) {
-@@ -130,13 +92,12 @@ public function testIndexLength(): void {
-     }
- 
-     // Add a separate index.
--    $this->schema->addIndex('test_table_index_length', 'test_separate', [['test_field_text', 200]], $table_specification);
--    $table_specification_with_new_index = $table_specification;
--    $table_specification_with_new_index['indexes']['test_separate'] = [['test_field_text', 200]];
-+    $this->schema->addIndex('test_table_index_length', 'test_separate', [['test_field_text', 200]], [], $table_specification);
-+    $table_specification_with_new_index = $this->buildTableIndexLengthDefinition(TRUE, TRUE);
- 
-     // Ensure that the exceptions of addIndex are thrown as expected.
-     try {
--      $this->schema->addIndex('test_table_index_length', 'test_separate', [['test_field_text', 200]], $table_specification);
-+      $this->schema->addIndex('test_table_index_length', 'test_separate', [['test_field_text', 200]], [], $table_specification_with_new_index);
-       $this->fail('\Drupal\Core\Database\SchemaObjectExistsException exception missed.');
-     }
-     catch (SchemaObjectExistsException $e) {
-@@ -144,7 +105,7 @@ public function testIndexLength(): void {
-     }
- 
-     try {
--      $this->schema->addIndex('test_table_non_existing', 'test_separate', [['test_field_text', 200]], $table_specification);
-+      $this->schema->addIndex('test_table_non_existing', 'test_separate', [['test_field_text', 200]], [], $table_specification_with_new_index);
-       $this->fail('\Drupal\Core\Database\SchemaObjectDoesNotExistException exception missed.');
-     }
-     catch (SchemaObjectDoesNotExistException $e) {
-@@ -179,8 +140,8 @@ public function testIndexLength(): void {
- 
-     // Count the number of columns defined in the indexes.
-     $column_count = 0;
--    foreach ($table_specification_with_new_index['indexes'] as $index) {
--      foreach ($index as $field) {
-+    foreach ($table_specification_with_new_index->indexes as $index) {
-+      foreach ($index->columns as $field) {
-         $column_count++;
+@@ -673,9 +689,17 @@ protected function installSchema(string $module): void {
+   protected function uninstallSchema(string $module): void {
+     $tables = $this->moduleHandler->invoke($module, 'schema') ?? [];
+     $schema = $this->connection->schema();
+-    foreach (array_keys($tables) as $table) {
+-      if ($schema->tableExists($table)) {
+-        $schema->dropTable($table);
++    foreach ($tables as $name => $table) {
++      if ($table instanceof Table) {
++        if (is_int($name)) {
++          $name = $table->name;
++        }
++        if ($name !== $table->name) {
++          throw new SchemaDefinitionException("The '{$name}' key returned by the {$module}_schema() function must be equal to the Table::\$name property; found '{$table->name}'");
++        }
++      }
++      if ($schema->tableExists($name)) {
++        $schema->dropTable($name);
        }
      }
-@@ -192,6 +153,86 @@ public function testIndexLength(): void {
-     $this->assertEquals($column_count, $test_count, 'Number of tests matches expected value.');
-   }
- 
-+  /**
-+   * Helper to build a table for ::testIndexLength().
-+   */
-+  protected function buildTableIndexLengthDefinition(bool $includeTestFieldText = TRUE, bool $includeSeparateIndex = FALSE): TableDefinition {
-+    $columns = [];
-+    $columns[] = new ColumnDefinition(
-+      name: 'id',
-+      type: 'int',
-+      default: NULL,
-+    );
-+    if ($includeTestFieldText) {
-+      $columns[] = new ColumnDefinition(
-+        name: 'test_field_text',
-+        type: 'text',
-+        notNull: TRUE,
-+      );
-+    }
-+    $columns[] = new ColumnDefinition(
-+      name: 'test_field_string_long',
-+      type: 'varchar',
-+      length: 255,
-+      notNull: TRUE,
-+    );
-+    $columns[] = new ColumnDefinition(
-+      name: 'test_field_string_ascii_long',
-+      type: 'varchar_ascii',
-+      length: 255,
-+    );
-+    $columns[] = new ColumnDefinition(
-+      name: 'test_field_string_short',
-+      type: 'varchar',
-+      length: 128,
-+      notNull: TRUE,
-+    );
-+
-+    $indexes = [
-+      new IndexDefinition(
-+        name: 'test_regular',
-+        columns: [
-+          'test_field_text',
-+          'test_field_string_long',
-+          'test_field_string_ascii_long',
-+          'test_field_string_short',
-+        ],
-+      ),
-+      new IndexDefinition(
-+        name: 'test_length',
-+        columns: [
-+          ['test_field_text', 128],
-+          ['test_field_string_long', 128],
-+          ['test_field_string_ascii_long', 128],
-+          ['test_field_string_short', 128],
-+        ],
-+      ),
-+      new IndexDefinition(
-+        name: 'test_mixed',
-+        columns: [
-+          ['test_field_text', 200],
-+          'test_field_string_long',
-+          ['test_field_string_ascii_long', 200],
-+          'test_field_string_short',
-+        ],
-+      ),
-+    ];
-+    if ($includeSeparateIndex) {
-+      $indexes[] = new IndexDefinition(
-+        name: 'test_separate',
-+        columns: [
-+          ['test_field_text', 200],
-+        ],
-+      );
-+    }
-+
-+    return new TableDefinition(
-+      name: 'test_table_index_length',
-+      columns: $columns,
-+      indexes: $indexes,
-+    );
-+  }
-+
-   /**
-    * @covers \Drupal\mysql\Driver\Database\mysql\Schema::introspectIndexSchema
-    */
-diff --git a/core/modules/pgsql/tests/src/Kernel/pgsql/SchemaTest.php b/core/modules/pgsql/tests/src/Kernel/pgsql/SchemaTest.php
-index 2de31456cb..fa51ef2471 100644
---- a/core/modules/pgsql/tests/src/Kernel/pgsql/SchemaTest.php
-+++ b/core/modules/pgsql/tests/src/Kernel/pgsql/SchemaTest.php
-@@ -3,6 +3,8 @@
- namespace Drupal\Tests\pgsql\Kernel\pgsql;
- 
- use Drupal\KernelTests\Core\Database\DriverSpecificSchemaTestBase;
-+use Drupal\Core\Database\SchemaDefinition\Column as ColumnDefinition;
-+use Drupal\Core\Database\SchemaDefinition\Table as TableDefinition;
- 
- // cSpell:ignore relkind objid refobjid regclass attname attrelid attnum
- // cSpell:ignore refobjsubid
-@@ -46,16 +48,18 @@ protected function checkSequenceRenaming(string $tableName): void {
-    * {@inheritdoc}
-    */
-   public function testTableWithSpecificDataType(): void {
--    $table_specification = [
--      'description' => 'Schema table description.',
--      'fields' => [
--        'timestamp'  => [
--          'pgsql_type' => 'timestamp',
--          'not null' => FALSE,
--          'default' => NULL,
--        ],
-+    $table_specification = new TableDefinition(
-+      name: 'test_timestamp',
-+      description: 'Schema table description.',
-+      columns: [
-+        new ColumnDefinition(
-+          name: 'timestamp',
-+          dbSpecificType: ['pgsql' => 'timestamp'],
-+          notNull: FALSE,
-+          default: NULL,
-+        ),
-       ],
--    ];
-+    );
-     $this->schema->createTable('test_timestamp', $table_specification);
-     $this->assertTrue($this->schema->tableExists('test_timestamp'));
    }
 diff --git a/core/modules/system/system.install b/core/modules/system/system.install
 index 079fa6cbf7..66232a3d85 100644
@@ -1225,25 +1001,224 @@ index 079fa6cbf7..66232a3d85 100644
  
    return $schema;
  }
-diff --git a/core/tests/Drupal/KernelTests/KernelTestBase.php b/core/tests/Drupal/KernelTests/KernelTestBase.php
-index 8b38145283..07697d8557 100644
---- a/core/tests/Drupal/KernelTests/KernelTestBase.php
-+++ b/core/tests/Drupal/KernelTests/KernelTestBase.php
-@@ -7,6 +7,7 @@
- use Drupal\Component\FileCache\FileCacheFactory;
- use Drupal\Core\Config\Development\ConfigSchemaChecker;
- use Drupal\Core\Database\Database;
+diff --git a/core/tests/Drupal/TestTools/Extension/SchemaInspector.php b/core/tests/Drupal/TestTools/Extension/SchemaInspector.php
+index 134ad27e08..9332679698 100644
+--- a/core/tests/Drupal/TestTools/Extension/SchemaInspector.php
++++ b/core/tests/Drupal/TestTools/Extension/SchemaInspector.php
+@@ -2,6 +2,9 @@
+ 
+ namespace Drupal\TestTools\Extension;
+ 
++use Drupal\Core\Database\Exception\SchemaDefinitionException;
++use Drupal\Core\Database\SchemaDefinition\ConvertDefinitionTrait;
 +use Drupal\Core\Database\SchemaDefinition\Table;
- use Drupal\Core\DependencyInjection\ContainerBuilder;
- use Drupal\Core\DependencyInjection\ServiceProviderInterface;
- use Drupal\Core\DrupalKernel;
-@@ -779,6 +780,9 @@ protected function installSchema($module, $tables) {
-       if (empty($specification[$table])) {
-         throw new \LogicException("$module module does not define a schema for table '$table'.");
-       }
-+      if ($specification[$table] instanceof Table && $table !== $specification[$table]->name) {
-+        throw new \LogicException("The '{$table}' key returned by the {$module}_schema() function must be equal to the Table::\$name property; found '{$specification[$table]->name}'.");
+ use Drupal\Core\Extension\ModuleHandlerInterface;
+ 
+ /**
+@@ -9,6 +12,8 @@
+  */
+ class SchemaInspector {
+ 
++  use ConvertDefinitionTrait;
++
+   /**
+    * Returns the module's schema specification.
+    *
+@@ -28,7 +33,23 @@ class SchemaInspector {
+    */
+   public static function getTablesSpecification(ModuleHandlerInterface $handler, string $module): array {
+     if ($handler->loadInclude($module, 'install')) {
+-      return $handler->invoke($module, 'schema') ?? [];
++      $tables = $handler->invoke($module, 'schema') ?? [];
++      $temp = [];
++      foreach ($tables as $name => $table) {
++        if ($table instanceof Table) {
++          if (is_int($name)) {
++            $name = $table->name;
++          }
++          if ($name !== $table->name) {
++            throw new SchemaDefinitionException("The '{$name}' key returned by the {$module}_schema() function must be equal to the Table::\$name property; found '{$table->name}'");
++          }
++          if (!\Drupal::database()->supportsSchemaDefinition()) {
++            $table = self::convertTableToArrayDefinition($table);
++          }
++        }
++        $temp[$name] = $table;
 +      }
-       $schema->createTable($table, $specification[$table]);
++      return $temp;
      }
+     return [];
    }
+diff --git a/core/tests/Drupal/Tests/Core/Database/ConvertDefinitionTraitTest.php b/core/tests/Drupal/Tests/Core/Database/ConvertDefinitionTraitTest.php
+new file mode 100644
+index 0000000000..17754728bc
+--- /dev/null
++++ b/core/tests/Drupal/Tests/Core/Database/ConvertDefinitionTraitTest.php
+@@ -0,0 +1,167 @@
++<?php
++
++declare(strict_types=1);
++
++namespace Drupal\Tests\Core\Database;
++
++use Drupal\Core\Database\SchemaDefinition\Column;
++use Drupal\Core\Database\SchemaDefinition\ConvertDefinitionTrait;
++use Drupal\Core\Database\SchemaDefinition\ForeignKey;
++use Drupal\Core\Database\SchemaDefinition\Index;
++use Drupal\Core\Database\SchemaDefinition\KeyColumn;
++use Drupal\Core\Database\SchemaDefinition\PrimaryKey;
++use Drupal\Core\Database\SchemaDefinition\Table;
++use Drupal\Core\Database\SchemaDefinition\UniqueKey;
++use Drupal\Tests\UnitTestCase;
++
++/**
++ * Tests the ConvertDefinitionTrait.
++ *
++ * @group Database
++ */
++class ConvertDefinitionTraitTest extends UnitTestCase {
++
++  use ConvertDefinitionTrait;
++
++  /**
++   * Tests the ConvertDefinitionTrait.
++   */
++  public function testConvertDefinitionTrait(): void {
++    $arraySpecification = [
++      'description' => 'Basic test table for the database unit tests.',
++      'fields' => [
++        'id' => [
++          'type' => 'serial',
++          'unsigned' => TRUE,
++          'not null' => TRUE,
++        ],
++        'name' => [
++          'description' => "A person's name",
++          'type' => 'varchar_ascii',
++          'length' => 255,
++          'not null' => TRUE,
++          'default' => '',
++          'binary' => TRUE,
++        ],
++        'age' => [
++          'description' => "The person's age",
++          'type' => 'int',
++          'unsigned' => TRUE,
++          'not null' => TRUE,
++          'default' => 0,
++        ],
++        'job' => [
++          'description' => "The person's job",
++          'type' => 'varchar',
++          'length' => 255,
++          'not null' => TRUE,
++          'default' => 'Undefined',
++        ],
++        'db_timestamp' => [
++          'description' => "The database timestamp",
++          'mysql_type' => 'timestamp',
++          'pgsql_type' => 'timestamp',
++          'sqlite_type' => 'datetime',
++          'not null' => FALSE,
++          'default' => NULL,
++        ],
++      ],
++      'primary key' => ['id'],
++      'unique keys' => [
++        'name' => ['name'],
++      ],
++      'indexes' => [
++        'ages' => ['age'],
++        'age_job_prefix' => ['age', ['job', 50]],
++        'age_name_prefix' => ['age', ['name', 20]],
++      ],
++      'foreign keys' => [
++        'user_id' => [
++          'table' => 'test_users',
++          'columns' => ['id' => 'id'],
++        ],
++      ],
++    ];
++
++    $schemaDefinition = new Table(
++      name: 'test',
++      description: 'Basic test table for the database unit tests.',
++      columns: [
++        new Column(
++          name: 'id',
++          type: 'serial',
++          unsigned: TRUE,
++          notNull: TRUE,
++        ),
++        new Column(
++          name: 'name',
++          description: "A person's name",
++          type: 'varchar_ascii',
++          length: 255,
++          notNull: TRUE,
++          default: '',
++          binary: TRUE,
++        ),
++        new Column(
++          name: 'age',
++          description: "The person's age",
++          type: 'int',
++          unsigned: TRUE,
++          notNull: TRUE,
++          default: 0,
++        ),
++        new Column(
++          name: 'job',
++          description: "The person's job",
++          type: 'varchar',
++          length: 255,
++          notNull: TRUE,
++          default: 'Undefined',
++        ),
++        new Column(
++          name: 'db_timestamp',
++          description: "The database timestamp",
++          dbSpecificType: [
++            'mysql' => 'timestamp',
++            'pgsql' => 'timestamp',
++            'sqlite' => 'datetime',
++          ],
++          notNull: FALSE,
++          default: NULL,
++        ),
++      ],
++      primaryKey: new PrimaryKey(['id']),
++      uniqueKeys: [
++        new UniqueKey(
++          name: 'name',
++          columns: ['name'],
++        ),
++      ],
++      indexes: [
++        new Index(
++          name: 'ages',
++          columns: ['age'],
++        ),
++        new Index(
++          name: 'age_job_prddefix',
++          columns: ['age', ['job', 50]],
++        ),
++        new Index(
++          name: 'age_name_prefix',
++          columns: ['age', new KeyColumn(name: 'name', length: 220)],
++        ),
++      ],
++      foreignKeys: [
++        new ForeignKey(
++          name: 'user_id',
++          foreignTable: 'test_users',
++          columns: ['id'],
++          foreignColumns: ['uid'],
++        ),
++      ],
++    );
++
++    $this->assertEquals($arraySpecification, self::convertTableToArrayDefinition($schemaDefinition));
++  }
++
++}
