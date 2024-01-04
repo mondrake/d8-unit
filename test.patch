@@ -1,27 +1,25 @@
 diff --git a/core/includes/install.core.inc b/core/includes/install.core.inc
-index 15ec5704b3..48611fd4b6 100644
+index 15ec5704b3..eb606db3fa 100644
 --- a/core/includes/install.core.inc
 +++ b/core/includes/install.core.inc
-@@ -401,7 +401,7 @@ function install_begin_request($class_loader, &$install_state) {
+@@ -399,9 +399,9 @@ function install_begin_request($class_loader, &$install_state) {
+ 
+   if ($install_state['settings_verified']) {
      try {
-       $system_schema = system_schema();
+-      $system_schema = system_schema();
++      $system_schema = system_schema(returnArraySchema: FALSE);
        end($system_schema);
 -      $table = key($system_schema);
 +      $table = current($system_schema)->name;
        $install_state['base_system_verified'] = Database::getConnection()->schema()->tableExists($table);
      }
      catch (DatabaseExceptionWrapper $e) {
-@@ -533,6 +533,7 @@ function install_begin_request($class_loader, &$install_state) {
- 
-   // Ensure that the active configuration is empty before installation starts.
-   if ($install_state['config_verified'] && empty($task)) {
-+// dump([__FUNCTION__, '*** 1', $install_state['config_verified'], $task, '*** 2', $kernel->getConfigStorage()->listAll()]);
-     if (count($kernel->getConfigStorage()->listAll())) {
-       $task = NULL;
-       throw new AlreadyInstalledException($container->get('string_translation'));
-@@ -1179,7 +1180,7 @@ function install_verify_database_settings($site_path) {
+@@ -1177,9 +1177,9 @@ function install_verify_database_settings($site_path) {
+  *   installing the System module.
+  */
  function install_verify_database_ready() {
-   $system_schema = system_schema();
+-  $system_schema = system_schema();
++  $system_schema = system_schema(returnArraySchema: FALSE);
    end($system_schema);
 -  $table = key($system_schema);
 +  $table = current($system_schema)->name;
@@ -29,33 +27,29 @@ index 15ec5704b3..48611fd4b6 100644
    $existing_install = FALSE;
    if (Database::getConnectionInfo()) {
 diff --git a/core/lib/Drupal/Core/Batch/BatchStorage.php b/core/lib/Drupal/Core/Batch/BatchStorage.php
-index a7733535ba..12f2fc2871 100644
+index a7733535ba..c00acaabd8 100644
 --- a/core/lib/Drupal/Core/Batch/BatchStorage.php
 +++ b/core/lib/Drupal/Core/Batch/BatchStorage.php
-@@ -6,10 +6,17 @@
+@@ -6,6 +6,13 @@
  use Drupal\Core\Access\CsrfTokenGenerator;
  use Drupal\Core\Database\Connection;
  use Drupal\Core\Database\DatabaseException;
 +use Drupal\Core\Database\SchemaDefinition\Column;
-+use Drupal\Core\Database\SchemaDefinition\ConvertDefinitionTrait;
++use Drupal\Core\Database\SchemaDefinition\ColumnSize;
++use Drupal\Core\Database\SchemaDefinition\ColumnType;
++use Drupal\Core\Database\SchemaDefinition\ConvertDefinition;
 +use Drupal\Core\Database\SchemaDefinition\Index;
 +use Drupal\Core\Database\SchemaDefinition\PrimaryKey;
 +use Drupal\Core\Database\SchemaDefinition\Table;
  use Symfony\Component\HttpFoundation\Session\SessionInterface;
  
  class BatchStorage implements BatchStorageInterface {
- 
-+  use ConvertDefinitionTrait;
-+
-   /**
-    * The table name.
-    */
 @@ -195,6 +202,9 @@ protected function ensureTableExists() {
      try {
        $database_schema = $this->connection->schema();
        $schema_definition = $this->schemaDefinition();
 +      if (!$this->connection->supportsSchemaDefinition()) {
-+        $schema_definition = $this->convertTableToArrayDefinition($schema_definition);
++        $schema_definition = ConvertDefinition::tableToArray($schema_definition);
 +      }
        $database_schema->createTable(static::TABLE_NAME, $schema_definition);
      }
@@ -97,29 +91,29 @@ index a7733535ba..12f2fc2871 100644
 +        new Column(
 +          name: 'bid',
 +          description: 'Primary Key: Unique batch ID.',
-+          type: 'serial',
++          type: ColumnType::Serial,
 +          unsigned: TRUE,
 +          notNull: TRUE,
 +        ),
 +        new Column(
 +          name: 'token',
 +          description: "A string token generated against the current user's session id and the batch id, used to ensure that only the user who submitted the batch can effectively access it.",
-+          type: 'varchar_ascii',
++          type: ColumnType::VarcharAscii,
 +          length: 64,
 +          notNull: TRUE,
 +        ),
 +        new Column(
 +          name: 'timestamp',
 +          description: 'A Unix timestamp indicating when this batch was submitted for processing. Stale batches are purged at cron time.',
-+          type: 'int',
++          type: ColumnType::Int,
 +          notNull: TRUE,
 +        ),
 +        new Column(
 +          name: 'batch',
 +          description: 'A serialized array containing the processing data for the batch.',
-+          type: 'blob',
++          type: ColumnType::Blob,
++          size: ColumnSize::Big,
 +          notNull: FALSE,
-+          size: 'big',
 +        ),
        ],
 -      'primary key' => ['bid'],
@@ -181,10 +175,10 @@ index 0000000000..fc0b178ac6
 +}
 diff --git a/core/lib/Drupal/Core/Database/SchemaDefinition/Column.php b/core/lib/Drupal/Core/Database/SchemaDefinition/Column.php
 new file mode 100644
-index 0000000000..5dea84a4ae
+index 0000000000..e34c037703
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/SchemaDefinition/Column.php
-@@ -0,0 +1,93 @@
+@@ -0,0 +1,89 @@
 +<?php
 +
 +declare(strict_types=1);
@@ -201,15 +195,11 @@ index 0000000000..5dea84a4ae
 +   *
 +   * @param string $name
 +   *   The column name.
-+   * @param Property|string $type
-+   *   (Optional) The generic datatype: 'char', 'varchar', 'text', 'blob',
-+   *   'int', 'float', 'numeric', or 'serial'. Most types just map to the
-+   *   according database engine specific data types. This argument is
-+   *   mandatory unless $dbSpecificType is specified.
-+   *   Use 'serial' for auto incrementing fields. This will expand to
-+   *   'INT auto_increment' on MySQL.
-+   *   A special 'varchar_ascii' type is also available for limiting machine
-+   *   name field to US ASCII characters.
++   * @param ColumnType $type
++   *   (Optional) The column data type, generic. Each database will map this to
++   *   its own definition. This argument is mandatory unless $dbSpecificType is
++   *   specified. See
++   *   \Drupal\Core\Database\SchemaDefinition\ColumnType for allowed values.
 +   * @param Property|string $description
 +   *   (Optional) A string in non-markup plain text describing this field and
 +   *   its purpose. References to other tables should be enclosed in curly
@@ -218,14 +208,10 @@ index 0000000000..5dea84a4ae
 +   * @param Property|bool $serialize
 +   *   (Optional) A boolean indicating whether the field will be stored as a
 +   *   serialized string.
-+   * @param Property|string $size
-+   *   (Optional) The data size: 'tiny', 'small', 'medium', 'normal', 'big'.
-+   *   This is a hint about the largest value the field will store and
-+   *   determines which of the database engine specific data types will be
-+   *   used (e.g. on MySQL, TINYINT vs. INT vs. BIGINT). 'normal', the default,
-+   *   selects the base type (e.g. on MySQL, INT, VARCHAR, BLOB, etc.). Not all
-+   *   sizes are available for all data types. See
-+   *   DatabaseSchema::getFieldTypeMap() for possible combinations.
++   * @param ColumnSize $size
++   *   (Optional) The column data size. This is a hint about the largest value
++   *   the column will store. See
++   *   \Drupal\Core\Database\SchemaDefinition\ColumnSize for allowed values.
 +   * @param Property|bool $notNull
 +   *   (Optional)  If true, no NULL values will be allowed in this database
 +   *   column. Defaults to false.
@@ -259,13 +245,16 @@ index 0000000000..5dea84a4ae
 +   *   each database backend. Specify this as an associative array having the
 +   *   database type ('mysql', 'sqlite', 'pgsql', 'oracle', etc.) as the key,
 +   *   and the database specific type as the value.
++   *
++   * @see \Drupal\Core\Database\SchemaDefinition\ColumnType
++   * @see \Drupal\Core\Database\SchemaDefinition\ColumnSize
 +   */
 +  public function __construct(
 +    public readonly string $name,
-+    public readonly Property|string $type = Property::Undefined,
++    public readonly ColumnType $type = ColumnType::Undefined,
 +    public readonly Property|string $description = Property::Undefined,
 +    public readonly Property|bool $serialize = Property::Undefined,
-+    public readonly Property|string $size = Property::Undefined,
++    public readonly ColumnSize $size = ColumnSize::Undefined,
 +    public readonly Property|bool $notNull = Property::Undefined,
 +    public readonly Property|string|int|NULL $default = Property::Undefined,
 +    public readonly Property|int $length = Property::Undefined,
@@ -275,15 +264,16 @@ index 0000000000..5dea84a4ae
 +    public readonly Property|bool $binary = Property::Undefined,
 +    public readonly Property|array $dbSpecificType = Property::Undefined,
 +  ) {
++dump(debug_backtrace(0, 2));
 +  }
 +
 +}
-diff --git a/core/lib/Drupal/Core/Database/SchemaDefinition/ConvertDefinitionTrait.php b/core/lib/Drupal/Core/Database/SchemaDefinition/ConvertDefinitionTrait.php
+diff --git a/core/lib/Drupal/Core/Database/SchemaDefinition/ColumnSize.php b/core/lib/Drupal/Core/Database/SchemaDefinition/ColumnSize.php
 new file mode 100644
-index 0000000000..776f4d6391
+index 0000000000..c305730185
 --- /dev/null
-+++ b/core/lib/Drupal/Core/Database/SchemaDefinition/ConvertDefinitionTrait.php
-@@ -0,0 +1,185 @@
++++ b/core/lib/Drupal/Core/Database/SchemaDefinition/ColumnSize.php
+@@ -0,0 +1,28 @@
 +<?php
 +
 +declare(strict_types=1);
@@ -291,36 +281,123 @@ index 0000000000..776f4d6391
 +namespace Drupal\Core\Database\SchemaDefinition;
 +
 +/**
-+ * A helper trait to convert SchemaDefinition objects to legacy array.
++ * Enumeration of cases for column size.
++ *
++ * It represents a hint about the largest value a column will store and
++ * determines which of the database engine specific data types will be used
++ * (e.g. on MySQL, TINYINT vs. INT vs. BIGINT). 'normal', the default, selects
++ * the base type (e.g. on MySQL, INT, VARCHAR, BLOB, etc.). Not all sizes are
++ * available for all data types. See DatabaseSchema::getFieldTypeMap() for
++ * possible combinations.
++ */
++enum ColumnSize: string {
++
++  case Normal = 'normal';
++
++  case Tiny = 'tiny';
++  case Small = 'small';
++  case Medium = 'medium';
++  case Big = 'big';
++
++  case Undefined = 'und';
++
++}
+diff --git a/core/lib/Drupal/Core/Database/SchemaDefinition/ColumnType.php b/core/lib/Drupal/Core/Database/SchemaDefinition/ColumnType.php
+new file mode 100644
+index 0000000000..a6a79eb7de
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/SchemaDefinition/ColumnType.php
+@@ -0,0 +1,34 @@
++<?php
++
++declare(strict_types=1);
++
++namespace Drupal\Core\Database\SchemaDefinition;
++
++/**
++ * Enumeration of cases for column type.
++ *
++ * It represents the generic data type of a table column. Most types just map
++ * to the according database engine specific data types.
++ */
++enum ColumnType: string {
++
++  // String related types.
++  case Char = 'char';
++  case Varchar = 'varchar';
++  // This is to indicate limiting the accepted characters in the column to the
++  // US ASCII subset only.
++  case VarcharAscii = 'varchar_ascii';
++  case Text = 'text';
++
++  case Int = 'int';
++  // This is to indicate auto incrementing fields. For example, this will
++  // expand to 'INT auto_increment' on MySQL.
++  case Serial = 'serial';
++  case Float = 'float';
++  case Numeric = 'numeric';
++
++  case Blob = 'blob';
++
++  case Undefined = 'und';
++
++}
+diff --git a/core/lib/Drupal/Core/Database/SchemaDefinition/ConvertDefinition.php b/core/lib/Drupal/Core/Database/SchemaDefinition/ConvertDefinition.php
+new file mode 100644
+index 0000000000..144d349996
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/SchemaDefinition/ConvertDefinition.php
+@@ -0,0 +1,198 @@
++<?php
++
++declare(strict_types=1);
++
++namespace Drupal\Core\Database\SchemaDefinition;
++
++/**
++ * An helper class to convert SchemaDefinition objects to legacy array.
 + *
 + * @internal
 + */
-+trait ConvertDefinitionTrait {
++abstract class ConvertDefinition {
++
++  /**
++   * Converts an array of Table objects.
++   *
++   * @internal
++   */
++  final public static function schemaToArray(array $schema): array {
++    $spec = [];
++    foreach ($schema as $table) {
++      $spec[$table->name] = self::tableToArray($table);
++    }
++    return $spec;
++  }
 +
 +  /**
 +   * Converts a Table object.
 +   *
 +   * @internal
 +   */
-+  final protected static function convertTableToArrayDefinition(Table $table): array {
++  final public static function tableToArray(Table $table): array {
 +    $spec = [];
 +    if ($table->description !== Property::Undefined) {
 +      $spec['description'] = $table->description;
 +    }
 +    if ($table->columns !== Property::Undefined) {
-+      $spec['fields'] = self::convertColumnsToArrayDefinition($table->columns);
++      $spec['fields'] = self::columnsToArray($table->columns);
 +    }
 +    if ($table->primaryKey !== Property::Undefined) {
-+      $spec['primary key'] = self::convertPrimaryKeyToArrayDefinition($table->primaryKey);
++      $spec['primary key'] = self::primaryKeyToArray($table->primaryKey);
 +    }
 +    if ($table->uniqueKeys !== Property::Undefined) {
-+      $spec['unique keys'] = self::convertUniqueKeysToArrayDefinition($table->uniqueKeys);
++      $spec['unique keys'] = self::uniqueKeysToArray($table->uniqueKeys);
 +    }
 +    if ($table->indexes !== Property::Undefined) {
-+      $spec['indexes'] = self::convertIndexesToArrayDefinition($table->indexes);
++      $spec['indexes'] = self::indexesToArray($table->indexes);
 +    }
 +    if ($table->foreignKeys !== Property::Undefined) {
-+      $spec['foreign keys'] = self::convertForeignKeysToArrayDefinition($table->foreignKeys);
++      $spec['foreign keys'] = self::foreignKeysToArray($table->foreignKeys);
 +    }
 +    return $spec;
 +  }
@@ -330,10 +407,10 @@ index 0000000000..776f4d6391
 +   *
 +   * @internal
 +   */
-+  final protected static function convertColumnsToArrayDefinition(array $columns): array {
++  final public static function columnsToArray(array $columns): array {
 +    $spec = [];
 +    foreach ($columns as $column) {
-+      $spec[$column->name] = self::convertColumnToArrayDefinition($column);
++      $spec[$column->name] = self::columnToArray($column);
 +    }
 +    return $spec;
 +  }
@@ -343,10 +420,10 @@ index 0000000000..776f4d6391
 +   *
 +   * @internal
 +   */
-+  final protected static function convertColumnToArrayDefinition(Column $column): array {
++  final public static function columnToArray(Column $column): array {
 +    $spec = [];
-+    if ($column->type !== Property::Undefined) {
-+      $spec['type'] = $column->type;
++    if ($column->type !== ColumnType::Undefined) {
++      $spec['type'] = $column->type->value;
 +    }
 +    if ($column->description !== Property::Undefined) {
 +      $spec['description'] = $column->description;
@@ -354,8 +431,8 @@ index 0000000000..776f4d6391
 +    if ($column->serialize !== Property::Undefined) {
 +      $spec['serialize'] = $column->serialize;
 +    }
-+    if ($column->size !== Property::Undefined) {
-+      $spec['size'] = $column->size;
++    if ($column->size !== ColumnSize::Undefined) {
++      $spec['size'] = $column->size->value;
 +    }
 +    if ($column->notNull !== Property::Undefined) {
 +      $spec['not null'] = $column->notNull;
@@ -391,10 +468,10 @@ index 0000000000..776f4d6391
 +   *
 +   * @internal
 +   */
-+  final protected static function convertKeyColumnsToArrayDefinition(array $columns): array {
++  final public static function keyColumnsToArray(array $columns): array {
 +    $spec = [];
 +    foreach ($columns as $column) {
-+      $spec[] = self::convertKeyColumnToArrayDefinition($column);
++      $spec[] = self::keyColumnToArray($column);
 +    }
 +    return $spec;
 +  }
@@ -404,7 +481,7 @@ index 0000000000..776f4d6391
 +   *
 +   * @internal
 +   */
-+  final protected static function convertKeyColumnToArrayDefinition(KeyColumn $column): string|array {
++  final public static function keyColumnToArray(KeyColumn $column): string|array {
 +    if ($column->length !== NULL) {
 +      return [$column->name, $column->length];
 +    }
@@ -416,8 +493,8 @@ index 0000000000..776f4d6391
 +   *
 +   * @internal
 +   */
-+  final protected static function convertPrimaryKeyToArrayDefinition(PrimaryKey $primaryKey): array {
-+    return self::convertKeyColumnsToArrayDefinition($primaryKey->columns);
++  final public static function primaryKeyToArray(PrimaryKey $primaryKey): array {
++    return self::keyColumnsToArray($primaryKey->columns);
 +  }
 +
 +  /**
@@ -425,10 +502,10 @@ index 0000000000..776f4d6391
 +   *
 +   * @internal
 +   */
-+  final protected static function convertUniqueKeysToArrayDefinition(array $uniqueKeys): array {
++  final public static function uniqueKeysToArray(array $uniqueKeys): array {
 +    $spec = [];
 +    foreach ($uniqueKeys as $uniqueKey) {
-+      $spec[$uniqueKey->name] = self::convertKeyColumnsToArrayDefinition($uniqueKey->columns);
++      $spec[$uniqueKey->name] = self::keyColumnsToArray($uniqueKey->columns);
 +    }
 +    return $spec;
 +  }
@@ -438,10 +515,10 @@ index 0000000000..776f4d6391
 +   *
 +   * @internal
 +   */
-+  final protected static function convertIndexesToArrayDefinition(array $indexes): array {
++  final public static function indexesToArray(array $indexes): array {
 +    $spec = [];
 +    foreach ($indexes as $index) {
-+      $spec[$index->name] = self::convertKeyColumnsToArrayDefinition($index->columns);
++      $spec[$index->name] = self::keyColumnsToArray($index->columns);
 +    }
 +    return $spec;
 +  }
@@ -451,11 +528,11 @@ index 0000000000..776f4d6391
 +   *
 +   * @internal
 +   */
-+  final protected static function convertForeignKeysToArrayDefinition(array $foreignKeys): array {
++  final public static function foreignKeysToArray(array $foreignKeys): array {
 +    $spec = [];
 +    foreach ($foreignKeys as $foreignKey) {
-+      $cols = self::convertKeyColumnsToArrayDefinition($foreignKey->columns);
-+      $foreignCols = self::convertKeyColumnsToArrayDefinition($foreignKey->foreignColumns);
++      $cols = self::keyColumnsToArray($foreignKey->columns);
++      $foreignCols = self::keyColumnsToArray($foreignKey->foreignColumns);
 +      $match = [];
 +      for ($i = 0; $i < count($cols); $i++) {
 +        $match[$cols[$i]] = $foreignCols[$i];
@@ -810,62 +887,231 @@ index 0000000000..7bb8e49142
 +  }
 +
 +}
+diff --git a/core/lib/Drupal/Core/Database/database.api.php b/core/lib/Drupal/Core/Database/database.api.php
+index 50e4bb5060..76321868eb 100644
+--- a/core/lib/Drupal/Core/Database/database.api.php
++++ b/core/lib/Drupal/Core/Database/database.api.php
+@@ -6,6 +6,14 @@
+  */
+ 
+ use Drupal\Core\Database\Query\SelectInterface;
++use Drupal\Core\Database\SchemaDefinition\Column;
++use Drupal\Core\Database\SchemaDefinition\ColumnSize;
++use Drupal\Core\Database\SchemaDefinition\ColumnType;
++use Drupal\Core\Database\SchemaDefinition\ConvertDefinition;
++use Drupal\Core\Database\SchemaDefinition\ForeignKey;
++use Drupal\Core\Database\SchemaDefinition\Index;
++use Drupal\Core\Database\SchemaDefinition\PrimaryKey;
++use Drupal\Core\Database\SchemaDefinition\Table;
+ 
+ /**
+  * @defgroup database Database abstraction layer
+@@ -502,8 +510,8 @@ function hook_query_TAG_alter(Drupal\Core\Database\Query\AlterableInterface $que
+ /**
+  * Define the current version of the database schema.
+  *
+- * A Drupal schema definition is an array structure representing one or more
+- * tables and their related keys and indexes. A schema is defined by
++ * A Drupal schema definition is a structure of value objects representing one
++ * or more tables and their related keys and indexes. A schema is defined by
+  * hook_schema() which must live in your module's .install file.
+  *
+  * The tables declared by this hook will be automatically created when the
+@@ -516,75 +524,93 @@ function hook_query_TAG_alter(Drupal\Core\Database\Query\AlterableInterface $que
+  * engines. You don't have to deal with the different SQL dialects for table
+  * creation and alteration of the supported database engines.
+  *
+- * See the Schema API Handbook at https://www.drupal.org/node/146843 for details
+- * on schema definition structures. Note that foreign key definitions are for
+- * documentation purposes only; foreign keys are not created in the database,
+- * nor are they enforced by Drupal.
++ * See the Schema API page at
++ * https://api.drupal.org/api/drupal/core%21lib%21Drupal%21Core%21Database%21database.api.php/group/schemaapi
++ * for details on schema definition structures. Note that foreign key
++ * definitions are for documentation purposes only; foreign keys are not
++ * created in the database, nor are they enforced by Drupal.
++ *
++ * @param bool $returnArraySchema
++ *   (Optional) FALSE indicates to return an array of
++ *   Drupal\Core\Database\SchemaDefinition\Table objects, TRUE to return
++ *   an array-based schema based on legacy (prior to Drupal xx.yy.zz)
++ *   definition. Defaults to TRUE.
+  *
+  * @return array
+- *   A schema definition structure array. For each element of the
+- *   array, the key is a table name and the value is a table structure
+- *   definition.
++ *   A schema definition structure array. Depending on the $returnArraySchema
++ *   parameter: if TRUE for each element of the array, the key is a table name
++ *   and the value is a legacy array-based table structure definition; if FALSE
++ *   the array is a list of Drupal\Core\Database\SchemaDefinition\Table
++ *   objects.
+  *
+  * @ingroup schemaapi
+  */
+-function hook_schema() {
+-  $schema['users_data'] = [
+-    'description' => 'Stores module data as key/value pairs per user.',
+-    'fields' => [
+-      'uid' => [
+-        'description' => 'The {users}.uid this record affects.',
+-        'type' => 'int',
+-        'unsigned' => TRUE,
+-        'not null' => TRUE,
+-        'default' => 0,
+-      ],
+-      'module' => [
+-        'description' => 'The name of the module declaring the variable.',
+-        'type' => 'varchar_ascii',
+-        'length' => DRUPAL_EXTENSION_NAME_MAX_LENGTH,
+-        'not null' => TRUE,
+-        'default' => '',
+-      ],
+-      'name' => [
+-        'description' => 'The identifier of the data.',
+-        'type' => 'varchar_ascii',
+-        'length' => 128,
+-        'not null' => TRUE,
+-        'default' => '',
+-      ],
+-      'value' => [
+-        'description' => 'The value.',
+-        'type' => 'blob',
+-        'not null' => FALSE,
+-        'size' => 'big',
+-      ],
+-      'serialized' => [
+-        'description' => 'Whether value is serialized.',
+-        'type' => 'int',
+-        'size' => 'tiny',
+-        'unsigned' => TRUE,
+-        'default' => 0,
+-      ],
++function hook_schema(bool $returnArraySchema = TRUE) {
++  $schema[] = new Table(
++    name: 'users_data',
++    description: 'Stores module data as key/value pairs per user.',
++    columns: [
++      new Column(
++        name: 'uid',
++        description: 'The {users}.uid this record affects.',
++        type: ColumnType::Int,
++        unsigned: TRUE,
++        notNull: TRUE,
++        default: 0,
++      ),
++      new Column(
++        name: 'module',
++        description: 'The name of the module declaring the variable.',
++        type: ColumnType::VarcharAscii,
++        length: DRUPAL_EXTENSION_NAME_MAX_LENGTH,
++        notNull: TRUE,
++        default: '',
++      ),
++      new Column(
++        name: 'name',
++        description: 'The identifier of the data.',
++        type: ColumnType::VarcharAscii,
++        length: 128,
++        notNull: TRUE,
++        default: '',
++      ),
++      new Column(
++        name: 'value',
++        description: 'The value.',
++        type: ColumnType::Blob,
++        size: ColumnSize::Big,
++        notNull: FALSE,
++      ),
++      new Column(
++        name: 'serialized',
++        description: 'Whether value is serialized.',
++        type: ColumnType::Int,
++        size: ColumnSize::Tiny,
++        unsigned: TRUE,
++        default: 0,
++      ),
+     ],
+-    'primary key' => ['uid', 'module', 'name'],
+-    'indexes' => [
+-      'module' => ['module'],
+-      'name' => ['name'],
++    primaryKey: new PrimaryKey(['uid', 'module', 'name']),
++    indexes: [
++      new Index(name: 'module', columns: ['module']),
++      new Index(name: 'name', columns: ['name']),
+     ],
+     // For documentation purposes only; foreign keys are not created in the
+     // database.
+-    'foreign keys' => [
+-      'data_user' => [
+-        'table' => 'users',
+-        'columns' => [
+-          'uid' => 'uid',
+-        ],
+-      ],
++    foreignKeys: [
++      new ForeignKey(
++       name: 'data_user',
++       foreignTable: 'users',
++       columns: ['uid'],
++       foreignColumns: ['uid'],
++      ),
+     ],
+-  ];
++  );
+ 
+-  return $schema;
++  return match ($returnArraySchema) {
++    TRUE => ConvertDefinition::schemaToArray($schema),
++    FALSE => $schema,
++  };
+ }
+ 
+ /**
 diff --git a/core/lib/Drupal/Core/Extension/ModuleInstaller.php b/core/lib/Drupal/Core/Extension/ModuleInstaller.php
-index 289ecffe41..54223c37ae 100644
+index 289ecffe41..022d10e5d4 100644
 --- a/core/lib/Drupal/Core/Extension/ModuleInstaller.php
 +++ b/core/lib/Drupal/Core/Extension/ModuleInstaller.php
-@@ -5,6 +5,9 @@
+@@ -5,6 +5,8 @@
  use Drupal\Core\Cache\Cache;
  use Drupal\Core\Cache\CacheBackendInterface;
  use Drupal\Core\Database\Connection;
-+use Drupal\Core\Database\Exception\SchemaDefinitionException;
-+use Drupal\Core\Database\SchemaDefinition\ConvertDefinitionTrait;
++use Drupal\Core\Database\SchemaDefinition\ConvertDefinition;
 +use Drupal\Core\Database\SchemaDefinition\Table;
  use Drupal\Core\DrupalKernelInterface;
  use Drupal\Core\Entity\EntityStorageException;
  use Drupal\Core\Entity\FieldableEntityInterface;
-@@ -28,6 +31,8 @@
-  */
- class ModuleInstaller implements ModuleInstallerInterface {
- 
-+  use ConvertDefinitionTrait;
-+
-   /**
-    * The module handler.
-    *
-@@ -658,6 +663,17 @@ protected function installSchema(string $module): void {
-     $tables = $this->moduleHandler->invoke($module, 'schema') ?? [];
+@@ -655,9 +657,15 @@ public function validateUninstall(array $module_list) {
+    * @internal
+    */
+   protected function installSchema(string $module): void {
+-    $tables = $this->moduleHandler->invoke($module, 'schema') ?? [];
++    $tables = $this->moduleHandler->invoke($module, 'schema', [FALSE]) ?? [];
      $schema = $this->connection->schema();
      foreach ($tables as $name => $table) {
 +      if ($table instanceof Table) {
-+        if (is_int($name)) {
-+          $name = $table->name;
-+        }
-+        if ($name !== $table->name) {
-+          throw new SchemaDefinitionException("The '{$name}' key returned by the {$module}_schema() function must be equal to the Table::\$name property; found '{$table->name}'");
-+        }
++        $name = $table->name;
 +        if (!$this->connection->supportsSchemaDefinition()) {
-+          $table = $this->convertTableToArrayDefinition($table);
++          $table = ConvertDefinition::tableToArray($table);
 +        }
 +      }
        $schema->createTable($name, $table);
      }
    }
-@@ -673,9 +689,17 @@ protected function installSchema(string $module): void {
+@@ -671,11 +679,14 @@ protected function installSchema(string $module): void {
+    * @internal
+    */
    protected function uninstallSchema(string $module): void {
-     $tables = $this->moduleHandler->invoke($module, 'schema') ?? [];
+-    $tables = $this->moduleHandler->invoke($module, 'schema') ?? [];
++    $tables = $this->moduleHandler->invoke($module, 'schema', [FALSE]) ?? [];
      $schema = $this->connection->schema();
 -    foreach (array_keys($tables) as $table) {
 -      if ($schema->tableExists($table)) {
 -        $schema->dropTable($table);
 +    foreach ($tables as $name => $table) {
 +      if ($table instanceof Table) {
-+        if (is_int($name)) {
-+          $name = $table->name;
-+        }
-+        if ($name !== $table->name) {
-+          throw new SchemaDefinitionException("The '{$name}' key returned by the {$module}_schema() function must be equal to the Table::\$name property; found '{$table->name}'");
-+        }
++        $name = $table->name;
 +      }
 +      if ($schema->tableExists($name)) {
 +        $schema->dropTable($name);
@@ -873,14 +1119,17 @@ index 289ecffe41..54223c37ae 100644
      }
    }
 diff --git a/core/modules/system/system.install b/core/modules/system/system.install
-index 079fa6cbf7..0bb8cea662 100644
+index 8f557e9ac4..8f19e98d4e 100644
 --- a/core/modules/system/system.install
 +++ b/core/modules/system/system.install
-@@ -13,6 +13,11 @@
+@@ -13,6 +13,14 @@
  use Drupal\Component\Utility\Unicode;
  use Drupal\Core\Cache\Cache;
  use Drupal\Core\Database\Database;
 +use Drupal\Core\Database\SchemaDefinition\Column;
++use Drupal\Core\Database\SchemaDefinition\ColumnSize;
++use Drupal\Core\Database\SchemaDefinition\ColumnType;
++use Drupal\Core\Database\SchemaDefinition\ConvertDefinition;
 +use Drupal\Core\Database\SchemaDefinition\ForeignKey;
 +use Drupal\Core\Database\SchemaDefinition\Index;
 +use Drupal\Core\Database\SchemaDefinition\PrimaryKey;
@@ -888,7 +1137,12 @@ index 079fa6cbf7..0bb8cea662 100644
  use Drupal\Core\DrupalKernel;
  use Drupal\Core\Extension\ExtensionLifecycle;
  use Drupal\Core\Entity\EntityTypeInterface;
-@@ -1616,69 +1621,83 @@ function system_schema() {
+@@ -1612,75 +1620,92 @@ function system_install() {
+ /**
+  * Implements hook_schema().
+  */
+-function system_schema() {
++function system_schema(bool $returnArraySchema = TRUE) {
    // @deprecated The sequences table has been deprecated in drupal:10.2.0 and is
    // removed from drupal:12.0.0. See https://www.drupal.org/node/3220378.
    // @todo: Remove sequences table in Drupal 12. See https://www.drupal.org/i/3335756
@@ -947,7 +1201,7 @@ index 079fa6cbf7..0bb8cea662 100644
 +      new Column(
 +        name: 'value',
 +        description: 'The value of the sequence.',
-+        type: 'serial',
++        type: ColumnType::Serial,
 +        unsigned: TRUE,
 +        notNull: TRUE,
 +      ),
@@ -964,21 +1218,21 @@ index 079fa6cbf7..0bb8cea662 100644
 +      new Column(
 +        name: 'uid',
 +        description: 'The {users}.uid corresponding to a session, or 0 for anonymous user.',
-+        type: 'int',
++        type: ColumnType::Int,
 +        unsigned: TRUE,
 +        notNull: TRUE,
 +      ),
 +      new Column(
 +        name: 'sid',
 +        description: "A session ID (hashed). The value is generated by Drupal's session handlers.",
-+        type: 'varchar_ascii',
++        type: ColumnType::VarcharAscii,
 +        length: 128,
 +        notNull: TRUE,
 +      ),
 +      new Column(
 +        name: 'hostname',
 +        description: 'The IP address that last used this session ID (sid).',
-+        type: 'varchar_ascii',
++        type: ColumnType::VarcharAscii,
 +        length: 128,
 +        notNull: TRUE,
 +        default: '',
@@ -986,17 +1240,17 @@ index 079fa6cbf7..0bb8cea662 100644
 +      new Column(
 +        name: 'timestamp',
 +        description: 'The Unix timestamp when this session last requested a page. Old records are purged by PHP automatically.',
-+        type: 'int',
++        type: ColumnType::Int,
++        size: ColumnSize::Big,
 +        notNull: TRUE,
 +        default: 0,
-+        size: 'big',
 +      ),
 +      new Column(
 +        name: 'session',
 +        description: 'The serialized contents of the user\'s session, an array of name/value pairs that persists across page requests by this session ID. Drupal loads the user\'s session from here at the start of each request and saves it at the end.',
-+        type: 'blob',
++        type: ColumnType::Blob,
++        size: ColumnSize::Big,
 +        notNull: FALSE,
-+        size: 'big',
 +      ),
      ],
 -    'indexes' => [
@@ -1029,48 +1283,39 @@ index 079fa6cbf7..0bb8cea662 100644
 -  ];
 +  );
  
-   return $schema;
+-  return $schema;
++  return match ($returnArraySchema) {
++    TRUE => ConvertDefinition::schemaToArray($schema),
++    FALSE => $schema,
++  };
  }
+ 
+ /**
 diff --git a/core/tests/Drupal/TestTools/Extension/SchemaInspector.php b/core/tests/Drupal/TestTools/Extension/SchemaInspector.php
-index 134ad27e08..9332679698 100644
+index 134ad27e08..fd41641c07 100644
 --- a/core/tests/Drupal/TestTools/Extension/SchemaInspector.php
 +++ b/core/tests/Drupal/TestTools/Extension/SchemaInspector.php
-@@ -2,6 +2,9 @@
+@@ -2,6 +2,8 @@
  
  namespace Drupal\TestTools\Extension;
  
-+use Drupal\Core\Database\Exception\SchemaDefinitionException;
-+use Drupal\Core\Database\SchemaDefinition\ConvertDefinitionTrait;
++use Drupal\Core\Database\SchemaDefinition\ConvertDefinition;
 +use Drupal\Core\Database\SchemaDefinition\Table;
  use Drupal\Core\Extension\ModuleHandlerInterface;
  
  /**
-@@ -9,6 +12,8 @@
-  */
- class SchemaInspector {
- 
-+  use ConvertDefinitionTrait;
-+
-   /**
-    * Returns the module's schema specification.
-    *
-@@ -28,7 +33,23 @@ class SchemaInspector {
+@@ -28,7 +30,18 @@ class SchemaInspector {
     */
    public static function getTablesSpecification(ModuleHandlerInterface $handler, string $module): array {
      if ($handler->loadInclude($module, 'install')) {
 -      return $handler->invoke($module, 'schema') ?? [];
-+      $tables = $handler->invoke($module, 'schema') ?? [];
++      $tables = $handler->invoke($module, 'schema', [FALSE]) ?? [];
 +      $temp = [];
 +      foreach ($tables as $name => $table) {
 +        if ($table instanceof Table) {
-+          if (is_int($name)) {
-+            $name = $table->name;
-+          }
-+          if ($name !== $table->name) {
-+            throw new SchemaDefinitionException("The '{$name}' key returned by the {$module}_schema() function must be equal to the Table::\$name property; found '{$table->name}'");
-+          }
++          $name = $table->name;
 +          if (!\Drupal::database()->supportsSchemaDefinition()) {
-+            $table = self::convertTableToArrayDefinition($table);
++            $table = ConvertDefinition::tableToArray($table);
 +          }
 +        }
 +        $temp[$name] = $table;
@@ -1079,12 +1324,12 @@ index 134ad27e08..9332679698 100644
      }
      return [];
    }
-diff --git a/core/tests/Drupal/Tests/Core/Database/ConvertDefinitionTraitTest.php b/core/tests/Drupal/Tests/Core/Database/ConvertDefinitionTraitTest.php
+diff --git a/core/tests/Drupal/Tests/Core/Database/ConvertDefinitionTest.php b/core/tests/Drupal/Tests/Core/Database/ConvertDefinitionTest.php
 new file mode 100644
-index 0000000000..f5ca2b8d5d
+index 0000000000..9be238507e
 --- /dev/null
-+++ b/core/tests/Drupal/Tests/Core/Database/ConvertDefinitionTraitTest.php
-@@ -0,0 +1,167 @@
++++ b/core/tests/Drupal/Tests/Core/Database/ConvertDefinitionTest.php
+@@ -0,0 +1,169 @@
 +<?php
 +
 +declare(strict_types=1);
@@ -1092,7 +1337,9 @@ index 0000000000..f5ca2b8d5d
 +namespace Drupal\Tests\Core\Database;
 +
 +use Drupal\Core\Database\SchemaDefinition\Column;
-+use Drupal\Core\Database\SchemaDefinition\ConvertDefinitionTrait;
++use Drupal\Core\Database\SchemaDefinition\ColumnSize;
++use Drupal\Core\Database\SchemaDefinition\ColumnType;
++use Drupal\Core\Database\SchemaDefinition\ConvertDefinition;
 +use Drupal\Core\Database\SchemaDefinition\ForeignKey;
 +use Drupal\Core\Database\SchemaDefinition\Index;
 +use Drupal\Core\Database\SchemaDefinition\KeyColumn;
@@ -1102,18 +1349,16 @@ index 0000000000..f5ca2b8d5d
 +use Drupal\Tests\UnitTestCase;
 +
 +/**
-+ * Tests the ConvertDefinitionTrait.
++ * Tests conversion of SchemaDefinition objects to legacy array-based structure.
 + *
 + * @group Database
 + */
-+class ConvertDefinitionTraitTest extends UnitTestCase {
-+
-+  use ConvertDefinitionTrait;
++class ConvertDefinitionTest extends UnitTestCase {
 +
 +  /**
-+   * Tests the ConvertDefinitionTrait.
++   * Tests ConvertDefinition::tableToArray.
 +   */
-+  public function testConvertDefinitionTrait(): void {
++  public function testConvertDefinition(): void {
 +    $arraySpecification = [
 +      'description' => 'Basic test table for the database unit tests.',
 +      'fields' => [
@@ -1133,6 +1378,7 @@ index 0000000000..f5ca2b8d5d
 +        'age' => [
 +          'description' => "The person's age",
 +          'type' => 'int',
++          'size' => 'small',
 +          'unsigned' => TRUE,
 +          'not null' => TRUE,
 +          'default' => 0,
@@ -1176,14 +1422,14 @@ index 0000000000..f5ca2b8d5d
 +      columns: [
 +        new Column(
 +          name: 'id',
-+          type: 'serial',
++          type: ColumnType::Serial,
 +          unsigned: TRUE,
 +          notNull: TRUE,
 +        ),
 +        new Column(
 +          name: 'name',
 +          description: "A person's name",
-+          type: 'varchar_ascii',
++          type: ColumnType::VarcharAscii,
 +          length: 255,
 +          notNull: TRUE,
 +          default: '',
@@ -1192,7 +1438,8 @@ index 0000000000..f5ca2b8d5d
 +        new Column(
 +          name: 'age',
 +          description: "The person's age",
-+          type: 'int',
++          type: ColumnType::Int,
++          size: ColumnSize::Small,
 +          unsigned: TRUE,
 +          notNull: TRUE,
 +          default: 0,
@@ -1200,7 +1447,7 @@ index 0000000000..f5ca2b8d5d
 +        new Column(
 +          name: 'job',
 +          description: "The person's job",
-+          type: 'varchar',
++          type: ColumnType::Varchar,
 +          length: 255,
 +          notNull: TRUE,
 +          default: 'Undefined',
@@ -1248,7 +1495,7 @@ index 0000000000..f5ca2b8d5d
 +      ],
 +    );
 +
-+    $this->assertEquals($arraySpecification, self::convertTableToArrayDefinition($schemaDefinition));
++    $this->assertEquals($arraySpecification, ConvertDefinition::tableToArray($schemaDefinition));
 +  }
 +
 +}
