@@ -1552,17 +1552,96 @@ index 57a07592ff..f98a7b1ae3 100644
      "autoload": {
          "psr-4": {
 diff --git a/core/lib/Drupal/Core/Test/PhpUnitTestRunner.php b/core/lib/Drupal/Core/Test/PhpUnitTestRunner.php
-index 425f125aa8..3ba1830618 100644
+index 425f125aa8..963fce354a 100644
 --- a/core/lib/Drupal/Core/Test/PhpUnitTestRunner.php
 +++ b/core/lib/Drupal/Core/Test/PhpUnitTestRunner.php
-@@ -129,6 +129,7 @@ public function runCommand(array $unescaped_test_classnames, string $phpunit_fil
+@@ -6,6 +6,7 @@
+ use Drupal\Core\DependencyInjection\ContainerInjectionInterface;
+ use Symfony\Component\DependencyInjection\ContainerInterface;
+ use Symfony\Component\Process\PhpExecutableFinder;
++use Symfony\Component\Process\Process;
+ 
+ /**
+  * Run PHPUnit-based tests.
+@@ -106,37 +107,37 @@ public function phpUnitCommand(): string {
+    *   (optional) The output by running the phpunit command. If provided, this
+    *   array will contain the lines output by the command.
+    *
+-   * @return string
+-   *   The results as returned by exec().
+-   *
+    * @internal
+    */
+-  public function runCommand(array $unescaped_test_classnames, string $phpunit_file, int &$status = NULL, array &$output = NULL): string {
++  public function runCommand(array $unescaped_test_classnames, string $phpunit_file, int &$status = NULL, array &$output = NULL): void {
+     global $base_url;
+     // Setup an environment variable containing the database connection so that
+     // functional tests can connect to the database.
+-    putenv('SIMPLETEST_DB=' . Database::getConnectionInfoAsUrl());
++    $process_environment_variables = [
++      'SIMPLETEST_DB' => Database::getConnectionInfoAsUrl(),
++    ];
+ 
+     // Setup an environment variable containing the base URL, if it is available.
+     // This allows functional tests to browse the site under test. When running
+     // tests via CLI, core/phpunit.xml.dist or core/scripts/run-tests.sh can set
+     // this variable.
+     if ($base_url) {
+-      putenv('SIMPLETEST_BASE_URL=' . $base_url);
+-      putenv('BROWSERTEST_OUTPUT_DIRECTORY=' . $this->workingDirectory);
++      $process_environment_variables['SIMPLETEST_BASE_URL'] = $base_url;
++      $process_environment_variables['BROWSERTEST_OUTPUT_DIRECTORY'] = $this->workingDirectory;
+     }
+     $phpunit_bin = $this->phpUnitCommand();
  
      $command = [
        $phpunit_bin,
 +      '--display-deprecations',
        '--log-junit',
-       escapeshellarg($phpunit_file),
+-      escapeshellarg($phpunit_file),
++      $phpunit_file,
      ];
+ 
+     // Optimized for running a single test.
+     if (count($unescaped_test_classnames) == 1) {
+       $class = new \ReflectionClass($unescaped_test_classnames[0]);
+-      $command[] = escapeshellarg($class->getFileName());
++      $command[] = $class->getFileName();
+     }
+     else {
+       // Double escape namespaces so they'll work in a regexp.
+@@ -147,25 +148,15 @@ public function runCommand(array $unescaped_test_classnames, string $phpunit_fil
+       $filter_string = implode("|", $escaped_test_classnames);
+       $command = array_merge($command, [
+         '--filter',
+-        escapeshellarg($filter_string),
++        $filter_string,
+       ]);
+     }
+ 
+-    // Need to change directories before running the command so that we can use
+-    // relative paths in the configuration file's exclusions.
+-    $old_cwd = getcwd();
+-    chdir($this->appRoot . "/core");
+-
+-    // exec in a subshell so that the environment is isolated.
+-    $ret = exec(implode(" ", $command), $output, $status);
+-
+-    chdir($old_cwd);
+-    putenv('SIMPLETEST_DB=');
+-    if ($base_url) {
+-      putenv('SIMPLETEST_BASE_URL=');
+-      putenv('BROWSERTEST_OUTPUT_DIRECTORY=');
+-    }
+-    return $ret;
++    $process = new Process($command, \Drupal::root() . "/core", $process_environment_variables);
++    $process->setTimeout(300);
++    $process->run();
++    $output = explode("\n", $process->getOutput());
++    $status = $process->getExitCode();
+   }
+ 
+   /**
 diff --git a/core/lib/Drupal/Core/Test/TestDiscovery.php b/core/lib/Drupal/Core/Test/TestDiscovery.php
 index d6e2336375..85608dab6d 100644
 --- a/core/lib/Drupal/Core/Test/TestDiscovery.php
@@ -1602,7 +1681,7 @@ index 41272c21c2..b2e7e5f8dd 100644
  /**
   * @coversDefaultClass \Drupal\tour\TourTipPluginInterface
 diff --git a/core/phpstan-baseline.neon b/core/phpstan-baseline.neon
-index 318074ad50..ca9e17df76 100644
+index 318074ad50..79163ee524 100644
 --- a/core/phpstan-baseline.neon
 +++ b/core/phpstan-baseline.neon
 @@ -1075,6 +1075,26 @@ parameters:
@@ -1706,7 +1785,7 @@ index 318074ad50..ca9e17df76 100644
  		-
  			message: "#^Variable \\$callable in empty\\(\\) always exists and is not falsy\\.$#"
  			count: 1
-@@ -1146,2432 +1219,7831 @@ parameters:
+@@ -1146,2432 +1219,7836 @@ parameters:
  			path: modules/book/src/Form/BookOutlineForm.php
  
  		-
@@ -6218,11 +6297,6 @@ index 318074ad50..ca9e17df76 100644
 +			path: tests/Drupal/KernelTests/Core/Config/Storage/StorageReplaceDataWrapperTest.php
 +
 +		-
-+			message: "#^Call to an undefined method Drupal\\\\KernelTests\\\\Core\\\\Database\\\\ConnectionTest\\:\\:expectError\\(\\)\\.$#"
-+			count: 2
-+			path: tests/Drupal/KernelTests/Core/Database/ConnectionTest.php
-+
-+		-
 +			message: "#^Variable \\$expected_driver might not be defined\\.$#"
 +			count: 2
 +			path: tests/Drupal/KernelTests/Core/Database/DriverSpecificKernelTestBase.php
@@ -7486,36 +7560,31 @@ index 318074ad50..ca9e17df76 100644
 +			message: "#^@dataProvider providerCheckException related method must be static in PHPUnit 10 and newer\\.$#"
 +			count: 1
 +			path: tests/Drupal/Tests/Core/Access/AccessManagerTest.php
-+
-+		-
-+			message: "#^@dataProvider providerTestCheckConjunctions related method must be static in PHPUnit 10 and newer\\.$#"
-+			count: 1
-+			path: tests/Drupal/Tests/Core/Access/AccessManagerTest.php
  
  		-
 -			message: "#^Variable \\$image_style in empty\\(\\) always exists and is not falsy\\.$#"
++			message: "#^@dataProvider providerTestCheckConjunctions related method must be static in PHPUnit 10 and newer\\.$#"
+ 			count: 1
+-			path: modules/image/src/Controller/ImageStyleDownloadController.php
++			path: tests/Drupal/Tests/Core/Access/AccessManagerTest.php
+ 
+ 		-
+-			message: "#^Variable \\$lock_name might not be defined\\.$#"
 +			message: "#^@dataProvider andOrCacheabilityPropagationProvider related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/image/src/Controller/ImageStyleDownloadController.php
 +			path: tests/Drupal/Tests/Core/Access/AccessResultTest.php
  
  		-
--			message: "#^Variable \\$lock_name might not be defined\\.$#"
+-			message: "#^Method Drupal\\\\image\\\\Form\\\\ImageStyleEditForm\\:\\:save\\(\\) should return int but return statement is missing\\.$#"
 +			message: "#^@dataProvider providerTestAllowedIfHasPermissions related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
--			path: modules/image/src/Controller/ImageStyleDownloadController.php
+-			path: modules/image/src/Form/ImageStyleEditForm.php
 +			path: tests/Drupal/Tests/Core/Access/AccessResultTest.php
  
  		-
--			message: "#^Method Drupal\\\\image\\\\Form\\\\ImageStyleEditForm\\:\\:save\\(\\) should return int but return statement is missing\\.$#"
-+			message: "#^@dataProvider providerTestInvalidParameterTypes related method must be static in PHPUnit 10 and newer\\.$#"
- 			count: 1
--			path: modules/image/src/Form/ImageStyleEditForm.php
-+			path: tests/Drupal/Tests/Core/Access/CsrfTokenGeneratorTest.php
- 
- 		-
 -			message: "#^Method Drupal\\\\image\\\\Form\\\\ImageStyleFormBase\\:\\:save\\(\\) should return int but return statement is missing\\.$#"
-+			message: "#^@dataProvider providerTestValidateParameterTypes related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerTestInvalidParameterTypes related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/image/src/Form/ImageStyleFormBase.php
 +			path: tests/Drupal/Tests/Core/Access/CsrfTokenGeneratorTest.php
@@ -7524,138 +7593,143 @@ index 318074ad50..ca9e17df76 100644
 -			message: "#^Access to an undefined property Drupal\\\\image\\\\Plugin\\\\Field\\\\FieldType\\\\ImageItem\\:\\:\\$height\\.$#"
 -			count: 2
 -			path: modules/image/src/Plugin/Field/FieldType/ImageItem.php
-+			message: "#^@dataProvider announceCommandProvider related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerTestValidateParameterTypes related method must be static in PHPUnit 10 and newer\\.$#"
 +			count: 1
-+			path: tests/Drupal/Tests/Core/Ajax/AjaxCommandsTest.php
++			path: tests/Drupal/Tests/Core/Access/CsrfTokenGeneratorTest.php
  
  		-
 -			message: "#^Access to an undefined property Drupal\\\\image\\\\Plugin\\\\Field\\\\FieldType\\\\ImageItem\\:\\:\\$width\\.$#"
 -			count: 2
 -			path: modules/image/src/Plugin/Field/FieldType/ImageItem.php
-+			message: "#^@dataProvider providerCss related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider announceCommandProvider related method must be static in PHPUnit 10 and newer\\.$#"
 +			count: 1
 +			path: tests/Drupal/Tests/Core/Ajax/AjaxCommandsTest.php
  
  		-
 -			message: "#^Variable \\$image_that_is_too_small_file might not be defined\\.$#"
-+			message: "#^@dataProvider providerTestMissingData related method must be static in PHPUnit 10 and newer\\.$#"
-+			count: 1
-+			path: tests/Drupal/Tests/Core/Annotation/PluralTranslationTest.php
-+
-+		-
-+			message: "#^@dataProvider providerAttachedAssets related method must be static in PHPUnit 10 and newer\\.$#"
- 			count: 2
+-			count: 2
 -			path: modules/image/tests/src/Functional/ImageFieldValidateTest.php
-+			path: tests/Drupal/Tests/Core/Asset/AssetResolverTest.php
++			message: "#^@dataProvider providerCss related method must be static in PHPUnit 10 and newer\\.$#"
++			count: 1
++			path: tests/Drupal/Tests/Core/Ajax/AjaxCommandsTest.php
  
  		-
 -			message: "#^Variable \\$edit in empty\\(\\) always exists and is not falsy\\.$#"
++			message: "#^@dataProvider providerTestMissingData related method must be static in PHPUnit 10 and newer\\.$#"
+ 			count: 1
+-			path: modules/image/tests/src/Functional/ImageStyleFlushTest.php
++			path: tests/Drupal/Tests/Core/Annotation/PluralTranslationTest.php
+ 
+ 		-
+-			message: "#^Call to deprecated method withConsecutive\\(\\) of class PHPUnit\\\\Framework\\\\MockObject\\\\Builder\\\\InvocationMocker\\.$#"
++			message: "#^@dataProvider providerAttachedAssets related method must be static in PHPUnit 10 and newer\\.$#"
+ 			count: 2
+-			path: modules/inline_form_errors/tests/src/Unit/FormErrorHandlerTest.php
++			path: tests/Drupal/Tests/Core/Asset/AssetResolverTest.php
+ 
+ 		-
+-			message: "#^Variable \\$reason in empty\\(\\) always exists and is not falsy\\.$#"
 +			message: """
 +				#^Call to deprecated method onConsecutiveCalls\\(\\) of class PHPUnit\\\\Framework\\\\TestCase\\:
 +				Use \\<code\\>\\$double\\-\\>willReturn\\(\\)\\</code\\> instead of \\<code\\>\\$double\\-\\>will\\(\\$this\\-\\>onConsecutiveCalls\\(\\)\\)\\</code\\>$#
 +			"""
  			count: 1
--			path: modules/image/tests/src/Functional/ImageStyleFlushTest.php
+-			path: modules/jsonapi/src/Context/FieldResolver.php
 +			path: tests/Drupal/Tests/Core/Asset/AssetResolverTest.php
  
  		-
--			message: "#^Call to deprecated method withConsecutive\\(\\) of class PHPUnit\\\\Framework\\\\MockObject\\\\Builder\\\\InvocationMocker\\.$#"
--			count: 2
--			path: modules/inline_form_errors/tests/src/Unit/FormErrorHandlerTest.php
-+			message: "#^@dataProvider providerTestRender related method must be static in PHPUnit 10 and newer\\.$#"
-+			count: 1
-+			path: tests/Drupal/Tests/Core/Asset/CssCollectionRendererUnitTest.php
- 
- 		-
--			message: "#^Variable \\$reason in empty\\(\\) always exists and is not falsy\\.$#"
-+			message: "#^@dataProvider providerTestOptimize related method must be static in PHPUnit 10 and newer\\.$#"
- 			count: 1
--			path: modules/jsonapi/src/Context/FieldResolver.php
-+			path: tests/Drupal/Tests/Core/Asset/CssOptimizerUnitTest.php
- 
- 		-
 -			message: "#^Method Drupal\\\\jsonapi\\\\JsonApiResource\\\\ResourceIdentifier\\:\\:getDataReferencePropertyName\\(\\) should return string but return statement is missing\\.$#"
-+			message: "#^@dataProvider providerTestClean related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerTestRender related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/jsonapi/src/JsonApiResource/ResourceIdentifier.php
-+			path: tests/Drupal/Tests/Core/Asset/JsOptimizerUnitTest.php
++			path: tests/Drupal/Tests/Core/Asset/CssCollectionRendererUnitTest.php
  
  		-
 -			message: "#^Variable \\$entity in isset\\(\\) always exists and is not nullable\\.$#"
 +			message: "#^@dataProvider providerTestOptimize related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/jsonapi/src/Normalizer/EntityAccessDeniedHttpExceptionNormalizer.php
-+			path: tests/Drupal/Tests/Core/Asset/JsOptimizerUnitTest.php
++			path: tests/Drupal/Tests/Core/Asset/CssOptimizerUnitTest.php
  
  		-
 -			message: "#^Variable \\$group might not be defined\\.$#"
 -			count: 5
 -			path: modules/jsonapi/src/Query/Filter.php
-+			message: "#^@dataProvider providerTestGetLibrariesWithDependencies related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerTestClean related method must be static in PHPUnit 10 and newer\\.$#"
 +			count: 1
-+			path: tests/Drupal/Tests/Core/Asset/LibraryDependencyResolverTest.php
++			path: tests/Drupal/Tests/Core/Asset/JsOptimizerUnitTest.php
  
  		-
 -			message: "#^Method Drupal\\\\jsonapi\\\\Revisions\\\\VersionNegotiator\\:\\:getRevision\\(\\) should return Drupal\\\\Core\\\\Entity\\\\EntityInterface but return statement is missing\\.$#"
-+			message: "#^@dataProvider providerTestGetMinimalRepresentativeSubset related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerTestOptimize related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/jsonapi/src/Revisions/VersionNegotiator.php
-+			path: tests/Drupal/Tests/Core/Asset/LibraryDependencyResolverTest.php
++			path: tests/Drupal/Tests/Core/Asset/JsOptimizerUnitTest.php
  
  		-
 -			message: "#^Variable \\$created_entity might not be defined\\.$#"
-+			message: "#^@dataProvider providerTestCssAssert related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerTestGetLibrariesWithDependencies related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/jsonapi/tests/src/Functional/ResourceTestBase.php
-+			path: tests/Drupal/Tests/Core/Asset/LibraryDiscoveryParserTest.php
++			path: tests/Drupal/Tests/Core/Asset/LibraryDependencyResolverTest.php
  
  		-
 -			message: "#^Variable \\$dynamic_cache might not be defined\\.$#"
-+			message: "#^@dataProvider providerTestDefaultFilter related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerTestGetMinimalRepresentativeSubset related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/jsonapi/tests/src/Functional/ResourceTestBase.php
-+			path: tests/Drupal/Tests/Core/Authentication/AuthenticationManagerTest.php
++			path: tests/Drupal/Tests/Core/Asset/LibraryDependencyResolverTest.php
  
  		-
 -			message: "#^Variable \\$parseable_invalid_request_body might not be defined\\.$#"
 -			count: 2
 -			path: modules/jsonapi/tests/src/Functional/ResourceTestBase.php
-+			message: "#^@dataProvider providerTestPercentages related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerTestCssAssert related method must be static in PHPUnit 10 and newer\\.$#"
 +			count: 1
-+			path: tests/Drupal/Tests/Core/Batch/PercentagesTest.php
++			path: tests/Drupal/Tests/Core/Asset/LibraryDiscoveryParserTest.php
  
  		-
 -			message: "#^Variable \\$reason in empty\\(\\) always exists and is not falsy\\.$#"
 -			count: 2
 -			path: modules/jsonapi/tests/src/Functional/ResourceTestBase.php
-+			message: "#^@dataProvider providerTestGetMachineNameSuggestion related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerTestDefaultFilter related method must be static in PHPUnit 10 and newer\\.$#"
 +			count: 1
-+			path: tests/Drupal/Tests/Core/Block/BlockBaseTest.php
++			path: tests/Drupal/Tests/Core/Authentication/AuthenticationManagerTest.php
  
  		-
 -			message: "#^Variable \\$id in isset\\(\\) always exists and is not nullable\\.$#"
 -			count: 2
 -			path: modules/jsonapi/tests/src/Unit/Normalizer/JsonApiDocumentTopLevelNormalizerTest.php
-+			message: "#^@dataProvider buildTagsProvider related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerTestPercentages related method must be static in PHPUnit 10 and newer\\.$#"
 +			count: 1
-+			path: tests/Drupal/Tests/Core/Cache/CacheTest.php
++			path: tests/Drupal/Tests/Core/Batch/PercentagesTest.php
  
  		-
 -			message: "#^Method Drupal\\\\language\\\\Form\\\\LanguageAddForm\\:\\:save\\(\\) should return int but return statement is missing\\.$#"
-+			message: "#^@dataProvider mergeCacheContextsProvide related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerTestGetMachineNameSuggestion related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/language/src/Form/LanguageAddForm.php
-+			path: tests/Drupal/Tests/Core/Cache/CacheTest.php
++			path: tests/Drupal/Tests/Core/Block/BlockBaseTest.php
  
  		-
 -			message: "#^Method Drupal\\\\language\\\\Form\\\\LanguageEditForm\\:\\:save\\(\\) should return int but return statement is missing\\.$#"
-+			message: "#^@dataProvider mergeMaxAgesProvider related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider buildTagsProvider related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/language/src/Form/LanguageEditForm.php
 +			path: tests/Drupal/Tests/Core/Cache/CacheTest.php
  
  		-
 -			message: "#^Variable \\$key might not be defined\\.$#"
++			message: "#^@dataProvider mergeCacheContextsProvide related method must be static in PHPUnit 10 and newer\\.$#"
++			count: 1
++			path: tests/Drupal/Tests/Core/Cache/CacheTest.php
++
++		-
++			message: "#^@dataProvider mergeMaxAgesProvider related method must be static in PHPUnit 10 and newer\\.$#"
++			count: 1
++			path: tests/Drupal/Tests/Core/Cache/CacheTest.php
++
++		-
 +			message: "#^@dataProvider mergeTagsProvider related method must be static in PHPUnit 10 and newer\\.$#"
 +			count: 1
 +			path: tests/Drupal/Tests/Core/Cache/CacheTest.php
@@ -7763,21 +7837,16 @@ index 318074ad50..ca9e17df76 100644
  
  		-
 -			message: "#^Call to deprecated constant REQUEST_TIME\\: Deprecated in drupal\\:8\\.3\\.0 and is removed from drupal\\:11\\.0\\.0\\. Use \\\\Drupal\\:\\:time\\(\\)\\-\\>getRequestTime\\(\\); $#"
--			count: 5
--			path: modules/locale/tests/src/Functional/LocaleUpdateBase.php
 +			message: "#^@dataProvider providerTestResolveConditions related method must be static in PHPUnit 10 and newer\\.$#"
 +			count: 1
 +			path: tests/Drupal/Tests/Core/Condition/ConditionAccessResolverTraitTest.php
- 
- 		-
--			message: "#^Call to deprecated constant REQUEST_TIME\\: Deprecated in drupal\\:8\\.3\\.0 and is removed from drupal\\:11\\.0\\.0\\. Use \\\\Drupal\\:\\:time\\(\\)\\-\\>getRequestTime\\(\\); $#"
++
++		-
 +			message: "#^@dataProvider providerTestSortAll related method must be static in PHPUnit 10 and newer\\.$#"
- 			count: 1
--			path: modules/locale/tests/src/Functional/LocaleUpdateCronTest.php
++			count: 1
 +			path: tests/Drupal/Tests/Core/Config/ConfigDependencyManagerTest.php
- 
- 		-
--			message: "#^Call to deprecated constant REQUEST_TIME\\: Deprecated in drupal\\:8\\.3\\.0 and is removed from drupal\\:11\\.0\\.0\\. Use \\\\Drupal\\:\\:time\\(\\)\\-\\>getRequestTime\\(\\); $#"
++
++		-
 +			message: "#^@dataProvider providerTestFilterNestedArray related method must be static in PHPUnit 10 and newer\\.$#"
 +			count: 1
 +			path: tests/Drupal/Tests/Core/Config/ConfigFactoryOverrideBaseTest.php
@@ -7794,36 +7863,27 @@ index 318074ad50..ca9e17df76 100644
 +
 +		-
 +			message: "#^@dataProvider overrideDataProvider related method must be static in PHPUnit 10 and newer\\.$#"
- 			count: 2
--			path: modules/locale/tests/src/Functional/LocaleUpdateInterfaceTest.php
++			count: 2
 +			path: tests/Drupal/Tests/Core/Config/ConfigTest.php
- 
- 		-
--			message: "#^Variable \\$error in empty\\(\\) always exists and is not falsy\\.$#"
++
++		-
 +			message: "#^@dataProvider setNameProvider related method must be static in PHPUnit 10 and newer\\.$#"
- 			count: 1
--			path: modules/media/media.install
++			count: 1
 +			path: tests/Drupal/Tests/Core/Config/ConfigTest.php
- 
- 		-
--			message: "#^Method Drupal\\\\media\\\\MediaTypeForm\\:\\:save\\(\\) should return int but return statement is missing\\.$#"
++
++		-
 +			message: "#^@dataProvider simpleDataProvider related method must be static in PHPUnit 10 and newer\\.$#"
- 			count: 1
--			path: modules/media/src/MediaTypeForm.php
++			count: 1
 +			path: tests/Drupal/Tests/Core/Config/ConfigTest.php
- 
- 		-
--			message: "#^Variable \\$source in empty\\(\\) always exists and is not falsy\\.$#"
++
++		-
 +			message: "#^@dataProvider validateNameProvider related method must be static in PHPUnit 10 and newer\\.$#"
- 			count: 1
--			path: modules/media/src/MediaTypeForm.php
++			count: 1
 +			path: tests/Drupal/Tests/Core/Config/ConfigTest.php
- 
- 		-
--			message: "#^Variable \\$resource_url on left side of \\?\\? always exists and is not nullable\\.$#"
++
++		-
 +			message: "#^Call to an undefined method Drupal\\\\Tests\\\\Core\\\\Config\\\\ConfigTest\\:\\:expectError\\(\\)\\.$#"
- 			count: 1
--			path: modules/media/src/OEmbed/UrlResolver.php
++			count: 1
 +			path: tests/Drupal/Tests/Core/Config/ConfigTest.php
 +
 +		-
@@ -7853,116 +7913,120 @@ index 318074ad50..ca9e17df76 100644
 +
 +		-
 +			message: "#^Call to deprecated method getMockForAbstractClass\\(\\) of class PHPUnit\\\\Framework\\\\TestCase\\.$#"
-+			count: 5
+ 			count: 5
+-			path: modules/locale/tests/src/Functional/LocaleUpdateBase.php
 +			path: tests/Drupal/Tests/Core/Config/Entity/EntityDisplayBaseTest.php
  
  		-
- 			message: """
--				#^Usage of deprecated trait Symfony\\\\Component\\\\DependencyInjection\\\\ContainerAwareTrait in class Drupal\\\\media_library\\\\OpenerResolver\\:
--				since Symfony 6\\.4, use dependency injection instead$#
+-			message: "#^Call to deprecated constant REQUEST_TIME\\: Deprecated in drupal\\:8\\.3\\.0 and is removed from drupal\\:11\\.0\\.0\\. Use \\\\Drupal\\:\\:time\\(\\)\\-\\>getRequestTime\\(\\); $#"
++			message: """
 +				#^Call to deprecated method addMethods\\(\\) of class PHPUnit\\\\Framework\\\\MockObject\\\\MockBuilder\\:
 +				https\\://github\\.com/sebastianbergmann/phpunit/issues/5320$#
- 			"""
++			"""
  			count: 1
--			path: modules/media_library/src/OpenerResolver.php
+-			path: modules/locale/tests/src/Functional/LocaleUpdateCronTest.php
 +			path: tests/Drupal/Tests/Core/Config/Entity/EntityDisplayModeBaseUnitTest.php
  
  		-
--			message: "#^Variable \\$jpg_image might not be defined\\.$#"
+-			message: "#^Call to deprecated constant REQUEST_TIME\\: Deprecated in drupal\\:8\\.3\\.0 and is removed from drupal\\:11\\.0\\.0\\. Use \\\\Drupal\\:\\:time\\(\\)\\-\\>getRequestTime\\(\\); $#"
 +			message: "#^@dataProvider providerTestGetKeys related method must be static in PHPUnit 10 and newer\\.$#"
- 			count: 1
--			path: modules/media_library/tests/src/FunctionalJavascript/EmbeddedFormWidgetTest.php
++			count: 1
 +			path: tests/Drupal/Tests/Core/Config/Entity/Query/QueryFactoryTest.php
- 
- 		-
--			message: "#^Method Drupal\\\\menu_link_content\\\\Form\\\\MenuLinkContentForm\\:\\:save\\(\\) should return int but return statement is missing\\.$#"
++
++		-
 +			message: "#^@dataProvider readMethodsProvider related method must be static in PHPUnit 10 and newer\\.$#"
- 			count: 1
--			path: modules/menu_link_content/src/Form/MenuLinkContentForm.php
++			count: 1
 +			path: tests/Drupal/Tests/Core/Config/ReadOnlyStorageTest.php
- 
- 		-
--			message: "#^Variable \\$uuid might not be defined\\.$#"
++
++		-
 +			message: """
 +				#^Call to deprecated method returnValue\\(\\) of class PHPUnit\\\\Framework\\\\TestCase\\:
 +				Use \\<code\\>\\$double\\-\\>willReturn\\(\\)\\</code\\> instead of \\<code\\>\\$double\\-\\>will\\(\\$this\\-\\>returnValue\\(\\)\\)\\</code\\>$#
 +			"""
-+			count: 2
+ 			count: 2
+-			path: modules/locale/tests/src/Functional/LocaleUpdateInterfaceTest.php
 +			path: tests/Drupal/Tests/Core/Config/StorageComparerTest.php
-+
-+		-
+ 
+ 		-
+-			message: "#^Variable \\$error in empty\\(\\) always exists and is not falsy\\.$#"
 +			message: "#^@dataProvider providerTestReplaceStorageContents related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
--			path: modules/menu_link_content/src/Plugin/Menu/MenuLinkContent.php
+-			path: modules/media/media.install
 +			path: tests/Drupal/Tests/Core/Config/StorageCopyTraitTest.php
+ 
+ 		-
+-			message: "#^Method Drupal\\\\media\\\\MediaTypeForm\\:\\:save\\(\\) should return int but return statement is missing\\.$#"
++			message: "#^Call to deprecated method getMockForAbstractClass\\(\\) of class PHPUnit\\\\Framework\\\\TestCase\\.$#"
+ 			count: 1
+-			path: modules/media/src/MediaTypeForm.php
++			path: tests/Drupal/Tests/Core/Controller/ControllerBaseTest.php
+ 
+ 		-
+-			message: "#^Variable \\$source in empty\\(\\) always exists and is not falsy\\.$#"
++			message: "#^@dataProvider providerTestCreateController related method must be static in PHPUnit 10 and newer\\.$#"
+ 			count: 1
+-			path: modules/media/src/MediaTypeForm.php
++			path: tests/Drupal/Tests/Core/Controller/ControllerResolverTest.php
+ 
+ 		-
+-			message: "#^Variable \\$resource_url on left side of \\?\\? always exists and is not nullable\\.$#"
++			message: "#^@dataProvider providerTestGetController related method must be static in PHPUnit 10 and newer\\.$#"
+ 			count: 1
+-			path: modules/media/src/OEmbed/UrlResolver.php
++			path: tests/Drupal/Tests/Core/Controller/ControllerResolverTest.php
++
++		-
++			message: "#^@dataProvider providerTestGetControllerFromDefinition related method must be static in PHPUnit 10 and newer\\.$#"
++			count: 1
++			path: tests/Drupal/Tests/Core/Controller/ControllerResolverTest.php
+ 
+ 		-
+ 			message: """
+-				#^Usage of deprecated trait Symfony\\\\Component\\\\DependencyInjection\\\\ContainerAwareTrait in class Drupal\\\\media_library\\\\OpenerResolver\\:
++				#^Class Drupal\\\\Tests\\\\Core\\\\Controller\\\\MockContainerAware implements deprecated interface Symfony\\\\Component\\\\DependencyInjection\\\\ContainerAwareInterface\\:
+ 				since Symfony 6\\.4, use dependency injection instead$#
+ 			"""
+ 			count: 1
+-			path: modules/media_library/src/OpenerResolver.php
++			path: tests/Drupal/Tests/Core/Controller/ControllerResolverTest.php
+ 
+ 		-
+-			message: "#^Variable \\$jpg_image might not be defined\\.$#"
++			message: """
++				#^Usage of deprecated trait Symfony\\\\Component\\\\DependencyInjection\\\\ContainerAwareTrait in class Drupal\\\\Tests\\\\Core\\\\Controller\\\\MockContainerAware\\:
++				since Symfony 6\\.4, use dependency injection instead$#
++			"""
+ 			count: 1
+-			path: modules/media_library/tests/src/FunctionalJavascript/EmbeddedFormWidgetTest.php
++			path: tests/Drupal/Tests/Core/Controller/ControllerResolverTest.php
+ 
+ 		-
+-			message: "#^Method Drupal\\\\menu_link_content\\\\Form\\\\MenuLinkContentForm\\:\\:save\\(\\) should return int but return statement is missing\\.$#"
++			message: "#^@dataProvider providerTestStaticTitleWithParameter related method must be static in PHPUnit 10 and newer\\.$#"
+ 			count: 1
+-			path: modules/menu_link_content/src/Form/MenuLinkContentForm.php
++			path: tests/Drupal/Tests/Core/Controller/TitleResolverTest.php
+ 
+ 		-
+-			message: "#^Variable \\$uuid might not be defined\\.$#"
++			message: "#^@dataProvider providerSuspendQueueThreshold related method must be static in PHPUnit 10 and newer\\.$#"
+ 			count: 1
+-			path: modules/menu_link_content/src/Plugin/Menu/MenuLinkContent.php
++			path: tests/Drupal/Tests/Core/Cron/CronSuspendQueueDelayTest.php
  
  		-
 -			message: "#^Call to deprecated constant REQUEST_TIME\\: Deprecated in drupal\\:8\\.3\\.0 and is removed from drupal\\:11\\.0\\.0\\. Use \\\\Drupal\\:\\:time\\(\\)\\-\\>getRequestTime\\(\\); $#"
 -			count: 2
 -			path: modules/menu_link_content/tests/src/Kernel/MenuLinksTest.php
-+			message: "#^Call to deprecated method getMockForAbstractClass\\(\\) of class PHPUnit\\\\Framework\\\\TestCase\\.$#"
-+			count: 1
-+			path: tests/Drupal/Tests/Core/Controller/ControllerBaseTest.php
- 
- 		-
--			message: "#^Method Drupal\\\\menu_ui\\\\MenuForm\\:\\:save\\(\\) should return int but return statement is missing\\.$#"
-+			message: "#^@dataProvider providerTestCreateController related method must be static in PHPUnit 10 and newer\\.$#"
- 			count: 1
--			path: modules/menu_ui/src/MenuForm.php
-+			path: tests/Drupal/Tests/Core/Controller/ControllerResolverTest.php
- 
- 		-
--			message: "#^Constructor of class Drupal\\\\migrate\\\\MigrateException has an unused parameter \\$code\\.$#"
-+			message: "#^@dataProvider providerTestGetController related method must be static in PHPUnit 10 and newer\\.$#"
- 			count: 1
--			path: modules/migrate/src/MigrateException.php
-+			path: tests/Drupal/Tests/Core/Controller/ControllerResolverTest.php
- 
- 		-
--			message: "#^Constructor of class Drupal\\\\migrate\\\\MigrateException has an unused parameter \\$previous\\.$#"
-+			message: "#^@dataProvider providerTestGetControllerFromDefinition related method must be static in PHPUnit 10 and newer\\.$#"
- 			count: 1
--			path: modules/migrate/src/MigrateException.php
-+			path: tests/Drupal/Tests/Core/Controller/ControllerResolverTest.php
- 
- 		-
- 			message: """
--				#^Call to deprecated method registerLoader\\(\\) of class Doctrine\\\\Common\\\\Annotations\\\\AnnotationRegistry\\:
--				This method is deprecated and will be removed in
--				            doctrine/annotations 2\\.0\\. Annotations will be autoloaded in 2\\.0\\.$#
-+				#^Class Drupal\\\\Tests\\\\Core\\\\Controller\\\\MockContainerAware implements deprecated interface Symfony\\\\Component\\\\DependencyInjection\\\\ContainerAwareInterface\\:
-+				since Symfony 6\\.4, use dependency injection instead$#
-+			"""
-+			count: 1
-+			path: tests/Drupal/Tests/Core/Controller/ControllerResolverTest.php
-+
-+		-
-+			message: """
-+				#^Usage of deprecated trait Symfony\\\\Component\\\\DependencyInjection\\\\ContainerAwareTrait in class Drupal\\\\Tests\\\\Core\\\\Controller\\\\MockContainerAware\\:
-+				since Symfony 6\\.4, use dependency injection instead$#
- 			"""
- 			count: 1
--			path: modules/migrate/src/Plugin/Discovery/AnnotatedClassDiscoveryAutomatedProviders.php
-+			path: tests/Drupal/Tests/Core/Controller/ControllerResolverTest.php
-+
-+		-
-+			message: "#^@dataProvider providerTestStaticTitleWithParameter related method must be static in PHPUnit 10 and newer\\.$#"
-+			count: 1
-+			path: tests/Drupal/Tests/Core/Controller/TitleResolverTest.php
-+
-+		-
-+			message: "#^@dataProvider providerSuspendQueueThreshold related method must be static in PHPUnit 10 and newer\\.$#"
-+			count: 1
-+			path: tests/Drupal/Tests/Core/Cron/CronSuspendQueueDelayTest.php
-+
-+		-
 +			message: "#^@dataProvider processQueuesTestData related method must be static in PHPUnit 10 and newer\\.$#"
 +			count: 1
 +			path: tests/Drupal/Tests/Core/CronTest.php
-+
-+		-
+ 
+ 		-
+-			message: "#^Method Drupal\\\\menu_ui\\\\MenuForm\\:\\:save\\(\\) should return int but return statement is missing\\.$#"
 +			message: "#^@dataProvider dataProviderTestCompileWithKnownOperators related method must be static in PHPUnit 10 and newer\\.$#"
-+			count: 1
+ 			count: 1
+-			path: modules/menu_ui/src/MenuForm.php
 +			path: tests/Drupal/Tests/Core/Database/ConditionTest.php
 +
 +		-
@@ -8034,79 +8098,99 @@ index 318074ad50..ca9e17df76 100644
 +			message: "#^@dataProvider providerSchema related method must be static in PHPUnit 10 and newer\\.$#"
 +			count: 1
 +			path: tests/Drupal/Tests/Core/Database/ConnectionTest.php
-+
-+		-
+ 
+ 		-
+-			message: "#^Constructor of class Drupal\\\\migrate\\\\MigrateException has an unused parameter \\$code\\.$#"
 +			message: "#^@dataProvider providerTestPrefixTables related method must be static in PHPUnit 10 and newer\\.$#"
-+			count: 1
+ 			count: 1
+-			path: modules/migrate/src/MigrateException.php
 +			path: tests/Drupal/Tests/Core/Database/ConnectionTest.php
  
  		-
--			message: "#^Missing cache backend declaration for performance\\.$#"
+-			message: "#^Constructor of class Drupal\\\\migrate\\\\MigrateException has an unused parameter \\$previous\\.$#"
 +			message: "#^Call to an undefined method Drupal\\\\Tests\\\\Core\\\\Database\\\\ConnectionTest\\:\\:expectError\\(\\)\\.$#"
  			count: 1
--			path: modules/migrate/src/Plugin/MigrateDestinationPluginManager.php
+-			path: modules/migrate/src/MigrateException.php
 +			path: tests/Drupal/Tests/Core/Database/ConnectionTest.php
  
  		-
--			message: "#^Missing cache backend declaration for performance\\.$#"
+-			message: """
+-				#^Call to deprecated method registerLoader\\(\\) of class Doctrine\\\\Common\\\\Annotations\\\\AnnotationRegistry\\:
+-				This method is deprecated and will be removed in
+-				            doctrine/annotations 2\\.0\\. Annotations will be autoloaded in 2\\.0\\.$#
+-			"""
 +			message: "#^@dataProvider providerFindDriverAutoloadDirectory related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
--			path: modules/migrate/src/Plugin/MigrateSourcePluginManager.php
+-			path: modules/migrate/src/Plugin/Discovery/AnnotatedClassDiscoveryAutomatedProviders.php
 +			path: tests/Drupal/Tests/Core/Database/DatabaseTest.php
  
  		-
--			message: "#^Constructor of class Drupal\\\\migrate\\\\Plugin\\\\MigrationPluginManager has an unused parameter \\$language_manager\\.$#"
+-			message: "#^Missing cache backend declaration for performance\\.$#"
 +			message: "#^@dataProvider providerFindDriverAutoloadDirectoryException related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
--			path: modules/migrate/src/Plugin/MigrationPluginManager.php
+-			path: modules/migrate/src/Plugin/MigrateDestinationPluginManager.php
 +			path: tests/Drupal/Tests/Core/Database/DatabaseTest.php
  
  		-
--			message: "#^Method Drupal\\\\migrate\\\\Plugin\\\\migrate\\\\destination\\\\ComponentEntityDisplayBase\\:\\:fields\\(\\) should return array but return statement is missing\\.$#"
+-			message: "#^Missing cache backend declaration for performance\\.$#"
 +			message: "#^@dataProvider providerDbInstallerObject related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
--			path: modules/migrate/src/Plugin/migrate/destination/ComponentEntityDisplayBase.php
+-			path: modules/migrate/src/Plugin/MigrateSourcePluginManager.php
 +			path: tests/Drupal/Tests/Core/Database/InstallerObjectTest.php
  
  		-
--			message: "#^Method Drupal\\\\migrate\\\\Plugin\\\\migrate\\\\destination\\\\Config\\:\\:fields\\(\\) should return array but return statement is missing\\.$#"
+-			message: "#^Constructor of class Drupal\\\\migrate\\\\Plugin\\\\MigrationPluginManager has an unused parameter \\$language_manager\\.$#"
 +			message: "#^@dataProvider providerTestExceptionMessage related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
--			path: modules/migrate/src/Plugin/migrate/destination/Config.php
+-			path: modules/migrate/src/Plugin/MigrationPluginManager.php
 +			path: tests/Drupal/Tests/Core/Database/RowCountExceptionTest.php
  
  		-
--			message: "#^Method Drupal\\\\migrate\\\\Plugin\\\\migrate\\\\destination\\\\Entity\\:\\:fields\\(\\) should return array but return statement is missing\\.$#"
+-			message: "#^Method Drupal\\\\migrate\\\\Plugin\\\\migrate\\\\destination\\\\ComponentEntityDisplayBase\\:\\:fields\\(\\) should return array but return statement is missing\\.$#"
 +			message: """
 +				#^Call to deprecated method findCaller\\(\\) of class Drupal\\\\Core\\\\Database\\\\Log\\:
 +				in drupal\\:10\\.1\\.0 and is removed from drupal\\:11\\.0\\.0\\. Use
 +				  Connection\\:\\:findCallerFromDebugBacktrace\\(\\)\\.$#
 +			"""
  			count: 1
--			path: modules/migrate/src/Plugin/migrate/destination/Entity.php
+-			path: modules/migrate/src/Plugin/migrate/destination/ComponentEntityDisplayBase.php
 +			path: tests/Drupal/Tests/Core/Database/Stub/StubConnection.php
  
  		-
--			message: "#^Variable \\$config might not be defined\\.$#"
+-			message: "#^Method Drupal\\\\migrate\\\\Plugin\\\\migrate\\\\destination\\\\Config\\:\\:fields\\(\\) should return array but return statement is missing\\.$#"
 +			message: """
 +				#^Fetching class constant class of deprecated class Drupal\\\\Core\\\\Database\\\\StatementWrapper\\:
 +				in drupal\\:10\\.1\\.0 and is removed from drupal\\:11\\.0\\.0\\. Use
 +				  \\\\Drupal\\\\Core\\\\Database\\\\StatementWrapperIterator instead\\.$#
 +			"""
  			count: 1
--			path: modules/migrate/src/Plugin/migrate/destination/EntityConfigBase.php
+-			path: modules/migrate/src/Plugin/migrate/destination/Config.php
 +			path: tests/Drupal/Tests/Core/Database/Stub/StubConnection.php
  
  		-
--			message: "#^Method Drupal\\\\migrate\\\\Plugin\\\\migrate\\\\destination\\\\NullDestination\\:\\:import\\(\\) should return array\\|bool but return statement is missing\\.$#"
+-			message: "#^Method Drupal\\\\migrate\\\\Plugin\\\\migrate\\\\destination\\\\Entity\\:\\:fields\\(\\) should return array but return statement is missing\\.$#"
 +			message: "#^@dataProvider providerConvertDbUrlToConnectionInfo related method must be static in PHPUnit 10 and newer\\.$#"
+ 			count: 1
+-			path: modules/migrate/src/Plugin/migrate/destination/Entity.php
++			path: tests/Drupal/Tests/Core/Database/UrlConversionTest.php
+ 
+ 		-
+-			message: "#^Variable \\$config might not be defined\\.$#"
++			message: "#^@dataProvider providerGetConnectionInfoAsUrl related method must be static in PHPUnit 10 and newer\\.$#"
+ 			count: 1
+-			path: modules/migrate/src/Plugin/migrate/destination/EntityConfigBase.php
++			path: tests/Drupal/Tests/Core/Database/UrlConversionTest.php
+ 
+ 		-
+-			message: "#^Method Drupal\\\\migrate\\\\Plugin\\\\migrate\\\\destination\\\\NullDestination\\:\\:import\\(\\) should return array\\|bool but return statement is missing\\.$#"
++			message: "#^@dataProvider providerInvalidArgumentGetConnectionInfoAsUrl related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/migrate/src/Plugin/migrate/destination/NullDestination.php
 +			path: tests/Drupal/Tests/Core/Database/UrlConversionTest.php
  
  		-
 -			message: "#^Call to an undefined static method static\\(Drupal\\\\Tests\\\\migrate\\\\Kernel\\\\MigrateTestBase\\)\\:\\:migrateDumpAlter\\(\\)\\.$#"
-+			message: "#^@dataProvider providerGetConnectionInfoAsUrl related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerInvalidArgumentsUrlConversion related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/migrate/tests/src/Kernel/MigrateTestBase.php
 +			path: tests/Drupal/Tests/Core/Database/UrlConversionTest.php
@@ -8115,66 +8199,53 @@ index 318074ad50..ca9e17df76 100644
 -			message: "#^Call to deprecated method withConsecutive\\(\\) of class PHPUnit\\\\Framework\\\\MockObject\\\\Builder\\\\InvocationMocker\\.$#"
 -			count: 2
 -			path: modules/migrate/tests/src/Unit/MigrateSqlIdMapEnsureTablesTest.php
-+			message: "#^@dataProvider providerInvalidArgumentGetConnectionInfoAsUrl related method must be static in PHPUnit 10 and newer\\.$#"
-+			count: 1
-+			path: tests/Drupal/Tests/Core/Database/UrlConversionTest.php
- 
- 		-
--			message: "#^Variable \\$sub_process_plugins might not be defined\\.$#"
--			count: 2
--			path: modules/migrate/tests/src/Unit/process/SubProcessTest.php
-+			message: "#^@dataProvider providerInvalidArgumentsUrlConversion related method must be static in PHPUnit 10 and newer\\.$#"
-+			count: 1
-+			path: tests/Drupal/Tests/Core/Database/UrlConversionTest.php
- 
- 		-
--			message: "#^Missing cache backend declaration for performance\\.$#"
 +			message: "#^@dataProvider providerTestWeekDaysOrdered related method must be static in PHPUnit 10 and newer\\.$#"
- 			count: 1
--			path: modules/migrate_drupal/src/MigrationPluginManager.php
++			count: 1
 +			path: tests/Drupal/Tests/Core/Datetime/DateHelperTest.php
  
  		-
--			message: "#^Variable \\$patterns might not be defined\\.$#"
+-			message: "#^Variable \\$sub_process_plugins might not be defined\\.$#"
 +			message: """
 +				#^Call to deprecated method returnValue\\(\\) of class PHPUnit\\\\Framework\\\\TestCase\\:
 +				Use \\<code\\>\\$double\\-\\>willReturn\\(\\)\\</code\\> instead of \\<code\\>\\$double\\-\\>will\\(\\$this\\-\\>returnValue\\(\\)\\)\\</code\\>$#
 +			"""
-+			count: 2
+ 			count: 2
+-			path: modules/migrate/tests/src/Unit/process/SubProcessTest.php
 +			path: tests/Drupal/Tests/Core/Datetime/DateHelperTest.php
-+
-+		-
+ 
+ 		-
+-			message: "#^Missing cache backend declaration for performance\\.$#"
 +			message: "#^@dataProvider providerTestFormatDiff related method must be static in PHPUnit 10 and newer\\.$#"
+ 			count: 1
+-			path: modules/migrate_drupal/src/MigrationPluginManager.php
++			path: tests/Drupal/Tests/Core/Datetime/DateTest.php
+ 
+ 		-
+-			message: "#^Variable \\$patterns might not be defined\\.$#"
++			message: "#^@dataProvider providerTestFormatInterval related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/migrate_drupal/src/NodeMigrateType.php
 +			path: tests/Drupal/Tests/Core/Datetime/DateTest.php
  
  		-
 -			message: "#^Constructor of class Drupal\\\\migrate_drupal\\\\Plugin\\\\migrate\\\\EntityReferenceTranslationDeriver has an unused parameter \\$base_plugin_id\\.$#"
-+			message: "#^@dataProvider providerTestFormatInterval related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerTestDateDiff related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/migrate_drupal/src/Plugin/migrate/EntityReferenceTranslationDeriver.php
-+			path: tests/Drupal/Tests/Core/Datetime/DateTest.php
++			path: tests/Drupal/Tests/Core/Datetime/DrupalDateTimeTest.php
  
  		-
 -			message: "#^Constructor of class Drupal\\\\migrate_drupal\\\\Plugin\\\\migrate\\\\source\\\\ContentEntityDeriver has an unused parameter \\$base_plugin_id\\.$#"
-+			message: "#^@dataProvider providerTestDateDiff related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerTestInvalidDateDiff related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/migrate_drupal/src/Plugin/migrate/source/ContentEntityDeriver.php
 +			path: tests/Drupal/Tests/Core/Datetime/DrupalDateTimeTest.php
  
  		-
 -			message: "#^Variable \\$patterns might not be defined\\.$#"
-+			message: "#^@dataProvider providerTestInvalidDateDiff related method must be static in PHPUnit 10 and newer\\.$#"
- 			count: 1
--			path: modules/migrate_drupal/tests/src/Kernel/StateFileExistsTest.php
-+			path: tests/Drupal/Tests/Core/Datetime/DrupalDateTimeTest.php
- 
- 		-
--			message: "#^Variable \\$patterns might not be defined\\.$#"
 +			message: "#^@dataProvider providerTestProcess related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
--			path: modules/migrate_drupal/tests/src/Kernel/d6/ValidateMigrationStateTest.php
+-			path: modules/migrate_drupal/tests/src/Kernel/StateFileExistsTest.php
 +			path: tests/Drupal/Tests/Core/DependencyInjection/Compiler/BackendCompilerPassTest.php
  
  		-
@@ -8184,36 +8255,40 @@ index 318074ad50..ca9e17df76 100644
 +				since Symfony 6\\.4, use dependency injection instead$#
 +			"""
  			count: 1
--			path: modules/migrate_drupal/tests/src/Kernel/d7/ValidateMigrationStateTest.php
+-			path: modules/migrate_drupal/tests/src/Kernel/d6/ValidateMigrationStateTest.php
 +			path: tests/Drupal/Tests/Core/DependencyInjection/DependencySerializationTest.php
  
  		-
--			message: "#^Missing cache backend declaration for performance\\.$#"
+-			message: "#^Variable \\$patterns might not be defined\\.$#"
 +			message: "#^@dataProvider providerTestExceptions related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
--			path: modules/migrate_drupal/tests/src/Unit/MigrateFieldPluginManagerTest.php
+-			path: modules/migrate_drupal/tests/src/Kernel/d7/ValidateMigrationStateTest.php
 +			path: tests/Drupal/Tests/Core/DependencyInjection/YamlFileLoaderTest.php
  
  		-
--			message: "#^Variable \\$patterns might not be defined\\.$#"
+-			message: "#^Missing cache backend declaration for performance\\.$#"
 +			message: "#^@dataProvider providerTestGetConfiguration related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
--			path: modules/migrate_drupal/tests/src/Unit/MigrationConfigurationTraitTest.php
+-			path: modules/migrate_drupal/tests/src/Unit/MigrateFieldPluginManagerTest.php
 +			path: tests/Drupal/Tests/Core/Display/DisplayVariantTest.php
  
  		-
--			message: "#^Variable \\$statement might not be defined\\.$#"
+-			message: "#^Variable \\$patterns might not be defined\\.$#"
 +			message: "#^@dataProvider providerTestTrustedHosts related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/migrate_drupal/tests/src/Unit/MigrationConfigurationTraitTest.php
 +			path: tests/Drupal/Tests/Core/DrupalKernel/DrupalKernelTest.php
  
  		-
+-			message: "#^Variable \\$statement might not be defined\\.$#"
++			message: "#^@dataProvider providerTestValidateHostname related method must be static in PHPUnit 10 and newer\\.$#"
+ 			count: 1
+-			path: modules/migrate_drupal/tests/src/Unit/MigrationConfigurationTraitTest.php
+-
+-		-
 -			message: "#^Call to deprecated constant REQUEST_TIME\\: Deprecated in drupal\\:8\\.3\\.0 and is removed from drupal\\:11\\.0\\.0\\. Use \\\\Drupal\\:\\:time\\(\\)\\-\\>getRequestTime\\(\\); $#"
 -			count: 2
 -			path: modules/migrate_drupal_ui/src/Batch/MigrateUpgradeImportBatch.php
-+			message: "#^@dataProvider providerTestValidateHostname related method must be static in PHPUnit 10 and newer\\.$#"
-+			count: 1
 +			path: tests/Drupal/Tests/Core/DrupalKernel/ValidateHostnameTest.php
  
  		-
@@ -8427,50 +8502,54 @@ index 318074ad50..ca9e17df76 100644
  
  		-
 -			message: "#^Variable \\$changed in isset\\(\\) always exists and is not nullable\\.$#"
--			count: 1
--			path: modules/node/tests/src/Kernel/Migrate/d7/MigrateNodeTest.php
 +			message: "#^Call to deprecated method getMockForAbstractClass\\(\\) of class PHPUnit\\\\Framework\\\\TestCase\\.$#"
 +			count: 4
 +			path: tests/Drupal/Tests/Core/Entity/EntityUnitTest.php
++
++		-
++			message: "#^@dataProvider providerTestToUrlLinkTemplateAddForm related method must be static in PHPUnit 10 and newer\\.$#"
+ 			count: 1
+-			path: modules/node/tests/src/Kernel/Migrate/d7/MigrateNodeTest.php
++			path: tests/Drupal/Tests/Core/Entity/EntityUrlTest.php
  
  		-
 -			message: "#^Method Drupal\\\\options\\\\Plugin\\\\Field\\\\FieldType\\\\ListFloatItem\\:\\:validateAllowedValue\\(\\) should return string but return statement is missing\\.$#"
-+			message: "#^@dataProvider providerTestToUrlLinkTemplateAddForm related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerTestToUrlLinkTemplateNoId related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/options/src/Plugin/Field/FieldType/ListFloatItem.php
 +			path: tests/Drupal/Tests/Core/Entity/EntityUrlTest.php
  
  		-
 -			message: "#^Method Drupal\\\\options\\\\Plugin\\\\Field\\\\FieldType\\\\ListIntegerItem\\:\\:validateAllowedValue\\(\\) should return string but return statement is missing\\.$#"
-+			message: "#^@dataProvider providerTestToUrlLinkTemplateNoId related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerTestToUrlLinkTemplateRevision related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/options/src/Plugin/Field/FieldType/ListIntegerItem.php
 +			path: tests/Drupal/Tests/Core/Entity/EntityUrlTest.php
  
  		-
 -			message: "#^Access to an undefined property Drupal\\\\options\\\\Plugin\\\\Field\\\\FieldType\\\\ListItemBase\\:\\:\\$value\\.$#"
-+			message: "#^@dataProvider providerTestToUrlLinkTemplateRevision related method must be static in PHPUnit 10 and newer\\.$#"
- 			count: 1
--			path: modules/options/src/Plugin/Field/FieldType/ListItemBase.php
-+			path: tests/Drupal/Tests/Core/Entity/EntityUrlTest.php
- 
- 		-
--			message: "#^Method Drupal\\\\options\\\\Plugin\\\\Field\\\\FieldType\\\\ListItemBase\\:\\:validateAllowedValue\\(\\) should return string but return statement is missing\\.$#"
 +			message: "#^@dataProvider providerTestToUrlLinkTemplates related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/options/src/Plugin/Field/FieldType/ListItemBase.php
 +			path: tests/Drupal/Tests/Core/Entity/EntityUrlTest.php
  
  		-
--			message: "#^Method Drupal\\\\options\\\\Plugin\\\\Field\\\\FieldType\\\\ListStringItem\\:\\:validateAllowedValue\\(\\) should return string but return statement is missing\\.$#"
+-			message: "#^Method Drupal\\\\options\\\\Plugin\\\\Field\\\\FieldType\\\\ListItemBase\\:\\:validateAllowedValue\\(\\) should return string but return statement is missing\\.$#"
 +			message: "#^@dataProvider providerTestToUrlUriCallback related method must be static in PHPUnit 10 and newer\\.$#"
+ 			count: 1
+-			path: modules/options/src/Plugin/Field/FieldType/ListItemBase.php
++			path: tests/Drupal/Tests/Core/Entity/EntityUrlTest.php
+ 
+ 		-
+-			message: "#^Method Drupal\\\\options\\\\Plugin\\\\Field\\\\FieldType\\\\ListStringItem\\:\\:validateAllowedValue\\(\\) should return string but return statement is missing\\.$#"
++			message: "#^@dataProvider providerTestToUrlUriCallbackUndefined related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/options/src/Plugin/Field/FieldType/ListStringItem.php
 +			path: tests/Drupal/Tests/Core/Entity/EntityUrlTest.php
  
  		-
 -			message: "#^Method Drupal\\\\path\\\\PathAliasForm\\:\\:save\\(\\) should return int but return statement is missing\\.$#"
-+			message: "#^@dataProvider providerTestToUrlUriCallbackUndefined related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^Call to deprecated method getMockForAbstractClass\\(\\) of class PHPUnit\\\\Framework\\\\MockObject\\\\MockBuilder\\.$#"
  			count: 1
 -			path: modules/path/src/PathAliasForm.php
 +			path: tests/Drupal/Tests/Core/Entity/EntityUrlTest.php
@@ -8479,7 +8558,7 @@ index 318074ad50..ca9e17df76 100644
 -			message: "#^Access to an undefined property Drupal\\\\path\\\\Plugin\\\\Field\\\\FieldType\\\\PathItem\\:\\:\\$alias\\.$#"
 -			count: 3
 -			path: modules/path/src/Plugin/Field/FieldType/PathItem.php
-+			message: "#^Call to deprecated method getMockForAbstractClass\\(\\) of class PHPUnit\\\\Framework\\\\MockObject\\\\MockBuilder\\.$#"
++			message: "#^Trying to mock an undefined method getRevisionId\\(\\) on class Drupal\\\\Tests\\\\Core\\\\Entity\\\\UrlTestEntity\\.$#"
 +			count: 1
 +			path: tests/Drupal/Tests/Core/Entity/EntityUrlTest.php
  
@@ -8487,7 +8566,7 @@ index 318074ad50..ca9e17df76 100644
 -			message: "#^Access to an undefined property Drupal\\\\path\\\\Plugin\\\\Field\\\\FieldType\\\\PathItem\\:\\:\\$langcode\\.$#"
 -			count: 2
 -			path: modules/path/src/Plugin/Field/FieldType/PathItem.php
-+			message: "#^Trying to mock an undefined method getRevisionId\\(\\) on class Drupal\\\\Tests\\\\Core\\\\Entity\\\\UrlTestEntity\\.$#"
++			message: "#^Trying to mock an undefined method isDefaultRevision\\(\\) on class Drupal\\\\Tests\\\\Core\\\\Entity\\\\UrlTestEntity\\.$#"
 +			count: 1
 +			path: tests/Drupal/Tests/Core/Entity/EntityUrlTest.php
  
@@ -8495,24 +8574,23 @@ index 318074ad50..ca9e17df76 100644
 -			message: "#^Access to an undefined property Drupal\\\\path\\\\Plugin\\\\Field\\\\FieldType\\\\PathItem\\:\\:\\$pid\\.$#"
 -			count: 5
 -			path: modules/path/src/Plugin/Field/FieldType/PathItem.php
-+			message: "#^Trying to mock an undefined method isDefaultRevision\\(\\) on class Drupal\\\\Tests\\\\Core\\\\Entity\\\\UrlTestEntity\\.$#"
-+			count: 1
-+			path: tests/Drupal/Tests/Core/Entity/EntityUrlTest.php
- 
- 		-
--			message: "#^Method Drupal\\\\path\\\\Plugin\\\\Field\\\\FieldType\\\\PathItem\\:\\:postSave\\(\\) should return bool but return statement is missing\\.$#"
--			count: 1
--			path: modules/path/src/Plugin/Field/FieldType/PathItem.php
 +			message: "#^@dataProvider factoryTypeProvider related method must be static in PHPUnit 10 and newer\\.$#"
 +			count: 14
 +			path: tests/Drupal/Tests/Core/Entity/FieldDefinitionTest.php
  
  		-
--			message: "#^Call to deprecated constant REQUEST_TIME\\: Deprecated in drupal\\:8\\.3\\.0 and is removed from drupal\\:11\\.0\\.0\\. Use \\\\Drupal\\:\\:time\\(\\)\\-\\>getRequestTime\\(\\); $#"
+-			message: "#^Method Drupal\\\\path\\\\Plugin\\\\Field\\\\FieldType\\\\PathItem\\:\\:postSave\\(\\) should return bool but return statement is missing\\.$#"
 +			message: "#^Call to deprecated method getMockForAbstractClass\\(\\) of class PHPUnit\\\\Framework\\\\TestCase\\.$#"
  			count: 1
--			path: modules/path_alias/src/AliasManager.php
+-			path: modules/path/src/Plugin/Field/FieldType/PathItem.php
 +			path: tests/Drupal/Tests/Core/Entity/KeyValueStore/KeyValueEntityStorageTest.php
+ 
+ 		-
+-			message: "#^Call to deprecated constant REQUEST_TIME\\: Deprecated in drupal\\:8\\.3\\.0 and is removed from drupal\\:11\\.0\\.0\\. Use \\\\Drupal\\:\\:time\\(\\)\\-\\>getRequestTime\\(\\); $#"
++			message: "#^@dataProvider providerTestGetDedicatedTableName related method must be static in PHPUnit 10 and newer\\.$#"
+ 			count: 1
+-			path: modules/path_alias/src/AliasManager.php
++			path: tests/Drupal/Tests/Core/Entity/Sql/DefaultTableMappingTest.php
  
  		-
 -			message: """
@@ -8520,25 +8598,29 @@ index 318074ad50..ca9e17df76 100644
 -				in drupal\\:10\\.2\\.0 and is removed from drupal\\:11\\.0\\.0\\. There is
 -				  no replacement\\.$#
 -			"""
-+			message: "#^@dataProvider providerTestGetDedicatedTableName related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerTestGetFieldColumnName related method must be static in PHPUnit 10 and newer\\.$#"
++			count: 2
++			path: tests/Drupal/Tests/Core/Entity/Sql/DefaultTableMappingTest.php
++
++		-
++			message: "#^@dataProvider providerTestGetFieldTableName related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/pgsql/src/Driver/Database/pgsql/Schema.php
 +			path: tests/Drupal/Tests/Core/Entity/Sql/DefaultTableMappingTest.php
  
  		-
 -			message: "#^Variable \\$table_field might not be defined\\.$#"
--			count: 1
++			message: "#^@dataProvider providerSchemaCastValue related method must be static in PHPUnit 10 and newer\\.$#"
+ 			count: 1
 -			path: modules/pgsql/src/Driver/Database/pgsql/Select.php
-+			message: "#^@dataProvider providerTestGetFieldColumnName related method must be static in PHPUnit 10 and newer\\.$#"
-+			count: 2
-+			path: tests/Drupal/Tests/Core/Entity/Sql/DefaultTableMappingTest.php
++			path: tests/Drupal/Tests/Core/Entity/Sql/SqlContentEntityStorageSchemaTest.php
  
  		-
 -			message: "#^Method Drupal\\\\pgsql\\\\Driver\\\\Database\\\\pgsql\\\\Upsert\\:\\:execute\\(\\) should return int but return statement is missing\\.$#"
-+			message: "#^@dataProvider providerTestGetFieldTableName related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerTestRequiresEntityDataMigration related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/pgsql/src/Driver/Database/pgsql/Upsert.php
-+			path: tests/Drupal/Tests/Core/Entity/Sql/DefaultTableMappingTest.php
++			path: tests/Drupal/Tests/Core/Entity/Sql/SqlContentEntityStorageSchemaTest.php
  
  		-
 -			message: """
@@ -8546,28 +8628,28 @@ index 318074ad50..ca9e17df76 100644
 -				in drupal\\:10\\.2\\.0 and is removed from drupal\\:11\\.0\\.0\\. There is
 -				  no replacement\\.$#
 -			"""
-+			message: "#^@dataProvider providerSchemaCastValue related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerTestRequiresEntityStorageSchemaChanges related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/pgsql/src/Update10101.php
 +			path: tests/Drupal/Tests/Core/Entity/Sql/SqlContentEntityStorageSchemaTest.php
  
  		-
 -			message: "#^Call to deprecated method withConsecutive\\(\\) of class PHPUnit\\\\Framework\\\\MockObject\\\\Builder\\\\InvocationMocker\\.$#"
-+			message: "#^@dataProvider providerTestRequiresEntityDataMigration related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerTestGetBaseTable related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/pgsql/tests/src/Unit/SchemaTest.php
-+			path: tests/Drupal/Tests/Core/Entity/Sql/SqlContentEntityStorageSchemaTest.php
++			path: tests/Drupal/Tests/Core/Entity/Sql/SqlContentEntityStorageTest.php
  
  		-
 -			message: "#^Variable \\$responsive_image_styles in empty\\(\\) always exists and is not falsy\\.$#"
-+			message: "#^@dataProvider providerTestRequiresEntityStorageSchemaChanges related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerTestGetRevisionDataTable related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/responsive_image/src/Plugin/Field/FieldFormatter/ResponsiveImageFormatter.php
-+			path: tests/Drupal/Tests/Core/Entity/Sql/SqlContentEntityStorageSchemaTest.php
++			path: tests/Drupal/Tests/Core/Entity/Sql/SqlContentEntityStorageTest.php
  
  		-
 -			message: "#^Method Drupal\\\\responsive_image\\\\ResponsiveImageStyleForm\\:\\:save\\(\\) should return int but return statement is missing\\.$#"
-+			message: "#^@dataProvider providerTestGetBaseTable related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerTestGetRevisionTable related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/responsive_image/src/ResponsiveImageStyleForm.php
 +			path: tests/Drupal/Tests/Core/Entity/Sql/SqlContentEntityStorageTest.php
@@ -8576,190 +8658,190 @@ index 318074ad50..ca9e17df76 100644
 -			message: "#^Variable \\$created_entity might not be defined\\.$#"
 -			count: 4
 -			path: modules/rest/tests/src/Functional/EntityResource/EntityResourceTestBase.php
-+			message: "#^@dataProvider providerTestGetRevisionDataTable related method must be static in PHPUnit 10 and newer\\.$#"
-+			count: 1
++			message: "#^@dataProvider providerTestGetTableMappingSimple related method must be static in PHPUnit 10 and newer\\.$#"
++			count: 8
 +			path: tests/Drupal/Tests/Core/Entity/Sql/SqlContentEntityStorageTest.php
  
  		-
 -			message: "#^Variable \\$working_to might not be defined\\.$#"
-+			message: "#^@dataProvider providerTestGetRevisionTable related method must be static in PHPUnit 10 and newer\\.$#"
- 			count: 1
+-			count: 1
 -			path: modules/search/search.module
++			message: "#^Call to deprecated method getMockForAbstractClass\\(\\) of class PHPUnit\\\\Framework\\\\MockObject\\\\MockBuilder\\.$#"
++			count: 4
 +			path: tests/Drupal/Tests/Core/Entity/Sql/SqlContentEntityStorageTest.php
  
  		-
 -			message: "#^Method Drupal\\\\search\\\\Form\\\\SearchPageAddForm\\:\\:save\\(\\) should return int but return statement is missing\\.$#"
 -			count: 1
 -			path: modules/search/src/Form/SearchPageAddForm.php
-+			message: "#^@dataProvider providerTestGetTableMappingSimple related method must be static in PHPUnit 10 and newer\\.$#"
-+			count: 8
-+			path: tests/Drupal/Tests/Core/Entity/Sql/SqlContentEntityStorageTest.php
- 
- 		-
--			message: "#^Method Drupal\\\\search\\\\Form\\\\SearchPageEditForm\\:\\:save\\(\\) should return int but return statement is missing\\.$#"
--			count: 1
--			path: modules/search/src/Form/SearchPageEditForm.php
-+			message: "#^Call to deprecated method getMockForAbstractClass\\(\\) of class PHPUnit\\\\Framework\\\\MockObject\\\\MockBuilder\\.$#"
-+			count: 4
-+			path: tests/Drupal/Tests/Core/Entity/Sql/SqlContentEntityStorageTest.php
- 
- 		-
--			message: "#^Method Drupal\\\\search\\\\Form\\\\SearchPageFormBase\\:\\:save\\(\\) should return int but return statement is missing\\.$#"
--			count: 1
--			path: modules/search/src/Form/SearchPageFormBase.php
 +			message: "#^Call to deprecated method getMockForAbstractClass\\(\\) of class PHPUnit\\\\Framework\\\\TestCase\\.$#"
 +			count: 2
 +			path: tests/Drupal/Tests/Core/Entity/TypedData/EntityAdapterUnitTest.php
  
  		-
--			message: "#^Call to deprecated constant REQUEST_TIME\\: Deprecated in drupal\\:8\\.3\\.0 and is removed from drupal\\:11\\.0\\.0\\. Use \\\\Drupal\\:\\:time\\(\\)\\-\\>getRequestTime\\(\\); $#"
+-			message: "#^Method Drupal\\\\search\\\\Form\\\\SearchPageEditForm\\:\\:save\\(\\) should return int but return statement is missing\\.$#"
 +			message: "#^@dataProvider provideFatalExitCodeData related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
--			path: modules/search/src/SearchIndex.php
+-			path: modules/search/src/Form/SearchPageEditForm.php
 +			path: tests/Drupal/Tests/Core/Error/DrupalLogErrorTest.php
  
  		-
--			message: "#^Method Drupal\\\\search\\\\SearchPageRepository\\:\\:setDefaultSearchPage\\(\\) should return static\\(Drupal\\\\search\\\\SearchPageRepository\\) but return statement is missing\\.$#"
+-			message: "#^Method Drupal\\\\search\\\\Form\\\\SearchPageFormBase\\:\\:save\\(\\) should return int but return statement is missing\\.$#"
 +			message: "#^@dataProvider providerTestSetLinkActiveClass related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
--			path: modules/search/src/SearchPageRepository.php
+-			path: modules/search/src/Form/SearchPageFormBase.php
 +			path: tests/Drupal/Tests/Core/EventSubscriber/ActiveLinkResponseFilterTest.php
  
  		-
 -			message: "#^Call to deprecated constant REQUEST_TIME\\: Deprecated in drupal\\:8\\.3\\.0 and is removed from drupal\\:11\\.0\\.0\\. Use \\\\Drupal\\:\\:time\\(\\)\\-\\>getRequestTime\\(\\); $#"
++			message: "#^Missing call to parent\\:\\:tearDown\\(\\) method\\.$#"
+ 			count: 1
+-			path: modules/search/src/SearchIndex.php
++			path: tests/Drupal/Tests/Core/EventSubscriber/CustomPageExceptionHtmlSubscriberTest.php
+ 
+ 		-
+-			message: "#^Method Drupal\\\\search\\\\SearchPageRepository\\:\\:setDefaultSearchPage\\(\\) should return static\\(Drupal\\\\search\\\\SearchPageRepository\\) but return statement is missing\\.$#"
 +			message: "#^@dataProvider providerTestOn4xx related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
--			path: modules/search/tests/src/Functional/SearchMultilingualEntityTest.php
+-			path: modules/search/src/SearchPageRepository.php
 +			path: tests/Drupal/Tests/Core/EventSubscriber/ExceptionJsonSubscriberTest.php
+ 
+ 		-
+-			message: "#^Call to deprecated constant REQUEST_TIME\\: Deprecated in drupal\\:8\\.3\\.0 and is removed from drupal\\:11\\.0\\.0\\. Use \\\\Drupal\\:\\:time\\(\\)\\-\\>getRequestTime\\(\\); $#"
++			message: "#^@dataProvider providerTestRemoveRoute related method must be static in PHPUnit 10 and newer\\.$#"
+ 			count: 1
+-			path: modules/search/tests/src/Functional/SearchMultilingualEntityTest.php
++			path: tests/Drupal/Tests/Core/EventSubscriber/ModuleRouteSubscriberTest.php
  
  		-
 -			message: "#^Call to deprecated constant REQUEST_TIME\\: Deprecated in drupal\\:8\\.3\\.0 and is removed from drupal\\:11\\.0\\.0\\. Use \\\\Drupal\\:\\:time\\(\\)\\-\\>getRequestTime\\(\\); $#"
 -			count: 2
 -			path: modules/search/tests/src/Functional/SearchRankingTest.php
-+			message: "#^@dataProvider providerTestRemoveRoute related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerTestOnRequestWithOptionsRequest related method must be static in PHPUnit 10 and newer\\.$#"
 +			count: 1
-+			path: tests/Drupal/Tests/Core/EventSubscriber/ModuleRouteSubscriberTest.php
++			path: tests/Drupal/Tests/Core/EventSubscriber/OptionsRequestSubscriberTest.php
  
  		-
 -			message: "#^Call to an undefined method Drupal\\\\serialization\\\\Normalizer\\\\EntityNormalizer\\:\\:getCustomSerializedPropertyNames\\(\\)\\.$#"
-+			message: "#^@dataProvider providerTestOnRequestWithOptionsRequest related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerTestDestinationRedirectToExternalUrl related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/serialization/src/Normalizer/EntityNormalizer.php
-+			path: tests/Drupal/Tests/Core/EventSubscriber/OptionsRequestSubscriberTest.php
++			path: tests/Drupal/Tests/Core/EventSubscriber/RedirectResponseSubscriberTest.php
  
  		-
 -			message: "#^Call to deprecated method withConsecutive\\(\\) of class PHPUnit\\\\Framework\\\\MockObject\\\\Builder\\\\InvocationMocker\\.$#"
 -			count: 3
 -			path: modules/serialization/tests/src/Unit/Normalizer/EntityNormalizerTest.php
-+			message: "#^@dataProvider providerTestDestinationRedirectToExternalUrl related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerTestDestinationRedirectWithInvalidUrl related method must be static in PHPUnit 10 and newer\\.$#"
 +			count: 1
 +			path: tests/Drupal/Tests/Core/EventSubscriber/RedirectResponseSubscriberTest.php
  
  		-
 -			message: "#^Method Drupal\\\\shortcut\\\\Form\\\\SetCustomize\\:\\:save\\(\\) should return int but return statement is missing\\.$#"
-+			message: "#^@dataProvider providerTestDestinationRedirectWithInvalidUrl related method must be static in PHPUnit 10 and newer\\.$#"
- 			count: 1
--			path: modules/shortcut/src/Form/SetCustomize.php
-+			path: tests/Drupal/Tests/Core/EventSubscriber/RedirectResponseSubscriberTest.php
- 
- 		-
--			message: "#^Method Drupal\\\\shortcut\\\\ShortcutForm\\:\\:save\\(\\) should return int but return statement is missing\\.$#"
 -			count: 1
--			path: modules/shortcut/src/ShortcutForm.php
+-			path: modules/shortcut/src/Form/SetCustomize.php
 +			message: "#^Call to an undefined method Drupal\\\\Tests\\\\Core\\\\EventSubscriber\\\\RedirectResponseSubscriberTest\\:\\:expectError\\(\\)\\.$#"
 +			count: 2
 +			path: tests/Drupal/Tests/Core/EventSubscriber/RedirectResponseSubscriberTest.php
  
  		-
--			message: "#^Method Drupal\\\\shortcut\\\\ShortcutSetForm\\:\\:save\\(\\) should return int but return statement is missing\\.$#"
+-			message: "#^Method Drupal\\\\shortcut\\\\ShortcutForm\\:\\:save\\(\\) should return int but return statement is missing\\.$#"
 +			message: "#^@dataProvider providerTestOnResponse related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
--			path: modules/shortcut/src/ShortcutSetForm.php
+-			path: modules/shortcut/src/ShortcutForm.php
 +			path: tests/Drupal/Tests/Core/EventSubscriber/RssResponseRelativeUrlFilterTest.php
  
  		-
--			message: "#^Variable \\$args might not be defined\\.$#"
+-			message: "#^Method Drupal\\\\shortcut\\\\ShortcutSetForm\\:\\:save\\(\\) should return int but return statement is missing\\.$#"
 +			message: "#^@dataProvider providerTestOnRouteBuildingInvalidVariables related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
--			path: modules/sqlite/src/Driver/Database/sqlite/Connection.php
+-			path: modules/shortcut/src/ShortcutSetForm.php
 +			path: tests/Drupal/Tests/Core/EventSubscriber/SpecialAttributesRouteSubscriberTest.php
  
  		-
--			message: "#^Variable \\$statement might not be defined\\.$#"
+-			message: "#^Variable \\$args might not be defined\\.$#"
 +			message: "#^@dataProvider providerTestOnRouteBuildingValidVariables related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/sqlite/src/Driver/Database/sqlite/Connection.php
 +			path: tests/Drupal/Tests/Core/EventSubscriber/SpecialAttributesRouteSubscriberTest.php
  
  		-
--			message: "#^Method Drupal\\\\system\\\\Controller\\\\BatchController\\:\\:batchPage\\(\\) should return array\\|Symfony\\\\Component\\\\HttpFoundation\\\\Response but return statement is missing\\.$#"
+-			message: "#^Variable \\$statement might not be defined\\.$#"
 +			message: "#^Call to an undefined method Drupal\\\\Tests\\\\Core\\\\EventSubscriber\\\\SpecialAttributesRouteSubscriberTest\\:\\:expectWarning\\(\\)\\.$#"
+ 			count: 1
+-			path: modules/sqlite/src/Driver/Database/sqlite/Connection.php
++			path: tests/Drupal/Tests/Core/EventSubscriber/SpecialAttributesRouteSubscriberTest.php
+ 
+ 		-
+-			message: "#^Method Drupal\\\\system\\\\Controller\\\\BatchController\\:\\:batchPage\\(\\) should return array\\|Symfony\\\\Component\\\\HttpFoundation\\\\Response but return statement is missing\\.$#"
++			message: "#^Call to an undefined method Drupal\\\\Tests\\\\Core\\\\EventSubscriber\\\\SpecialAttributesRouteSubscriberTest\\:\\:expectWarningMessage\\(\\)\\.$#"
  			count: 1
 -			path: modules/system/src/Controller/BatchController.php
 +			path: tests/Drupal/Tests/Core/EventSubscriber/SpecialAttributesRouteSubscriberTest.php
  
  		-
 -			message: "#^Method Drupal\\\\system\\\\Form\\\\DateFormatFormBase\\:\\:save\\(\\) should return int but return statement is missing\\.$#"
-+			message: "#^Call to an undefined method Drupal\\\\Tests\\\\Core\\\\EventSubscriber\\\\SpecialAttributesRouteSubscriberTest\\:\\:expectWarningMessage\\(\\)\\.$#"
- 			count: 1
--			path: modules/system/src/Form/DateFormatFormBase.php
-+			path: tests/Drupal/Tests/Core/EventSubscriber/SpecialAttributesRouteSubscriberTest.php
- 
- 		-
--			message: "#^Method Drupal\\\\system\\\\Form\\\\ModulesListNonStableConfirmForm\\:\\:getQuestion\\(\\) should return Drupal\\\\Core\\\\StringTranslation\\\\TranslatableMarkup but return statement is missing\\.$#"
 -			count: 1
--			path: modules/system/src/Form/ModulesListNonStableConfirmForm.php
+-			path: modules/system/src/Form/DateFormatFormBase.php
 +			message: "#^@dataProvider providerDatabaseDrivers related method must be static in PHPUnit 10 and newer\\.$#"
 +			count: 3
 +			path: tests/Drupal/Tests/Core/Extension/DatabaseDriverListTest.php
  
  		-
--			message: "#^Variable \\$default_theme in isset\\(\\) always exists and is not nullable\\.$#"
+-			message: "#^Method Drupal\\\\system\\\\Form\\\\ModulesListNonStableConfirmForm\\:\\:getQuestion\\(\\) should return Drupal\\\\Core\\\\StringTranslation\\\\TranslatableMarkup but return statement is missing\\.$#"
 +			message: "#^@dataProvider providerCreateFromString related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
--			path: modules/system/src/Form/ThemeSettingsForm.php
+-			path: modules/system/src/Form/ModulesListNonStableConfirmForm.php
 +			path: tests/Drupal/Tests/Core/Extension/DependencyTest.php
  
  		-
--			message: "#^Variable \\$theme_settings in isset\\(\\) always exists and is not nullable\\.$#"
+-			message: "#^Variable \\$default_theme in isset\\(\\) always exists and is not nullable\\.$#"
 +			message: "#^@dataProvider providerCheckIncompatibility related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
--			path: modules/system/src/Plugin/migrate/destination/d7/ThemeSettings.php
+-			path: modules/system/src/Form/ThemeSettingsForm.php
 +			path: tests/Drupal/Tests/Core/Extension/ExtensionListTest.php
  
  		-
--			message: "#^Variable \\$violation_messages might not be defined\\.$#"
+-			message: "#^Variable \\$theme_settings in isset\\(\\) always exists and is not nullable\\.$#"
 +			message: "#^@dataProvider provideInvalidBranch related method must be static in PHPUnit 10 and newer\\.$#"
+ 			count: 1
+-			path: modules/system/src/Plugin/migrate/destination/d7/ThemeSettings.php
++			path: tests/Drupal/Tests/Core/Extension/ExtensionVersionTest.php
+ 
+ 		-
+-			message: "#^Variable \\$violation_messages might not be defined\\.$#"
++			message: "#^@dataProvider providerCreateFromSupportBranch related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/system/src/SecurityAdvisories/SecurityAdvisory.php
 +			path: tests/Drupal/Tests/Core/Extension/ExtensionVersionTest.php
  
  		-
 -			message: "#^Variable \\$directories might not be defined\\.$#"
-+			message: "#^@dataProvider providerCreateFromSupportBranch related method must be static in PHPUnit 10 and newer\\.$#"
- 			count: 1
--			path: modules/system/system.install
-+			path: tests/Drupal/Tests/Core/Extension/ExtensionVersionTest.php
- 
- 		-
--			message: "#^Variable \\$pdo_message might not be defined\\.$#"
 +			message: "#^@dataProvider providerInvalidBranchCorePrefix related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/system/system.install
 +			path: tests/Drupal/Tests/Core/Extension/ExtensionVersionTest.php
  
  		-
--			message: "#^Variable \\$site_path might not be defined\\.$#"
+-			message: "#^Variable \\$pdo_message might not be defined\\.$#"
 +			message: "#^@dataProvider providerInvalidVersionCorePrefix related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/system/system.install
 +			path: tests/Drupal/Tests/Core/Extension/ExtensionVersionTest.php
  
  		-
--			message: "#^Variable \\$messages might not be defined\\.$#"
+-			message: "#^Variable \\$site_path might not be defined\\.$#"
 +			message: "#^@dataProvider providerInvalidVersionNumber related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
+-			path: modules/system/system.install
++			path: tests/Drupal/Tests/Core/Extension/ExtensionVersionTest.php
+ 
+ 		-
+-			message: "#^Variable \\$messages might not be defined\\.$#"
+-			count: 1
 -			path: modules/system/tests/modules/batch_test/batch_test.callbacks.inc
++			message: "#^@dataProvider providerVersionInfos related method must be static in PHPUnit 10 and newer\\.$#"
++			count: 3
 +			path: tests/Drupal/Tests/Core/Extension/ExtensionVersionTest.php
  
  		-
@@ -8768,11 +8850,6 @@ index 318074ad50..ca9e17df76 100644
 -				in drupal\\:8\\.4\\.0 and is removed from drupal\\:9\\.0\\.0\\. This is
 -				  the deprecation message for deprecated_test_function\\(\\)\\.$#
 -			"""
-+			message: "#^@dataProvider providerVersionInfos related method must be static in PHPUnit 10 and newer\\.$#"
-+			count: 3
-+			path: tests/Drupal/Tests/Core/Extension/ExtensionVersionTest.php
-+
-+		-
 +			message: "#^@dataProvider coreModuleListDataProvider related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/system/tests/modules/deprecation_test/src/DeprecatedController.php
@@ -9038,40 +9115,36 @@ index 318074ad50..ca9e17df76 100644
  
  		-
 -			message: "#^Variable \\$items in isset\\(\\) always exists and is not nullable\\.$#"
+-			count: 1
+-			path: modules/user/src/Plugin/Validation/Constraint/UserMailRequiredValidator.php
 +			message: "#^@dataProvider providerLimitValidationErrors related method must be static in PHPUnit 10 and newer\\.$#"
 +			count: 2
-+			path: tests/Drupal/Tests/Core/Form/FormStateDecoratorBaseTest.php
-+
-+		-
-+			message: "#^@dataProvider providerLoadInclude related method must be static in PHPUnit 10 and newer\\.$#"
- 			count: 1
--			path: modules/user/src/Plugin/Validation/Constraint/UserMailRequiredValidator.php
 +			path: tests/Drupal/Tests/Core/Form/FormStateDecoratorBaseTest.php
  
  		-
 -			message: "#^Method Drupal\\\\user\\\\Plugin\\\\views\\\\field\\\\UserData\\:\\:render\\(\\) should return Drupal\\\\Component\\\\Render\\\\MarkupInterface\\|string but return statement is missing\\.$#"
-+			message: "#^@dataProvider providerPrepareCallback related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerLoadInclude related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/user/src/Plugin/views/field/UserData.php
 +			path: tests/Drupal/Tests/Core/Form/FormStateDecoratorBaseTest.php
  
  		-
 -			message: "#^Method Drupal\\\\user\\\\ProfileForm\\:\\:save\\(\\) should return int but return statement is missing\\.$#"
-+			message: "#^@dataProvider providerSet related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerPrepareCallback related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/user/src/ProfileForm.php
 +			path: tests/Drupal/Tests/Core/Form/FormStateDecoratorBaseTest.php
  
  		-
 -			message: "#^Method Drupal\\\\user\\\\RegisterForm\\:\\:save\\(\\) should return int but return statement is missing\\.$#"
-+			message: "#^@dataProvider providerSetRequestMethod related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerSet related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/user/src/RegisterForm.php
 +			path: tests/Drupal/Tests/Core/Form/FormStateDecoratorBaseTest.php
  
  		-
 -			message: "#^Method Drupal\\\\user\\\\RoleForm\\:\\:save\\(\\) should return int but return statement is missing\\.$#"
-+			message: "#^@dataProvider providerSetTemporaryValue related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerSetRequestMethod related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/user/src/RoleForm.php
 +			path: tests/Drupal/Tests/Core/Form/FormStateDecoratorBaseTest.php
@@ -9080,27 +9153,28 @@ index 318074ad50..ca9e17df76 100644
 -			message: "#^Call to deprecated constant REQUEST_TIME\\: Deprecated in drupal\\:8\\.3\\.0 and is removed from drupal\\:11\\.0\\.0\\. Use \\\\Drupal\\:\\:time\\(\\)\\-\\>getRequestTime\\(\\); $#"
 -			count: 2
 -			path: modules/user/tests/src/Functional/UserCreateTest.php
++			message: "#^@dataProvider providerSetTemporaryValue related method must be static in PHPUnit 10 and newer\\.$#"
++			count: 1
++			path: tests/Drupal/Tests/Core/Form/FormStateDecoratorBaseTest.php
+ 
+ 		-
+-			message: "#^Call to deprecated constant REQUEST_TIME\\: Deprecated in drupal\\:8\\.3\\.0 and is removed from drupal\\:11\\.0\\.0\\. Use \\\\Drupal\\:\\:time\\(\\)\\-\\>getRequestTime\\(\\); $#"
+-			count: 1
+-			path: modules/user/tests/src/Functional/UserEditTest.php
 +			message: "#^@dataProvider providerSingleBooleanArgument related method must be static in PHPUnit 10 and newer\\.$#"
 +			count: 26
 +			path: tests/Drupal/Tests/Core/Form/FormStateDecoratorBaseTest.php
  
  		-
--			message: "#^Call to deprecated constant REQUEST_TIME\\: Deprecated in drupal\\:8\\.3\\.0 and is removed from drupal\\:11\\.0\\.0\\. Use \\\\Drupal\\:\\:time\\(\\)\\-\\>getRequestTime\\(\\); $#"
-+			message: "#^@dataProvider providerTestGetError related method must be static in PHPUnit 10 and newer\\.$#"
- 			count: 1
--			path: modules/user/tests/src/Functional/UserEditTest.php
-+			path: tests/Drupal/Tests/Core/Form/FormStateTest.php
- 
- 		-
 -			message: "#^Variable \\$name in isset\\(\\) always exists and is not nullable\\.$#"
-+			message: "#^@dataProvider providerTestGetRedirect related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerTestGetError related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/user/tests/src/Functional/UserLoginHttpTest.php
 +			path: tests/Drupal/Tests/Core/Form/FormStateTest.php
  
  		-
 -			message: "#^Variable \\$pass in isset\\(\\) always exists and is not nullable\\.$#"
-+			message: "#^@dataProvider providerTestIsCached related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerTestGetRedirect related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/user/tests/src/Functional/UserLoginHttpTest.php
 +			path: tests/Drupal/Tests/Core/Form/FormStateTest.php
@@ -9109,34 +9183,34 @@ index 318074ad50..ca9e17df76 100644
 -			message: "#^Call to deprecated constant REQUEST_TIME\\: Deprecated in drupal\\:8\\.3\\.0 and is removed from drupal\\:11\\.0\\.0\\. Use \\\\Drupal\\:\\:time\\(\\)\\-\\>getRequestTime\\(\\); $#"
 -			count: 5
 -			path: modules/user/tests/src/Functional/UserPasswordResetTest.php
-+			message: "#^@dataProvider providerTestIsMethodType related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerTestIsCached related method must be static in PHPUnit 10 and newer\\.$#"
 +			count: 1
 +			path: tests/Drupal/Tests/Core/Form/FormStateTest.php
  
  		-
 -			message: "#^Call to deprecated constant REQUEST_TIME\\: Deprecated in drupal\\:8\\.3\\.0 and is removed from drupal\\:11\\.0\\.0\\. Use \\\\Drupal\\:\\:time\\(\\)\\-\\>getRequestTime\\(\\); $#"
-+			message: "#^@dataProvider providerTestSetErrorByName related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerTestIsMethodType related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/user/tests/src/Functional/UserPictureTest.php
 +			path: tests/Drupal/Tests/Core/Form/FormStateTest.php
  
  		-
 -			message: "#^Call to an undefined method Drupal\\\\Tests\\\\user\\\\Functional\\\\UserRegistrationRestTest\\:\\:getExpectedUnauthorizedEntityAccessCacheability\\(\\)\\.$#"
-+			message: "#^@dataProvider providerGetValue related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerTestSetErrorByName related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/user/tests/src/Functional/UserRegistrationRestTest.php
-+			path: tests/Drupal/Tests/Core/Form/FormStateValuesTraitTest.php
++			path: tests/Drupal/Tests/Core/Form/FormStateTest.php
  
  		-
 -			message: "#^Call to deprecated constant REQUEST_TIME\\: Deprecated in drupal\\:8\\.3\\.0 and is removed from drupal\\:11\\.0\\.0\\. Use \\\\Drupal\\:\\:time\\(\\)\\-\\>getRequestTime\\(\\); $#"
-+			message: "#^@dataProvider providerHasValue related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerGetValue related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/user/tests/src/Functional/UserRegistrationTest.php
 +			path: tests/Drupal/Tests/Core/Form/FormStateValuesTraitTest.php
  
  		-
 -			message: "#^Call to deprecated constant REQUEST_TIME\\: Deprecated in drupal\\:8\\.3\\.0 and is removed from drupal\\:11\\.0\\.0\\. Use \\\\Drupal\\:\\:time\\(\\)\\-\\>getRequestTime\\(\\); $#"
-+			message: "#^@dataProvider providerIsValueEmpty related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerHasValue related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/user/tests/src/Functional/Views/UserChangedTest.php
 +			path: tests/Drupal/Tests/Core/Form/FormStateValuesTraitTest.php
@@ -9146,7 +9220,7 @@ index 318074ad50..ca9e17df76 100644
 -				#^Call to deprecated method expectWarning\\(\\) of class PHPUnit\\\\Framework\\\\TestCase\\:
 -				https\\://github\\.com/sebastianbergmann/phpunit/issues/5062$#
 -			"""
-+			message: "#^@dataProvider providerSetValue related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerIsValueEmpty related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/user/tests/src/Kernel/Views/HandlerFilterRolesTest.php
 +			path: tests/Drupal/Tests/Core/Form/FormStateValuesTraitTest.php
@@ -9156,34 +9230,48 @@ index 318074ad50..ca9e17df76 100644
 -				#^Call to deprecated method expectWarningMessage\\(\\) of class PHPUnit\\\\Framework\\\\TestCase\\:
 -				https\\://github\\.com/sebastianbergmann/phpunit/issues/5062$#
 -			"""
-+			message: "#^@dataProvider providerTestHandleFormSubmissionWithResponses related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerSetValue related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/user/tests/src/Kernel/Views/HandlerFilterRolesTest.php
-+			path: tests/Drupal/Tests/Core/Form/FormSubmitterTest.php
++			path: tests/Drupal/Tests/Core/Form/FormStateValuesTraitTest.php
  
  		-
 -			message: "#^Variable \\$result in isset\\(\\) always exists and is not nullable\\.$#"
-+			message: "#^@dataProvider providerTestRedirectWithUrl related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerTestHandleFormSubmissionWithResponses related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/user/tests/src/Unit/UserAccessControlHandlerTest.php
 +			path: tests/Drupal/Tests/Core/Form/FormSubmitterTest.php
  
  		-
 -			message: "#^Method Drupal\\\\views\\\\Form\\\\ViewsFormMainForm\\:\\:getFormId\\(\\) should return string but return statement is missing\\.$#"
-+			message: "#^@dataProvider providerTestHandleErrorsWithLimitedValidation related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerTestRedirectWithUrl related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/views/src/Form/ViewsFormMainForm.php
-+			path: tests/Drupal/Tests/Core/Form/FormValidatorTest.php
++			path: tests/Drupal/Tests/Core/Form/FormSubmitterTest.php
  
  		-
 -			message: "#^Variable \\$display in isset\\(\\) always exists and is not nullable\\.$#"
-+			message: "#^@dataProvider providerTestRequiredErrorMessage related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^Missing call to parent\\:\\:tearDown\\(\\) method\\.$#"
  			count: 1
 -			path: modules/views/src/Plugin/Derivative/ViewsBlock.php
-+			path: tests/Drupal/Tests/Core/Form/FormValidatorTest.php
++			path: tests/Drupal/Tests/Core/Form/FormTestBase.php
  
  		-
 -			message: "#^Call to an undefined method \\$this\\(Drupal\\\\views\\\\Plugin\\\\views\\\\HandlerBase\\)\\:\\:getFormula\\(\\)\\.$#"
++			message: "#^@dataProvider providerTestHandleErrorsWithLimitedValidation related method must be static in PHPUnit 10 and newer\\.$#"
+ 			count: 1
+-			path: modules/views/src/Plugin/views/HandlerBase.php
++			path: tests/Drupal/Tests/Core/Form/FormValidatorTest.php
+ 
+ 		-
+-			message: "#^Method Drupal\\\\views\\\\Plugin\\\\views\\\\HandlerBase\\:\\:getTableJoin\\(\\) should return Drupal\\\\views\\\\Plugin\\\\views\\\\join\\\\JoinPluginBase but return statement is missing\\.$#"
++			message: "#^@dataProvider providerTestRequiredErrorMessage related method must be static in PHPUnit 10 and newer\\.$#"
+ 			count: 1
+-			path: modules/views/src/Plugin/views/HandlerBase.php
++			path: tests/Drupal/Tests/Core/Form/FormValidatorTest.php
+ 
+ 		-
+-			message: "#^Variable \\$group_types might not be defined\\.$#"
 +			message: """
 +				#^Call to deprecated method addMethods\\(\\) of class PHPUnit\\\\Framework\\\\MockObject\\\\MockBuilder\\:
 +				https\\://github\\.com/sebastianbergmann/phpunit/issues/5320$#
@@ -9193,36 +9281,22 @@ index 318074ad50..ca9e17df76 100644
 +			path: tests/Drupal/Tests/Core/Form/FormValidatorTest.php
  
  		-
--			message: "#^Method Drupal\\\\views\\\\Plugin\\\\views\\\\HandlerBase\\:\\:getTableJoin\\(\\) should return Drupal\\\\views\\\\Plugin\\\\views\\\\join\\\\JoinPluginBase but return statement is missing\\.$#"
+-			message: "#^Variable \\$items might not be defined\\.$#"
 +			message: "#^@dataProvider providerTestFlattenOptions related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
--			path: modules/views/src/Plugin/views/HandlerBase.php
+-			path: modules/views/src/Plugin/views/area/Broken.php
 +			path: tests/Drupal/Tests/Core/Form/OptGroupTest.php
  
  		-
--			message: "#^Variable \\$group_types might not be defined\\.$#"
-+			message: "#^@dataProvider providerGetValues related method must be static in PHPUnit 10 and newer\\.$#"
- 			count: 1
--			path: modules/views/src/Plugin/views/HandlerBase.php
-+			path: tests/Drupal/Tests/Core/Form/SubformStateTest.php
- 
- 		-
--			message: "#^Variable \\$items might not be defined\\.$#"
-+			message: "#^@dataProvider providerGetValuesBroken related method must be static in PHPUnit 10 and newer\\.$#"
- 			count: 1
--			path: modules/views/src/Plugin/views/area/Broken.php
-+			path: tests/Drupal/Tests/Core/Form/SubformStateTest.php
- 
- 		-
 -			message: "#^Method Drupal\\\\views\\\\Plugin\\\\views\\\\area\\\\HTTPStatusCode\\:\\:render\\(\\) should return array but return statement is missing\\.$#"
-+			message: "#^@dataProvider providerTestGetValue related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerGetValues related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/views/src/Plugin/views/area/HTTPStatusCode.php
 +			path: tests/Drupal/Tests/Core/Form/SubformStateTest.php
  
  		-
 -			message: "#^Variable \\$options_name might not be defined\\.$#"
-+			message: "#^@dataProvider providerTestGetValueBroken related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerGetValuesBroken related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/views/src/Plugin/views/argument/ArgumentPluginBase.php
 +			path: tests/Drupal/Tests/Core/Form/SubformStateTest.php
@@ -9231,7 +9305,7 @@ index 318074ad50..ca9e17df76 100644
 -			message: "#^Variable \\$plugin_name might not be defined\\.$#"
 -			count: 2
 -			path: modules/views/src/Plugin/views/argument/ArgumentPluginBase.php
-+			message: "#^@dataProvider providerTestSetValues related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerTestGetValue related method must be static in PHPUnit 10 and newer\\.$#"
 +			count: 1
 +			path: tests/Drupal/Tests/Core/Form/SubformStateTest.php
  
@@ -9239,43 +9313,57 @@ index 318074ad50..ca9e17df76 100644
 -			message: "#^Variable \\$validate_types might not be defined\\.$#"
 -			count: 2
 -			path: modules/views/src/Plugin/views/argument/ArgumentPluginBase.php
-+			message: "#^@dataProvider providerTestSetValuesBroken related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerTestGetValueBroken related method must be static in PHPUnit 10 and newer\\.$#"
 +			count: 1
 +			path: tests/Drupal/Tests/Core/Form/SubformStateTest.php
  
  		-
 -			message: "#^Variable \\$items might not be defined\\.$#"
-+			message: "#^@dataProvider providerTestExceptions related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerTestSetValues related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/views/src/Plugin/views/argument/Broken.php
++			path: tests/Drupal/Tests/Core/Form/SubformStateTest.php
+ 
+ 		-
+-			message: "#^Call to deprecated constant REQUEST_TIME\\: Deprecated in drupal\\:8\\.3\\.0 and is removed from drupal\\:11\\.0\\.0\\. Use \\\\Drupal\\:\\:time\\(\\)\\-\\>getRequestTime\\(\\); $#"
++			message: "#^@dataProvider providerTestSetValuesBroken related method must be static in PHPUnit 10 and newer\\.$#"
+ 			count: 1
+-			path: modules/views/src/Plugin/views/argument/Date.php
++			path: tests/Drupal/Tests/Core/Form/SubformStateTest.php
+ 
+ 		-
+-			message: "#^Method Drupal\\\\views\\\\Plugin\\\\views\\\\cache\\\\CachePluginBase\\:\\:cacheGet\\(\\) should return bool but return statement is missing\\.$#"
++			message: "#^@dataProvider providerTestExceptions related method must be static in PHPUnit 10 and newer\\.$#"
+ 			count: 1
+-			path: modules/views/src/Plugin/views/cache/CachePluginBase.php
 +			path: tests/Drupal/Tests/Core/Http/CacheableExceptionTest.php
  
  		-
 -			message: "#^Call to deprecated constant REQUEST_TIME\\: Deprecated in drupal\\:8\\.3\\.0 and is removed from drupal\\:11\\.0\\.0\\. Use \\\\Drupal\\:\\:time\\(\\)\\-\\>getRequestTime\\(\\); $#"
 +			message: "#^@dataProvider providerTestCreateFromOptions related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
--			path: modules/views/src/Plugin/views/argument/Date.php
+-			path: modules/views/src/Plugin/views/cache/Time.php
 +			path: tests/Drupal/Tests/Core/Http/ClientFactoryTest.php
  
  		-
--			message: "#^Method Drupal\\\\views\\\\Plugin\\\\views\\\\cache\\\\CachePluginBase\\:\\:cacheGet\\(\\) should return bool but return statement is missing\\.$#"
+-			message: "#^Constructor of class Drupal\\\\views\\\\Plugin\\\\views\\\\display\\\\DisplayPluginBase has an unused parameter \\$configuration\\.$#"
 +			message: """
 +				#^Call to deprecated method getConfig\\(\\) of class GuzzleHttp\\\\Client\\:
 +				Client\\:\\:getConfig will be removed in guzzlehttp/guzzle\\:8\\.0\\.$#
 +			"""
  			count: 1
--			path: modules/views/src/Plugin/views/cache/CachePluginBase.php
+-			path: modules/views/src/Plugin/views/display/DisplayPluginBase.php
 +			path: tests/Drupal/Tests/Core/Http/ClientFactoryTest.php
  
  		-
--			message: "#^Call to deprecated constant REQUEST_TIME\\: Deprecated in drupal\\:8\\.3\\.0 and is removed from drupal\\:11\\.0\\.0\\. Use \\\\Drupal\\:\\:time\\(\\)\\-\\>getRequestTime\\(\\); $#"
+-			message: "#^Variable \\$pager in isset\\(\\) always exists and is not nullable\\.$#"
 +			message: "#^@dataProvider providerTestCreateRequest related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
--			path: modules/views/src/Plugin/views/cache/Time.php
+-			path: modules/views/src/Plugin/views/display/DisplayPluginBase.php
 +			path: tests/Drupal/Tests/Core/Http/TrustedHostsRequestFactoryTest.php
  
  		-
--			message: "#^Constructor of class Drupal\\\\views\\\\Plugin\\\\views\\\\display\\\\DisplayPluginBase has an unused parameter \\$configuration\\.$#"
+-			message: "#^Variable \\$style in empty\\(\\) always exists and is not falsy\\.$#"
 -			count: 1
 -			path: modules/views/src/Plugin/views/display/DisplayPluginBase.php
 +			message: """
@@ -9286,74 +9374,74 @@ index 318074ad50..ca9e17df76 100644
 +			path: tests/Drupal/Tests/Core/Image/ImageTest.php
  
  		-
--			message: "#^Variable \\$pager in isset\\(\\) always exists and is not nullable\\.$#"
+-			message: "#^Variable \\$access_plugin in isset\\(\\) always exists and is not nullable\\.$#"
 +			message: "#^@dataProvider providerTestSortArrayOfLanguages related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
--			path: modules/views/src/Plugin/views/display/DisplayPluginBase.php
+-			path: modules/views/src/Plugin/views/display/PathPluginBase.php
 +			path: tests/Drupal/Tests/Core/Language/LanguageUnitTest.php
  
  		-
--			message: "#^Variable \\$style in empty\\(\\) always exists and is not falsy\\.$#"
+-			message: "#^Variable \\$options might not be defined\\.$#"
 +			message: "#^@dataProvider providerTestBuild related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
--			path: modules/views/src/Plugin/views/display/DisplayPluginBase.php
+-			path: modules/views/src/Plugin/views/field/Boolean.php
 +			path: tests/Drupal/Tests/Core/Layout/LayoutDefaultTest.php
  
  		-
--			message: "#^Variable \\$access_plugin in isset\\(\\) always exists and is not nullable\\.$#"
+-			message: "#^Variable \\$items might not be defined\\.$#"
 +			message: "#^Call to deprecated method getMockForAbstractClass\\(\\) of class PHPUnit\\\\Framework\\\\TestCase\\.$#"
  			count: 1
--			path: modules/views/src/Plugin/views/display/PathPluginBase.php
+-			path: modules/views/src/Plugin/views/field/Broken.php
 +			path: tests/Drupal/Tests/Core/Lock/LockBackendAbstractTest.php
  
  		-
--			message: "#^Variable \\$options might not be defined\\.$#"
+-			message: "#^Variable \\$entity in empty\\(\\) always exists and is not falsy\\.$#"
 +			message: "#^@dataProvider providerTestParseMessagePlaceholders related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
--			path: modules/views/src/Plugin/views/field/Boolean.php
-+			path: tests/Drupal/Tests/Core/Logger/LogMessageParserTest.php
- 
- 		-
--			message: "#^Variable \\$items might not be defined\\.$#"
-+			message: "#^@dataProvider providerTestLog related method must be static in PHPUnit 10 and newer\\.$#"
- 			count: 1
--			path: modules/views/src/Plugin/views/field/Broken.php
-+			path: tests/Drupal/Tests/Core/Logger/LoggerChannelTest.php
- 
- 		-
--			message: "#^Variable \\$entity in empty\\(\\) always exists and is not falsy\\.$#"
-+			message: "#^@dataProvider providerTestGetWeight related method must be static in PHPUnit 10 and newer\\.$#"
- 			count: 1
 -			path: modules/views/src/Plugin/views/field/BulkForm.php
-+			path: tests/Drupal/Tests/Core/Menu/LocalTaskDefaultTest.php
++			path: tests/Drupal/Tests/Core/Logger/LogMessageParserTest.php
  
  		-
 -			message: "#^Call to deprecated constant REQUEST_TIME\\: Deprecated in drupal\\:8\\.3\\.0 and is removed from drupal\\:11\\.0\\.0\\. Use \\\\Drupal\\:\\:time\\(\\)\\-\\>getRequestTime\\(\\); $#"
 -			count: 2
+-			path: modules/views/src/Plugin/views/field/Date.php
++			message: "#^@dataProvider providerTestLog related method must be static in PHPUnit 10 and newer\\.$#"
++			count: 1
++			path: tests/Drupal/Tests/Core/Logger/LoggerChannelTest.php
+ 
+ 		-
+-			message: "#^Method Drupal\\\\views\\\\Plugin\\\\views\\\\field\\\\Date\\:\\:render\\(\\) should return Drupal\\\\Component\\\\Render\\\\MarkupInterface\\|string but return statement is missing\\.$#"
++			message: "#^@dataProvider providerTestGetWeight related method must be static in PHPUnit 10 and newer\\.$#"
+ 			count: 1
+-			path: modules/views/src/Plugin/views/field/Date.php
++			path: tests/Drupal/Tests/Core/Menu/LocalTaskDefaultTest.php
+ 
+ 		-
+-			message: "#^Variable \\$custom_format might not be defined\\.$#"
+-			count: 9
 -			path: modules/views/src/Plugin/views/field/Date.php
 +			message: "#^@dataProvider providerTestSetMinDepth related method must be static in PHPUnit 10 and newer\\.$#"
 +			count: 1
 +			path: tests/Drupal/Tests/Core/Menu/MenuTreeParametersTest.php
  
  		-
--			message: "#^Method Drupal\\\\views\\\\Plugin\\\\views\\\\field\\\\Date\\:\\:render\\(\\) should return Drupal\\\\Component\\\\Render\\\\MarkupInterface\\|string but return statement is missing\\.$#"
+-			message: "#^Method Drupal\\\\views\\\\Plugin\\\\views\\\\field\\\\EntityField\\:\\:renderItems\\(\\) should return string but return statement is missing\\.$#"
 +			message: "#^@dataProvider providerTestDeleteOverrides related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
--			path: modules/views/src/Plugin/views/field/Date.php
-+			path: tests/Drupal/Tests/Core/Menu/StaticMenuLinkOverridesTest.php
- 
- 		-
--			message: "#^Variable \\$custom_format might not be defined\\.$#"
--			count: 9
--			path: modules/views/src/Plugin/views/field/Date.php
-+			message: "#^@dataProvider providerTestLoadOverride related method must be static in PHPUnit 10 and newer\\.$#"
-+			count: 1
-+			path: tests/Drupal/Tests/Core/Menu/StaticMenuLinkOverridesTest.php
- 
- 		-
--			message: "#^Method Drupal\\\\views\\\\Plugin\\\\views\\\\field\\\\EntityField\\:\\:renderItems\\(\\) should return string but return statement is missing\\.$#"
--			count: 1
 -			path: modules/views/src/Plugin/views/field/EntityField.php
++			path: tests/Drupal/Tests/Core/Menu/StaticMenuLinkOverridesTest.php
+ 
+ 		-
+-			message: "#^Variable \\$field_item_list in isset\\(\\) always exists and is not nullable\\.$#"
++			message: "#^@dataProvider providerTestLoadOverride related method must be static in PHPUnit 10 and newer\\.$#"
+ 			count: 1
+-			path: modules/views/src/Plugin/views/field/EntityField.php
++			path: tests/Drupal/Tests/Core/Menu/StaticMenuLinkOverridesTest.php
+ 
+ 		-
+-			message: "#^Variable \\$options in empty\\(\\) always exists and is not falsy\\.$#"
+-			count: 1
+-			path: modules/views/src/Plugin/views/field/FieldPluginBase.php
 +			message: """
 +				#^Call to deprecated method returnSelf\\(\\) of class PHPUnit\\\\Framework\\\\TestCase\\:
 +				Use \\<code\\>\\$double\\-\\>willReturnSelf\\(\\)\\</code\\> instead of \\<code\\>\\$double\\-\\>will\\(\\$this\\-\\>returnSelf\\(\\)\\)\\</code\\>$#
@@ -9362,76 +9450,68 @@ index 318074ad50..ca9e17df76 100644
 +			path: tests/Drupal/Tests/Core/Menu/StaticMenuLinkOverridesTest.php
  
  		-
--			message: "#^Variable \\$field_item_list in isset\\(\\) always exists and is not nullable\\.$#"
+-			message: "#^Variable \\$raw_items might not be defined\\.$#"
 +			message: "#^@dataProvider providerAllowIfAnyRuleReturnedAllow related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
--			path: modules/views/src/Plugin/views/field/EntityField.php
-+			path: tests/Drupal/Tests/Core/PageCache/ChainRequestPolicyTest.php
- 
- 		-
--			message: "#^Variable \\$options in empty\\(\\) always exists and is not falsy\\.$#"
-+			message: "#^@dataProvider providerChainExceptionOnInvalidReturnValue related method must be static in PHPUnit 10 and newer\\.$#"
- 			count: 1
 -			path: modules/views/src/Plugin/views/field/FieldPluginBase.php
 +			path: tests/Drupal/Tests/Core/PageCache/ChainRequestPolicyTest.php
- 
- 		-
--			message: "#^Variable \\$raw_items might not be defined\\.$#"
-+			message: "#^@dataProvider providerChainExceptionOnInvalidReturnValue related method must be static in PHPUnit 10 and newer\\.$#"
- 			count: 1
--			path: modules/views/src/Plugin/views/field/FieldPluginBase.php
-+			path: tests/Drupal/Tests/Core/PageCache/ChainResponsePolicyTest.php
  
  		-
 -			message: "#^Variable \\$style in isset\\(\\) always exists and is not nullable\\.$#"
-+			message: "#^@dataProvider providerTestHttpMethod related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerChainExceptionOnInvalidReturnValue related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/views/src/Plugin/views/field/FieldPluginBase.php
-+			path: tests/Drupal/Tests/Core/PageCache/CommandLineOrUnsafeMethodTest.php
++			path: tests/Drupal/Tests/Core/PageCache/ChainRequestPolicyTest.php
  
  		-
 -			message: "#^Method Drupal\\\\views\\\\Plugin\\\\views\\\\field\\\\Markup\\:\\:render\\(\\) should return Drupal\\\\Component\\\\Render\\\\MarkupInterface\\|string but return statement is missing\\.$#"
-+			message: "#^@dataProvider providerTestApplies related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerChainExceptionOnInvalidReturnValue related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/views/src/Plugin/views/field/Markup.php
-+			path: tests/Drupal/Tests/Core/ParamConverter/EntityConverterTest.php
++			path: tests/Drupal/Tests/Core/PageCache/ChainResponsePolicyTest.php
  
  		-
 -			message: "#^Method Drupal\\\\views\\\\Plugin\\\\views\\\\field\\\\PrerenderList\\:\\:renderItems\\(\\) should return string but return statement is missing\\.$#"
-+			message: "#^@dataProvider providerTestConvert related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerTestHttpMethod related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/views/src/Plugin/views/field/PrerenderList.php
-+			path: tests/Drupal/Tests/Core/ParamConverter/EntityConverterTest.php
++			path: tests/Drupal/Tests/Core/PageCache/CommandLineOrUnsafeMethodTest.php
  
  		-
 -			message: "#^Variable \\$items might not be defined\\.$#"
-+			message: "#^@dataProvider providerTestConvert related method must be static in PHPUnit 10 and newer\\.$#"
++			message: "#^@dataProvider providerTestApplies related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
 -			path: modules/views/src/Plugin/views/filter/Broken.php
--
--		-
++			path: tests/Drupal/Tests/Core/ParamConverter/EntityConverterTest.php
+ 
+ 		-
 -			message: "#^Call to an undefined method Drupal\\\\views\\\\Plugin\\\\views\\\\filter\\\\FilterPluginBase\\:\\:operators\\(\\)\\.$#"
 -			count: 2
+-			path: modules/views/src/Plugin/views/filter/FilterPluginBase.php
++			message: "#^@dataProvider providerTestConvert related method must be static in PHPUnit 10 and newer\\.$#"
++			count: 1
++			path: tests/Drupal/Tests/Core/ParamConverter/EntityConverterTest.php
+ 
+ 		-
+-			message: "#^Variable \\$groups might not be defined\\.$#"
++			message: "#^@dataProvider providerTestConvert related method must be static in PHPUnit 10 and newer\\.$#"
+ 			count: 1
 -			path: modules/views/src/Plugin/views/filter/FilterPluginBase.php
 +			path: tests/Drupal/Tests/Core/ParamConverter/EntityRevisionParamConverterTest.php
  
  		-
--			message: "#^Variable \\$groups might not be defined\\.$#"
+-			message: "#^Variable \\$source might not be defined\\.$#"
 +			message: "#^@dataProvider providerTestGetConverter related method must be static in PHPUnit 10 and newer\\.$#"
  			count: 1
--			path: modules/views/src/Plugin/views/filter/FilterPluginBase.php
+-			path: modules/views/src/Plugin/views/filter/InOperator.php
 +			path: tests/Drupal/Tests/Core/ParamConverter/ParamConverterManagerTest.php
  
  		-
 -			message: "#^Variable \\$source might not be defined\\.$#"
-+			message: "#^@dataProvider providerTestSetRouteParameterConverters related method must be static in PHPUnit 10 and newer\\.$#"
- 			count: 1
--			path: modules/views/src/Plugin/views/filter/InOperator.php
--
--		-
--			message: "#^Variable \\$source might not be defined\\.$#"
 -			count: 2
 -			path: modules/views/src/Plugin/views/filter/NumericFilter.php
++			message: "#^@dataProvider providerTestSetRouteParameterConverters related method must be static in PHPUnit 10 and newer\\.$#"
++			count: 1
 +			path: tests/Drupal/Tests/Core/ParamConverter/ParamConverterManagerTest.php
  
  		-
@@ -11003,10 +11083,10 @@ index 76d5deb891..0000000000
 -}
 diff --git a/core/tests/Drupal/TestTools/PhpUnitCompatibility/PhpUnit10/TestCompatibilityTrait.php b/core/tests/Drupal/TestTools/PhpUnitCompatibility/PhpUnit10/TestCompatibilityTrait.php
 new file mode 100644
-index 0000000000..0b9d683bd1
+index 0000000000..ac63ef5495
 --- /dev/null
 +++ b/core/tests/Drupal/TestTools/PhpUnitCompatibility/PhpUnit10/TestCompatibilityTrait.php
-@@ -0,0 +1,50 @@
+@@ -0,0 +1,54 @@
 +<?php
 +
 +declare(strict_types=1);
@@ -11020,7 +11100,11 @@ index 0000000000..0b9d683bd1
 + */
 +trait TestCompatibilityTrait {
 +
-+  /** @var null|callable */
++  /**
++   * The previous error handler.
++   *
++   * @var callable|null
++   */
 +  protected $previouslyDefinedErrorHandler;
 +
 +  protected bool $expectedError = FALSE;
@@ -11029,7 +11113,7 @@ index 0000000000..0b9d683bd1
 +  protected ?string $actualErrorMessage = NULL;
 +
 +  public function tearDownExpectedTriggeredErrors(): void {
-+    if (null !== $this->previouslyDefinedErrorHandler) {
++    if ($this->previouslyDefinedErrorHandler !== NULL) {
 +      self::assertSame($this->expectedError, $this->actualError, $this->expectedError ?
 +        'An error was expected, but it was not triggered' :
 +        'An unexpected error was triggered'
@@ -11040,7 +11124,7 @@ index 0000000000..0b9d683bd1
 +
 +  public function expectError(): void {
 +    $this->expectedError = TRUE;
-+    if (null === $this->previouslyDefinedErrorHandler) {
++    if ($this->previouslyDefinedErrorHandler === NULL) {
 +      $this->previouslyDefinedErrorHandler = set_error_handler(
 +        function (
 +          int $code,
@@ -11050,7 +11134,7 @@ index 0000000000..0b9d683bd1
 +            $this->actualError = TRUE;
 +            $this->actualErrorMessage = $message;
 +          }
-+          return true;
++          return TRUE;
 +        }
 +      );
 +    }
@@ -11565,6 +11649,21 @@ index 3350704688..0000000000
 -  }
 -
 -}
+diff --git a/core/tests/Drupal/Tests/PhpUnitCompatibilityTrait.php b/core/tests/Drupal/Tests/PhpUnitCompatibilityTrait.php
+index 3bba95e3a7..cbe436fbcb 100644
+--- a/core/tests/Drupal/Tests/PhpUnitCompatibilityTrait.php
++++ b/core/tests/Drupal/Tests/PhpUnitCompatibilityTrait.php
+@@ -18,6 +18,10 @@ class_alias("Drupal\TestTools\PhpUnitCompatibility\PhpUnit" . RunnerVersion::get
+    * Makes Drupal's test API forward compatible with multiple versions of PHPUnit.
+    */
+   trait PhpUnitCompatibilityTrait {
++
++    public function tearDownExpectedTriggeredErrors(): void {
++    }
++
+   }
+ 
+ }
 diff --git a/core/tests/Drupal/Tests/UnitTestCase.php b/core/tests/Drupal/Tests/UnitTestCase.php
 index 2ca419d204..1a1d2aa7f5 100644
 --- a/core/tests/Drupal/Tests/UnitTestCase.php
