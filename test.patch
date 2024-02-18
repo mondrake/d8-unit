@@ -3736,20 +3736,20 @@ index 06d874e285..a2dbea6ff5 100644
  }
 diff --git a/core/tests/Drupal/TestTools/Trait/ExpectDeprecationTrait.php b/core/tests/Drupal/TestTools/Trait/ExpectDeprecationTrait.php
 new file mode 100644
-index 0000000000..1810033724
+index 0000000000..1b9f307edf
 --- /dev/null
 +++ b/core/tests/Drupal/TestTools/Trait/ExpectDeprecationTrait.php
-@@ -0,0 +1,132 @@
+@@ -0,0 +1,92 @@
 +<?php
 +
 +declare(strict_types=1);
 +
 +namespace Drupal\TestTools\Trait;
 +
++use Drupal\TestTools\PhpUnitCompatibility\IgnoreDeprecation;
 +use PHPUnit\Event\Code\TestMethodBuilder;
 +use PHPUnit\Framework\Attributes\After;
 +use PHPUnit\Framework\Attributes\Before;
-+use PHPUnit\Framework\Attributes\BeforeClass;
 +
 +// cspell:ignore errno errstr errfile errline
 +
@@ -3767,38 +3767,8 @@ index 0000000000..1810033724
 +   */
 +  protected $previouslyDefinedErrorHandler;
 +
-+  /**
-+   * @var list<string>
-+   */
-+  protected static array $ignoreDeprecationPatterns = [];
-+
 +  protected array $expectedDeprecations = [];
 +  protected array $collectedDeprecations = [];
-+
-+  #[BeforeClass]
-+  public static function parseIgnoreDeprecationPatterns(): void {
-+    if (!self::$ignoreDeprecationPatterns) {
-+      $root = dirname(substr(__DIR__, 0, -strlen(__NAMESPACE__)), 2);
-+      $ignoreFile = $root . DIRECTORY_SEPARATOR . 'core' . DIRECTORY_SEPARATOR . '.deprecation-ignore.txt';
-+      if (!is_file($ignoreFile)) {
-+        throw new \InvalidArgumentException(sprintf('The ignoreFile "%s" does not exist.', $ignoreFile));
-+      }
-+      set_error_handler(static function ($t, $m) use ($ignoreFile, &$line) {
-+        throw new \RuntimeException(sprintf('Invalid pattern found in "%s" on line "%d"', $ignoreFile, 1 + $line) . substr($m, 12));
-+      });
-+      try {
-+        foreach (file($ignoreFile) as $line => $pattern) {
-+          if ((trim($pattern)[0] ?? '#') !== '#') {
-+            preg_match($pattern, '');
-+            self::$ignoreDeprecationPatterns[] = $pattern;
-+          }
-+        }
-+      }
-+      finally {
-+        restore_error_handler();
-+      }
-+    }
-+  }
 +
 +  #[Before]
 +  public function setUpErrorHandler(): void {
@@ -3809,18 +3779,20 @@ index 0000000000..1810033724
 +
 +      $this->previouslyDefinedErrorHandler = set_error_handler(
 +        function (int $errno, string $errstr, string $errfile = NULL, int $errline = NULL) use ($handler): bool {
++dump(['Test level', $errno, $errstr, $errfile, $errline]);
 +          // Collect deprecations regardless of whether they are ignored or not.
 +          if (E_USER_DEPRECATED === $errno || E_DEPRECATED === $errno) {
 +            $this->collectedDeprecations[] = $errstr;
 +          }
 +
-+          if ((E_USER_DEPRECATED === $errno || E_DEPRECATED === $errno) && $this->isIgnoredDeprecation($errstr)) {
++          if ((E_USER_DEPRECATED === $errno || E_DEPRECATED === $errno) && IgnoreDeprecation::isIgnoredDeprecation($errstr)) {
 +            return TRUE;
 +          }
 +          elseif ((E_USER_DEPRECATED === $errno || E_DEPRECATED === $errno) && $this->isTestInLegacyGroup()) {
 +            return TRUE;
 +          }
 +          else {
++dump(['Test level fallback']);
 +            call_user_func($handler, $errno, $errstr, $errfile, $errline);
 +          }
 +          return TRUE;
@@ -3845,22 +3817,10 @@ index 0000000000..1810033724
 +  }
 +
 +  public function expectDeprecation(string $message): void {
-+    $test = TestMethodBuilder::fromTestCase($this);
-+    if (!$test->metadata()->isIgnoreDeprecations()->isNotEmpty() && !$this->isTestInLegacyGroup()) {
++    if (!$this->valueObjectForEvents()->metadata()->isIgnoreDeprecations()->isNotEmpty() && !$this->isTestInLegacyGroup()) {
 +      throw new \RuntimeException('expectDeprecation() can only be called from tests marked with #[IgnoreDeprecations] or \'@group legacy\'');
 +    }
 +    $this->expectedDeprecations[] = $message;
-+  }
-+
-+  public function isIgnoredDeprecation(string $deprecationMessage): bool {
-+    if (!self::$ignoreDeprecationPatterns) {
-+      return FALSE;
-+    }
-+    $result = @preg_filter(self::$ignoreDeprecationPatterns, '$0', $deprecationMessage);
-+    if (preg_last_error() !== \PREG_NO_ERROR) {
-+      throw new \RuntimeException(preg_last_error_msg());
-+    }
-+    return (bool) $result;
 +  }
 +
 +  protected function isTestInLegacyGroup(): bool {
@@ -5300,10 +5260,10 @@ index c24d8f85b9..0000000000
 -
 -}
 diff --git a/core/tests/bootstrap.php b/core/tests/bootstrap.php
-index a5718d049a..b70c146f65 100644
+index a5718d049a..e255242178 100644
 --- a/core/tests/bootstrap.php
 +++ b/core/tests/bootstrap.php
-@@ -7,7 +7,9 @@
+@@ -7,7 +7,11 @@
   * @see phpunit.xml.dist
   */
  
@@ -5311,10 +5271,12 @@ index a5718d049a..b70c146f65 100644
 +use Drupal\TestTools\PhpUnitCompatibility\RunnerVersion;
 +use Symfony\Component\ErrorHandler\DebugClassLoader;
 +use PHPUnit\Runner\ErrorHandler;
++
++// cspell:ignore errno errstr errfile errline
  
  /**
   * Finds all valid extension directories recursively within a given directory.
-@@ -155,8 +157,6 @@ function drupal_phpunit_populate_class_loader() {
+@@ -155,8 +159,6 @@ function drupal_phpunit_populate_class_loader() {
  $loader = drupal_phpunit_populate_class_loader();
  class_alias('\Drupal\Tests\DocumentElement', '\Behat\Mink\Element\DocumentElement', TRUE);
  
@@ -5323,25 +5285,34 @@ index a5718d049a..b70c146f65 100644
  // Set sane locale settings, to ensure consistent string, dates, times and
  // numbers handling.
  // @see \Drupal\Core\DrupalKernel::bootEnvironment()
-@@ -180,6 +180,23 @@ class_alias('\Drupal\Tests\DocumentElement', '\Behat\Mink\Element\DocumentElemen
+@@ -180,6 +182,32 @@ class_alias('\Drupal\Tests\DocumentElement', '\Behat\Mink\Element\DocumentElemen
    putenv("SYMFONY_DEPRECATIONS_HELPER=ignoreFile=$deprecation_ignore_filename");
  }
  
 +if (RunnerVersion::getMajor() >= 10) {
++  // @todo Force the ignore file for now.
++  $deprecation_ignore_filename = realpath(__DIR__ . "/../.deprecation-ignore.txt");
++
++  IgnoreDeprecation::init($deprecation_ignore_filename);
++
++  // @todo Needs to have an early error handler to manage DebugClassLoader
++  //   deprecations. For now just dumping the error message.
 +  $phpUnitErrorHandler = new ErrorHandler();
 +  set_error_handler(
 +    function (int $errno, string $errstr, string $errfile = NULL, int $errline = NULL) use ($phpUnitErrorHandler): bool {
-+      if (E_USER_DEPRECATED === $errno || E_DEPRECATED === $errno) {
-+        dump($errstr);
++dump(['Bootstrap level', $errno, $errstr, $errfile, $errline]);
++      if ((E_USER_DEPRECATED === $errno || E_DEPRECATED === $errno) && IgnoreDeprecation::isIgnoredDeprecation($errstr)) {
++        return TRUE;
 +      }
 +      else {
++dump(['Bootstrap level fallback to PHPUnit']);
 +        call_user_func($phpUnitErrorHandler, $errno, $errstr, $errfile, $errline);
 +      }
 +      return TRUE;
 +    }
 +  );
 +
-+  DebugClassLoader::enable(FALSE);
++  DebugClassLoader::enable();
 +}
 +
  // Drupal expects to be run from its root directory. This ensures all test types
