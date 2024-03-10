@@ -1708,7 +1708,7 @@ index 7410e7afbd..f98a7b1ae3 100644
      "autoload": {
          "psr-4": {
 diff --git a/core/lib/Drupal/Core/Test/PhpUnitTestRunner.php b/core/lib/Drupal/Core/Test/PhpUnitTestRunner.php
-index f238cf4d34..71f32126cc 100644
+index f238cf4d34..2a2344fe36 100644
 --- a/core/lib/Drupal/Core/Test/PhpUnitTestRunner.php
 +++ b/core/lib/Drupal/Core/Test/PhpUnitTestRunner.php
 @@ -4,6 +4,7 @@
@@ -1719,7 +1719,25 @@ index f238cf4d34..71f32126cc 100644
  use Symfony\Component\DependencyInjection\ContainerInterface;
  use Symfony\Component\Process\PhpExecutableFinder;
  use Symfony\Component\Process\Process;
-@@ -129,10 +130,21 @@ public function runCommand(array $unescaped_test_classnames, string $phpunit_fil
+@@ -98,7 +99,7 @@ public function phpUnitCommand(): string {
+    * @param string[] $unescaped_test_classnames
+    *   An array of test class names, including full namespaces, to be passed as
+    *   a regular expression to PHPUnit's --filter option.
+-   * @param string $phpunit_file
++   * @param string $log_junit_file_path
+    *   A filepath to use for PHPUnit's --log-junit option.
+    * @param int $status
+    *   (optional) The exit status code of the PHPUnit process will be assigned
+@@ -109,7 +110,7 @@ public function phpUnitCommand(): string {
+    *
+    * @internal
+    */
+-  public function runCommand(array $unescaped_test_classnames, string $phpunit_file, int &$status = NULL, array &$output = NULL): void {
++  public function runCommand(array $unescaped_test_classnames, string $log_junit_file_path, int &$status = NULL, array &$output = NULL): void {
+     global $base_url;
+     // Setup an environment variable containing the database connection so that
+     // functional tests can connect to the database.
+@@ -129,10 +130,20 @@ public function runCommand(array $unescaped_test_classnames, string $phpunit_fil
  
      $command = [
        $phpunit_bin,
@@ -1728,16 +1746,15 @@ index f238cf4d34..71f32126cc 100644
 +      '--fail-on-warning',
        '--log-junit',
 -      $phpunit_file,
++      $log_junit_file_path,
      ];
  
 +    if (DeprecationHandler::getConfiguration() !== FALSE) {
-+      $command += [
++      $command = array_merge($command, [
 +        '--display-deprecations',
 +        '--fail-on-deprecation',
-+      ];
++      ]);
 +    }
-+
-+    $command[] = $phpunit_file;
 +
      // Optimized for running a single test.
      if (count($unescaped_test_classnames) == 1) {
@@ -3407,15 +3424,17 @@ index 0000000000..033faed081
 +}
 diff --git a/core/tests/Drupal/TestTools/Extension/DeprecationBridge/DeprecationHandler.php b/core/tests/Drupal/TestTools/Extension/DeprecationBridge/DeprecationHandler.php
 new file mode 100644
-index 0000000000..5d1afdbcdf
+index 0000000000..4dba87d5f2
 --- /dev/null
 +++ b/core/tests/Drupal/TestTools/Extension/DeprecationBridge/DeprecationHandler.php
-@@ -0,0 +1,138 @@
+@@ -0,0 +1,174 @@
 +<?php
 +
 +declare(strict_types=1);
 +
 +namespace Drupal\TestTools\Extension\DeprecationBridge;
++
++use PHPUnit\Framework\TestCase;
 +
 +/**
 + * @todo
@@ -3424,30 +3443,28 @@ index 0000000000..5d1afdbcdf
 + */
 +final class DeprecationHandler {
 +
-+  /**
-+   * The singleton instance.
-+   */
-+  private static ?self $instance = NULL;
++  private static bool $enabled = FALSE;
 +
 +  /**
 +   * @var list<string>
 +   */
-+  private static array $ignoreDeprecationPatterns = [];
++  private static array $deprecationIgnorePatterns = [];
 +
++  /**
++   * @var list<string>
++   */
 +  private static array $expectedDeprecations = [];
++
++  /**
++   * @var list<string>
++   */
 +  private static array $collectedDeprecations = [];
 +
 +  /**
-+   * @todo
++   * This class should not be instantiated.
 +   */
 +  private function __construct() {
-+  }
-+
-+  /**
-+   * @todo
-+   */
-+  public static function isEnabled(): bool {
-+    return self::$instance !== NULL;
++    throw new \LogicException(__CLASS__ . ' should not be instantiated');
 +  }
 +
 +  /**
@@ -3455,80 +3472,116 @@ index 0000000000..5d1afdbcdf
 +   */
 +  public static function getConfiguration(): array|FALSE {
 +    $environmentVariable = getenv('SYMFONY_DEPRECATIONS_HELPER');
-+dump([__METHOD__, '1', $environmentVariable]);
 +    if ($environmentVariable === 'disabled') {
 +      return FALSE;
 +    }
 +    if ($environmentVariable === FALSE) {
 +      // Ensure ignored deprecation patterns listed in .deprecation-ignore.txt
 +      // are considered in testing.
-+      $deprecationIgnoreFilename = realpath(__DIR__ . "/../../../../../.deprecation-ignore.txt");
++      $relativeFilePath = __DIR__ . "/../../../../../.deprecation-ignore.txt";
++      $deprecationIgnoreFilename = realpath($relativeFilePath);
++      if (empty($deprecationIgnoreFilename)) {
++        throw new \InvalidArgumentException(sprintf('The ignoreFile "%s" does not exist.', $relativeFilePath));
++      }
 +      $environmentVariable = "ignoreFile=$deprecationIgnoreFilename";
 +    }
-+dump([__METHOD__, '2', $environmentVariable]);
 +    parse_str($environmentVariable, $configuration);
-+dump([__METHOD__, '3', $configuration]);
 +    return $configuration;
 +  }
 +
 +  /**
 +   * @todo
 +   */
++  public static function isEnabled(): bool {
++    return self::$enabled;
++  }
++
++  /**
++   * @todo
++   */
 +  public static function init(?string $ignoreFile = NULL): void {
-+    if (self::$instance === NULL) {
-+      if ($ignoreFile && !self::$ignoreDeprecationPatterns) {
-+        if (!is_file($ignoreFile)) {
-+          throw new \InvalidArgumentException(sprintf('The ignoreFile "%s" does not exist.', $ignoreFile));
-+        }
-+        set_error_handler(static function ($t, $m) use ($ignoreFile, &$line) {
-+          throw new \RuntimeException(sprintf('Invalid pattern found in "%s" on line "%d"', $ignoreFile, 1 + $line) . substr($m, 12));
-+        });
-+        try {
-+          foreach (file($ignoreFile) as $line => $pattern) {
-+            if ((trim($pattern)[0] ?? '#') !== '#') {
-+              preg_match($pattern, '');
-+              self::$ignoreDeprecationPatterns[] = $pattern;
-+            }
++    if (self::isEnabled()) {
++      throw new \LogicException(__CLASS__ . ' is already initialized');
++    }
++
++    // Load the deprecation ignore patterns from the specified file.
++    if ($ignoreFile && !self::$deprecationIgnorePatterns) {
++      if (!is_file($ignoreFile)) {
++        throw new \InvalidArgumentException(sprintf('The ignoreFile "%s" does not exist.', $ignoreFile));
++      }
++      set_error_handler(static function ($t, $m) use ($ignoreFile, &$line) {
++        throw new \RuntimeException(sprintf('Invalid pattern found in "%s" on line "%d"', $ignoreFile, 1 + $line) . substr($m, 12));
++      });
++      try {
++        foreach (file($ignoreFile) as $line => $pattern) {
++          if ((trim($pattern)[0] ?? '#') !== '#') {
++            preg_match($pattern, '');
++            self::$deprecationIgnorePatterns[] = $pattern;
 +          }
 +        }
-+        finally {
-+          restore_error_handler();
-+        }
 +      }
-+      self::$instance = new self();
++      finally {
++        restore_error_handler();
++      }
 +    }
++
++    // Mark the extension as enabled.
++    self::$enabled = TRUE;
 +  }
 +
 +  public static function reset(): void {
++    if (!self::isEnabled()) {
++      return;
++    }
 +    self::$expectedDeprecations = [];
 +    self::$collectedDeprecations = [];
 +  }
 +
 +  public static function expectDeprecation(string $message): void {
++    if (!self::isEnabled()) {
++      return;
++    }
 +    self::$expectedDeprecations[] = $message;
 +  }
 +
 +  public static function getExpectedDeprecations(): array {
++    if (!self::isEnabled()) {
++      throw new \LogicException(__CLASS__ . ' is not initialized');
++    }
 +    return self::$expectedDeprecations;
 +  }
 +
 +  public static function collectActualDeprecation(string $message): void {
++    if (!self::isEnabled()) {
++      return;
++    }
 +    self::$collectedDeprecations[] = $message;
 +  }
 +
 +  public static function getCollectedDeprecations(): array {
++    if (!self::isEnabled()) {
++      throw new \LogicException(__CLASS__ . ' is not initialized');
++    }
 +    return self::$collectedDeprecations;
 +  }
 +
 +  public static function isIgnoredDeprecation(string $deprecationMessage): bool {
-+    if (!self::$ignoreDeprecationPatterns) {
++    if (!self::$deprecationIgnorePatterns) {
 +      return FALSE;
 +    }
-+    $result = @preg_filter(self::$ignoreDeprecationPatterns, '$0', $deprecationMessage);
++    $result = @preg_filter(self::$deprecationIgnorePatterns, '$0', $deprecationMessage);
 +    if (preg_last_error() !== \PREG_NO_ERROR) {
 +      throw new \RuntimeException(preg_last_error_msg());
 +    }
 +    return (bool) $result;
++  }
++
++  public static function isTestInLegacyGroup(TestCase $testCase): bool {
++    $groups = [];
++    foreach ($testCase->valueObjectForEvents()->metadata()->isGroup() as $metadata) {
++      $groups[] = $metadata->groupName();
++    }
++    return in_array('legacy', $groups, TRUE);
 +  }
 +
 +  /**
@@ -3551,10 +3604,10 @@ index 0000000000..5d1afdbcdf
 +}
 diff --git a/core/tests/Drupal/TestTools/Extension/DeprecationBridge/ExpectDeprecationTrait.php b/core/tests/Drupal/TestTools/Extension/DeprecationBridge/ExpectDeprecationTrait.php
 new file mode 100644
-index 0000000000..59d373cd04
+index 0000000000..ab1ccd9bea
 --- /dev/null
 +++ b/core/tests/Drupal/TestTools/Extension/DeprecationBridge/ExpectDeprecationTrait.php
-@@ -0,0 +1,53 @@
+@@ -0,0 +1,57 @@
 +<?php
 +
 +declare(strict_types=1);
@@ -3573,12 +3626,20 @@ index 0000000000..59d373cd04
 +
 +  #[Before]
 +  public function setUpErrorHandler(): void {
++    if (!DeprecationHandler::isEnabled()) {
++      return;
++    }
++
 +    DeprecationHandler::reset();
 +    set_error_handler(new TestErrorHandler(DeprecationHandler::currentErrorHandler(), $this));
 +  }
 +
 +  #[After]
 +  public function tearDownErrorHandler(): void {
++    if (!DeprecationHandler::isEnabled()) {
++      return;
++    }
++
 +    if (DeprecationHandler::currentErrorHandler() instanceof TestErrorHandler) {
 +      restore_error_handler();
 +    }
@@ -3593,18 +3654,14 @@ index 0000000000..59d373cd04
 +  }
 +
 +  public function expectDeprecation(string $message): void {
-+    if (!$this->valueObjectForEvents()->metadata()->isIgnoreDeprecations()->isNotEmpty() && !$this->isTestInLegacyGroup()) {
++    if (!DeprecationHandler::isEnabled()) {
++      return;
++    }
++
++    if (!$this->valueObjectForEvents()->metadata()->isIgnoreDeprecations()->isNotEmpty() && !DeprecationHandler::isTestInLegacyGroup($this)) {
 +      throw new \RuntimeException('expectDeprecation() can only be called from tests marked with #[IgnoreDeprecations] or \'@group legacy\'');
 +    }
 +    DeprecationHandler::expectDeprecation($message);
-+  }
-+
-+  public function isTestInLegacyGroup(): bool {
-+    $groups = [];
-+    foreach ($this->valueObjectForEvents()->metadata()->isGroup() as $metadata) {
-+      $groups[] = $metadata->groupName();
-+    }
-+    return in_array('legacy', $groups, TRUE);
 +  }
 +
 +}
