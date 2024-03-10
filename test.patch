@@ -3288,7 +3288,7 @@ index 5d3c9b5fe3..6127320183 100644
    cache.backend.database:
      class: Drupal\Core\Cache\MemoryBackendFactory
 diff --git a/core/tests/Drupal/KernelTests/KernelTestBase.php b/core/tests/Drupal/KernelTests/KernelTestBase.php
-index 2e449e8c7d..f26f535a5d 100644
+index 2e449e8c7d..9b69210b57 100644
 --- a/core/tests/Drupal/KernelTests/KernelTestBase.php
 +++ b/core/tests/Drupal/KernelTests/KernelTestBase.php
 @@ -21,8 +21,8 @@
@@ -3297,7 +3297,7 @@ index 2e449e8c7d..f26f535a5d 100644
  use Drupal\Tests\TestRequirementsTrait;
 -use Drupal\Tests\Traits\PhpUnitWarnings;
  use Drupal\TestTools\Comparator\MarkupInterfaceComparator;
-+use Drupal\TestTools\Trait\ExpectDeprecationTrait;
++use Drupal\TestTools\Extension\DeprecationBridge\ExpectDeprecationTrait;
  use Drupal\TestTools\Extension\SchemaInspector;
  use Drupal\TestTools\TestVarDumper;
  use PHPUnit\Framework\Exception;
@@ -3417,6 +3417,67 @@ index 0000000000..efd7eed121
 +  public static function dumpErrorHandler($msg): void {
 +    $handler = self::currentErrorHandler();
 +    dump([$msg, (is_object($handler) ? get_class($handler) : $handler)]);
++  }
++
++}
+diff --git a/core/tests/Drupal/TestTools/Extension/DeprecationBridge/ExpectDeprecationTrait.php b/core/tests/Drupal/TestTools/Extension/DeprecationBridge/ExpectDeprecationTrait.php
+new file mode 100644
+index 0000000000..def56a021c
+--- /dev/null
++++ b/core/tests/Drupal/TestTools/Extension/DeprecationBridge/ExpectDeprecationTrait.php
+@@ -0,0 +1,55 @@
++<?php
++
++declare(strict_types=1);
++
++namespace Drupal\TestTools\Extension\DeprecationBridge;
++
++use PHPUnit\Framework\Attributes\After;
++use PHPUnit\Framework\Attributes\Before;
++
++/**
++ * Manage expected deprecations.
++ *
++ * @internal
++ */
++trait ExpectDeprecationTrait {
++
++  protected array $expectedDeprecations = [];
++  public array $collectedDeprecations = [];
++
++  #[Before]
++  public function setUpErrorHandler(): void {
++    set_error_handler(new TestErrorHandler(DeprecationHandler::currentErrorHandler(), $this));
++  }
++
++  #[After]
++  public function tearDownErrorHandler(): void {
++    if (DeprecationHandler::currentErrorHandler() instanceof TestErrorHandler) {
++      restore_error_handler();
++    }
++
++    // Checks if collected deprecations match the expectations.
++    if ($this->expectedDeprecations) {
++      $prefix = "@expectedDeprecation:\n";
++      $expDep = $prefix . '%A  ' . implode("\n%A  ", $this->expectedDeprecations) . "\n%A";
++      $actDep = $prefix . '  ' . implode("\n  ", $this->collectedDeprecations) . "\n";
++      $this->assertStringMatchesFormat($expDep, $actDep);
++    }
++  }
++
++  public function expectDeprecation(string $message): void {
++    if (!$this->valueObjectForEvents()->metadata()->isIgnoreDeprecations()->isNotEmpty() && !$this->isTestInLegacyGroup()) {
++      throw new \RuntimeException('expectDeprecation() can only be called from tests marked with #[IgnoreDeprecations] or \'@group legacy\'');
++    }
++    $this->expectedDeprecations[] = $message;
++  }
++
++  public function isTestInLegacyGroup(): bool {
++    $groups = [];
++    foreach ($this->valueObjectForEvents()->metadata()->isGroup() as $metadata) {
++      $groups[] = $metadata->groupName();
++    }
++    return in_array('legacy', $groups, TRUE);
 +  }
 +
 +}
@@ -3891,69 +3952,6 @@ index 06d874e285..a2dbea6ff5 100644
    }
  
  }
-diff --git a/core/tests/Drupal/TestTools/Trait/ExpectDeprecationTrait.php b/core/tests/Drupal/TestTools/Trait/ExpectDeprecationTrait.php
-new file mode 100644
-index 0000000000..c0046e6704
---- /dev/null
-+++ b/core/tests/Drupal/TestTools/Trait/ExpectDeprecationTrait.php
-@@ -0,0 +1,57 @@
-+<?php
-+
-+declare(strict_types=1);
-+
-+namespace Drupal\TestTools\Trait;
-+
-+use Drupal\TestTools\Extension\DeprecationBridge\DeprecationHandler;
-+use Drupal\TestTools\Extension\DeprecationBridge\TestErrorHandler;
-+use PHPUnit\Framework\Attributes\After;
-+use PHPUnit\Framework\Attributes\Before;
-+
-+/**
-+ * Manage expected deprecations.
-+ *
-+ * @internal
-+ */
-+trait ExpectDeprecationTrait {
-+
-+  protected array $expectedDeprecations = [];
-+  public array $collectedDeprecations = [];
-+
-+  #[Before]
-+  public function setUpErrorHandler(): void {
-+    set_error_handler(new TestErrorHandler(DeprecationHandler::currentErrorHandler(), $this));
-+  }
-+
-+  #[After]
-+  public function tearDownErrorHandler(): void {
-+    if (DeprecationHandler::currentErrorHandler() instanceof TestErrorHandler) {
-+      restore_error_handler();
-+    }
-+
-+    // Checks if collected deprecations match the expectations.
-+    if ($this->expectedDeprecations) {
-+      $prefix = "@expectedDeprecation:\n";
-+      $expDep = $prefix . '%A  ' . implode("\n%A  ", $this->expectedDeprecations) . "\n%A";
-+      $actDep = $prefix . '  ' . implode("\n  ", $this->collectedDeprecations) . "\n";
-+      $this->assertStringMatchesFormat($expDep, $actDep);
-+    }
-+  }
-+
-+  public function expectDeprecation(string $message): void {
-+    if (!$this->valueObjectForEvents()->metadata()->isIgnoreDeprecations()->isNotEmpty() && !$this->isTestInLegacyGroup()) {
-+      throw new \RuntimeException('expectDeprecation() can only be called from tests marked with #[IgnoreDeprecations] or \'@group legacy\'');
-+    }
-+    $this->expectedDeprecations[] = $message;
-+  }
-+
-+  public function isTestInLegacyGroup(): bool {
-+    $groups = [];
-+    foreach ($this->valueObjectForEvents()->metadata()->isGroup() as $metadata) {
-+      $groups[] = $metadata->groupName();
-+    }
-+    return in_array('legacy', $groups, TRUE);
-+  }
-+
-+}
 diff --git a/core/tests/Drupal/Tests/BrowserHtmlDebugTrait.php b/core/tests/Drupal/Tests/BrowserHtmlDebugTrait.php
 index 0ce61082fd..1dea75ea8f 100644
 --- a/core/tests/Drupal/Tests/BrowserHtmlDebugTrait.php
@@ -4007,7 +4005,7 @@ index 0ce61082fd..1dea75ea8f 100644
        $this->htmlOutputDirectory = DRUPAL_ROOT . '/sites/simpletest/browser_output';
        // Do not use the file_system service so this method can be called before
 diff --git a/core/tests/Drupal/Tests/BrowserTestBase.php b/core/tests/Drupal/Tests/BrowserTestBase.php
-index fc6173bfc1..248bd82672 100644
+index fc6173bfc1..191a6590b4 100644
 --- a/core/tests/Drupal/Tests/BrowserTestBase.php
 +++ b/core/tests/Drupal/Tests/BrowserTestBase.php
 @@ -6,6 +6,7 @@
@@ -4025,7 +4023,7 @@ index fc6173bfc1..248bd82672 100644
 -use Drupal\Tests\Traits\PhpUnitWarnings;
  use Drupal\Tests\user\Traits\UserCreationTrait;
  use Drupal\TestTools\Comparator\MarkupInterfaceComparator;
-+use Drupal\TestTools\Trait\ExpectDeprecationTrait;
++use Drupal\TestTools\Extension\DeprecationBridge\ExpectDeprecationTrait;
  use Drupal\TestTools\TestVarDumper;
  use GuzzleHttp\Cookie\CookieJar;
  use PHPUnit\Framework\TestCase;
@@ -4053,7 +4051,7 @@ index fc6173bfc1..248bd82672 100644
  
      // Set up the browser test output file.
 diff --git a/core/tests/Drupal/Tests/Component/Assertion/InspectorTest.php b/core/tests/Drupal/Tests/Component/Assertion/InspectorTest.php
-index ef3dff30f8..4a06773445 100644
+index ef3dff30f8..e04c0c136a 100644
 --- a/core/tests/Drupal/Tests/Component/Assertion/InspectorTest.php
 +++ b/core/tests/Drupal/Tests/Component/Assertion/InspectorTest.php
 @@ -6,7 +6,7 @@
@@ -4061,19 +4059,19 @@ index ef3dff30f8..4a06773445 100644
  use PHPUnit\Framework\TestCase;
  use Drupal\Component\Assertion\Inspector;
 -use Symfony\Bridge\PhpUnit\ExpectDeprecationTrait;
-+use Drupal\TestTools\Trait\ExpectDeprecationTrait;
++use Drupal\TestTools\Extension\DeprecationBridge\ExpectDeprecationTrait;
  
  /**
   * @coversDefaultClass \Drupal\Component\Assertion\Inspector
 diff --git a/core/tests/Drupal/Tests/Component/DependencyInjection/ContainerTest.php b/core/tests/Drupal/Tests/Component/DependencyInjection/ContainerTest.php
-index 53dae9704e..472d92724c 100644
+index 53dae9704e..f931c8b8f3 100644
 --- a/core/tests/Drupal/Tests/Component/DependencyInjection/ContainerTest.php
 +++ b/core/tests/Drupal/Tests/Component/DependencyInjection/ContainerTest.php
 @@ -5,9 +5,9 @@
  namespace Drupal\Tests\Component\DependencyInjection;
  
  use Drupal\Component\Utility\Crypt;
-+use Drupal\TestTools\Trait\ExpectDeprecationTrait;
++use Drupal\TestTools\Extension\DeprecationBridge\ExpectDeprecationTrait;
  use PHPUnit\Framework\TestCase;
  use Prophecy\PhpUnit\ProphecyTrait;
 -use Symfony\Bridge\PhpUnit\ExpectDeprecationTrait;
@@ -4081,14 +4079,14 @@ index 53dae9704e..472d92724c 100644
  use Symfony\Component\DependencyInjection\Exception\InvalidArgumentException;
  use Symfony\Component\DependencyInjection\Exception\LogicException;
 diff --git a/core/tests/Drupal/Tests/Component/DependencyInjection/Dumper/OptimizedPhpArrayDumperTest.php b/core/tests/Drupal/Tests/Component/DependencyInjection/Dumper/OptimizedPhpArrayDumperTest.php
-index 3883c0d945..3c049fef69 100644
+index 3883c0d945..10d2d41732 100644
 --- a/core/tests/Drupal/Tests/Component/DependencyInjection/Dumper/OptimizedPhpArrayDumperTest.php
 +++ b/core/tests/Drupal/Tests/Component/DependencyInjection/Dumper/OptimizedPhpArrayDumperTest.php
 @@ -5,10 +5,10 @@
  namespace Drupal\Tests\Component\DependencyInjection\Dumper {
  
    use Drupal\Component\Utility\Crypt;
-+  use Drupal\TestTools\Trait\ExpectDeprecationTrait;
++  use Drupal\TestTools\Extension\DeprecationBridge\ExpectDeprecationTrait;
    use PHPUnit\Framework\TestCase;
    use Prophecy\PhpUnit\ProphecyTrait;
    use Prophecy\Prophet;
@@ -4126,14 +4124,14 @@ index 8291c74649..b2566ed752 100644
      $component_paths = [];
      foreach (new \DirectoryIterator($root_component_path) as $file) {
 diff --git a/core/tests/Drupal/Tests/Component/EventDispatcher/ContainerAwareEventDispatcherTest.php b/core/tests/Drupal/Tests/Component/EventDispatcher/ContainerAwareEventDispatcherTest.php
-index a8fd9e87d6..ac36824787 100644
+index a8fd9e87d6..ad875cc2bf 100644
 --- a/core/tests/Drupal/Tests/Component/EventDispatcher/ContainerAwareEventDispatcherTest.php
 +++ b/core/tests/Drupal/Tests/Component/EventDispatcher/ContainerAwareEventDispatcherTest.php
 @@ -5,6 +5,7 @@
  namespace Drupal\Tests\Component\EventDispatcher;
  
  use Drupal\Component\EventDispatcher\ContainerAwareEventDispatcher;
-+use Drupal\TestTools\Trait\ExpectDeprecationTrait;
++use Drupal\TestTools\Extension\DeprecationBridge\ExpectDeprecationTrait;
  use PHPUnit\Framework\TestCase;
  use Symfony\Component\DependencyInjection\Container;
  use Symfony\Component\DependencyInjection\ContainerBuilder;
@@ -4146,7 +4144,7 @@ index a8fd9e87d6..ac36824787 100644
  /**
   * Unit tests for the ContainerAwareEventDispatcher.
 diff --git a/core/tests/Drupal/Tests/Component/PhpStorage/FileStorageReadOnlyTest.php b/core/tests/Drupal/Tests/Component/PhpStorage/FileStorageReadOnlyTest.php
-index 6233e5b1b4..1ee141e59f 100644
+index 6233e5b1b4..86d915e87d 100644
 --- a/core/tests/Drupal/Tests/Component/PhpStorage/FileStorageReadOnlyTest.php
 +++ b/core/tests/Drupal/Tests/Component/PhpStorage/FileStorageReadOnlyTest.php
 @@ -7,7 +7,7 @@
@@ -4154,12 +4152,12 @@ index 6233e5b1b4..1ee141e59f 100644
  use Drupal\Component\PhpStorage\FileReadOnlyStorage;
  use Drupal\Component\Utility\Random;
 -use Symfony\Bridge\PhpUnit\ExpectDeprecationTrait;
-+use Drupal\TestTools\Trait\ExpectDeprecationTrait;
++use Drupal\TestTools\Extension\DeprecationBridge\ExpectDeprecationTrait;
  
  /**
   * @coversDefaultClass \Drupal\Component\PhpStorage\FileReadOnlyStorage
 diff --git a/core/tests/Drupal/Tests/Component/PhpStorage/FileStorageTest.php b/core/tests/Drupal/Tests/Component/PhpStorage/FileStorageTest.php
-index d7ca82e28b..7049ab3ce0 100644
+index d7ca82e28b..2524aee2ec 100644
 --- a/core/tests/Drupal/Tests/Component/PhpStorage/FileStorageTest.php
 +++ b/core/tests/Drupal/Tests/Component/PhpStorage/FileStorageTest.php
 @@ -6,9 +6,8 @@
@@ -4167,7 +4165,7 @@ index d7ca82e28b..7049ab3ce0 100644
  use Drupal\Component\PhpStorage\FileStorage;
  use Drupal\Component\Utility\Random;
 -use Drupal\Tests\Traits\PhpUnitWarnings;
-+use Drupal\TestTools\Trait\ExpectDeprecationTrait;
++use Drupal\TestTools\Extension\DeprecationBridge\ExpectDeprecationTrait;
  use org\bovigo\vfs\vfsStreamDirectory;
 -use Symfony\Bridge\PhpUnit\ExpectDeprecationTrait;
  
@@ -4183,35 +4181,35 @@ index d7ca82e28b..7049ab3ce0 100644
    /**
     * Standard test settings to pass to storage instances.
 diff --git a/core/tests/Drupal/Tests/Component/Plugin/PluginHelperLegacyTest.php b/core/tests/Drupal/Tests/Component/Plugin/PluginHelperLegacyTest.php
-index 7e775a1b54..1984dfaa0e 100644
+index 7e775a1b54..3ca8215fa0 100644
 --- a/core/tests/Drupal/Tests/Component/Plugin/PluginHelperLegacyTest.php
 +++ b/core/tests/Drupal/Tests/Component/Plugin/PluginHelperLegacyTest.php
 @@ -6,8 +6,8 @@
  
  use Drupal\Component\Plugin\ConfigurableInterface;
  use Drupal\Component\Plugin\PluginHelper;
-+use Drupal\TestTools\Trait\ExpectDeprecationTrait;
++use Drupal\TestTools\Extension\DeprecationBridge\ExpectDeprecationTrait;
  use PHPUnit\Framework\TestCase;
 -use Symfony\Bridge\PhpUnit\ExpectDeprecationTrait;
  
  /**
   * @coversDefaultClass \Drupal\Component\Plugin\PluginHelper
 diff --git a/core/tests/Drupal/Tests/Component/Render/FormattableMarkupTest.php b/core/tests/Drupal/Tests/Component/Render/FormattableMarkupTest.php
-index 06a50ebd5b..6ddc3d2b05 100644
+index 06a50ebd5b..898c0114ee 100644
 --- a/core/tests/Drupal/Tests/Component/Render/FormattableMarkupTest.php
 +++ b/core/tests/Drupal/Tests/Component/Render/FormattableMarkupTest.php
 @@ -5,8 +5,8 @@
  namespace Drupal\Tests\Component\Render;
  
  use Drupal\Component\Render\FormattableMarkup;
-+use Drupal\TestTools\Trait\ExpectDeprecationTrait;
++use Drupal\TestTools\Extension\DeprecationBridge\ExpectDeprecationTrait;
  use PHPUnit\Framework\TestCase;
 -use Symfony\Bridge\PhpUnit\ExpectDeprecationTrait;
  
  /**
   * Tests the TranslatableMarkup class.
 diff --git a/core/tests/Drupal/Tests/Component/Serialization/YamlSymfonyTest.php b/core/tests/Drupal/Tests/Component/Serialization/YamlSymfonyTest.php
-index d731a7376e..20fe25b0bc 100644
+index d731a7376e..a5eb59cac2 100644
 --- a/core/tests/Drupal/Tests/Component/Serialization/YamlSymfonyTest.php
 +++ b/core/tests/Drupal/Tests/Component/Serialization/YamlSymfonyTest.php
 @@ -6,7 +6,7 @@
@@ -4219,7 +4217,7 @@ index d731a7376e..20fe25b0bc 100644
  use Drupal\Component\Serialization\Exception\InvalidDataTypeException;
  use Drupal\Component\Serialization\YamlSymfony;
 -use Symfony\Bridge\PhpUnit\ExpectDeprecationTrait;
-+use Drupal\TestTools\Trait\ExpectDeprecationTrait;
++use Drupal\TestTools\Extension\DeprecationBridge\ExpectDeprecationTrait;
  use Symfony\Component\Yaml\Tag\TaggedValue;
  
  /**
@@ -4277,14 +4275,14 @@ index 6a8a5ba90b..5ac8aba378 100644
        ['true', TRUE],
        ['TRUE', TRUE],
 diff --git a/core/tests/Drupal/Tests/Component/Utility/BytesTest.php b/core/tests/Drupal/Tests/Component/Utility/BytesTest.php
-index e28b912fb5..68e789e3e6 100644
+index e28b912fb5..04c77eb0a7 100644
 --- a/core/tests/Drupal/Tests/Component/Utility/BytesTest.php
 +++ b/core/tests/Drupal/Tests/Component/Utility/BytesTest.php
 @@ -5,10 +5,10 @@
  namespace Drupal\Tests\Component\Utility;
  
  use Drupal\Component\Utility\Bytes;
-+use Drupal\TestTools\Trait\ExpectDeprecationTrait;
++use Drupal\TestTools\Extension\DeprecationBridge\ExpectDeprecationTrait;
  use PHPUnit\Framework\TestCase;
  use Prophecy\Argument;
  use Prophecy\PhpUnit\ProphecyTrait;
@@ -4293,28 +4291,28 @@ index e28b912fb5..68e789e3e6 100644
  
  /**
 diff --git a/core/tests/Drupal/Tests/Component/Utility/HtmlTest.php b/core/tests/Drupal/Tests/Component/Utility/HtmlTest.php
-index 99affa11aa..de0e1d3b8d 100644
+index 99affa11aa..5835f540fb 100644
 --- a/core/tests/Drupal/Tests/Component/Utility/HtmlTest.php
 +++ b/core/tests/Drupal/Tests/Component/Utility/HtmlTest.php
 @@ -8,8 +8,8 @@
  use Drupal\Component\Render\MarkupTrait;
  use Drupal\Component\Utility\Html;
  use Drupal\Component\Utility\Random;
-+use Drupal\TestTools\Trait\ExpectDeprecationTrait;
++use Drupal\TestTools\Extension\DeprecationBridge\ExpectDeprecationTrait;
  use PHPUnit\Framework\TestCase;
 -use Symfony\Bridge\PhpUnit\ExpectDeprecationTrait;
  
  // cspell:ignore répét répété
  
 diff --git a/core/tests/Drupal/Tests/Component/Utility/UnicodeTest.php b/core/tests/Drupal/Tests/Component/Utility/UnicodeTest.php
-index 6dfe031dd1..feebcca9ef 100644
+index 6dfe031dd1..2913045327 100644
 --- a/core/tests/Drupal/Tests/Component/Utility/UnicodeTest.php
 +++ b/core/tests/Drupal/Tests/Component/Utility/UnicodeTest.php
 @@ -5,8 +5,8 @@
  namespace Drupal\Tests\Component\Utility;
  
  use Drupal\Component\Utility\Unicode;
-+use Drupal\TestTools\Trait\ExpectDeprecationTrait;
++use Drupal\TestTools\Extension\DeprecationBridge\ExpectDeprecationTrait;
  use PHPUnit\Framework\TestCase;
 -use Symfony\Bridge\PhpUnit\ExpectDeprecationTrait;
  
@@ -4846,14 +4844,14 @@ index eedf6a3d71..adbf124092 100644
  }
  
 diff --git a/core/tests/Drupal/Tests/ExpectDeprecationTest.php b/core/tests/Drupal/Tests/ExpectDeprecationTest.php
-index 8fc2b4c872..11819ccb32 100644
+index 8fc2b4c872..349a34f015 100644
 --- a/core/tests/Drupal/Tests/ExpectDeprecationTest.php
 +++ b/core/tests/Drupal/Tests/ExpectDeprecationTest.php
 @@ -4,8 +4,8 @@
  
  namespace Drupal\Tests;
  
-+use Drupal\TestTools\Trait\ExpectDeprecationTrait;
++use Drupal\TestTools\Extension\DeprecationBridge\ExpectDeprecationTrait;
  use PHPUnit\Framework\TestCase;
 -use Symfony\Bridge\PhpUnit\ExpectDeprecationTrait;
  
@@ -5212,7 +5210,7 @@ index 180179a8a6..0000000000
 -
 -}
 diff --git a/core/tests/Drupal/Tests/UnitTestCase.php b/core/tests/Drupal/Tests/UnitTestCase.php
-index 2ca419d204..df37c59713 100644
+index 2ca419d204..6bff44c085 100644
 --- a/core/tests/Drupal/Tests/UnitTestCase.php
 +++ b/core/tests/Drupal/Tests/UnitTestCase.php
 @@ -10,12 +10,11 @@
@@ -5220,7 +5218,7 @@ index 2ca419d204..df37c59713 100644
  use Drupal\Core\StringTranslation\TranslatableMarkup;
  use Drupal\Core\StringTranslation\PluralTranslatableMarkup;
 -use Drupal\Tests\Traits\PhpUnitWarnings;
-+use Drupal\TestTools\Trait\ExpectDeprecationTrait;
++use Drupal\TestTools\Extension\DeprecationBridge\ExpectDeprecationTrait;
  use Drupal\TestTools\TestVarDumper;
  use PHPUnit\Framework\TestCase;
  use Prophecy\PhpUnit\ProphecyTrait;
