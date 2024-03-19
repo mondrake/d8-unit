@@ -947,21 +947,20 @@ index 64bdffa8c8..4531e34cc7 100644
    }
  
 diff --git a/core/tests/Drupal/KernelTests/Core/Cache/EndOfTransactionQueriesTest.php b/core/tests/Drupal/KernelTests/Core/Cache/EndOfTransactionQueriesTest.php
-index a50b2827f5..23b14b388b 100644
+index a50b2827f5..2874b559dc 100644
 --- a/core/tests/Drupal/KernelTests/Core/Cache/EndOfTransactionQueriesTest.php
 +++ b/core/tests/Drupal/KernelTests/Core/Cache/EndOfTransactionQueriesTest.php
-@@ -71,21 +71,25 @@ public function testEntitySave(): void {
+@@ -71,21 +71,21 @@ public function testEntitySave(): void {
      Database::startLog('testEntitySave');
      $entity->save();
  
 +    // Entity save should have deferred cache invalidation to after transaction
-+    // completion for the "entity_test_list", "entity_test_list:entity_test"
-+    // and "4xx-response" tags. Since cache invalidation is a MERGE database
-+    // operation, and in core drivers each MERGE is split in two SELECT and
-+    // INSERT|UPDATE operations, we expect 6 logged database queries to be
-+    // related to the {cachetags} table, near the end of the log pile, and no
-+    // INSERT or UPDATE operation after these 6.
-+    $expected_tail_length = 6;
++    // completion for the "entity_test_list", "entity_test_list:entity_test",
++    // "4xx-response" and "user_list" tags. Since cache invalidation is a MERGE
++    // database operation, and in core drivers each MERGE is split in two
++    // consecutive SELECT and INSERT|UPDATE operations, we expect 8 logged
++    // database queries to be related to the {cachetags} table, near the end of
++    // the log stack, and no INSERT or UPDATE operation afterwards.
      $executed_statements = [];
      foreach (Database::getLog('testEntitySave') as $log) {
 -      // Exclude transaction related statements from the log.
@@ -972,21 +971,40 @@ index a50b2827f5..23b14b388b 100644
 -      ) {
 -        continue;
 -      }
-+      dump([1, $log]);
        $executed_statements[] = $log['query'];
      }
 -    $last_statement_index = max(array_keys($executed_statements));
 -    $cachetag_statements = array_keys($this->getStatementsForTable($executed_statements, 'cachetags'));
 -    $this->assertSame($last_statement_index - count($cachetag_statements) + 1, min($cachetag_statements), 'All of the last queries in the transaction are for the "cachetags" table.');
 +    $cachetag_statements = $this->getStatementsForTable($executed_statements, 'cachetags');
-+    dump([2, $cachetag_statements]);
 +    $this->assertCount(8, $cachetag_statements);
-+    $xxx = array_slice($executed_statements, array_key_last($cachetag_statements) + 1);
-+    dump([4, $xxx]);
-+    $this->assertSame($expected_post_transaction_statements, $tail_cachetag_statements);
++    $tail_statements = array_slice($executed_statements, array_key_last($cachetag_statements) + 1);
++    $this->assertNoDmlStatement($tail_statements);
  
      // Verify that a nested entity save occurred.
      $this->assertSame('john doe', User::load(1)->getAccountName());
+@@ -182,4 +182,21 @@ protected static function isStatementRelatedToTable(string $statement, string $t
+     return preg_match($pattern, $statement) === 1 ? TRUE : FALSE;
+   }
+ 
++  /**
++   * Asserts that an array of SQL statements is not DML instructions.
++   *
++   * INSERT and UPDATE are DML (Data Manipulation Language) statements.
++   *
++   * @param string[] $statements
++   *   The query statements.
++   */
++  protected static function assertNoDmlStatement(array $statements): void {
++    $pattern = '/.*(INSERT|UPDATE|DELETE|MERGE)/';
++    foreach ($statements as $statement) {
++      if (preg_match($pattern, $statement) === 0) {
++        self::fail("Unexpected DML statement: {$statement}");
++      }
++    }
++  }
++
+ }
 diff --git a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
 index 7edbc7a9b1..49d7338643 100644
 --- a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
