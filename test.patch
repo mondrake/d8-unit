@@ -1,12 +1,202 @@
-diff --git a/core/tests/Drupal/FunctionalTests/Routing/PathEncodedTest.php b/core/tests/Drupal/FunctionalTests/Routing/PathEncodedTest.php
-index fd5e94a6f9..f1ccd9ba61 100644
---- a/core/tests/Drupal/FunctionalTests/Routing/PathEncodedTest.php
-+++ b/core/tests/Drupal/FunctionalTests/Routing/PathEncodedTest.php
-@@ -35,6 +35,7 @@ public function testGetEncoded() {
-       'path_encoded_test.parentheses' => '/cat(box)',
-     ];
-     foreach ($route_paths as $route_name => $path) {
-+dump($path);
-       $this->drupalGet(Url::fromRoute($route_name));
-       $this->assertSession()->pageTextContains('PathEncodedTestController works');
+diff --git a/core/core.services.yml b/core/core.services.yml
+index 1f96371654..e7c418f4cf 100644
+--- a/core/core.services.yml
++++ b/core/core.services.yml
+@@ -409,7 +409,7 @@ services:
+     arguments: ['@config.storage', 'config/schema', '', true, '%install_profile%']
+   config.typed:
+     class: Drupal\Core\Config\TypedConfigManager
+-    arguments: ['@config.storage', '@config.storage.schema', '@cache.discovery', '@module_handler', '@class_resolver']
++    autowire: true
+     tags:
+       - { name: plugin_manager_cache_clear }
+     calls:
+diff --git a/core/lib/Drupal/Core/Config/TypedConfigManager.php b/core/lib/Drupal/Core/Config/TypedConfigManager.php
+index fec847d331..8f01c9a637 100644
+--- a/core/lib/Drupal/Core/Config/TypedConfigManager.php
++++ b/core/lib/Drupal/Core/Config/TypedConfigManager.php
+@@ -16,26 +16,14 @@
+ use Drupal\Core\TypedData\TraversableTypedDataInterface;
+ use Drupal\Core\TypedData\TypedDataManager;
+ use Drupal\Core\Validation\Plugin\Validation\Constraint\FullyValidatableConstraint;
++use Symfony\Component\DependencyInjection\Attribute\Autowire;
++use Symfony\Component\DependencyInjection\Attribute\AutowireServiceClosure;
+ 
+ /**
+  * Manages config schema type plugins.
+  */
+ class TypedConfigManager extends TypedDataManager implements TypedConfigManagerInterface {
+ 
+-  /**
+-   * A storage instance for reading configuration data.
+-   *
+-   * @var \Drupal\Core\Config\StorageInterface
+-   */
+-  protected $configStorage;
+-
+-  /**
+-   * A storage instance for reading configuration schema data.
+-   *
+-   * @var \Drupal\Core\Config\StorageInterface
+-   */
+-  protected $schemaStorage;
+-
+   /**
+    * The array of plugin definitions, keyed by plugin id.
+    *
+@@ -47,23 +35,34 @@ class TypedConfigManager extends TypedDataManager implements TypedConfigManagerI
+    * Creates a new typed configuration manager.
+    *
+    * @param \Drupal\Core\Config\StorageInterface $configStorage
+-   *   The storage object to use for reading schema data
++   *   The storage instance for reading configuration data.
+    * @param \Drupal\Core\Config\StorageInterface $schemaStorage
+-   *   The storage object to use for reading schema data
++   *   The storage instance for reading configuration schema data.
+    * @param \Drupal\Core\Cache\CacheBackendInterface $cache
+    *   The cache backend to use for caching the definitions.
+    * @param \Drupal\Core\Extension\ModuleHandlerInterface $module_handler
+    *   The module handler.
+    * @param \Drupal\Core\DependencyInjection\ClassResolverInterface $class_resolver
+-   *   (optional) The class resolver.
++   *   The class resolver.
++   * @param \Closure $loggerClosure
++   *   A closure that wraps the 'logger.channel.php' service.
+    */
+-  public function __construct(StorageInterface $configStorage, StorageInterface $schemaStorage, CacheBackendInterface $cache, ModuleHandlerInterface $module_handler, ClassResolverInterface $class_resolver = NULL) {
+-    $this->configStorage = $configStorage;
+-    $this->schemaStorage = $schemaStorage;
++  public function __construct(
++    #[Autowire(service: 'config.storage')]
++    protected StorageInterface $configStorage,
++    #[Autowire(service: 'config.storage.schema')]
++    protected StorageInterface $schemaStorage,
++    #[Autowire(service: 'cache.discovery')]
++    CacheBackendInterface $cache,
++    ModuleHandlerInterface $module_handler,
++    ClassResolverInterface $class_resolver,
++    #[AutowireServiceClosure('logger.channel.php')]
++    protected \Closure $loggerClosure,
++  ) {
+     $this->setCacheBackend($cache, 'typed_config_definitions');
+     $this->alterInfo('config_schema_info');
+     $this->moduleHandler = $module_handler;
+-    $this->classResolver = $class_resolver ?: \Drupal::service('class_resolver');
++    $this->classResolver = $class_resolver;
+   }
+ 
+   /**
+@@ -84,9 +83,11 @@ public function get($name) {
+     if ($data === FALSE) {
+       // For a typed config the data MUST exist.
+       $data = [];
+-      trigger_error(new FormattableMarkup('Missing required data for typed configuration: @config', [
+-        '@config' => $name,
+-      ]), E_USER_ERROR);
++      /** @var \Psr\Log\LoggerInterface $logger */
++      $logger = ($this->loggerClosure)();
++      $logger->error('Missing required data for typed configuration: %config', [
++        '%config' => $name,
++      ]);
      }
+     return $this->createFromNameAndData($name, $data);
+   }
+diff --git a/core/modules/views/tests/src/Kernel/TestViewsTest.php b/core/modules/views/tests/src/Kernel/TestViewsTest.php
+index fe9c70ffe0..c84bd3b918 100644
+--- a/core/modules/views/tests/src/Kernel/TestViewsTest.php
++++ b/core/modules/views/tests/src/Kernel/TestViewsTest.php
+@@ -13,6 +13,7 @@
+ use Drupal\Core\Config\TypedConfigManager;
+ use Drupal\KernelTests\KernelTestBase;
+ use Drupal\views\Tests\ViewTestData;
++use Psr\Log\LoggerInterface;
+ 
+ /**
+  * Tests that test views provided by all modules match schema.
+@@ -199,6 +200,10 @@ protected function setUp(): void {
+    * Tests default configuration data type.
+    */
+   public function testDefaultConfig() {
++    $loggerClosure = function (): LoggerInterface {
++      return $this->prophesize(LoggerInterface::class)->reveal();
++    };
++
+     // Create a typed config manager with access to configuration schema in
+     // every module, profile and theme.
+     $typed_config = new TypedConfigManager(
+@@ -206,7 +211,8 @@ public function testDefaultConfig() {
+       new TestInstallStorage(InstallStorage::CONFIG_SCHEMA_DIRECTORY),
+       \Drupal::service('cache.discovery'),
+       \Drupal::service('module_handler'),
+-      \Drupal::service('class_resolver')
++      \Drupal::service('class_resolver'),
++      $loggerClosure,
+     );
+     $typed_config->setValidationConstraintManager(\Drupal::service('validation.constraint'));
+     // Avoid restricting to the config schemas discovered.
+diff --git a/core/tests/Drupal/KernelTests/Config/TypedConfigTest.php b/core/tests/Drupal/KernelTests/Config/TypedConfigTest.php
+index 1eefc3a840..b3f3bebf6f 100644
+--- a/core/tests/Drupal/KernelTests/Config/TypedConfigTest.php
++++ b/core/tests/Drupal/KernelTests/Config/TypedConfigTest.php
+@@ -5,12 +5,12 @@
+ use Drupal\Core\Config\Schema\Sequence;
+ use Drupal\Core\Config\Schema\SequenceDataDefinition;
+ use Drupal\Core\Config\Schema\TypedConfigInterface;
++use Drupal\Core\Config\Schema\Undefined;
+ use Drupal\Core\TypedData\ComplexDataDefinitionInterface;
+ use Drupal\Core\TypedData\ComplexDataInterface;
+ use Drupal\Core\TypedData\Type\IntegerInterface;
+ use Drupal\Core\TypedData\Type\StringInterface;
+ use Drupal\KernelTests\KernelTestBase;
+-use PHPUnit\Framework\Error\Error;
+ use Symfony\Component\Validator\ConstraintViolationListInterface;
+ 
+ /**
+@@ -46,15 +46,6 @@ public function testTypedDataAPI() {
+     /** @var \Drupal\Core\Config\TypedConfigManagerInterface $typed_config_manager */
+     $typed_config_manager = \Drupal::service('config.typed');
+ 
+-    // Test non-existent data.
+-    try {
+-      $typed_config_manager->get('config_test.non_existent');
+-      $this->fail('Expected error when trying to get non-existent typed config.');
+-    }
+-    catch (Error $e) {
+-      $this->assertEquals('Missing required data for typed configuration: config_test.non_existent', $e->getMessage());
+-    }
+-
+     /** @var \Drupal\Core\Config\Schema\TypedConfigInterface $typed_config */
+     $typed_config = $typed_config_manager->get('config_test.validation');
+ 
+@@ -112,6 +103,31 @@ public function testTypedDataAPI() {
+     $this->assertEquals(['uuid', 'langcode', 'status', 'dependencies', 'id', 'label', 'weight', 'style', 'size', 'size_value', 'protected_property'], array_keys($typed_config->getElements()));
+   }
+ 
++  /**
++   * Tests non-existent data.
++   */
++  public function testNonExistingTypedData(): void {
++    $loggerClosure = function (): LoggerInterface {
++      $logger = $this->prophesize(LoggerInterface::class);
++      $logger->error()->shouldBeCalledOnce();
++      return $logger->reveal();
++    };
++
++    // Create a typed config manager with the logger prophecy.
++    $typedConfigManager = new TypedConfigManager(
++      \Drupal::service('config.storage'),
++      \Drupal::service('config.storage.schema'),
++      \Drupal::service('cache.discovery'),
++      \Drupal::service('module_handler'),
++      \Drupal::service('class_resolver'),
++      $loggerClosure,
++    );
++
++    /** @var \Drupal\Core\Config\Schema\Undefined $typedConfig */
++    $typedConfig = $typedConfigManager->get('config_test.non_existent');
++    $this->assertInstanceOf(Undefined::class, $typedConfig);
++  }
++
+   /**
+    * Tests the behavior of `NotBlank` on required data.
+    *
