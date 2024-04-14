@@ -1,168 +1,160 @@
-diff --git a/core/.phpstan-baseline.php b/core/.phpstan-baseline.php
-index 1f1aae4f65..bc0371b547 100644
---- a/core/.phpstan-baseline.php
-+++ b/core/.phpstan-baseline.php
-@@ -2030,18 +2030,6 @@
- 	'count' => 1,
- 	'path' => __DIR__ . '/tests/Drupal/KernelTests/Core/Cache/ApcuBackendTest.php',
- ];
--$ignoreErrors[] = [
--	'message' => '#^Call to deprecated method expectWarning\\(\\) of class PHPUnit\\\\Framework\\\\TestCase\\:
--https\\://github\\.com/sebastianbergmann/phpunit/issues/5062$#',
--	'count' => 1,
--	'path' => __DIR__ . '/tests/Drupal/KernelTests/Core/Config/ConfigInstallTest.php',
--];
--$ignoreErrors[] = [
--	'message' => '#^Call to deprecated method expectWarningMessage\\(\\) of class PHPUnit\\\\Framework\\\\TestCase\\:
--https\\://github\\.com/sebastianbergmann/phpunit/issues/5062$#',
--	'count' => 1,
--	'path' => __DIR__ . '/tests/Drupal/KernelTests/Core/Config/ConfigInstallTest.php',
--];
- $ignoreErrors[] = [
- 	'message' => '#^Variable \\$expected_driver might not be defined\\.$#',
- 	'count' => 2,
-diff --git a/core/core.services.yml b/core/core.services.yml
-index 1f96371654..3a1213a949 100644
---- a/core/core.services.yml
-+++ b/core/core.services.yml
-@@ -371,7 +371,7 @@ services:
-     class: Drupal\Core\Config\Importer\FinalMissingContentSubscriber
-   config.installer:
-     class: Drupal\Core\Config\ConfigInstaller
--    arguments: ['@config.factory', '@config.storage', '@config.typed', '@config.manager', '@event_dispatcher', '%install_profile%', '@extension.path.resolver']
-+    autowire: true
-     lazy: true
-   Drupal\Core\Config\ConfigInstallerInterface: '@config.installer'
-   config.storage:
-diff --git a/core/lib/Drupal/Core/Config/ConfigInstaller.php b/core/lib/Drupal/Core/Config/ConfigInstaller.php
-index ec94fb331c..f77e7cccdd 100644
---- a/core/lib/Drupal/Core/Config/ConfigInstaller.php
-+++ b/core/lib/Drupal/Core/Config/ConfigInstaller.php
-@@ -7,8 +7,13 @@
- use Drupal\Core\Config\Entity\ConfigDependencyManager;
- use Drupal\Core\Extension\ExtensionPathResolver;
- use Drupal\Core\Installer\InstallerKernel;
-+use Symfony\Component\DependencyInjection\Attribute\Autowire;
-+use Symfony\Component\DependencyInjection\Attribute\AutowireServiceClosure;
- use Symfony\Contracts\EventDispatcher\EventDispatcherInterface;
+diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
+index 07e727b6a0..46d1a3948c 100644
+--- a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
++++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
+@@ -23,6 +23,20 @@
+  */
+ abstract class TransactionManagerBase implements TransactionManagerInterface {
  
-+/**
-+ * The configuration installer.
-+ */
- class ConfigInstaller implements ConfigInstallerInterface {
- 
++  /**
++   * The id of the root Transaction object.
++   *
++   * We need to keep track of the very first 'root' transaction object created,
++   * because under some circumstances we might end up processing more than one
++   * of them during the transaction stack lifecycle. For example, a root
++   * transaction is opened, then a DDL statement is executed in a database that
++   * does not support transactional DDL, and another root opened before the
++   * original one is closed. By having the first one tracked, we can ensure
++   * that post transaction callbacks are processed only upon its destruction
++   * and not before.
++   */
++  private ?string $rootId = NULL;
++
    /**
-@@ -74,25 +79,19 @@ class ConfigInstaller implements ConfigInstallerInterface {
-    */
-   protected $extensionPathResolver;
+    * The stack of Drupal transactions currently active.
+    *
+@@ -234,11 +248,19 @@ public function push(string $name = ''): Transaction {
+       throw new TransactionNameNonUniqueException("A transaction named {$name} is already in use. Active stack: " . $this->dumpStackItemsAsString());
+     }
  
--  /**
--   * Constructs the configuration installer.
--   *
--   * @param \Drupal\Core\Config\ConfigFactoryInterface $config_factory
--   *   The configuration factory.
--   * @param \Drupal\Core\Config\StorageInterface $active_storage
--   *   The active configuration storage.
--   * @param \Drupal\Core\Config\TypedConfigManagerInterface $typed_config
--   *   The typed configuration manager.
--   * @param \Drupal\Core\Config\ConfigManagerInterface $config_manager
--   *   The configuration manager.
--   * @param \Symfony\Contracts\EventDispatcher\EventDispatcherInterface $event_dispatcher
--   *   The event dispatcher.
--   * @param string $install_profile
--   *   The name of the currently active installation profile.
--   * @param \Drupal\Core\Extension\ExtensionPathResolver $extension_path_resolver
--   *   The extension path resolver.
--   */
--  public function __construct(ConfigFactoryInterface $config_factory, StorageInterface $active_storage, TypedConfigManagerInterface $typed_config, ConfigManagerInterface $config_manager, EventDispatcherInterface $event_dispatcher, $install_profile, ExtensionPathResolver $extension_path_resolver) {
-+  public function __construct(
-+    ConfigFactoryInterface $config_factory,
-+    #[Autowire(service: 'config.storage')]
-+    StorageInterface $active_storage,
-+    TypedConfigManagerInterface $typed_config,
-+    ConfigManagerInterface $config_manager,
-+    EventDispatcherInterface $event_dispatcher,
-+    #[Autowire(param: 'install_profile')]
-+    $install_profile,
-+    ExtensionPathResolver $extension_path_resolver,
-+    #[AutowireServiceClosure('logger.channel.php')]
-+    protected \Closure $loggerClosure,
-+  ) {
-     $this->configFactory = $config_factory;
-     $this->activeStorages[$active_storage->getCollectionName()] = $active_storage;
-     $this->typedConfig = $typed_config;
-@@ -326,6 +325,7 @@ protected function getConfigToCreate(StorageInterface $storage, $collection, $pr
-    *   An array of configuration data to create, keyed by name.
++    // Define an unique id for the transaction.
++    $id = uniqid('', TRUE);
++
+     // Do the client-level processing.
+     if ($this->stackDepth() === 0) {
+       $this->beginClientTransaction();
+       $type = StackItemType::Root;
+       $this->setConnectionTransactionState(ClientConnectionTransactionState::Active);
++      // Only set ::rootId if there's not one set already, which may happen in
++      // case of broken transactions.
++      if ($this->rootId === NULL) {
++        $this->rootId = $id;
++      }
+     }
+     else {
+       // If we're already in a Drupal transaction then we want to create a
+@@ -248,9 +270,6 @@ public function push(string $name = ''): Transaction {
+       $type = StackItemType::Savepoint;
+     }
+ 
+-    // Define an unique id for the transaction.
+-    $id = uniqid('', TRUE);
+-
+     // Add an item on the stack, increasing its depth.
+     $this->addStackItem($id, new StackItem($name, $type));
+ 
+@@ -262,6 +281,17 @@ public function push(string $name = ''): Transaction {
+    * {@inheritdoc}
     */
-   protected function createConfiguration($collection, array $config_to_create) {
-+//dump([__METHOD__, $collection, $config_to_create]);
-     // Order the configuration to install in the order of dependencies.
-     if ($collection == StorageInterface::DEFAULT_COLLECTION) {
-       $dependency_manager = new ConfigDependencyManager();
-@@ -388,7 +388,12 @@ protected function createConfiguration($collection, array $config_to_create) {
-         if ($entity->isInstallable()) {
-           $entity->trustData()->save();
-           if ($id !== $entity->id()) {
--            trigger_error(sprintf('The configuration name "%s" does not match the ID "%s"', $name, $entity->id()), E_USER_WARNING);
-+            /** @var \Psr\Log\LoggerInterface $logger */
-+            $logger = ($this->loggerClosure)();
-+            $logger->warning('The configuration name "%name" does not match the ID "%id"', [
-+              '%name' => $name,
-+              '%id' => $entity->id(),
-+            ]);
-           }
-         }
+   public function unpile(string $name, string $id): void {
++    // If $id is not in the stack, but is in the voided items, and is the root
++    // transaction, then we can process the post transaction callbacks. We are
++    // here because the transaction is not active anymore (a rollback, or a DDL
++    // statement executed breaking the transaction).
++    if (!isset($this->stack()[$id]) && isset($this->voidedItems[$id]) && $this->rootId === $id) {
++      $this->processPostTransactionCallbacks();
++      $this->rootId = NULL;
++      unset($this->voidedItems[$id]);
++      return;
++    }
++
+     // If the $id does not correspond to the one in the stack for that $name,
+     // we are facing an orphaned Transaction object (for example in case of a
+     // DDL statement breaking an active transaction). That should be listed in
+@@ -289,6 +319,10 @@ public function unpile(string $name, string $id): void {
+         // If this was the root Drupal transaction, we can commit the client
+         // transaction.
+         $this->processRootCommit();
++        if ($this->rootId === $id) {
++          $this->processPostTransactionCallbacks();
++          $this->rootId = NULL;
++        }
        }
-diff --git a/core/tests/Drupal/KernelTests/Core/Config/ConfigInstallTest.php b/core/tests/Drupal/KernelTests/Core/Config/ConfigInstallTest.php
-index 4655ae374e..18b96dde55 100644
---- a/core/tests/Drupal/KernelTests/Core/Config/ConfigInstallTest.php
-+++ b/core/tests/Drupal/KernelTests/Core/Config/ConfigInstallTest.php
-@@ -3,10 +3,12 @@
- namespace Drupal\KernelTests\Core\Config;
- 
- use Drupal\Core\Config\ConfigCollectionEvents;
-+use Drupal\Core\Config\ConfigInstaller;
- use Drupal\Core\Config\InstallStorage;
- use Drupal\Core\Config\PreExistingConfigException;
- use Drupal\Core\Config\UnmetDependenciesException;
- use Drupal\KernelTests\KernelTestBase;
-+use Psr\Log\LoggerInterface;
- 
- /**
-  * Tests installation of configuration objects in installation functionality.
-@@ -263,9 +265,32 @@ public function testLanguage() {
-    * Tests installing configuration where the filename and ID do not match.
+       else {
+         // The stack got corrupted.
+@@ -403,7 +437,6 @@ protected function getConnectionTransactionState(): ClientConnectionTransactionS
+    * Processes the root transaction rollback.
     */
-   public function testIdMisMatch() {
--    $this->expectWarning();
--    $this->expectWarningMessage('The configuration name "config_test.dynamic.no_id_match" does not match the ID "does_not_match"');
--    $this->installModules(['config_test_id_mismatch']);
-+    // Install the test module.
-+    $this->installModules(['config_test']);
+   protected function processRootRollback(): void {
+-    $this->processPostTransactionCallbacks();
+     $this->rollbackClientTransaction();
+   }
+ 
+@@ -415,7 +448,6 @@ protected function processRootRollback(): void {
+    */
+   protected function processRootCommit(): void {
+     $clientCommit = $this->commitClientTransaction();
+-    $this->processPostTransactionCallbacks();
+     if (!$clientCommit) {
+       throw new TransactionCommitFailedException();
+     }
+@@ -517,7 +549,6 @@ public function voidClientTransaction(): void {
+       $this->voidStackItem((string) $i);
+     }
+     $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
+-    $this->processPostTransactionCallbacks();
+   }
+ 
+ }
+diff --git a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
+index c39412bcda..b63f553183 100644
+--- a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
++++ b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
+@@ -779,18 +779,43 @@ public function testRootTransactionEndCallbackCalledOnCommit(): void {
+   /**
+    * Tests post-transaction callback executes after transaction rollback.
+    */
+-  public function testRootTransactionEndCallbackCalledOnRollback(): void {
++  public function testRootTransactionEndCallbackCalledAfterRollbackAndDestruction(): void {
+     $transaction = $this->createRootTransaction('', FALSE);
+     $this->connection->transactionManager()->addPostTransactionCallback([$this, 'rootTransactionCallback']);
+     $this->insertRow('row');
+     $this->assertNull($this->postTransactionCallbackAction);
+     $transaction->rollBack();
++    // Rollback is not itself sufficient to get callbacks processed.
++    $this->assertNull($this->postTransactionCallbackAction);
++    unset($transaction);
++    // Callbacks were processed when destructing the transaction.
+     $this->assertSame('rtcRollback', $this->postTransactionCallbackAction);
++    $this->assertRowAbsent('row');
++    // The post-transaction callback should have inserted a 'rtcRollback' row.
++    $this->assertRowPresent('rtcRollback');
++  }
 +
-+    $loggerClosure = function (): LoggerInterface {
-+      $logger = $this->prophesize(LoggerInterface::class);
-+      $logger->warning('The configuration name "%name" does not match the ID "%id"', [
-+        "%name" => "config_test.dynamic.no_id_match",
-+        "%id" => "does_not_match",
-+      ])->shouldBeCalledOnce();
-+      return $logger->reveal();
-+    };
-+
-+    // Create a config installer with the logger prophecy.
-+    $configInstaller = new ConfigInstaller(
-+      \Drupal::service('config.factory'),
-+      \Drupal::service('config.storage'),
-+      \Drupal::service('config.typed'),
-+      \Drupal::service('config.manager'),
-+      \Drupal::service('event_dispatcher'),
-+      \Drupal::getContainer()->getParameter('install_profile'),
-+      \Drupal::service('extension.path.resolver'),
-+      $loggerClosure,
-+    );
-+
-+    // Try installing the mismatching configuration.
-+    $configInstaller->installDefaultConfig('module', 'config_test_id_mismatch');
++  /**
++   * Tests post-transaction callback executes after a DDL statement.
++   */
++  public function testRootTransactionEndCallbackCalledAfterDdlAndDestruction(): void {
++    $transaction = $this->createRootTransaction('', FALSE);
++    $this->connection->transactionManager()->addPostTransactionCallback([$this, 'rootTransactionCallback']);
++    $this->insertRow('row');
++dump($this->connection->query('SELECT * FROM {test}')->fetchAll());
++    $this->assertNull($this->postTransactionCallbackAction);
++    // Truncate is a DDL statement.
++    $this->connection->truncate('test');
++    // DDL is not sufficient itself to get callbacks processed.
++    $this->assertNull($this->postTransactionCallbackAction);
++dump($this->connection->query('SELECT * FROM {test}')->fetchAll());
+     unset($transaction);
++dump($this->connection->query('SELECT * FROM {test}')->fetchAll());
++    // Callbacks were processed when destructing the transaction.
++    $this->assertSame('rtcCommit', $this->postTransactionCallbackAction);
+     $this->assertRowAbsent('row');
+-    // The row insert should be missing since the client rollback occurs after
+-    // the processing of the callbacks.
+-    $this->assertRowAbsent('rtcRollback');
++    // The post-transaction callback should have inserted a 'rtcRollback' row.
++    $this->assertRowPresent('rtcCommit');
    }
  
    /**
