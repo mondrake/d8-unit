@@ -1,173 +1,230 @@
-diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
-index 07e727b6a0..46d1a3948c 100644
---- a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
-+++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
-@@ -23,6 +23,20 @@
-  */
- abstract class TransactionManagerBase implements TransactionManagerInterface {
- 
-+  /**
-+   * The id of the root Transaction object.
-+   *
-+   * We need to keep track of the very first 'root' transaction object created,
-+   * because under some circumstances we might end up processing more than one
-+   * of them during the transaction stack lifecycle. For example, a root
-+   * transaction is opened, then a DDL statement is executed in a database that
-+   * does not support transactional DDL, and another root opened before the
-+   * original one is closed. By having the first one tracked, we can ensure
-+   * that post transaction callbacks are processed only upon its destruction
-+   * and not before.
-+   */
-+  private ?string $rootId = NULL;
-+
-   /**
-    * The stack of Drupal transactions currently active.
-    *
-@@ -234,11 +248,19 @@ public function push(string $name = ''): Transaction {
-       throw new TransactionNameNonUniqueException("A transaction named {$name} is already in use. Active stack: " . $this->dumpStackItemsAsString());
-     }
- 
-+    // Define an unique id for the transaction.
-+    $id = uniqid('', TRUE);
-+
-     // Do the client-level processing.
-     if ($this->stackDepth() === 0) {
-       $this->beginClientTransaction();
-       $type = StackItemType::Root;
-       $this->setConnectionTransactionState(ClientConnectionTransactionState::Active);
-+      // Only set ::rootId if there's not one set already, which may happen in
-+      // case of broken transactions.
-+      if ($this->rootId === NULL) {
-+        $this->rootId = $id;
-+      }
-     }
-     else {
-       // If we're already in a Drupal transaction then we want to create a
-@@ -248,9 +270,6 @@ public function push(string $name = ''): Transaction {
-       $type = StackItemType::Savepoint;
-     }
- 
--    // Define an unique id for the transaction.
--    $id = uniqid('', TRUE);
--
-     // Add an item on the stack, increasing its depth.
-     $this->addStackItem($id, new StackItem($name, $type));
- 
-@@ -262,6 +281,17 @@ public function push(string $name = ''): Transaction {
-    * {@inheritdoc}
-    */
-   public function unpile(string $name, string $id): void {
-+    // If $id is not in the stack, but is in the voided items, and is the root
-+    // transaction, then we can process the post transaction callbacks. We are
-+    // here because the transaction is not active anymore (a rollback, or a DDL
-+    // statement executed breaking the transaction).
-+    if (!isset($this->stack()[$id]) && isset($this->voidedItems[$id]) && $this->rootId === $id) {
-+      $this->processPostTransactionCallbacks();
-+      $this->rootId = NULL;
-+      unset($this->voidedItems[$id]);
-+      return;
-+    }
-+
-     // If the $id does not correspond to the one in the stack for that $name,
-     // we are facing an orphaned Transaction object (for example in case of a
-     // DDL statement breaking an active transaction). That should be listed in
-@@ -289,6 +319,10 @@ public function unpile(string $name, string $id): void {
-         // If this was the root Drupal transaction, we can commit the client
-         // transaction.
-         $this->processRootCommit();
-+        if ($this->rootId === $id) {
-+          $this->processPostTransactionCallbacks();
-+          $this->rootId = NULL;
+diff --git a/composer.json b/composer.json
+index 61c5d3735a..48a914793b 100644
+--- a/composer.json
++++ b/composer.json
+@@ -105,6 +105,11 @@
+             "Drupal\\Composer\\": "composer"
+         }
+     },
++    "autoload-dev": {
++        "psr-4": {
++            "Drupal\\PHPStan\\": "core/tests/PHPStan"
 +        }
-       }
-       else {
-         // The stack got corrupted.
-@@ -403,7 +437,6 @@ protected function getConnectionTransactionState(): ClientConnectionTransactionS
-    * Processes the root transaction rollback.
-    */
-   protected function processRootRollback(): void {
--    $this->processPostTransactionCallbacks();
-     $this->rollbackClientTransaction();
-   }
++    },
+     "scripts": {
+         "pre-install-cmd": "Drupal\\Composer\\Composer::ensureComposerVersion",
+         "pre-update-cmd": "Drupal\\Composer\\Composer::ensureComposerVersion",
+diff --git a/core/misc/cspell/dictionary.txt b/core/misc/cspell/dictionary.txt
+index 1a46815d4a..1289ee0829 100644
+--- a/core/misc/cspell/dictionary.txt
++++ b/core/misc/cspell/dictionary.txt
+@@ -10,6 +10,7 @@ ajaxing
+ allwords
+ alphadecimal
+ ampm
++analyse
+ anyall
+ archiver
+ archivers
+diff --git a/core/phpstan.neon.dist b/core/phpstan.neon.dist
+index 17c3970c21..073baf8af6 100644
+--- a/core/phpstan.neon.dist
++++ b/core/phpstan.neon.dist
+@@ -44,3 +44,6 @@ parameters:
+     - "#Drupal calls should be avoided in classes, use dependency injection instead#"
+     - "#^Plugin definitions cannot be altered.#"
+     - "#^Class .* extends @internal class#"
++
++rules:
++  - Drupal\PHPStan\Rules\ComponentTestDoesNotExtendCoreTest
+diff --git a/core/tests/Drupal/Tests/Listeners/DrupalComponentTestListenerTrait.php b/core/tests/Drupal/Tests/Listeners/DrupalComponentTestListenerTrait.php
+deleted file mode 100644
+index 90a5638e2d..0000000000
+--- a/core/tests/Drupal/Tests/Listeners/DrupalComponentTestListenerTrait.php
++++ /dev/null
+@@ -1,37 +0,0 @@
+-<?php
+-
+-declare(strict_types=1);
+-
+-namespace Drupal\Tests\Listeners;
+-
+-use Drupal\KernelTests\KernelTestBase;
+-use Drupal\Tests\BrowserTestBase;
+-use Drupal\Tests\UnitTestCase;
+-use PHPUnit\Framework\AssertionFailedError;
+-
+-/**
+- * Ensures that no component tests are extending a core test base class.
+- *
+- * @internal
+- */
+-trait DrupalComponentTestListenerTrait {
+-
+-  /**
+-   * Reacts to the end of a test.
+-   *
+-   * @param \PHPUnit\Framework\Test $test
+-   *   The test object that has ended its test run.
+-   * @param float $time
+-   *   The time the test took.
+-   */
+-  protected function componentEndTest($test, $time) {
+-    /** @var \PHPUnit\Framework\Test $test */
+-    if (str_starts_with($test->toString(), 'Drupal\Tests\Component')) {
+-      if ($test instanceof BrowserTestBase || $test instanceof KernelTestBase || $test instanceof UnitTestCase) {
+-        $error = new AssertionFailedError('Component tests should not extend a core test base class.');
+-        $test->getTestResultObject()->addFailure($test, $error, $time);
+-      }
+-    }
+-  }
+-
+-}
+diff --git a/core/tests/Drupal/Tests/Listeners/DrupalListener.php b/core/tests/Drupal/Tests/Listeners/DrupalListener.php
+index 182e4fe4e7..26fa1e5001 100644
+--- a/core/tests/Drupal/Tests/Listeners/DrupalListener.php
++++ b/core/tests/Drupal/Tests/Listeners/DrupalListener.php
+@@ -18,7 +18,6 @@
+ class DrupalListener implements TestListener {
  
-@@ -415,7 +448,6 @@ protected function processRootRollback(): void {
+   use TestListenerDefaultImplementation;
+-  use DrupalComponentTestListenerTrait;
+ 
+   /**
+    * The wrapped Symfony test listener.
+@@ -60,7 +59,6 @@ public function startTest(Test $test): void {
     */
-   protected function processRootCommit(): void {
-     $clientCommit = $this->commitClientTransaction();
--    $this->processPostTransactionCallbacks();
-     if (!$clientCommit) {
-       throw new TransactionCommitFailedException();
-     }
-@@ -517,7 +549,6 @@ public function voidClientTransaction(): void {
-       $this->voidStackItem((string) $i);
-     }
-     $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
--    $this->processPostTransactionCallbacks();
+   public function endTest(Test $test, float $time): void {
+     $this->symfonyListener->endTest($test, $time);
+-    $this->componentEndTest($test, $time);
    }
  
  }
-diff --git a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
-index c39412bcda..568c741478 100644
---- a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
-+++ b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
-@@ -779,18 +779,56 @@ public function testRootTransactionEndCallbackCalledOnCommit(): void {
-   /**
-    * Tests post-transaction callback executes after transaction rollback.
-    */
--  public function testRootTransactionEndCallbackCalledOnRollback(): void {
-+  public function testRootTransactionEndCallbackCalledAfterRollbackAndDestruction(): void {
-     $transaction = $this->createRootTransaction('', FALSE);
-     $this->connection->transactionManager()->addPostTransactionCallback([$this, 'rootTransactionCallback']);
-     $this->insertRow('row');
-     $this->assertNull($this->postTransactionCallbackAction);
-     $transaction->rollBack();
--    $this->assertSame('rtcRollback', $this->postTransactionCallbackAction);
+diff --git a/core/tests/Drupal/Tests/PHPStan/Rules/ComponentTestDoesNotExtendCoreTestTest.php b/core/tests/Drupal/Tests/PHPStan/Rules/ComponentTestDoesNotExtendCoreTestTest.php
+new file mode 100644
+index 0000000000..830fb8d2d3
+--- /dev/null
++++ b/core/tests/Drupal/Tests/PHPStan/Rules/ComponentTestDoesNotExtendCoreTestTest.php
+@@ -0,0 +1,34 @@
++<?php
 +
-+    // Rollback is not itself sufficient to get callbacks processed.
-+    $this->assertNull($this->postTransactionCallbackAction);
-+    $this->assertRowAbsent('rtcCommit');
-+    $this->assertRowAbsent('rtcRollback');
-+    $this->assertRowAbsent('row');
++declare(strict_types=1);
 +
-     unset($transaction);
++namespace Drupal\Tests\PHPStan\Rules;
 +
-+    // Callbacks were processed when destructing the transaction.
-+    // The post-transaction callback should have inserted a 'rtcRollback' row.
-+    $this->assertSame('rtcRollback', $this->postTransactionCallbackAction);
-+    $this->assertRowAbsent('rtcCommit');
-+    $this->assertRowPresent('rtcRollback');
-     $this->assertRowAbsent('row');
--    // The row insert should be missing since the client rollback occurs after
--    // the processing of the callbacks.
++use Drupal\PHPStan\Rules\ComponentTestDoesNotExtendCoreTest;
++use PHPStan\Rules\Rule;
++use PHPStan\Testing\RuleTestCase;
++
++/**
++ * Tests ComponentTestDoesNotExtendCoreTest rule.
++ *
++ * @group phpstan
++ */
++class ComponentTestDoesNotExtendCoreTestTest extends RuleTestCase {
++
++  protected function getRule(): Rule {
++    return new ComponentTestDoesNotExtendCoreTest();
++  }
++
++  public function testRule(): void {
++    $this->analyse(
++      [__DIR__ . '../../../fixtures/PHPStan/component-tests.php'],
++      [
++        [
++          'Component tests should not extend a core test base class.',
++          16,
++        ],
++      ]
++    );
++  }
++
++}
+diff --git a/core/tests/PHPStan/Rules/ComponentTestDoesNotExtendCoreTest.php b/core/tests/PHPStan/Rules/ComponentTestDoesNotExtendCoreTest.php
+new file mode 100644
+index 0000000000..e472d501be
+--- /dev/null
++++ b/core/tests/PHPStan/Rules/ComponentTestDoesNotExtendCoreTest.php
+@@ -0,0 +1,50 @@
++<?php
++
++declare(strict_types=1);
++
++namespace Drupal\PHPStan\Rules;
++
++use PhpParser\Node;
++use PhpParser\Node\Stmt\Class_;
++use PHPStan\Analyser\Scope;
++use PHPStan\Rules\Rule;
++use PHPStan\Rules\RuleErrorBuilder;
++
++/**
++ * Ensures that no component tests are extending a core test base class.
++ *
++ * @implements Rule<\PhpParser\Node\Stmt\Class_>
++ *
++ * @internal
++ */
++final class ComponentTestDoesNotExtendCoreTest implements Rule {
++
++  /**
++   * {@inheritdoc}
++   */
++  public function getNodeType(): string {
++    return Class_::class;
 +  }
 +
 +  /**
-+   * Tests post-transaction callback executes after a DDL statement.
++   * {@inheritdoc}
 +   */
-+  public function testRootTransactionEndCallbackCalledAfterDdlAndDestruction(): void {
-+    $transaction = $this->createRootTransaction('', FALSE);
-+    $this->connection->transactionManager()->addPostTransactionCallback([$this, 'rootTransactionCallback']);
-+    $this->insertRow('row');
-+    $this->assertNull($this->postTransactionCallbackAction);
-+    // We cannot use truncate here, since it has protective code to fall back
-+    // to a transactional delete when in transaction. We drop an unrelated
-+    // table instead.
-+    $this->connection->schema()->dropTable('test_people');
++  public function processNode(Node $node, Scope $scope): array {
++    if ($node->extends === NULL || $node->namespacedName === NULL) {
++      return [];
++    }
++    if (!str_starts_with($node->namespacedName->toString(), 'Drupal\Tests\Component')) {
++      return [];
++    }
++    if (str_starts_with($node->extends->toString(), 'Drupal\Tests\Core')) {
++      return [
++        RuleErrorBuilder::message('Component tests should not extend a core test base class.')
++          ->line($node->getStartLine())
++          ->build(),
++      ];
++    }
 +
-+    // DDL is not sufficient itself to get callbacks processed.
-+    $this->assertNull($this->postTransactionCallbackAction);
-+    $this->assertRowAbsent('rtcCommit');
-     $this->assertRowAbsent('rtcRollback');
-+    $this->assertRowPresent('row');
++    return [];
++  }
 +
-+    unset($transaction);
++}
+diff --git a/core/tests/fixtures/PHPStan/component-tests.php b/core/tests/fixtures/PHPStan/component-tests.php
+new file mode 100644
+index 0000000000..4e5ca03cd1
+--- /dev/null
++++ b/core/tests/fixtures/PHPStan/component-tests.php
+@@ -0,0 +1,26 @@
++<?php
 +
-+    // Callbacks were processed when destructing the transaction.
-+    // The post-transaction callback should have inserted a 'rtcRCommit' row.
-+    $this->assertSame('rtcCommit', $this->postTransactionCallbackAction);
-+    $this->assertRowPresent('rtcCommit');
-+    $this->assertRowAbsent('rtcRollback');
-+    $this->assertRowPresent('row');
-   }
- 
-   /**
++// phpcs:ignoreFile
++
++declare(strict_types=1);
++
++namespace Drupal\Tests\Core\Foo;
++
++use PHPUnit\Framework\TestCase;
++
++abstract class FooTestBase extends TestCase {
++
++}
++
++namespace Drupal\Tests\Component\Foo;
++
++use Drupal\Example\Something\TestCase;
++use Drupal\Tests\Core\Foo\FooTestBase;
++
++final class FooTest extends FooTestBase {
++
++}
++
++final class BarTest extends TestCase {
++
++}
