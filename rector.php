@@ -11,10 +11,12 @@ use Rector\Php52\Rector\Property\VarToPublicPropertyRector;
 
 return RectorConfig::configure()
     ->withPaths([
-        __DIR__ . '/composer',
+//        __DIR__ . '/composer',
 //        __DIR__ . '/core/tests',
-//        __DIR__ . '/core/modules/system',
-        __DIR__ . '/core',
+        __DIR__ . '/core/lib/Drupal/Component',
+        __DIR__ . '/core/tests/Drupal/Tests/Component',
+        __DIR__ . '/core/modules/system',
+//        __DIR__ . '/core',
     ])
 //    ->withSkipPath(
 //        __DIR__ . '/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures',
@@ -26,7 +28,7 @@ return RectorConfig::configure()
     // ->withPhpSets()
     ->withRules([
 //        AddVoidReturnTypeWhereNoReturnRector::class,
-//        DataProviderAnnotationToAttributeRector::class,
+        DataProviderAnnotationToAttributeRector::class,
 //        TestWithAnnotationToAttributeRector::class,
         VarToPublicPropertyRector::class,
 //        Rector\PHPUnit\AnnotationsToAttributes\Rector\Class_\AnnotationWithValueToAttributeRector
