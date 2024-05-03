@@ -13,14 +13,14 @@ return RectorConfig::configure()
     ->withPaths([
 //        __DIR__ . '/composer',
 //        __DIR__ . '/core/tests',
-        __DIR__ . '/core/lib/Drupal/Component',
-        __DIR__ . '/core/tests/Drupal/Tests/Component',
-        __DIR__ . '/core/modules/system',
+//        __DIR__ . '/core/lib/Drupal/Component',
+        __DIR__ . '/core/tests',
+//        __DIR__ . '/core/modules/system',
 //        __DIR__ . '/core',
     ])
-//    ->withSkipPath(
-//        __DIR__ . '/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures',
-//    )
+    ->withSkipPath(
+        __DIR__ . '/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures',
+    )
 //    ->withSkipPath(
 //        __DIR__ . '/core/modules/**/src',
 //    )
@@ -30,7 +30,7 @@ return RectorConfig::configure()
 //        AddVoidReturnTypeWhereNoReturnRector::class,
         DataProviderAnnotationToAttributeRector::class,
 //        TestWithAnnotationToAttributeRector::class,
-        VarToPublicPropertyRector::class,
+//        VarToPublicPropertyRector::class,
 //        Rector\PHPUnit\AnnotationsToAttributes\Rector\Class_\AnnotationWithValueToAttributeRector
     ])
     ->withImportNames(
