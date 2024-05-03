@@ -17,6 +17,9 @@ return RectorConfig::configure()
     ->withSkipPath(
         __DIR__ . '/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures',
     )
+    ->withSkipPath(
+        '*.api.php',
+    )
     ->withRules([
 //        AddVoidReturnTypeWhereNoReturnRector::class,
         DataProviderAnnotationToAttributeRector::class,
