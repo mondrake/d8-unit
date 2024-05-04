@@ -63,7 +63,7 @@ final class FillRunTestInIsolationRector extends AbstractRector
             return null;
         }
 
-        if (! $classReflection->isSubclassOf(KernelTestBase::class)) {
+        if (! $classReflection->isSubclassOf(KernelTestBase::class) && ! $classReflection->isSubclassOf(BrowserTestBase::class)) {
             return null;
         }
 
