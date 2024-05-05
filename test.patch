@@ -2026,7 +2026,7 @@ index f8a54e20a2..459af44d8c 100644
 +
  }
 diff --git a/core/modules/ban/tests/src/Functional/IpAddressBlockingTest.php b/core/modules/ban/tests/src/Functional/IpAddressBlockingTest.php
-index 6c72b0dae8..de77e6d9a1 100644
+index 6c72b0dae8..605e638c3d 100644
 --- a/core/modules/ban/tests/src/Functional/IpAddressBlockingTest.php
 +++ b/core/modules/ban/tests/src/Functional/IpAddressBlockingTest.php
 @@ -7,12 +7,14 @@
@@ -2044,15 +2044,6 @@ index 6c72b0dae8..de77e6d9a1 100644
  class IpAddressBlockingTest extends BrowserTestBase {
  
    /**
-@@ -58,7 +60,7 @@ public function testIPAddressValidation() {
-     $edit['ip'] = '255.255.255.255';
-     $this->drupalGet('admin/config/people/ban');
-     $this->submitForm($edit, 'Add');
--    $this->assertSession()->pageTextContains('Enter a valid IP address.');
-+    $this->assertSession()->pageTextContains('Enter a foo/bar IP address.');
- 
-     // Try to block a reserved IP address.
-     $edit = [];
 diff --git a/core/modules/language/tests/src/Unit/process/LanguageDomainsTest.php b/core/modules/language/tests/src/Unit/process/LanguageDomainsTest.php
 index 8f6c3105ec..87f69db623 100644
 --- a/core/modules/language/tests/src/Unit/process/LanguageDomainsTest.php
@@ -3236,10 +3227,10 @@ index 0000000000..bd87d7db90
 +}
 diff --git a/core/tests/Drupal/TestTools/Extension/HtmlLogging/HtmlOutputLogger.php b/core/tests/Drupal/TestTools/Extension/HtmlLogging/HtmlOutputLogger.php
 new file mode 100644
-index 0000000000..a329277fb6
+index 0000000000..1850cf91ce
 --- /dev/null
 +++ b/core/tests/Drupal/TestTools/Extension/HtmlLogging/HtmlOutputLogger.php
-@@ -0,0 +1,118 @@
+@@ -0,0 +1,143 @@
 +<?php
 +
 +declare(strict_types=1);
@@ -3263,9 +3254,9 @@ index 0000000000..a329277fb6
 +  private static ?self $instance = NULL;
 +
 +  /**
-+   * The list of links to HTML pages generated.
++   * A file with list of links to HTML pages generated.
 +   */
-+  private static array $links = [];
++  private ?string $browserOutputFile = NULL;
 +
 +  /**
 +   * @throws \PHPUnit\Event\EventFacadeIsSealedException
@@ -3297,10 +3288,11 @@ index 0000000000..a329277fb6
 +   * @throws \RuntimeException
 +   */
 +  public static function init(string $outputDirectory, bool $outputVerbose): void {
-+    print('init');
 +    if (self::$instance === NULL) {
++      $outputDirectory = realpath($outputDirectory);
 +      if (!is_dir($outputDirectory) || !is_writable($outputDirectory)) {
 +        print "HTML output directory {$outputDirectory} is not a writable directory.\n\n";
++        return;
 +      }
 +      self::$instance = new self($outputDirectory, $outputVerbose, Facade::instance());
 +    }
@@ -3328,33 +3320,57 @@ index 0000000000..a329277fb6
 +    if (!self::isEnabled()) {
 +      throw new \RuntimeException("HTML output is not enabled");
 +    }
-+    print('log: ' . $logEntry);
-+    self::$links[] = $logEntry;
++
++    $browserOutputFile = getenv('BROWSERTEST_OUTPUT_FILE');
++    file_put_contents($browserOutputFile, $logEntry . "\n", FILE_APPEND);
 +  }
 +
 +  /**
 +   * Empties the list of the HTML output created during the test run.
 +   */
 +  public function testRunnerStarted(TestRunnerStarted $event): void {
-+    self::$links = [];
++    if (!self::isEnabled()) {
++      throw new \RuntimeException("HTML output is not enabled");
++    }
++
++    // Convert to a canonicalized absolute pathname just in case the current
++    // working directory is changed.
++    $this->browserOutputFile = tempnam($this->outputDirectory, 'browser_output_');
++    if ($this->browserOutputFile) {
++      touch($this->browserOutputFile);
++      putenv('BROWSERTEST_OUTPUT_FILE=' . $this->browserOutputFile);
++    }
++    else {
++      // Remove any environment variable.
++      putenv('BROWSERTEST_OUTPUT_FILE');
++      throw new \RuntimeException("Unable to create a temporary file in {$this->outputDirectory}.");
++    }
 +  }
 +
 +  /**
 +   * Prints the list of HTML output generated during the test.
 +   */
 +  public function testRunnerFinished(TestRunnerFinished $event): void {
-+    if (self::$links) {
++    if (!self::isEnabled()) {
++      throw new \RuntimeException("HTML output is not enabled");
++    }
++
++    $contents = file_get_contents($this->browserOutputFile);
++    if ($contents) {
 +      print "\n\n";
 +      if ($this->outputVerbose) {
 +        print "HTML output was generated.\n\n";
-+        foreach (self::$links as $link) {
-+          print $link;
-+        }
++        print $contents;
 +      }
 +      else {
-+        print "HTML output was generated, " . count(self::$links) . " page(s).\n\n";
++        print "HTML output was generated, " . count(explode("\n", $contents)) . " page(s).\n\n";
 +      }
 +    }
++
++    // No need to keep the file around any more.
++    $this->browserOutputFile = NULL;
++    putenv('BROWSERTEST_OUTPUT_FILE');
++    unlink($this->browserOutputFile);
 +  }
 +
 +}
@@ -5135,7 +5151,7 @@ index db779652db..0000000000
 -
 -}
 diff --git a/core/tests/bootstrap.php b/core/tests/bootstrap.php
-index 05479c1d0e..a11b760e38 100644
+index 05479c1d0e..56f7cd68a2 100644
 --- a/core/tests/bootstrap.php
 +++ b/core/tests/bootstrap.php
 @@ -7,7 +7,11 @@
@@ -5160,7 +5176,7 @@ index 05479c1d0e..a11b760e38 100644
  // Set sane locale settings, to ensure consistent string, dates, times and
  // numbers handling.
  // @see \Drupal\Core\DrupalKernel::bootEnvironment()
-@@ -160,11 +162,27 @@ class_alias('\Drupal\Tests\DocumentElement', '\Behat\Mink\Element\DocumentElemen
+@@ -160,11 +162,26 @@ class_alias('\Drupal\Tests\DocumentElement', '\Behat\Mink\Element\DocumentElemen
  // reduce the fragility of the testing system in general.
  date_default_timezone_set('Australia/Sydney');
  
@@ -5188,8 +5204,7 @@ index 05479c1d0e..a11b760e38 100644
 +// Functional tests HTML output logging.
 +$browserTestOutputDirectory = getenv('BROWSERTEST_OUTPUT_DIRECTORY');
 +if ($browserTestOutputDirectory !== FALSE) {
-+  // HtmlOutputLogger::init($browserTestOutputDirectory, (bool) getenv('BROWSERTEST_OUTPUT_VERBOSE') ?? FALSE);
-+  HtmlOutputLogger::init($browserTestOutputDirectory, TRUE);
++  HtmlOutputLogger::init($browserTestOutputDirectory, (bool) getenv('BROWSERTEST_OUTPUT_VERBOSE') ?? FALSE);
  }
  
  // Drupal expects to be run from its root directory. This ensures all test types
