@@ -93,15 +93,14 @@ return RectorConfig::configure()
         __DIR__ . '/composer',
         __DIR__ . '/core',
     ])
-    ->withSkipPath(
-        __DIR__ . '/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures',
-    )
-    ->withSkipPath(
+    ->withSkip([
+        '/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures/*',
+        '/core/tests/fixtures/*',
+        '/core/tests/PHPStan/*',
+        // Below to avoid unwanted conversions of FQCNs to short syntax.       
         '*/ProxyClass/*',
-    )
-    ->withSkipPath(
         '*.api.php',
-    )
+    ])
     ->withRules([
         FillRunTestInIsolationRector::class,
     ])
