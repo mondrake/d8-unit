@@ -54,10 +54,6 @@ final class FillRunTestInIsolationRector extends AbstractRector
             return null;
         }
 
-        if (str_starts_with($className, 'AnonymousClass')) {
-            return null;
-        }
-
         $classReflection = $this->reflectionResolver->resolveClassReflection($node);
         if (! $classReflection instanceof ClassReflection) {
             return null;
@@ -68,6 +64,10 @@ final class FillRunTestInIsolationRector extends AbstractRector
         }
 
         if (! $classReflection->isSubclassOf(KernelTestBase::class) && ! $classReflection->isSubclassOf(BrowserTestBase::class)) {
+            return null;
+        }
+
+        if (\str_starts_with($className, 'AnonymousClass')) {
             return null;
         }
 
