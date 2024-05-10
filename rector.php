@@ -120,7 +120,7 @@ return null;
 
 return RectorConfig::configure()
     ->withPaths([
-        __DIR__ . '/core/tests/Drupal/Tests/Component/Diff',
+        __DIR__ . '/core/tests/Drupal/Tests/Component',
     ])
     ->withSkip([
         __DIR__ . '/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures',
