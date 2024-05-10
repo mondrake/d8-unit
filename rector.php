@@ -26,29 +26,33 @@ use Rector\Config\RectorConfig;
 final class DrupalAnnotationToAttributeRector extends AbstractRector implements MinPhpVersionInterface
 {
     private array $annotationTargets = [
-        '@author',
-        '@backupGlobals',
-        '@backupStaticAttributes',
-        '@covers',
-        '@coversDefaultClass',
-        '@coversNothing',
-        '@dataProvider',
-        '@depends',
-        '@doesNotPerformAssertions',
-        '@group',
-        '@large',
-        '@medium',
-        '@preserveGlobalState',
-        '@requires',
-        '@runTestsInSeparateProcesses',
-        '@runInSeparateProcess',
-        '@small',
-        '@test',
-        '@testdox',
-        '@testWith',
-        '@ticket',
-        '@uses',
+        '@author' => [],
+        '@backupGlobals' => [],
+        '@backupStaticAttributes' => [],
+        '@covers' => [],
+        '@coversDefaultClass' => [],
+        '@coversNothing' => [],
+        '@dataProvider' => [],
+        '@depends' => [],
+        '@doesNotPerformAssertions' => [],
+        '@group' => [],
+        '@large' => [],
+        '@medium' => [],
+        '@preserveGlobalState' => [],
+        '@requires' => [],
+        '@runTestsInSeparateProcesses' => [],
+        '@runInSeparateProcess' => [],
+        '@small' => [],
+        '@test' => [],
+        '@testdox' => [],
+        '@testWith' => [
+            'multiline' => true,
+        ],
+        '@ticket' => [],
+        '@uses' => [],
     ];
+
+    private string $currentClassName;
 
     public function __construct(
         private readonly PhpDocTagRemover $phpDocTagRemover,
@@ -79,6 +83,10 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
     public function refactor(Node $node): ?Node
     {
         $nodeName = $this->getName($node);
+
+        if ($node instanceof Class_) {
+            $this->$currentClassName = $nodeName;
+        }
         
         $phpDocInfo = $this->phpDocInfoFactory->createFromNode($node);
         if (! $phpDocInfo instanceof PhpDocInfo) {
@@ -87,7 +95,7 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
 
         $hasChanged = false;
 
-        foreach ($this->annotationTargets as $target) {
+        foreach ($this->annotationTargets as $target => $targetConfig) {
             /** @var PhpDocTagNode[] $desiredTagValueNodes */
             $desiredTagValueNodes = $phpDocInfo->getTagsByName($target);
 
@@ -96,11 +104,13 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
                     continue;
                 }
 
-                $attributeValue = $this->resolveAttributeValue(
-                    $desiredTagValueNode->value,
-                    [],
-                );
-dump([$nodeName, $target, $attributeValue]);
+                $attributeValue = $this->resolveAttributeValue($desiredTagValueNode->value, []);
+                $attributeValueLines = count(explode('\n', $attributeValue));
+
+                if (($targetConfig['multiline'] ?? false) && $attributeValueLines > 1) {
+dump([$this->$currentClassName, $nodeName, $target, $attributeValue]);
+                }
+
 /*                $attributeGroup = $this->phpAttributeGroupFactory->createFromClassWithItems(
                     $target->getAttributeClass(),
                     [$attributeValue]
@@ -138,7 +148,9 @@ return null;
 
 return RectorConfig::configure()
     ->withPaths([
-        __DIR__ . '/core/tests/Drupal/Tests',
+#        __DIR__ . '/core/tests/Drupal/Tests',
+        __DIR__ . '/composer',
+        __DIR__ . '/core',
     ])
     ->withSkip([
         __DIR__ . '/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures',
