@@ -105,7 +105,7 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
                 }
 
                 $attributeValue = $this->resolveAttributeValue($desiredTagValueNode->value, []);
-                $attributeValueLines = count(explode('\n', $attributeValue));
+                $attributeValueLines = count(explode("\n", $attributeValue));
 
 dump([$this->$currentClassName, $nodeName, $target, $targetConfig, $attributeValue, $attributeValueLines]);
                 if (($targetConfig['multiline'] ?? false) && $attributeValueLines > 1) {
