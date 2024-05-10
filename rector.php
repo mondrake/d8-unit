@@ -23,12 +23,13 @@ use Webmozart\Assert\Assert;
 
 use Rector\Config\RectorConfig;
 
-final class DrupalAnnotationToAttributeRector extends AbstractRector implements ConfigurableRectorInterface, MinPhpVersionInterface
+final class DrupalAnnotationToAttributeRector extends AbstractRector implements MinPhpVersionInterface
 {
-    /**
-     * @var AnnotationWithValueToAttribute[]
-     */
-    private array $annotationWithValueToAttributes = [];
+    private array $annotationTargets = [
+        'coversDefaultClass',
+        'covers',
+        'dataProvider',
+    ];
 
     public function __construct(
         private readonly PhpDocTagRemover $phpDocTagRemover,
@@ -62,11 +63,11 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
         if (! $phpDocInfo instanceof PhpDocInfo) {
             return null;
         }
-dump($phpDocInfo); return null;
+dump($phpDocInfo->getTags()); return null;
 
         $hasChanged = false;
 
-        foreach ($this->annotationWithValueToAttributes as $annotationWithValueToAttribute) {
+        foreach ($this->annotationTargets as $annotationWithValueToAttribute) {
             /** @var PhpDocTagNode[] $desiredTagValueNodes */
             $desiredTagValueNodes = $phpDocInfo->getTagsByName($annotationWithValueToAttribute->getAnnotationName());
 
@@ -99,15 +100,6 @@ dump($phpDocInfo); return null;
         }
 
         return null;
-    }
-
-    /**
-     * @param mixed[] $configuration
-     */
-    public function configure(array $configuration): void
-    {
-        Assert::allIsInstanceOf($configuration, AnnotationWithValueToAttribute::class);
-        $this->annotationWithValueToAttributes = $configuration;
     }
 
     private function resolveAttributeValue(
