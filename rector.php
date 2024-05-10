@@ -26,9 +26,9 @@ use Rector\Config\RectorConfig;
 final class DrupalAnnotationToAttributeRector extends AbstractRector implements MinPhpVersionInterface
 {
     private array $annotationTargets = [
-        'coversDefaultClass',
-        'covers',
-        'dataProvider',
+        '@coversDefaultClass',
+        '@covers',
+        '@dataProvider',
     ];
 
     public function __construct(
@@ -63,26 +63,26 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
         if (! $phpDocInfo instanceof PhpDocInfo) {
             return null;
         }
-dump($phpDocInfo->getTokens()); return null;
 
         $hasChanged = false;
 
-        foreach ($this->annotationTargets as $annotationWithValueToAttribute) {
+        foreach ($this->annotationTargets as $target) {
             /** @var PhpDocTagNode[] $desiredTagValueNodes */
-            $desiredTagValueNodes = $phpDocInfo->getTagsByName($annotationWithValueToAttribute->getAnnotationName());
+            $desiredTagValueNodes = $phpDocInfo->getTagsByName($target);
+dump($desiredTagValueNodes);
 
-            foreach ($desiredTagValueNodes as $desiredTagValueNode) {
+/*            foreach ($desiredTagValueNodes as $desiredTagValueNode) {
                 if (! $desiredTagValueNode->value instanceof GenericTagValueNode) {
                     continue;
                 }
 
                 $attributeValue = $this->resolveAttributeValue(
                     $desiredTagValueNode->value,
-                    $annotationWithValueToAttribute
+                    $target
                 );
 
                 $attributeGroup = $this->phpAttributeGroupFactory->createFromClassWithItems(
-                    $annotationWithValueToAttribute->getAttributeClass(),
+                    $target->getAttributeClass(),
                     [$attributeValue]
                 );
 
@@ -91,9 +91,9 @@ dump($phpDocInfo->getTokens()); return null;
                 // cleanup
                 $this->phpDocTagRemover->removeTagValueFromNode($phpDocInfo, $desiredTagValueNode);
                 $hasChanged = true;
-            }
+            }*/
         }
-
+return null;
         if ($hasChanged) {
             $this->docBlockUpdater->updateRefactoredNodeWithPhpDocInfo($node);
             return $node;
@@ -104,9 +104,9 @@ dump($phpDocInfo->getTokens()); return null;
 
     private function resolveAttributeValue(
         GenericTagValueNode $genericTagValueNode,
-        AnnotationWithValueToAttribute $annotationWithValueToAttribute
+        AnnotationWithValueToAttribute $target
     ): mixed {
-        $valueMap = $annotationWithValueToAttribute->getValueMap();
+        $valueMap = $target->getValueMap();
         if ($valueMap === []) {
             // no map? convert value as it is
             return $genericTagValueNode->value;
