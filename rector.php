@@ -89,8 +89,8 @@ dump([$target, $attributeValue]);
 
                 // cleanup
                 $this->phpDocTagRemover->removeTagValueFromNode($phpDocInfo, $desiredTagValueNode);
-                $hasChanged = true;
-            }*/
+                $hasChanged = true;*/
+            }
         }
 return null;
         if ($hasChanged) {
