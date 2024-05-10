@@ -7,6 +7,8 @@ use PhpParser\Node\Stmt\Class_;
 use PhpParser\Node\Stmt\ClassMethod;
 use PHPStan\PhpDocParser\Ast\PhpDoc\GenericTagValueNode;
 use PHPStan\PhpDocParser\Ast\PhpDoc\PhpDocTagNode;
+use PHPStan\Reflection\ClassReflection;
+use PHPUnit\Framework\TestCase;
 use Rector\BetterPhpDocParser\PhpDocInfo\PhpDocInfo;
 use Rector\BetterPhpDocParser\PhpDocInfo\PhpDocInfoFactory;
 use Rector\BetterPhpDocParser\PhpDocManipulator\PhpDocTagRemover;
@@ -15,6 +17,7 @@ use Rector\Contract\Rector\ConfigurableRectorInterface;
 use Rector\PhpAttribute\NodeFactory\PhpAttributeGroupFactory;
 use Rector\PHPUnit\ValueObject\AnnotationWithValueToAttribute;
 use Rector\Rector\AbstractRector;
+use Rector\Reflection\ReflectionResolver;
 use Rector\ValueObject\PhpVersionFeature;
 use Rector\VersionBonding\Contract\MinPhpVersionInterface;
 use Symplify\RuleDocGenerator\ValueObject\CodeSample\ConfiguredCodeSample;
@@ -52,13 +55,14 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
         '@uses' => [],
     ];
 
-    private string $currentClassName;
+    private ?string $currentClassName;
 
     public function __construct(
         private readonly PhpDocTagRemover $phpDocTagRemover,
         private readonly PhpAttributeGroupFactory $phpAttributeGroupFactory,
         private readonly DocBlockUpdater $docBlockUpdater,
         private readonly PhpDocInfoFactory $phpDocInfoFactory,
+        private readonly ReflectionResolver $reflectionResolver,
     ) {
     }
 
@@ -85,9 +89,31 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
         $nodeName = $this->getName($node);
 
         if ($node instanceof Class_) {
-            $this->$currentClassName = $nodeName;
+            $classReflection = $this->reflectionResolver->resolveClassReflection($node);
+            if (! $classReflection instanceof ClassReflection) {
+                return null;
+            }
+
+            if (! $classReflection->isClass()) {
+                return null;
+            }
+
+            if (! $classReflection->isSubclassOf(TestCase::class)) {
+                $this->currentClassName = null;
+                return null;
+            }
+
+            $this->currentClassName = $nodeName;
         }
         
+        if ($this->currentClassName === null) {
+            return null;
+        }
+
+        if (! $phpDocInfo instanceof PhpDocInfo) {
+            return null;
+        }
+
         $phpDocInfo = $this->phpDocInfoFactory->createFromNode($node);
         if (! $phpDocInfo instanceof PhpDocInfo) {
             return null;
