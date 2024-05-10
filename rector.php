@@ -96,6 +96,7 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
         $hasChanged = false;
 
         foreach ($this->annotationTargets as $target => $targetConfig) {
+            
             /** @var PhpDocTagNode[] $desiredTagValueNodes */
             $desiredTagValueNodes = $phpDocInfo->getTagsByName($target);
 
@@ -107,7 +108,7 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
                 $attributeValue = $this->resolveAttributeValue($desiredTagValueNode->value, []);
                 $attributeValueLines = count(explode("\n", $attributeValue));
 
-                if (($targetConfig['multiline'] ?? false) && ($attributeValueLines > 1)) {
+                if ((! $targetConfig['multiline'] ?? false) && ($attributeValueLines > 1)) {
 dump([$this->$currentClassName, $nodeName, $target, $targetConfig, ($targetConfig['multiline'] ?? false), $attributeValue]);
                 }
 
@@ -148,9 +149,9 @@ return null;
 
 return RectorConfig::configure()
     ->withPaths([
-        __DIR__ . '/core/tests/Drupal/Tests',
-#        __DIR__ . '/composer',
-#        __DIR__ . '/core',
+#        __DIR__ . '/core/tests/Drupal/Tests',
+        __DIR__ . '/composer',
+        __DIR__ . '/core',
     ])
     ->withSkip([
         __DIR__ . '/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures',
