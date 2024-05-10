@@ -29,6 +29,9 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
         '@coversDefaultClass',
         '@covers',
         '@dataProvider',
+        '@group',
+        '@preserveGlobalState',
+        '@runTestsInSeparateProcesses',
     ];
 
     public function __construct(
