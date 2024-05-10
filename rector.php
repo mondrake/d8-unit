@@ -69,19 +69,18 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
         foreach ($this->annotationTargets as $target) {
             /** @var PhpDocTagNode[] $desiredTagValueNodes */
             $desiredTagValueNodes = $phpDocInfo->getTagsByName($target);
-dump($desiredTagValueNodes);
 
-/*            foreach ($desiredTagValueNodes as $desiredTagValueNode) {
+            foreach ($desiredTagValueNodes as $desiredTagValueNode) {
                 if (! $desiredTagValueNode->value instanceof GenericTagValueNode) {
                     continue;
                 }
 
                 $attributeValue = $this->resolveAttributeValue(
                     $desiredTagValueNode->value,
-                    $target
+                    [],
                 );
-
-                $attributeGroup = $this->phpAttributeGroupFactory->createFromClassWithItems(
+dump([$target, $attributeValue]);
+/*                $attributeGroup = $this->phpAttributeGroupFactory->createFromClassWithItems(
                     $target->getAttributeClass(),
                     [$attributeValue]
                 );
@@ -104,9 +103,8 @@ return null;
 
     private function resolveAttributeValue(
         GenericTagValueNode $genericTagValueNode,
-        AnnotationWithValueToAttribute $target
+        array $valueMap = [],
     ): mixed {
-        $valueMap = $target->getValueMap();
         if ($valueMap === []) {
             // no map? convert value as it is
             return $genericTagValueNode->value;
