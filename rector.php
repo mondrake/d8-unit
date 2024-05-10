@@ -63,7 +63,7 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
         if (! $phpDocInfo instanceof PhpDocInfo) {
             return null;
         }
-dump($phpDocInfo->getTags()); return null;
+dump($phpDocInfo->getTokens()); return null;
 
         $hasChanged = false;
 
