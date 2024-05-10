@@ -108,7 +108,7 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
                 $attributeValueLines = count(explode("\n", $attributeValue));
 
                 if ($attributeValueLines > 1) {
-dump([$this->$currentClassName, $nodeName, $target, $targetConfig, $attributeValue]);
+dump([$this->$currentClassName, $nodeName, $target, $targetConfig, ($targetConfig['multiline'] ?? false), $attributeValue]);
                 }
 
 /*                $attributeGroup = $this->phpAttributeGroupFactory->createFromClassWithItems(
@@ -148,7 +148,7 @@ return null;
 
 return RectorConfig::configure()
     ->withPaths([
-        __DIR__ . '/core/tests/Drupal/Tests/Component',
+        __DIR__ . '/core/tests/Drupal/Tests',
 #        __DIR__ . '/composer',
 #        __DIR__ . '/core',
     ])
