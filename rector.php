@@ -21,6 +21,8 @@ use Symplify\RuleDocGenerator\ValueObject\CodeSample\ConfiguredCodeSample;
 use Symplify\RuleDocGenerator\ValueObject\RuleDefinition;
 use Webmozart\Assert\Assert;
 
+use Rector\Config\RectorConfig;
+
 final class DrupalAnnotationToAttributeRector extends AbstractRector implements ConfigurableRectorInterface, MinPhpVersionInterface
 {
     /**
@@ -133,8 +135,7 @@ return RectorConfig::configure()
         '*.api.php',
     ])
     ->withRules([
-        CoversAnnotationWithValueToAttributeRector::class,
-        DataProviderAnnotationToAttributeRector::class,
+        DrupalAnnotationToAttributeRector::class,
     ])
     ->withImportNames(
         importDocBlockNames: false,
