@@ -26,12 +26,28 @@ use Rector\Config\RectorConfig;
 final class DrupalAnnotationToAttributeRector extends AbstractRector implements MinPhpVersionInterface
 {
     private array $annotationTargets = [
-        '@coversDefaultClass',
+        '@author',
+        '@backupGlobals',
+        '@backupStaticAttributes',
         '@covers',
+        '@coversDefaultClass',
+        '@coversNothing',
         '@dataProvider',
+        '@depends',
+        '@doesNotPerformAssertions',
         '@group',
+        '@large',
+        '@medium',
         '@preserveGlobalState',
+        '@requires',
         '@runTestsInSeparateProcesses',
+        '@runInSeparateProcess',
+        '@small',
+        '@test',
+        '@testdox',
+        '@testWith',
+        '@ticket',
+        '@uses',
     ];
 
     public function __construct(
@@ -62,6 +78,8 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
      */
     public function refactor(Node $node): ?Node
     {
+        $nodeName = $this->getName($node);
+        
         $phpDocInfo = $this->phpDocInfoFactory->createFromNode($node);
         if (! $phpDocInfo instanceof PhpDocInfo) {
             return null;
@@ -82,7 +100,7 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
                     $desiredTagValueNode->value,
                     [],
                 );
-dump([$target, $attributeValue]);
+dump([$nodeName, $target, $attributeValue]);
 /*                $attributeGroup = $this->phpAttributeGroupFactory->createFromClassWithItems(
                     $target->getAttributeClass(),
                     [$attributeValue]
