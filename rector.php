@@ -172,8 +172,8 @@ return null;
 
 return RectorConfig::configure()
     ->withPaths([
-        __DIR__ . '/core/tests',
-    #    __DIR__ . '/composer',
+        __DIR__ . '/core',
+        __DIR__ . '/composer',
   #      __DIR__ . '/core/tests',
     ])
     ->withSkip([
