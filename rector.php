@@ -55,7 +55,7 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
         '@uses' => [],
     ];
 
-    private ?string $currentClassName;
+    private static ?string $currentClassName;
 
     public function __construct(
         private readonly PhpDocTagRemover $phpDocTagRemover,
@@ -99,18 +99,14 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
             }
 
             if (! $classReflection->isSubclassOf(TestCase::class)) {
-                $this->currentClassName = null;
+                self::$currentClassName = null;
                 return null;
             }
 
-            $this->currentClassName = $nodeName;
-        }
-        
-        if ($this->currentClassName === null) {
-            return null;
+            self::$currentClassName = $nodeName;
         }
 
-        if (! $phpDocInfo instanceof PhpDocInfo) {
+        if (! isset(self::$currentClassName)) {
             return null;
         }
 
@@ -118,11 +114,12 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
         if (! $phpDocInfo instanceof PhpDocInfo) {
             return null;
         }
+#   dump([$this->currentClassName, $nodeName]);
 
         $hasChanged = false;
 
         foreach ($this->annotationTargets as $target => $targetConfig) {
-            
+
             /** @var PhpDocTagNode[] $desiredTagValueNodes */
             $desiredTagValueNodes = $phpDocInfo->getTagsByName($target);
 
@@ -135,7 +132,7 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
                 $attributeValueLines = count(explode("\n", $attributeValue));
 
                 if ((! $targetConfig['multiline'] ?? false) && ($attributeValueLines > 1)) {
-dump([$this->$currentClassName, $nodeName, $target, $targetConfig, ($targetConfig['multiline'] ?? false), $attributeValue]);
+dump([self::$currentClassName, $nodeName, $target, $attributeValue]);
                 }
 
 /*                $attributeGroup = $this->phpAttributeGroupFactory->createFromClassWithItems(
@@ -175,11 +172,12 @@ return null;
 
 return RectorConfig::configure()
     ->withPaths([
-        __DIR__ . '/core/tests/Drupal/Tests',
+        __DIR__ . '/core/tests',
     #    __DIR__ . '/composer',
   #      __DIR__ . '/core/tests',
     ])
     ->withSkip([
+        __DIR__ . '/core/tests/Drupal/Tests',
         __DIR__ . '/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures',
         '*/ProxyClass/*',
         '*.api.php',
