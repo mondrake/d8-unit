@@ -8,6 +8,18 @@ use PhpParser\Node\Stmt\ClassMethod;
 use PHPStan\PhpDocParser\Ast\PhpDoc\GenericTagValueNode;
 use PHPStan\PhpDocParser\Ast\PhpDoc\PhpDocTagNode;
 use PHPStan\Reflection\ClassReflection;
+use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\CoversNothing;
+use PHPUnit\Framework\Attributes\DataProvider;
+use PHPUnit\Framework\Attributes\Group;
+use PHPUnit\Framework\Attributes\IgnoreDeprecations;
+use PHPUnit\Framework\Attributes\Medium;
+use PHPUnit\Framework\Attributes\PreserveGlobalState;
+use PHPUnit\Framework\Attributes\RequiresPhpExtension;
+use PHPUnit\Framework\Attributes\RunInSeparateProcess;
+use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
+use PHPUnit\Framework\Attributes\TestWith;
+use PHPUnit\Framework\Attributes\UseClass;
 use PHPUnit\Framework\TestCase;
 use Rector\BetterPhpDocParser\PhpDocInfo\PhpDocInfo;
 use Rector\BetterPhpDocParser\PhpDocInfo\PhpDocInfoFactory;
@@ -32,27 +44,50 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
         '@author' => [],
         '@backupGlobals' => [],
         '@backupStaticAttributes' => [],
-        '@covers' => [],
-        '@coversDefaultClass' => [],
-        '@coversNothing' => [],
-        '@dataProvider' => [],
+        '@covers' => [
+            'converter' => 'convertCovers',
+        ],
+        '@coversDefaultClass' => [
+            'converter' => 'convertCoversDefaultClass',
+        ],
+        '@coversNothing' => [
+            'converter' => 'convertCoversNothing',
+        ],
+        '@dataProvider' => [
+            'converter' => 'convertDataProvider',
+        ],
         '@depends' => [],
         '@doesNotPerformAssertions' => [],
-        '@group' => [],
+        '@group' => [
+            'converter' => 'convertGroup',
+        ],
         '@large' => [],
-        '@medium' => [],
-        '@preserveGlobalState' => [],
-        '@requires' => [],
-        '@runTestsInSeparateProcesses' => [],
-        '@runInSeparateProcess' => [],
+        '@medium' => [
+            'converter' => 'convertMedium',
+        ],
+        '@preserveGlobalState' => [
+            'converter' => 'convertPreserveGlobalState',
+        ],
+        '@requires' => [
+            'converter' => 'convertRequires',
+        ],
+        '@runTestsInSeparateProcesses' => [
+            'converter' => 'convertRunTestsInSeparateProcesses',
+        ],
+        '@runInSeparateProcess' => [
+            'converter' => 'convertRunInSeparateProcess',
+        ],
         '@small' => [],
         '@test' => [],
         '@testdox' => [],
         '@testWith' => [
             'multiline' => true,
+            'converter' => 'convertTestWith',
         ],
         '@ticket' => [],
-        '@uses' => [],
+        '@uses' => [
+            'converter' => 'convertUses',
+        ],
     ];
 
     private static ?string $currentClassName;
@@ -114,7 +149,6 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
         if (! $phpDocInfo instanceof PhpDocInfo) {
             return null;
         }
-#   dump([$this->currentClassName, $nodeName]);
 
         $hasChanged = false;
 
@@ -131,29 +165,261 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
                 $attributeValue = $this->resolveAttributeValue($desiredTagValueNode->value, []);
                 $attributeValueLines = count(explode("\n", $attributeValue));
 
-                if ((! $targetConfig['multiline'] ?? false) && ($attributeValueLines > 1)) {
-dump([self::$currentClassName, $nodeName, $target, $attributeValue]);
+                $targetConverter = $targetConfig['converter'] ?? false;
+
+                if (! $targetConverter) {
+                    throw new \RuntimeException('No converter for ' . $target . ' annotation');
                 }
 
-/*                $attributeGroup = $this->phpAttributeGroupFactory->createFromClassWithItems(
-                    $target->getAttributeClass(),
-                    [$attributeValue]
-                );
+                if ((! $targetConfig['multiline'] ?? false) && ($attributeValueLines > 1)) {
+#                    @todo reactivate
+#                    throw new \RuntimeException('Unexepected multiline annotation value in ' . var_export([self::$currentClassName, $nodeName, $target, $attributeValue], true));
+                }
 
-                $node->attrGroups[] = $attributeGroup;
-
-                // cleanup
-                $this->phpDocTagRemover->removeTagValueFromNode($phpDocInfo, $desiredTagValueNode);
-                $hasChanged = true;*/
+                call_user_func([$this, $targetConverter], $node, $phpDocInfo, $desiredTagValueNode);
+                $hasChanged = true;
             }
         }
-return null;
+
         if ($hasChanged) {
             $this->docBlockUpdater->updateRefactoredNodeWithPhpDocInfo($node);
             return $node;
         }
 
         return null;
+    }
+
+    private function convertRunTestsInSeparateProcesses(
+        Node $node,
+        $phpDocInfo,
+        $desiredTagValueNode,
+    ): void {
+
+        $attributeGroup = $this->phpAttributeGroupFactory->createFromClassWithItems(
+            RunTestsInSeparateProcesses::class,
+            [],
+        );
+
+        $node->attrGroups[] = $attributeGroup;
+
+        // cleanup
+        $this->phpDocTagRemover->removeTagValueFromNode($phpDocInfo, $desiredTagValueNode);
+
+    }
+
+    private function convertRunInSeparateProcess(
+        Node $node,
+        $phpDocInfo,
+        $desiredTagValueNode,
+    ): void {
+
+        $attributeGroup = $this->phpAttributeGroupFactory->createFromClassWithItems(
+            RunInSeparateProcess::class,
+            [],
+        );
+
+        $node->attrGroups[] = $attributeGroup;
+
+        // cleanup
+        $this->phpDocTagRemover->removeTagValueFromNode($phpDocInfo, $desiredTagValueNode);
+
+    }
+
+    private function convertPreserveGlobalState(
+        Node $node,
+        $phpDocInfo,
+        $desiredTagValueNode,
+    ): void {
+        $preserve = match ($desiredTagValueNode->value->value) {
+            'enabled' => true,
+            'disabled' => false,
+        };
+
+        $attributeGroup = $this->phpAttributeGroupFactory->createFromClassWithItems(
+            PreserveGlobalState::class,
+            [$preserve],
+        );
+
+        $node->attrGroups[] = $attributeGroup;
+
+        // cleanup
+        $this->phpDocTagRemover->removeTagValueFromNode($phpDocInfo, $desiredTagValueNode);
+
+    }
+
+    private function convertDataProvider(
+        Node $node,
+        $phpDocInfo,
+        $desiredTagValueNode,
+    ): void {
+
+        $attributeGroup = $this->phpAttributeGroupFactory->createFromClassWithItems(
+            DataProvider::class,
+            [$desiredTagValueNode->value->value],
+        );
+
+        $node->attrGroups[] = $attributeGroup;
+
+        // cleanup
+        $this->phpDocTagRemover->removeTagValueFromNode($phpDocInfo, $desiredTagValueNode);
+
+    }
+
+    private function convertGroup(
+        Node $node,
+        $phpDocInfo,
+        $desiredTagValueNode,
+    ): void {
+        $value = $desiredTagValueNode->value->value;
+
+        $attributeGroup = match ($value) {
+            '@legacy' => $this->phpAttributeGroupFactory->createFromClassWithItems(
+                IndirectDeprecations::class,
+                [],
+            ),
+            default => $this->phpAttributeGroupFactory->createFromClassWithItems(
+                Group::class,
+                [$value],
+            ),
+        };
+
+        $node->attrGroups[] = $attributeGroup;
+
+        // cleanup
+        $this->phpDocTagRemover->removeTagValueFromNode($phpDocInfo, $desiredTagValueNode);
+
+    }
+
+    private function convertTestWith(
+        Node $node,
+        $phpDocInfo,
+        $desiredTagValueNode,
+    ): void {
+        $values = explode("\n", $desiredTagValueNode->value->value);
+
+        foreach ($values as $value) {
+            $attributeGroup = $this->phpAttributeGroupFactory->createFromClassWithItems(
+                TestWith::class,
+                [$value],
+            );
+            $node->attrGroups[] = $attributeGroup;
+        };
+
+        // cleanup
+        $this->phpDocTagRemover->removeTagValueFromNode($phpDocInfo, $desiredTagValueNode);
+
+    }
+
+    private function convertRequires(
+        Node $node,
+        $phpDocInfo,
+        $desiredTagValueNode,
+    ): void {
+        $value = explode(' ', $desiredTagValueNode->value->value);
+
+        $attributeGroup = match ($value[0]) {
+            'extension' => $this->phpAttributeGroupFactory->createFromClassWithItems(
+                RequiresPhpExtension::class,
+                [$value[1]],
+            ),
+            default => throw new \RuntimeException('Unsupported require "' . $value[0] . '"'),
+        };
+
+        $node->attrGroups[] = $attributeGroup;
+
+        // cleanup
+        $this->phpDocTagRemover->removeTagValueFromNode($phpDocInfo, $desiredTagValueNode);
+
+    }
+
+    private function convertCoversDefaultClass(
+        Node $node,
+        $phpDocInfo,
+        $desiredTagValueNode,
+    ): void {
+
+        $attributeGroup = $this->phpAttributeGroupFactory->createFromClassWithItems(
+            CoversClass::class,
+            [$desiredTagValueNode->value->value],
+        );
+
+        $node->attrGroups[] = $attributeGroup;
+
+        // cleanup
+        $this->phpDocTagRemover->removeTagValueFromNode($phpDocInfo, $desiredTagValueNode);
+
+    }
+
+    private function convertCovers(
+        Node $node,
+        $phpDocInfo,
+        $desiredTagValueNode,
+    ): void {
+
+/*        $attributeGroup = $this->phpAttributeGroupFactory->createFromClassWithItems(
+            CoversClass::class,
+            [$desiredTagValueNode->value->value],
+        );
+
+        $node->attrGroups[] = $attributeGroup;*/
+
+        // cleanup
+        $this->phpDocTagRemover->removeTagValueFromNode($phpDocInfo, $desiredTagValueNode);
+
+    }
+
+    private function convertCoversNothing(
+        Node $node,
+        $phpDocInfo,
+        $desiredTagValueNode,
+    ): void {
+
+        $attributeGroup = $this->phpAttributeGroupFactory->createFromClassWithItems(
+            CoversNothing::class,
+            [],
+        );
+
+        $node->attrGroups[] = $attributeGroup;
+
+        // cleanup
+        $this->phpDocTagRemover->removeTagValueFromNode($phpDocInfo, $desiredTagValueNode);
+
+    }
+
+    private function convertUses(
+        Node $node,
+        $phpDocInfo,
+        $desiredTagValueNode,
+    ): void {
+
+        $attributeGroup = $this->phpAttributeGroupFactory->createFromClassWithItems(
+            UseClass::class,
+            [$desiredTagValueNode->value->value],
+        );
+
+        $node->attrGroups[] = $attributeGroup;
+
+        // cleanup
+        $this->phpDocTagRemover->removeTagValueFromNode($phpDocInfo, $desiredTagValueNode);
+
+    }
+
+    private function convertMedium(
+        Node $node,
+        $phpDocInfo,
+        $desiredTagValueNode,
+    ): void {
+
+        $attributeGroup = $this->phpAttributeGroupFactory->createFromClassWithItems(
+            Medium::class,
+            [],
+        );
+
+        $node->attrGroups[] = $attributeGroup;
+
+        // cleanup
+        $this->phpDocTagRemover->removeTagValueFromNode($phpDocInfo, $desiredTagValueNode);
+
     }
 
     private function resolveAttributeValue(
@@ -168,16 +434,16 @@ return null;
         $originalValue = strtolower($genericTagValueNode->value);
         return $valueMap[$originalValue];
     }
+
 }
 
 return RectorConfig::configure()
     ->withPaths([
-        __DIR__ . '/core',
-        __DIR__ . '/composer',
-  #      __DIR__ . '/core/tests',
+        __DIR__ . '/core/tests/Drupal/Tests/Component',
+#        __DIR__ . '/core',
+#        __DIR__ . '/composer',
     ])
     ->withSkip([
-        __DIR__ . '/core/tests/Drupal/Tests',
         __DIR__ . '/core/tests/Drupal/Tests/Component/Annotation/Doctrine/Fixtures',
         '*/ProxyClass/*',
         '*.api.php',
