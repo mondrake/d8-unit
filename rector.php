@@ -19,7 +19,7 @@ use PHPUnit\Framework\Attributes\RequiresPhpExtension;
 use PHPUnit\Framework\Attributes\RunInSeparateProcess;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 use PHPUnit\Framework\Attributes\TestWith;
-use PHPUnit\Framework\Attributes\UseClass;
+use PHPUnit\Framework\Attributes\UsesClass;
 use PHPUnit\Framework\TestCase;
 use Rector\BetterPhpDocParser\PhpDocInfo\PhpDocInfo;
 use Rector\BetterPhpDocParser\PhpDocInfo\PhpDocInfoFactory;
@@ -41,9 +41,13 @@ use Rector\Config\RectorConfig;
 final class DrupalAnnotationToAttributeRector extends AbstractRector implements MinPhpVersionInterface
 {
     private array $annotationTargets = [
+        '@after' => [],
+        '@afterClass' => [],
         '@author' => [],
         '@backupGlobals' => [],
         '@backupStaticAttributes' => [],
+        '@before' => [],
+        '@beforeClass' => [],
         '@covers' => [
             'converter' => 'convertCovers',
         ],
@@ -91,6 +95,7 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
     ];
 
     private static ?string $currentClassName;
+    private static ?Node $currentClassNode;
 
     public function __construct(
         private readonly PhpDocTagRemover $phpDocTagRemover,
@@ -135,10 +140,12 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
 
             if (! $classReflection->isSubclassOf(TestCase::class)) {
                 self::$currentClassName = null;
+                self::$currentClassNode = null;
                 return null;
             }
 
             self::$currentClassName = $nodeName;
+            self::$currentClassNode = $node;
         }
 
         if (! isset(self::$currentClassName)) {
@@ -172,8 +179,8 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
                 }
 
                 if ((! $targetConfig['multiline'] ?? false) && ($attributeValueLines > 1)) {
-#                    @todo reactivate
-#                    throw new \RuntimeException('Unexepected multiline annotation value in ' . var_export([self::$currentClassName, $nodeName, $target, $attributeValue], true));
+                    #                    @todo reactivate
+                    #                    throw new \RuntimeException('Unexepected multiline annotation value in ' . var_export([self::$currentClassName, $nodeName, $target, $attributeValue], true));
                 }
 
                 call_user_func([$this, $targetConverter], $node, $phpDocInfo, $desiredTagValueNode);
@@ -182,6 +189,7 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
         }
 
         if ($hasChanged) {
+            $this->docBlockUpdater->updateRefactoredNodeWithPhpDocInfo(self::$currentClassNode);
             $this->docBlockUpdater->updateRefactoredNodeWithPhpDocInfo($node);
             return $node;
         }
@@ -331,7 +339,7 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
         $this->phpDocTagRemover->removeTagValueFromNode($phpDocInfo, $desiredTagValueNode);
 
     }
-
+    
     private function convertCoversDefaultClass(
         Node $node,
         $phpDocInfo,
@@ -355,14 +363,6 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
         $phpDocInfo,
         $desiredTagValueNode,
     ): void {
-
-/*        $attributeGroup = $this->phpAttributeGroupFactory->createFromClassWithItems(
-            CoversClass::class,
-            [$desiredTagValueNode->value->value],
-        );
-
-        $node->attrGroups[] = $attributeGroup;*/
-
         // cleanup
         $this->phpDocTagRemover->removeTagValueFromNode($phpDocInfo, $desiredTagValueNode);
 
@@ -393,11 +393,12 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
     ): void {
 
         $attributeGroup = $this->phpAttributeGroupFactory->createFromClassWithItems(
-            UseClass::class,
+            UsesClass::class,
             [$desiredTagValueNode->value->value],
         );
 
-        $node->attrGroups[] = $attributeGroup;
+        // Attach the attribute to the class.
+        self::$currentClassNode->attrGroups[] = $attributeGroup;
 
         // cleanup
         $this->phpDocTagRemover->removeTagValueFromNode($phpDocInfo, $desiredTagValueNode);
@@ -415,7 +416,8 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
             [],
         );
 
-        $node->attrGroups[] = $attributeGroup;
+        // Attach the attribute to the class.
+        self::$currentClassNode->attrGroups[] = $attributeGroup;
 
         // cleanup
         $this->phpDocTagRemover->removeTagValueFromNode($phpDocInfo, $desiredTagValueNode);
