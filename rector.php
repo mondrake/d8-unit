@@ -3,6 +3,8 @@
 declare(strict_types=1);
 
 use PhpParser\Node;
+use PhpParser\Node\Expr\ClassConstFetch;
+use PhpParser\Node\Name\FullyQualified;
 use PhpParser\Node\Stmt\Class_;
 use PhpParser\Node\Stmt\ClassMethod;
 use PHPStan\PhpDocParser\Ast\PhpDoc\GenericTagValueNode;
@@ -179,8 +181,7 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
                 }
 
                 if ((! $targetConfig['multiline'] ?? false) && ($attributeValueLines > 1)) {
-                    #                    @todo reactivate
-                    #                    throw new \RuntimeException('Unexepected multiline annotation value in ' . var_export([self::$currentClassName, $nodeName, $target, $attributeValue], true));
+                    throw new \RuntimeException('Unexepected multiline annotation value in ' . var_export([self::$currentClassName, $nodeName, $target, $attributeValue], true));
                 }
 
                 call_user_func([$this, $targetConverter], $node, $phpDocInfo, $desiredTagValueNode);
@@ -346,9 +347,14 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
         $desiredTagValueNode,
     ): void {
 
+        $classLikeName = $desiredTagValueNode->value->value;
+        $classLikeName = \ltrim($classLikeName, '\\');
+        $fullyQualified = new FullyQualified($classLikeName);
+        $classConst = new ClassConstFetch($fullyQualified, 'class');
+        
         $attributeGroup = $this->phpAttributeGroupFactory->createFromClassWithItems(
             CoversClass::class,
-            [$desiredTagValueNode->value->value],
+            [$classConst],
         );
 
         $node->attrGroups[] = $attributeGroup;
