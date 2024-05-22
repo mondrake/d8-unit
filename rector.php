@@ -288,7 +288,7 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
             ),
             default => $this->phpAttributeGroupFactory->createFromClassWithItems(
                 Group::class,
-                [$value],
+                [(string) $value],
             ),
         };
 
@@ -398,9 +398,14 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
         $desiredTagValueNode,
     ): void {
 
+        $classLikeName = $desiredTagValueNode->value->value;
+        $classLikeName = \ltrim($classLikeName, '\\');
+        $fullyQualified = new FullyQualified($classLikeName);
+        $classConst = new ClassConstFetch($fullyQualified, 'class');
+
         $attributeGroup = $this->phpAttributeGroupFactory->createFromClassWithItems(
             UsesClass::class,
-            [$desiredTagValueNode->value->value],
+            [$classConst],
         );
 
         // Attach the attribute to the class.
