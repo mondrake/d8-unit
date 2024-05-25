@@ -7,6 +7,8 @@ use PhpParser\Node\Expr\ClassConstFetch;
 use PhpParser\Node\Name\FullyQualified;
 use PhpParser\Node\Stmt\Class_;
 use PhpParser\Node\Stmt\ClassMethod;
+use PhpParser\NodeDumper;
+use PhpParser\ParserFactory;
 use PHPStan\PhpDocParser\Ast\PhpDoc\GenericTagValueNode;
 use PHPStan\PhpDocParser\Ast\PhpDoc\PhpDocTagNode;
 use PHPStan\Reflection\ClassReflection;
@@ -307,6 +309,7 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
         $values = explode("\n", $desiredTagValueNode->value->value);
 
         foreach ($values as $value) {
+            $this->parseTestWithData($value);
             $attributeGroup = $this->phpAttributeGroupFactory->createFromClassWithItems(
                 TestWith::class,
                 [$value],
@@ -450,6 +453,15 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
 
         $originalValue = strtolower($genericTagValueNode->value);
         return $valueMap[$originalValue];
+    }
+
+    private function parseTestWithData(
+        string $data,
+    ) {
+        $parser = (new ParserFactory())->createForNewestSupportedVersion();
+        $ast = $parser->parse("<?php\n" . $data);
+        $dumper = new NodeDumper;
+        dump(get_class($ast), $dumper->dump($ast));
     }
 
 }
