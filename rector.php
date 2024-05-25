@@ -309,7 +309,8 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
         $values = explode("\n", $desiredTagValueNode->value->value);
 
         foreach ($values as $value) {
-            $this->parseTestWithData($value);
+            $data = $this->parseTestWithData($value);
+            dump($data);
             $attributeGroup = $this->phpAttributeGroupFactory->createFromClassWithItems(
                 TestWith::class,
                 [$value],
@@ -460,9 +461,7 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
     ) {
         $parser = (new ParserFactory())->createForNewestSupportedVersion();
         $ast = $parser->parse("<?php\n\$array = {$data};");
-#        $dumper = new NodeDumper;
-#        dump($dumper->dump($ast));
-        dump($ast);
+        return $ast[0]->expr->expr;
     }
 
 }
