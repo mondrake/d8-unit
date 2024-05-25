@@ -369,7 +369,7 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
         $phpDocInfo,
         $desiredTagValueNode,
     ): void {
-
+dump([__METHOD__, $desiredTagValueNode]);
         $legacyCoversValueNode = new PhpDocTagNode('legacy-covers', $desiredTagValueNode);
         $phpDocInfo->addTagValueNode($legacyCoversValueNode);
         
@@ -468,7 +468,7 @@ return RectorConfig::configure()
     ->withRules([
         DrupalAnnotationToAttributeRector::class,
     ])
-#    ->withoutParallel()
+    ->withoutParallel()
     ->withImportNames(
         importDocBlockNames: false,
         importShortClasses: false,
