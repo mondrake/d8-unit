@@ -1,168 +1,1455 @@
-diff --git a/core/.phpstan-baseline.php b/core/.phpstan-baseline.php
-index 1f1aae4f65..bc0371b547 100644
---- a/core/.phpstan-baseline.php
-+++ b/core/.phpstan-baseline.php
-@@ -2030,18 +2030,6 @@
- 	'count' => 1,
- 	'path' => __DIR__ . '/tests/Drupal/KernelTests/Core/Cache/ApcuBackendTest.php',
- ];
--$ignoreErrors[] = [
--	'message' => '#^Call to deprecated method expectWarning\\(\\) of class PHPUnit\\\\Framework\\\\TestCase\\:
--https\\://github\\.com/sebastianbergmann/phpunit/issues/5062$#',
--	'count' => 1,
--	'path' => __DIR__ . '/tests/Drupal/KernelTests/Core/Config/ConfigInstallTest.php',
--];
--$ignoreErrors[] = [
--	'message' => '#^Call to deprecated method expectWarningMessage\\(\\) of class PHPUnit\\\\Framework\\\\TestCase\\:
--https\\://github\\.com/sebastianbergmann/phpunit/issues/5062$#',
--	'count' => 1,
--	'path' => __DIR__ . '/tests/Drupal/KernelTests/Core/Config/ConfigInstallTest.php',
--];
- $ignoreErrors[] = [
- 	'message' => '#^Variable \\$expected_driver might not be defined\\.$#',
- 	'count' => 2,
-diff --git a/core/core.services.yml b/core/core.services.yml
-index 1f96371654..3a1213a949 100644
---- a/core/core.services.yml
-+++ b/core/core.services.yml
-@@ -371,7 +371,7 @@ services:
-     class: Drupal\Core\Config\Importer\FinalMissingContentSubscriber
-   config.installer:
-     class: Drupal\Core\Config\ConfigInstaller
--    arguments: ['@config.factory', '@config.storage', '@config.typed', '@config.manager', '@event_dispatcher', '%install_profile%', '@extension.path.resolver']
-+    autowire: true
-     lazy: true
-   Drupal\Core\Config\ConfigInstallerInterface: '@config.installer'
-   config.storage:
-diff --git a/core/lib/Drupal/Core/Config/ConfigInstaller.php b/core/lib/Drupal/Core/Config/ConfigInstaller.php
-index ec94fb331c..f77e7cccdd 100644
---- a/core/lib/Drupal/Core/Config/ConfigInstaller.php
-+++ b/core/lib/Drupal/Core/Config/ConfigInstaller.php
-@@ -7,8 +7,13 @@
- use Drupal\Core\Config\Entity\ConfigDependencyManager;
- use Drupal\Core\Extension\ExtensionPathResolver;
- use Drupal\Core\Installer\InstallerKernel;
-+use Symfony\Component\DependencyInjection\Attribute\Autowire;
-+use Symfony\Component\DependencyInjection\Attribute\AutowireServiceClosure;
- use Symfony\Contracts\EventDispatcher\EventDispatcherInterface;
- 
-+/**
-+ * The configuration installer.
-+ */
- class ConfigInstaller implements ConfigInstallerInterface {
- 
-   /**
-@@ -74,25 +79,19 @@ class ConfigInstaller implements ConfigInstallerInterface {
-    */
-   protected $extensionPathResolver;
- 
--  /**
--   * Constructs the configuration installer.
--   *
--   * @param \Drupal\Core\Config\ConfigFactoryInterface $config_factory
--   *   The configuration factory.
--   * @param \Drupal\Core\Config\StorageInterface $active_storage
--   *   The active configuration storage.
--   * @param \Drupal\Core\Config\TypedConfigManagerInterface $typed_config
--   *   The typed configuration manager.
--   * @param \Drupal\Core\Config\ConfigManagerInterface $config_manager
--   *   The configuration manager.
--   * @param \Symfony\Contracts\EventDispatcher\EventDispatcherInterface $event_dispatcher
--   *   The event dispatcher.
--   * @param string $install_profile
--   *   The name of the currently active installation profile.
--   * @param \Drupal\Core\Extension\ExtensionPathResolver $extension_path_resolver
--   *   The extension path resolver.
--   */
--  public function __construct(ConfigFactoryInterface $config_factory, StorageInterface $active_storage, TypedConfigManagerInterface $typed_config, ConfigManagerInterface $config_manager, EventDispatcherInterface $event_dispatcher, $install_profile, ExtensionPathResolver $extension_path_resolver) {
-+  public function __construct(
-+    ConfigFactoryInterface $config_factory,
-+    #[Autowire(service: 'config.storage')]
-+    StorageInterface $active_storage,
-+    TypedConfigManagerInterface $typed_config,
-+    ConfigManagerInterface $config_manager,
-+    EventDispatcherInterface $event_dispatcher,
-+    #[Autowire(param: 'install_profile')]
-+    $install_profile,
-+    ExtensionPathResolver $extension_path_resolver,
-+    #[AutowireServiceClosure('logger.channel.php')]
-+    protected \Closure $loggerClosure,
-+  ) {
-     $this->configFactory = $config_factory;
-     $this->activeStorages[$active_storage->getCollectionName()] = $active_storage;
-     $this->typedConfig = $typed_config;
-@@ -326,6 +325,7 @@ protected function getConfigToCreate(StorageInterface $storage, $collection, $pr
-    *   An array of configuration data to create, keyed by name.
-    */
-   protected function createConfiguration($collection, array $config_to_create) {
-+//dump([__METHOD__, $collection, $config_to_create]);
-     // Order the configuration to install in the order of dependencies.
-     if ($collection == StorageInterface::DEFAULT_COLLECTION) {
-       $dependency_manager = new ConfigDependencyManager();
-@@ -388,7 +388,12 @@ protected function createConfiguration($collection, array $config_to_create) {
-         if ($entity->isInstallable()) {
-           $entity->trustData()->save();
-           if ($id !== $entity->id()) {
--            trigger_error(sprintf('The configuration name "%s" does not match the ID "%s"', $name, $entity->id()), E_USER_WARNING);
-+            /** @var \Psr\Log\LoggerInterface $logger */
-+            $logger = ($this->loggerClosure)();
-+            $logger->warning('The configuration name "%name" does not match the ID "%id"', [
-+              '%name' => $name,
-+              '%id' => $entity->id(),
-+            ]);
-           }
-         }
-       }
-diff --git a/core/tests/Drupal/KernelTests/Core/Config/ConfigInstallTest.php b/core/tests/Drupal/KernelTests/Core/Config/ConfigInstallTest.php
-index 4655ae374e..18b96dde55 100644
---- a/core/tests/Drupal/KernelTests/Core/Config/ConfigInstallTest.php
-+++ b/core/tests/Drupal/KernelTests/Core/Config/ConfigInstallTest.php
-@@ -3,10 +3,12 @@
- namespace Drupal\KernelTests\Core\Config;
- 
- use Drupal\Core\Config\ConfigCollectionEvents;
-+use Drupal\Core\Config\ConfigInstaller;
- use Drupal\Core\Config\InstallStorage;
- use Drupal\Core\Config\PreExistingConfigException;
- use Drupal\Core\Config\UnmetDependenciesException;
- use Drupal\KernelTests\KernelTestBase;
-+use Psr\Log\LoggerInterface;
+diff --git a/core/tests/Drupal/Tests/Component/Annotation/PluginIdTest.php b/core/tests/Drupal/Tests/Component/Annotation/PluginIdTest.php
+index cb22ff6f07..b079546054 100644
+--- a/core/tests/Drupal/Tests/Component/Annotation/PluginIdTest.php
++++ b/core/tests/Drupal/Tests/Component/Annotation/PluginIdTest.php
+@@ -8,7 +8,7 @@
+ use PHPUnit\Framework\TestCase;
  
  /**
-  * Tests installation of configuration objects in installation functionality.
-@@ -263,9 +265,32 @@ public function testLanguage() {
-    * Tests installing configuration where the filename and ID do not match.
-    */
-   public function testIdMisMatch() {
--    $this->expectWarning();
--    $this->expectWarningMessage('The configuration name "config_test.dynamic.no_id_match" does not match the ID "does_not_match"');
--    $this->installModules(['config_test_id_mismatch']);
-+    // Install the test module.
-+    $this->installModules(['config_test']);
+- * @coversDefaultClass \Drupal\Component\Annotation\PluginId
++ * @coversDefaultClass \Drupal\Component\Annotation\PluginID
+  * @group Annotation
+  */
+ class PluginIdTest extends TestCase {
+diff --git a/core/tests/Drupal/Tests/Component/DependencyInjection/Dumper/OptimizedPhpArrayDumperTest.php b/core/tests/Drupal/Tests/Component/DependencyInjection/Dumper/OptimizedPhpArrayDumperTest.php
+index 9766833a0a..588fcbd5f0 100644
+--- a/core/tests/Drupal/Tests/Component/DependencyInjection/Dumper/OptimizedPhpArrayDumperTest.php
++++ b/core/tests/Drupal/Tests/Component/DependencyInjection/Dumper/OptimizedPhpArrayDumperTest.php
+@@ -2,729 +2,727 @@
+ 
+ declare(strict_types=1);
+ 
+-namespace Drupal\Tests\Component\DependencyInjection\Dumper {
+-
+-  use Drupal\Component\Utility\Crypt;
+-  use Drupal\TestTools\Extension\DeprecationBridge\ExpectDeprecationTrait;
+-  use PHPUnit\Framework\TestCase;
+-  use Prophecy\PhpUnit\ProphecyTrait;
+-  use Prophecy\Prophet;
+-  use Symfony\Component\DependencyInjection\Argument\IteratorArgument;
+-  use Symfony\Component\DependencyInjection\Argument\ServiceClosureArgument;
+-  use Symfony\Component\DependencyInjection\Definition;
+-  use Symfony\Component\DependencyInjection\Reference;
+-  use Symfony\Component\DependencyInjection\Parameter;
+-  use Symfony\Component\ExpressionLanguage\Expression;
+-  use Symfony\Component\DependencyInjection\ParameterBag\ParameterBag;
+-  use Symfony\Component\DependencyInjection\ContainerInterface;
+-  use Symfony\Component\DependencyInjection\Exception\InvalidArgumentException;
+-  use Symfony\Component\DependencyInjection\Exception\RuntimeException;
++namespace Drupal\Tests\Component\DependencyInjection\Dumper;
 +
-+    $loggerClosure = function (): LoggerInterface {
-+      $logger = $this->prophesize(LoggerInterface::class);
-+      $logger->warning('The configuration name "%name" does not match the ID "%id"', [
-+        "%name" => "config_test.dynamic.no_id_match",
-+        "%id" => "does_not_match",
-+      ])->shouldBeCalledOnce();
-+      return $logger->reveal();
-+    };
++use Drupal\Component\Utility\Crypt;
++use Drupal\TestTools\Extension\DeprecationBridge\ExpectDeprecationTrait;
++use PHPUnit\Framework\TestCase;
++use Prophecy\PhpUnit\ProphecyTrait;
++use Prophecy\Prophet;
++use Symfony\Component\DependencyInjection\Argument\IteratorArgument;
++use Symfony\Component\DependencyInjection\Argument\ServiceClosureArgument;
++use Symfony\Component\DependencyInjection\ContainerInterface;
++use Symfony\Component\DependencyInjection\Definition;
++use Symfony\Component\DependencyInjection\Exception\InvalidArgumentException;
++use Symfony\Component\DependencyInjection\Exception\RuntimeException;
++use Symfony\Component\DependencyInjection\Parameter;
++use Symfony\Component\DependencyInjection\ParameterBag\ParameterBag;
++use Symfony\Component\DependencyInjection\Reference;
++use Symfony\Component\ExpressionLanguage\Expression;
+ 
+-  /**
+-   * @coversDefaultClass \Drupal\Component\DependencyInjection\Dumper\OptimizedPhpArrayDumper
+-   * @group DependencyInjection
+-   */
+-  class OptimizedPhpArrayDumperTest extends TestCase {
+-
+-    use ExpectDeprecationTrait;
+-    use ProphecyTrait;
++/**
++ * @coversDefaultClass \Drupal\Component\DependencyInjection\Dumper\OptimizedPhpArrayDumper
++ * @group DependencyInjection
++ */
++class OptimizedPhpArrayDumperTest extends TestCase {
+ 
+-    /**
+-     * The container builder instance.
+-     *
+-     * @var \Symfony\Component\DependencyInjection\ContainerBuilder
+-     */
+-    protected $containerBuilder;
++  use ExpectDeprecationTrait;
++  use ProphecyTrait;
+ 
+-    /**
+-     * The definition for the container to build in tests.
+-     *
+-     * @var array
+-     */
+-    protected $containerDefinition;
+-
+-    /**
+-     * Whether the dumper uses the machine-optimized format or not.
+-     *
+-     * @var bool
+-     */
+-    protected $machineFormat = TRUE;
++  /**
++   * The container builder instance.
++   *
++   * @var \Symfony\Component\DependencyInjection\ContainerBuilder
++   */
++  protected $containerBuilder;
+ 
+-    /**
+-     * Stores the dumper class to use.
+-     *
+-     * @var string
+-     */
+-    protected $dumperClass = '\Drupal\Component\DependencyInjection\Dumper\OptimizedPhpArrayDumper';
++  /**
++   * The definition for the container to build in tests.
++   *
++   * @var array
++   */
++  protected $containerDefinition;
+ 
+-    /**
+-     * The dumper instance.
+-     *
+-     * @var \Symfony\Component\DependencyInjection\Dumper\DumperInterface
+-     */
+-    protected $dumper;
++  /**
++   * Whether the dumper uses the machine-optimized format or not.
++   *
++   * @var bool
++   */
++  protected $machineFormat = TRUE;
+ 
+-    /**
+-     * {@inheritdoc}
+-     */
+-    protected function setUp(): void {
+-      // Setup a mock container builder.
+-      $this->containerBuilder = $this->prophesize('\Symfony\Component\DependencyInjection\ContainerBuilder');
+-      $this->containerBuilder->getAliases()->willReturn([]);
+-      $this->containerBuilder->getParameterBag()->willReturn(new ParameterBag());
+-      $this->containerBuilder->getDefinitions()->willReturn([]);
+-      $this->containerBuilder->isCompiled()->willReturn(TRUE);
+-
+-      $definition = [];
+-      $definition['aliases'] = [];
+-      $definition['parameters'] = [];
+-      $definition['services'] = [];
+-      $definition['frozen'] = TRUE;
+-      $definition['machine_format'] = $this->machineFormat;
+-
+-      $this->containerDefinition = $definition;
+-
+-      // Create the dumper.
+-      $this->dumper = new $this->dumperClass($this->containerBuilder->reveal());
+-    }
++  /**
++   * Stores the dumper class to use.
++   *
++   * @var string
++   */
++  protected $dumperClass = '\Drupal\Component\DependencyInjection\Dumper\OptimizedPhpArrayDumper';
+ 
+-    /**
+-     * Tests that an empty container works properly.
+-     *
+-     * @covers ::dump
+-     * @covers ::getArray
+-     * @covers ::supportsMachineFormat
+-     */
+-    public function testDumpForEmptyContainer() {
+-      $serialized_definition = $this->dumper->dump();
+-      $this->assertEquals(serialize($this->containerDefinition), $serialized_definition);
+-    }
++  /**
++   * The dumper instance.
++   *
++   * @var \Symfony\Component\DependencyInjection\Dumper\DumperInterface
++   */
++  protected $dumper;
+ 
+-    /**
+-     * Tests that alias processing works properly.
+-     *
+-     * @covers ::getAliases
+-     *
+-     * @dataProvider getAliasesDataProvider
+-     */
+-    public function testGetAliases($aliases, $definition_aliases) {
+-      $this->containerDefinition['aliases'] = $definition_aliases;
+-      $this->containerBuilder->getAliases()->willReturn($aliases);
+-      $this->assertEquals($this->containerDefinition, $this->dumper->getArray(), 'Expected definition matches dump.');
+-    }
++  /**
++   * {@inheritdoc}
++   */
++  protected function setUp(): void {
++    // Setup a mock container builder.
++    $this->containerBuilder = $this->prophesize('\Symfony\Component\DependencyInjection\ContainerBuilder');
++    $this->containerBuilder->getAliases()->willReturn([]);
++    $this->containerBuilder->getParameterBag()->willReturn(new ParameterBag());
++    $this->containerBuilder->getDefinitions()->willReturn([]);
++    $this->containerBuilder->isCompiled()->willReturn(TRUE);
 +
-+    // Create a config installer with the logger prophecy.
-+    $configInstaller = new ConfigInstaller(
-+      \Drupal::service('config.factory'),
-+      \Drupal::service('config.storage'),
-+      \Drupal::service('config.typed'),
-+      \Drupal::service('config.manager'),
-+      \Drupal::service('event_dispatcher'),
-+      \Drupal::getContainer()->getParameter('install_profile'),
-+      \Drupal::service('extension.path.resolver'),
-+      $loggerClosure,
-+    );
++    $definition = [];
++    $definition['aliases'] = [];
++    $definition['parameters'] = [];
++    $definition['services'] = [];
++    $definition['frozen'] = TRUE;
++    $definition['machine_format'] = $this->machineFormat;
 +
-+    // Try installing the mismatching configuration.
-+    $configInstaller->installDefaultConfig('module', 'config_test_id_mismatch');
++    $this->containerDefinition = $definition;
++
++    // Create the dumper.
++    $this->dumper = new $this->dumperClass($this->containerBuilder->reveal());
++  }
+ 
+-    /**
+-     * Data provider for testGetAliases().
+-     *
+-     * @return array[]
+-     *   Returns data-set elements with:
+-     *     - aliases as returned by ContainerBuilder.
+-     *     - aliases as expected in the container definition.
+-     */
+-    public static function getAliasesDataProvider() {
+-      return [
+-        [[], []],
+-        [
+-          ['foo' => 'foo.alias'],
+-          ['foo' => 'foo.alias'],
+-        ],
+-        [
+-          ['foo' => 'foo.alias', 'foo.alias' => 'foo.alias.alias'],
+-          ['foo' => 'foo.alias.alias', 'foo.alias' => 'foo.alias.alias'],
+-        ],
+-      ];
+-    }
++  /**
++   * Tests that an empty container works properly.
++   *
++   * @covers ::dump
++   * @covers ::getArray
++   * @covers ::supportsMachineFormat
++   */
++  public function testDumpForEmptyContainer() {
++    $serialized_definition = $this->dumper->dump();
++    $this->assertEquals(serialize($this->containerDefinition), $serialized_definition);
++  }
+ 
+-    /**
+-     * Tests that parameter processing works properly.
+-     *
+-     * @covers ::getParameters
+-     * @covers ::prepareParameters
+-     * @covers ::escape
+-     * @covers ::dumpValue
+-     * @covers ::getReferenceCall
+-     *
+-     * @dataProvider getParametersDataProvider
+-     */
+-    public function testGetParameters($parameters, $definition_parameters, $is_frozen) {
+-      $this->containerDefinition['parameters'] = $definition_parameters;
+-      $this->containerDefinition['frozen'] = $is_frozen;
++  /**
++   * Tests that alias processing works properly.
++   *
++   * @covers ::getAliases
++   *
++   * @dataProvider getAliasesDataProvider
++   */
++  public function testGetAliases($aliases, $definition_aliases) {
++    $this->containerDefinition['aliases'] = $definition_aliases;
++    $this->containerBuilder->getAliases()->willReturn($aliases);
++    $this->assertEquals($this->containerDefinition, $this->dumper->getArray(), 'Expected definition matches dump.');
++  }
+ 
+-      $parameter_bag = new ParameterBag($parameters);
+-      $this->containerBuilder->getParameterBag()->willReturn($parameter_bag);
+-      $this->containerBuilder->isCompiled()->willReturn($is_frozen);
++  /**
++   * Data provider for testGetAliases().
++   *
++   * @return array[]
++   *   Returns data-set elements with:
++   *     - aliases as returned by ContainerBuilder.
++   *     - aliases as expected in the container definition.
++   */
++  public static function getAliasesDataProvider() {
++    return [
++      [[], []],
++      [
++        ['foo' => 'foo.alias'],
++        ['foo' => 'foo.alias'],
++      ],
++      [
++        ['foo' => 'foo.alias', 'foo.alias' => 'foo.alias.alias'],
++        ['foo' => 'foo.alias.alias', 'foo.alias' => 'foo.alias.alias'],
++      ],
++    ];
++  }
+ 
+-      $this->assertEquals($this->containerDefinition, $this->dumper->getArray(), 'Expected definition matches dump.');
+-    }
++  /**
++   * Tests that parameter processing works properly.
++   *
++   * @covers ::getParameters
++   * @covers ::prepareParameters
++   * @covers ::escape
++   * @covers ::dumpValue
++   * @covers ::getReferenceCall
++   *
++   * @dataProvider getParametersDataProvider
++   */
++  public function testGetParameters($parameters, $definition_parameters, $is_frozen) {
++    $this->containerDefinition['parameters'] = $definition_parameters;
++    $this->containerDefinition['frozen'] = $is_frozen;
+ 
+-    /**
+-     * Data provider for testGetParameters().
+-     *
+-     * @return array[]
+-     *   Returns data-set elements with:
+-     *     - parameters as returned by ContainerBuilder.
+-     *     - parameters as expected in the container definition.
+-     *     - frozen value
+-     */
+-    public static function getParametersDataProvider() {
+-      return [
+-        [[], [], TRUE],
+-        [
+-          ['foo' => 'value_foo'],
+-          ['foo' => 'value_foo'],
+-          TRUE,
+-        ],
+-        [
+-          ['foo' => ['llama' => 'yes']],
+-          ['foo' => ['llama' => 'yes']],
+-          TRUE,
+-        ],
+-        [
+-          ['foo' => '%llama%', 'llama' => 'yes'],
+-          ['foo' => '%%llama%%', 'llama' => 'yes'],
+-          TRUE,
+-        ],
+-        [
+-          ['foo' => '%llama%', 'llama' => 'yes'],
+-          ['foo' => '%llama%', 'llama' => 'yes'],
+-          FALSE,
+-        ],
+-      ];
+-    }
++    $parameter_bag = new ParameterBag($parameters);
++    $this->containerBuilder->getParameterBag()->willReturn($parameter_bag);
++    $this->containerBuilder->isCompiled()->willReturn($is_frozen);
+ 
+-    /**
+-     * Tests that service processing works properly.
+-     *
+-     * @covers ::getServiceDefinitions
+-     * @covers ::getServiceDefinition
+-     * @covers ::dumpMethodCalls
+-     * @covers ::dumpCollection
+-     * @covers ::dumpCallable
+-     * @covers ::dumpValue
+-     * @covers ::getPrivateServiceCall
+-     * @covers ::getReferenceCall
+-     * @covers ::getServiceCall
+-     * @covers ::getServiceClosureCall
+-     * @covers ::getParameterCall
+-     *
+-     * @dataProvider getDefinitionsDataProvider
+-     */
+-    public function testGetServiceDefinitions($services, $definition_services) {
+-      $this->containerDefinition['services'] = $definition_services;
++    $this->assertEquals($this->containerDefinition, $this->dumper->getArray(), 'Expected definition matches dump.');
++  }
+ 
+-      $this->containerBuilder->getDefinitions()->willReturn($services);
++  /**
++   * Data provider for testGetParameters().
++   *
++   * @return array[]
++   *   Returns data-set elements with:
++   *     - parameters as returned by ContainerBuilder.
++   *     - parameters as expected in the container definition.
++   *     - frozen value
++   */
++  public static function getParametersDataProvider() {
++    return [
++      [[], [], TRUE],
++      [
++        ['foo' => 'value_foo'],
++        ['foo' => 'value_foo'],
++        TRUE,
++      ],
++      [
++        ['foo' => ['llama' => 'yes']],
++        ['foo' => ['llama' => 'yes']],
++        TRUE,
++      ],
++      [
++        ['foo' => '%llama%', 'llama' => 'yes'],
++        ['foo' => '%%llama%%', 'llama' => 'yes'],
++        TRUE,
++      ],
++      [
++        ['foo' => '%llama%', 'llama' => 'yes'],
++        ['foo' => '%llama%', 'llama' => 'yes'],
++        FALSE,
++      ],
++    ];
++  }
+ 
+-      $bar_definition = new Definition('\stdClass');
+-      $bar_definition->setPublic(TRUE);
+-      $this->containerBuilder->getDefinition('bar')->willReturn($bar_definition);
++  /**
++   * Tests that service processing works properly.
++   *
++   * @covers ::getServiceDefinitions
++   * @covers ::getServiceDefinition
++   * @covers ::dumpMethodCalls
++   * @covers ::dumpCollection
++   * @covers ::dumpCallable
++   * @covers ::dumpValue
++   * @covers ::getPrivateServiceCall
++   * @covers ::getReferenceCall
++   * @covers ::getServiceCall
++   * @covers ::getServiceClosureCall
++   * @covers ::getParameterCall
++   *
++   * @dataProvider getDefinitionsDataProvider
++   */
++  public function testGetServiceDefinitions($services, $definition_services) {
++    $this->containerDefinition['services'] = $definition_services;
+ 
+-      $private_definition = new Definition('\stdClass');
+-      $private_definition->setPublic(FALSE);
++    $this->containerBuilder->getDefinitions()->willReturn($services);
+ 
+-      $this->containerBuilder->getDefinition('private_definition')->willReturn($private_definition);
++    $bar_definition = new Definition('\stdClass');
++    $bar_definition->setPublic(TRUE);
++    $this->containerBuilder->getDefinition('bar')->willReturn($bar_definition);
+ 
+-      $this->assertEquals($this->containerDefinition, $this->dumper->getArray(), 'Expected definition matches dump.');
+-    }
++    $private_definition = new Definition('\stdClass');
++    $private_definition->setPublic(FALSE);
+ 
+-    /**
+-     * Data provider for testGetServiceDefinitions().
+-     *
+-     * @return array[]
+-     *   Returns data-set elements with:
+-     *     - parameters as returned by ContainerBuilder.
+-     *     - parameters as expected in the container definition.
+-     *     - frozen value
+-     */
+-    public static function getDefinitionsDataProvider() {
+-      $base_service_definition = [
+-        'class' => '\stdClass',
+-        'public' => TRUE,
+-        'file' => FALSE,
+-        'synthetic' => FALSE,
+-        'lazy' => FALSE,
+-        'arguments' => [],
+-        'arguments_count' => 0,
+-        'properties' => [],
+-        'calls' => [],
+-        'shared' => TRUE,
+-        'factory' => FALSE,
+-        'configurator' => FALSE,
+-      ];
++    $this->containerBuilder->getDefinition('private_definition')->willReturn($private_definition);
+ 
+-      // Test basic flags.
+-      $service_definitions[] = [] + $base_service_definition;
+-
+-      $service_definitions[] = [
+-        'public' => FALSE,
+-      ] + $base_service_definition;
+-
+-      $service_definitions[] = [
+-        'file' => 'test_include.php',
+-      ] + $base_service_definition;
+-
+-      $service_definitions[] = [
+-        'synthetic' => TRUE,
+-      ] + $base_service_definition;
+-
+-      $service_definitions[] = [
+-        'shared' => FALSE,
+-      ] + $base_service_definition;
+-
+-      $service_definitions[] = [
+-        'lazy' => TRUE,
+-      ] + $base_service_definition;
+-
+-      // Test a basic public Reference.
+-      $service_definitions[] = [
+-        'arguments' => ['foo', new Reference('bar')],
+-        'arguments_count' => 2,
+-        'arguments_expected' => static::getCollection(['foo', static::getServiceCall('bar')]),
+-      ] + $base_service_definition;
+-
+-      // Test a public reference that should not throw an Exception.
+-      $reference = new Reference('bar', ContainerInterface::NULL_ON_INVALID_REFERENCE);
+-      $service_definitions[] = [
+-        'arguments' => [$reference],
+-        'arguments_count' => 1,
+-        'arguments_expected' => static::getCollection([static::getServiceCall('bar', ContainerInterface::NULL_ON_INVALID_REFERENCE)]),
+-      ] + $base_service_definition;
+-
+-      // Test a private shared service, denoted by having a Reference.
+-      $private_definition = [
+-        'class' => '\stdClass',
+-        'public' => FALSE,
+-        'arguments_count' => 0,
+-      ];
++    $this->assertEquals($this->containerDefinition, $this->dumper->getArray(), 'Expected definition matches dump.');
++  }
+ 
+-      $service_definitions[] = [
+-        'arguments' => ['foo', new Reference('private_definition')],
+-        'arguments_count' => 2,
+-        'arguments_expected' => static::getCollection([
+-          'foo',
+-          static::getPrivateServiceCall('private_definition', $private_definition, TRUE),
+-        ]),
+-      ] + $base_service_definition;
+-
+-      // Test a service closure.
+-      $service_definitions[] = [
+-        'arguments' => [
+-          'foo',
+-          [
+-            'alias-1' => new ServiceClosureArgument(new Reference('bar', ContainerInterface::NULL_ON_INVALID_REFERENCE)),
+-            'alias-2' => new ServiceClosureArgument(new Reference('bar', ContainerInterface::EXCEPTION_ON_INVALID_REFERENCE)),
+-          ],
++  /**
++   * Data provider for testGetServiceDefinitions().
++   *
++   * @return array[]
++   *   Returns data-set elements with:
++   *     - parameters as returned by ContainerBuilder.
++   *     - parameters as expected in the container definition.
++   *     - frozen value
++   */
++  public static function getDefinitionsDataProvider() {
++    $base_service_definition = [
++      'class' => '\stdClass',
++      'public' => TRUE,
++      'file' => FALSE,
++      'synthetic' => FALSE,
++      'lazy' => FALSE,
++      'arguments' => [],
++      'arguments_count' => 0,
++      'properties' => [],
++      'calls' => [],
++      'shared' => TRUE,
++      'factory' => FALSE,
++      'configurator' => FALSE,
++    ];
++
++    // Test basic flags.
++    $service_definitions[] = [] + $base_service_definition;
++
++    $service_definitions[] = [
++      'public' => FALSE,
++    ] + $base_service_definition;
++
++    $service_definitions[] = [
++      'file' => 'test_include.php',
++    ] + $base_service_definition;
++
++    $service_definitions[] = [
++      'synthetic' => TRUE,
++    ] + $base_service_definition;
++
++    $service_definitions[] = [
++      'shared' => FALSE,
++    ] + $base_service_definition;
++
++    $service_definitions[] = [
++      'lazy' => TRUE,
++    ] + $base_service_definition;
++
++    // Test a basic public Reference.
++    $service_definitions[] = [
++      'arguments' => ['foo', new Reference('bar')],
++      'arguments_count' => 2,
++      'arguments_expected' => static::getCollection(['foo', static::getServiceCall('bar')]),
++    ] + $base_service_definition;
++
++    // Test a public reference that should not throw an Exception.
++    $reference = new Reference('bar', ContainerInterface::NULL_ON_INVALID_REFERENCE);
++    $service_definitions[] = [
++      'arguments' => [$reference],
++      'arguments_count' => 1,
++      'arguments_expected' => static::getCollection([static::getServiceCall('bar', ContainerInterface::NULL_ON_INVALID_REFERENCE)]),
++    ] + $base_service_definition;
++
++    // Test a private shared service, denoted by having a Reference.
++    $private_definition = [
++      'class' => '\stdClass',
++      'public' => FALSE,
++      'arguments_count' => 0,
++    ];
++
++    $service_definitions[] = [
++      'arguments' => ['foo', new Reference('private_definition')],
++      'arguments_count' => 2,
++      'arguments_expected' => static::getCollection([
++        'foo',
++        static::getPrivateServiceCall('private_definition', $private_definition, TRUE),
++      ]),
++    ] + $base_service_definition;
++
++    // Test a service closure.
++    $service_definitions[] = [
++      'arguments' => [
++        'foo',
++        [
++          'alias-1' => new ServiceClosureArgument(new Reference('bar', ContainerInterface::NULL_ON_INVALID_REFERENCE)),
++          'alias-2' => new ServiceClosureArgument(new Reference('bar', ContainerInterface::EXCEPTION_ON_INVALID_REFERENCE)),
+         ],
+-        'arguments_count' => 2,
+-        'arguments_expected' => static::getCollection([
+-          'foo',
+-          static::getCollection([
+-            'alias-1' => static::getServiceClosureCall('bar', ContainerInterface::NULL_ON_INVALID_REFERENCE),
+-            'alias-2' => static::getServiceClosureCall('bar', ContainerInterface::EXCEPTION_ON_INVALID_REFERENCE),
+-          ]),
+-        ]),
+-      ] + $base_service_definition;
+-
+-      // Test a private non-shared service, denoted by having a Definition.
+-      $private_definition_object = new Definition('\stdClass');
+-      $private_definition_object->setPublic(FALSE);
+-
+-      $service_definitions[] = [
+-        'arguments' => ['foo', $private_definition_object],
+-        'arguments_count' => 2,
+-        'arguments_expected' => static::getCollection([
+-          'foo',
+-          static::getPrivateServiceCall(NULL, $private_definition),
++      ],
++      'arguments_count' => 2,
++      'arguments_expected' => static::getCollection([
++        'foo',
++        static::getCollection([
++          'alias-1' => static::getServiceClosureCall('bar', ContainerInterface::NULL_ON_INVALID_REFERENCE),
++          'alias-2' => static::getServiceClosureCall('bar', ContainerInterface::EXCEPTION_ON_INVALID_REFERENCE),
+         ]),
+-      ] + $base_service_definition;
+-
+-      // Test a deep collection without a reference.
+-      $service_definitions[] = [
+-        'arguments' => [[['foo']]],
+-        'arguments_count' => 1,
+-      ] + $base_service_definition;
+-
+-      // Test a deep collection with a reference to resolve.
+-      $service_definitions[] = [
+-        'arguments' => [[new Reference('bar')]],
+-        'arguments_count' => 1,
+-        'arguments_expected' => static::getCollection([static::getCollection([static::getServiceCall('bar')])]),
+-      ] + $base_service_definition;
+-
+-      // Test an IteratorArgument collection with a reference to resolve.
+-      $service_definitions[] = [
+-        'arguments' => [new IteratorArgument([new Reference('bar')])],
+-        'arguments_count' => 1,
+-        'arguments_expected' => static::getCollection([static::getIterator([static::getServiceCall('bar')])]),
+-      ] + $base_service_definition;
+-
+-      // Test a collection with a variable to resolve.
+-      $service_definitions[] = [
+-        'arguments' => [new Parameter('llama_parameter')],
+-        'arguments_count' => 1,
+-        'arguments_expected' => static::getCollection([static::getParameterCall('llama_parameter')]),
+-      ] + $base_service_definition;
+-
+-      // Test getMethodCalls.
+-      $calls = [
+-        ['method', static::getCollection([])],
+-        ['method2', static::getCollection([])],
+-      ];
+-      $service_definitions[] = [
+-        'calls' => $calls,
+-      ] + $base_service_definition;
+-
+-      $service_definitions[] = [
+-        'shared' => FALSE,
+-      ] + $base_service_definition;
+-
+-      // Test factory.
+-      $service_definitions[] = [
+-        'factory' => [new Reference('bar'), 'factoryMethod'],
+-        'factory_expected' => [static::getServiceCall('bar'), 'factoryMethod'],
+-      ] + $base_service_definition;
+-
+-      // Test invalid factory - needed to test deep dumpValue().
+-      $service_definitions[] = [
+-        'factory' => [['foo', 'llama'], 'factoryMethod'],
+-      ] + $base_service_definition;
+-
+-      // Test properties.
+-      $service_definitions[] = [
+-        'properties' => ['_value' => 'llama'],
+-      ] + $base_service_definition;
+-
+-      // Test configurator.
+-      $service_definitions[] = [
+-        'configurator' => [new Reference('bar'), 'configureService'],
+-        'configurator_expected' => [static::getServiceCall('bar'), 'configureService'],
+-      ] + $base_service_definition;
+-
+-      $services_provided = [];
+-      $services_provided[] = [
+-        [],
+-        [],
+-      ];
+-
+-      foreach ($service_definitions as $service_definition) {
+-        $definition = (new Prophet())->prophesize('\Symfony\Component\DependencyInjection\Definition');
+-        $definition->getClass()->willReturn($service_definition['class']);
+-        $definition->isPublic()->willReturn($service_definition['public']);
+-        $definition->getFile()->willReturn($service_definition['file']);
+-        $definition->isSynthetic()->willReturn($service_definition['synthetic']);
+-        $definition->isLazy()->willReturn($service_definition['lazy']);
+-        $definition->getArguments()->willReturn($service_definition['arguments']);
+-        $definition->getProperties()->willReturn($service_definition['properties']);
+-        $definition->getMethodCalls()->willReturn($service_definition['calls']);
+-        $definition->isShared()->willReturn($service_definition['shared']);
+-        $definition->getDecoratedService()->willReturn(NULL);
+-        $definition->getFactory()->willReturn($service_definition['factory']);
+-        $definition->getConfigurator()->willReturn($service_definition['configurator']);
+-
+-        // Preserve order.
+-        $filtered_service_definition = [];
+-        foreach ($base_service_definition as $key => $value) {
+-          $filtered_service_definition[$key] = $service_definition[$key];
+-          unset($service_definition[$key]);
+-
+-          if ($key == 'class' || $key == 'arguments_count') {
+-            continue;
+-          }
+-
+-          if ($filtered_service_definition[$key] === $base_service_definition[$key]) {
+-            unset($filtered_service_definition[$key]);
+-          }
++      ]),
++    ] + $base_service_definition;
++
++    // Test a private non-shared service, denoted by having a Definition.
++    $private_definition_object = new Definition('\stdClass');
++    $private_definition_object->setPublic(FALSE);
++
++    $service_definitions[] = [
++      'arguments' => ['foo', $private_definition_object],
++      'arguments_count' => 2,
++      'arguments_expected' => static::getCollection([
++        'foo',
++        static::getPrivateServiceCall(NULL, $private_definition),
++      ]),
++    ] + $base_service_definition;
++
++    // Test a deep collection without a reference.
++    $service_definitions[] = [
++      'arguments' => [[['foo']]],
++      'arguments_count' => 1,
++    ] + $base_service_definition;
++
++    // Test a deep collection with a reference to resolve.
++    $service_definitions[] = [
++      'arguments' => [[new Reference('bar')]],
++      'arguments_count' => 1,
++      'arguments_expected' => static::getCollection([static::getCollection([static::getServiceCall('bar')])]),
++    ] + $base_service_definition;
++
++    // Test an IteratorArgument collection with a reference to resolve.
++    $service_definitions[] = [
++      'arguments' => [new IteratorArgument([new Reference('bar')])],
++      'arguments_count' => 1,
++      'arguments_expected' => static::getCollection([static::getIterator([static::getServiceCall('bar')])]),
++    ] + $base_service_definition;
++
++    // Test a collection with a variable to resolve.
++    $service_definitions[] = [
++      'arguments' => [new Parameter('llama_parameter')],
++      'arguments_count' => 1,
++      'arguments_expected' => static::getCollection([static::getParameterCall('llama_parameter')]),
++    ] + $base_service_definition;
++
++    // Test getMethodCalls.
++    $calls = [
++      ['method', static::getCollection([])],
++      ['method2', static::getCollection([])],
++    ];
++    $service_definitions[] = [
++      'calls' => $calls,
++    ] + $base_service_definition;
++
++    $service_definitions[] = [
++      'shared' => FALSE,
++    ] + $base_service_definition;
++
++    // Test factory.
++    $service_definitions[] = [
++      'factory' => [new Reference('bar'), 'factoryMethod'],
++      'factory_expected' => [static::getServiceCall('bar'), 'factoryMethod'],
++    ] + $base_service_definition;
++
++    // Test invalid factory - needed to test deep dumpValue().
++    $service_definitions[] = [
++      'factory' => [['foo', 'llama'], 'factoryMethod'],
++    ] + $base_service_definition;
++
++    // Test properties.
++    $service_definitions[] = [
++      'properties' => ['_value' => 'llama'],
++    ] + $base_service_definition;
++
++    // Test configurator.
++    $service_definitions[] = [
++      'configurator' => [new Reference('bar'), 'configureService'],
++      'configurator_expected' => [static::getServiceCall('bar'), 'configureService'],
++    ] + $base_service_definition;
++
++    $services_provided = [];
++    $services_provided[] = [
++      [],
++      [],
++    ];
++
++    foreach ($service_definitions as $service_definition) {
++      $definition = (new Prophet())->prophesize('\Symfony\Component\DependencyInjection\Definition');
++      $definition->getClass()->willReturn($service_definition['class']);
++      $definition->isPublic()->willReturn($service_definition['public']);
++      $definition->getFile()->willReturn($service_definition['file']);
++      $definition->isSynthetic()->willReturn($service_definition['synthetic']);
++      $definition->isLazy()->willReturn($service_definition['lazy']);
++      $definition->getArguments()->willReturn($service_definition['arguments']);
++      $definition->getProperties()->willReturn($service_definition['properties']);
++      $definition->getMethodCalls()->willReturn($service_definition['calls']);
++      $definition->isShared()->willReturn($service_definition['shared']);
++      $definition->getDecoratedService()->willReturn(NULL);
++      $definition->getFactory()->willReturn($service_definition['factory']);
++      $definition->getConfigurator()->willReturn($service_definition['configurator']);
++
++      // Preserve order.
++      $filtered_service_definition = [];
++      foreach ($base_service_definition as $key => $value) {
++        $filtered_service_definition[$key] = $service_definition[$key];
++        unset($service_definition[$key]);
++
++        if ($key == 'class' || $key == 'arguments_count') {
++          continue;
+         }
+ 
+-        // Add remaining properties.
+-        $filtered_service_definition += $service_definition;
+-
+-        // Allow to set _expected values.
+-        foreach (['arguments', 'factory', 'configurator'] as $key) {
+-          $expected = $key . '_expected';
+-          if (isset($filtered_service_definition[$expected])) {
+-            $filtered_service_definition[$key] = $filtered_service_definition[$expected];
+-            unset($filtered_service_definition[$expected]);
+-          }
++        if ($filtered_service_definition[$key] === $base_service_definition[$key]) {
++          unset($filtered_service_definition[$key]);
+         }
++      }
+ 
+-        if (isset($filtered_service_definition['public']) && $filtered_service_definition['public'] === FALSE) {
+-          $services_provided[] = [
+-            ['foo_service' => $definition->reveal()],
+-            [],
+-          ];
+-          continue;
++      // Add remaining properties.
++      $filtered_service_definition += $service_definition;
++
++      // Allow to set _expected values.
++      foreach (['arguments', 'factory', 'configurator'] as $key) {
++        $expected = $key . '_expected';
++        if (isset($filtered_service_definition[$expected])) {
++          $filtered_service_definition[$key] = $filtered_service_definition[$expected];
++          unset($filtered_service_definition[$expected]);
+         }
++      }
+ 
++      if (isset($filtered_service_definition['public']) && $filtered_service_definition['public'] === FALSE) {
+         $services_provided[] = [
+           ['foo_service' => $definition->reveal()],
+-          ['foo_service' => static::serializeDefinition($filtered_service_definition)],
++          [],
+         ];
++        continue;
+       }
+ 
+-      return $services_provided;
+-    }
+-
+-    /**
+-     * Helper function to serialize a definition.
+-     *
+-     * Used to override serialization.
+-     */
+-    protected static function serializeDefinition(array $service_definition) {
+-      return serialize($service_definition);
+-    }
+-
+-    /**
+-     * Helper function to return a service definition.
+-     */
+-    protected static function getServiceCall($id, $invalid_behavior = ContainerInterface::EXCEPTION_ON_INVALID_REFERENCE) {
+-      return (object) [
+-        'type' => 'service',
+-        'id' => $id,
+-        'invalidBehavior' => $invalid_behavior,
++      $services_provided[] = [
++        ['foo_service' => $definition->reveal()],
++        ['foo_service' => static::serializeDefinition($filtered_service_definition)],
+       ];
+     }
+ 
+-    /**
+-     * Helper function to return a service closure definition.
+-     */
+-    protected static function getServiceClosureCall($id, $invalid_behavior = ContainerInterface::EXCEPTION_ON_INVALID_REFERENCE) {
+-      return (object) [
+-        'type' => 'service_closure',
+-        'id' => $id,
+-        'invalidBehavior' => $invalid_behavior,
+-      ];
+-    }
++    return $services_provided;
++  }
+ 
+-    /**
+-     * Tests that references to aliases work correctly.
+-     *
+-     * @covers ::getReferenceCall
+-     *
+-     * @dataProvider publicPrivateDataProvider
+-     */
+-    public function testGetServiceDefinitionWithReferenceToAlias($public) {
+-      $bar_definition = new Definition('\stdClass');
+-      $bar_definition_php_array = [
+-        'class' => '\stdClass',
+-      ];
+-      if ($public) {
+-        $bar_definition->setPublic(TRUE);
+-      }
+-      else {
+-        $bar_definition->setPublic(FALSE);
+-        $bar_definition_php_array['public'] = FALSE;
+-      }
+-      $bar_definition_php_array['arguments_count'] = 0;
++  /**
++   * Helper function to serialize a definition.
++   *
++   * Used to override serialization.
++   */
++  protected static function serializeDefinition(array $service_definition) {
++    return serialize($service_definition);
++  }
+ 
+-      $services['bar'] = $bar_definition;
++  /**
++   * Helper function to return a service definition.
++   */
++  protected static function getServiceCall($id, $invalid_behavior = ContainerInterface::EXCEPTION_ON_INVALID_REFERENCE) {
++    return (object) [
++      'type' => 'service',
++      'id' => $id,
++      'invalidBehavior' => $invalid_behavior,
++    ];
++  }
+ 
+-      $aliases['bar.alias'] = 'bar';
++  /**
++   * Helper function to return a service closure definition.
++   */
++  protected static function getServiceClosureCall($id, $invalid_behavior = ContainerInterface::EXCEPTION_ON_INVALID_REFERENCE) {
++    return (object) [
++      'type' => 'service_closure',
++      'id' => $id,
++      'invalidBehavior' => $invalid_behavior,
++    ];
++  }
+ 
+-      $foo = new Definition('\stdClass');
+-      $foo->setPublic(TRUE);
+-      $foo->addArgument(new Reference('bar.alias'));
++  /**
++   * Tests that references to aliases work correctly.
++   *
++   * @covers ::getReferenceCall
++   *
++   * @dataProvider publicPrivateDataProvider
++   */
++  public function testGetServiceDefinitionWithReferenceToAlias($public) {
++    $bar_definition = new Definition('\stdClass');
++    $bar_definition_php_array = [
++      'class' => '\stdClass',
++    ];
++    if ($public) {
++      $bar_definition->setPublic(TRUE);
++    }
++    else {
++      $bar_definition->setPublic(FALSE);
++      $bar_definition_php_array['public'] = FALSE;
++    }
++    $bar_definition_php_array['arguments_count'] = 0;
+ 
+-      $services['foo'] = $foo;
++    $services['bar'] = $bar_definition;
+ 
+-      $this->containerBuilder->getAliases()->willReturn($aliases);
+-      $this->containerBuilder->getDefinitions()->willReturn($services);
+-      $this->containerBuilder->getDefinition('bar')->willReturn($bar_definition);
+-      $dump = $this->dumper->getArray();
+-      if ($public) {
+-        $service_definition = static::getServiceCall('bar');
+-      }
+-      else {
+-        $service_definition = static::getPrivateServiceCall('bar', $bar_definition_php_array, TRUE);
+-      }
+-      $data = [
+-        'class' => '\stdClass',
+-        'arguments' => static::getCollection([
+-          $service_definition,
+-        ]),
+-        'arguments_count' => 1,
+-      ];
+-      $this->assertEquals(static::serializeDefinition($data), $dump['services']['foo'], 'Expected definition matches dump.');
+-    }
++    $aliases['bar.alias'] = 'bar';
+ 
+-    public static function publicPrivateDataProvider() {
+-      return [
+-        [TRUE],
+-        [FALSE],
+-      ];
+-    }
++    $foo = new Definition('\stdClass');
++    $foo->setPublic(TRUE);
++    $foo->addArgument(new Reference('bar.alias'));
+ 
+-    /**
+-     * Tests that getDecoratedService() is unsupported.
+-     *
+-     * Tests that the correct InvalidArgumentException is thrown for
+-     * getDecoratedService().
+-     *
+-     * @covers ::getServiceDefinition
+-     */
+-    public function testGetServiceDefinitionForDecoratedService() {
+-      $bar_definition = new Definition('\stdClass');
+-      $bar_definition->setPublic(TRUE);
+-      $bar_definition->setDecoratedService((string) new Reference('foo'));
+-      $services['bar'] = $bar_definition;
++    $services['foo'] = $foo;
+ 
+-      $this->containerBuilder->getDefinitions()->willReturn($services);
+-      $this->expectException(InvalidArgumentException::class);
+-      $this->dumper->getArray();
++    $this->containerBuilder->getAliases()->willReturn($aliases);
++    $this->containerBuilder->getDefinitions()->willReturn($services);
++    $this->containerBuilder->getDefinition('bar')->willReturn($bar_definition);
++    $dump = $this->dumper->getArray();
++    if ($public) {
++      $service_definition = static::getServiceCall('bar');
++    }
++    else {
++      $service_definition = static::getPrivateServiceCall('bar', $bar_definition_php_array, TRUE);
+     }
++    $data = [
++      'class' => '\stdClass',
++      'arguments' => static::getCollection([
++        $service_definition,
++      ]),
++      'arguments_count' => 1,
++    ];
++    $this->assertEquals(static::serializeDefinition($data), $dump['services']['foo'], 'Expected definition matches dump.');
++  }
+ 
+-    /**
+-     * Tests that the correct RuntimeException is thrown for expressions.
+-     *
+-     * @covers ::dumpValue
+-     */
+-    public function testGetServiceDefinitionForExpression() {
+-      $expression = new Expression('');
++  public static function publicPrivateDataProvider() {
++    return [
++      [TRUE],
++      [FALSE],
++    ];
++  }
+ 
+-      $bar_definition = new Definition('\stdClass');
+-      $bar_definition->setPublic(TRUE);
+-      $bar_definition->addArgument($expression);
+-      $services['bar'] = $bar_definition;
++  /**
++   * Tests that getDecoratedService() is unsupported.
++   *
++   * Tests that the correct InvalidArgumentException is thrown for
++   * getDecoratedService().
++   *
++   * @covers ::getServiceDefinition
++   */
++  public function testGetServiceDefinitionForDecoratedService() {
++    $bar_definition = new Definition('\stdClass');
++    $bar_definition->setPublic(TRUE);
++    $bar_definition->setDecoratedService((string) new Reference('foo'));
++    $services['bar'] = $bar_definition;
++
++    $this->containerBuilder->getDefinitions()->willReturn($services);
++    $this->expectException(InvalidArgumentException::class);
++    $this->dumper->getArray();
++  }
+ 
+-      $this->containerBuilder->getDefinitions()->willReturn($services);
+-      $this->expectException(RuntimeException::class);
+-      $this->dumper->getArray();
+-    }
++  /**
++   * Tests that the correct RuntimeException is thrown for expressions.
++   *
++   * @covers ::dumpValue
++   */
++  public function testGetServiceDefinitionForExpression() {
++    $expression = new Expression('');
+ 
+-    /**
+-     * Tests that the correct RuntimeException is thrown for dumping an object.
+-     *
+-     * @covers ::dumpValue
+-     */
+-    public function testGetServiceDefinitionForObject() {
+-      $service = new \stdClass();
++    $bar_definition = new Definition('\stdClass');
++    $bar_definition->setPublic(TRUE);
++    $bar_definition->addArgument($expression);
++    $services['bar'] = $bar_definition;
+ 
+-      $bar_definition = new Definition('\stdClass');
+-      $bar_definition->setPublic(TRUE);
+-      $bar_definition->addArgument($service);
+-      $services['bar'] = $bar_definition;
++    $this->containerBuilder->getDefinitions()->willReturn($services);
++    $this->expectException(RuntimeException::class);
++    $this->dumper->getArray();
++  }
+ 
+-      $this->containerBuilder->getDefinitions()->willReturn($services);
+-      $this->expectException(RuntimeException::class);
+-      $this->dumper->getArray();
+-    }
++  /**
++   * Tests that the correct RuntimeException is thrown for dumping an object.
++   *
++   * @covers ::dumpValue
++   */
++  public function testGetServiceDefinitionForObject() {
++    $service = new \stdClass();
+ 
+-    /**
+-     * Tests that the correct RuntimeException is thrown for dumping a resource.
+-     *
+-     * @covers ::dumpValue
+-     */
+-    public function testGetServiceDefinitionForResource() {
+-      $resource = fopen('php://memory', 'r');
++    $bar_definition = new Definition('\stdClass');
++    $bar_definition->setPublic(TRUE);
++    $bar_definition->addArgument($service);
++    $services['bar'] = $bar_definition;
+ 
+-      $bar_definition = new Definition('\stdClass');
+-      $bar_definition->setPublic(TRUE);
+-      $bar_definition->addArgument($resource);
+-      $services['bar'] = $bar_definition;
++    $this->containerBuilder->getDefinitions()->willReturn($services);
++    $this->expectException(RuntimeException::class);
++    $this->dumper->getArray();
++  }
+ 
+-      $this->containerBuilder->getDefinitions()->willReturn($services);
+-      $this->expectException(RuntimeException::class);
+-      $this->dumper->getArray();
+-    }
++  /**
++   * Tests that the correct RuntimeException is thrown for dumping a resource.
++   *
++   * @covers ::dumpValue
++   */
++  public function testGetServiceDefinitionForResource() {
++    $resource = fopen('php://memory', 'r');
+ 
+-    /**
+-     * Tests that service arguments with escaped percents are correctly dumped.
+-     *
+-     * @dataProvider percentsEscapeProvider
+-     */
+-    public function testPercentsEscape($expected, $argument) {
+-      $definition = new Definition('\stdClass', [$argument]);
+-      $definition->setPublic(TRUE);
+-      $this->containerBuilder->getDefinitions()->willReturn([
+-        'test' => $definition,
+-      ]);
+-
+-      $dump = $this->dumper->getArray();
+-
+-      $this->assertEquals(static::serializeDefinition([
+-        'class' => '\stdClass',
+-        'arguments' => static::getCollection([
+-          $this->getRaw($expected),
+-        ]),
+-        'arguments_count' => 1,
+-      ]), $dump['services']['test']);
+-    }
++    $bar_definition = new Definition('\stdClass');
++    $bar_definition->setPublic(TRUE);
++    $bar_definition->addArgument($resource);
++    $services['bar'] = $bar_definition;
+ 
+-    /**
+-     * Data provider for testPercentsEscape().
+-     *
+-     * @return array[]
+-     *   Returns data-set elements with:
+-     *     - expected final value.
+-     *     - escaped value in service definition.
+-     */
+-    public static function percentsEscapeProvider() {
+-      return [
+-        ['%foo%', '%%foo%%'],
+-        ['foo%bar%', 'foo%%bar%%'],
+-        ['%foo%bar', '%%foo%%bar'],
+-        ['%', '%'],
+-        ['%', '%%'],
+-        ['%%', '%%%'],
+-        ['%%', '%%%%'],
+-      ];
+-    }
++    $this->containerBuilder->getDefinitions()->willReturn($services);
++    $this->expectException(RuntimeException::class);
++    $this->dumper->getArray();
++  }
+ 
+-    /**
+-     * Helper function to return a private service definition.
+-     */
+-    protected static function getPrivateServiceCall($id, $service_definition, $shared = FALSE) {
+-      if (!$id) {
+-        $hash = Crypt::hashBase64(serialize($service_definition));
+-        $id = 'private__' . $hash;
+-      }
+-      return (object) [
+-        'type' => 'private_service',
+-        'id' => $id,
+-        'value' => $service_definition,
+-        'shared' => $shared,
+-      ];
+-    }
++  /**
++   * Tests that service arguments with escaped percents are correctly dumped.
++   *
++   * @dataProvider percentsEscapeProvider
++   */
++  public function testPercentsEscape($expected, $argument) {
++    $definition = new Definition('\stdClass', [$argument]);
++    $definition->setPublic(TRUE);
++    $this->containerBuilder->getDefinitions()->willReturn([
++      'test' => $definition,
++    ]);
++
++    $dump = $this->dumper->getArray();
++
++    $this->assertEquals(static::serializeDefinition([
++      'class' => '\stdClass',
++      'arguments' => static::getCollection([
++        $this->getRaw($expected),
++      ]),
++      'arguments_count' => 1,
++    ]), $dump['services']['test']);
++  }
+ 
+-    /**
+-     * Helper function to return a machine-optimized collection.
+-     */
+-    protected static function getCollection($collection) {
+-      return (object) [
+-        'type' => 'collection',
+-        'value' => $collection,
+-      ];
+-    }
++  /**
++   * Data provider for testPercentsEscape().
++   *
++   * @return array[]
++   *   Returns data-set elements with:
++   *     - expected final value.
++   *     - escaped value in service definition.
++   */
++  public static function percentsEscapeProvider() {
++    return [
++      ['%foo%', '%%foo%%'],
++      ['foo%bar%', 'foo%%bar%%'],
++      ['%foo%bar', '%%foo%%bar'],
++      ['%', '%'],
++      ['%', '%%'],
++      ['%%', '%%%'],
++      ['%%', '%%%%'],
++    ];
++  }
+ 
+-    /**
+-     * Helper function to return a machine-optimized iterator.
+-     */
+-    protected static function getIterator($collection) {
+-      return (object) [
+-        'type' => 'iterator',
+-        'value' => $collection,
+-      ];
++  /**
++   * Helper function to return a private service definition.
++   */
++  protected static function getPrivateServiceCall($id, $service_definition, $shared = FALSE) {
++    if (!$id) {
++      $hash = Crypt::hashBase64(serialize($service_definition));
++      $id = 'private__' . $hash;
+     }
++    return (object) [
++      'type' => 'private_service',
++      'id' => $id,
++      'value' => $service_definition,
++      'shared' => $shared,
++    ];
++  }
+ 
+-    /**
+-     * Helper function to return a parameter definition.
+-     */
+-    protected static function getParameterCall($name) {
+-      return (object) [
+-        'type' => 'parameter',
+-        'name' => $name,
+-      ];
+-    }
++  /**
++   * Helper function to return a machine-optimized collection.
++   */
++  protected static function getCollection($collection) {
++    return (object) [
++      'type' => 'collection',
++      'value' => $collection,
++    ];
++  }
+ 
+-    /**
+-     * Helper function to return a raw value definition.
+-     */
+-    protected function getRaw($value) {
+-      return (object) [
+-        'type' => 'raw',
+-        'value' => $value,
+-      ];
+-    }
++  /**
++   * Helper function to return a machine-optimized iterator.
++   */
++  protected static function getIterator($collection) {
++    return (object) [
++      'type' => 'iterator',
++      'value' => $collection,
++    ];
++  }
+ 
++  /**
++   * Helper function to return a parameter definition.
++   */
++  protected static function getParameterCall($name) {
++    return (object) [
++      'type' => 'parameter',
++      'name' => $name,
++    ];
++  }
++
++  /**
++   * Helper function to return a raw value definition.
++   */
++  protected function getRaw($value) {
++    return (object) [
++      'type' => 'raw',
++      'value' => $value,
++    ];
    }
  
-   /**
+ }
+@@ -735,24 +733,24 @@ protected function getRaw($value) {
+  * As Drupal Core does not ship with ExpressionLanguage component we need to
+  * define a dummy, else it cannot be tested.
+  */
+-namespace Symfony\Component\ExpressionLanguage {
++namespace Symfony\Component\ExpressionLanguage;
+ 
+-  if (!class_exists('\Symfony\Component\ExpressionLanguage\Expression')) {
+-    /**
+-     * Dummy class to ensure non-existent Symfony component can be tested.
+-     */
+-    class Expression {
+-
+-      public function __construct($expression) {
+-      }
++if (!class_exists('\Symfony\Component\ExpressionLanguage\Expression')) {
++  /**
++   * Dummy class to ensure non-existent Symfony component can be tested.
++   */
++  class Expression {
+ 
+-      /**
+-       * Gets the string representation of the expression.
+-       */
+-      public function __toString() {
+-        return 'dummy_expression';
+-      }
++    public function __construct($expression) {
++    }
+ 
++    /**
++     * Gets the string representation of the expression.
++     */
++    public function __toString() {
++      return 'dummy_expression';
+     }
++
+   }
+ }
++
+diff --git a/core/tests/Drupal/Tests/Component/Plugin/Attribute/PluginIdTest.php b/core/tests/Drupal/Tests/Component/Plugin/Attribute/PluginIdTest.php
+index ef34597e78..72ba747627 100644
+--- a/core/tests/Drupal/Tests/Component/Plugin/Attribute/PluginIdTest.php
++++ b/core/tests/Drupal/Tests/Component/Plugin/Attribute/PluginIdTest.php
+@@ -8,7 +8,7 @@
+ use PHPUnit\Framework\TestCase;
+ 
+ /**
+- * @coversDefaultClass \Drupal\Component\Plugin\Attribute\PluginId
++ * @coversDefaultClass \Drupal\Component\Plugin\Attribute\PluginID
+  * @group Attribute
+  */
+ class PluginIdTest extends TestCase {
