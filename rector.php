@@ -3,11 +3,12 @@
 declare(strict_types=1);
 
 use PhpParser\Node;
+use PhpParser\Node\Expr\Array_;
 use PhpParser\Node\Expr\ClassConstFetch;
 use PhpParser\Node\Name\FullyQualified;
+use PhpParser\Node\Scalar\String_;
 use PhpParser\Node\Stmt\Class_;
 use PhpParser\Node\Stmt\ClassMethod;
-use PhpParser\NodeDumper;
 use PhpParser\ParserFactory;
 use PHPStan\PhpDocParser\Ast\PhpDoc\GenericTagValueNode;
 use PHPStan\PhpDocParser\Ast\PhpDoc\PhpDocTagNode;
@@ -282,6 +283,7 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
         $desiredTagValueNode,
     ): void {
         $value = $desiredTagValueNode->value->value;
+        $stringValue = new String_($value);
 
         $attributeGroup = match ($value) {
             '@legacy' => $this->phpAttributeGroupFactory->createFromClassWithItems(
@@ -290,7 +292,7 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
             ),
             default => $this->phpAttributeGroupFactory->createFromClassWithItems(
                 Group::class,
-                [(string) $value],
+                [$stringValue],
             ),
         };
 
@@ -310,10 +312,9 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
 
         foreach ($values as $value) {
             $data = $this->parseTestWithData($value);
-            dump($data);
             $attributeGroup = $this->phpAttributeGroupFactory->createFromClassWithItems(
                 TestWith::class,
-                [$value],
+                [$data],
             );
             $node->attrGroups[] = $attributeGroup;
         };
@@ -458,7 +459,7 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
 
     private function parseTestWithData(
         string $data,
-    ) {
+    ): Array_ {
         $parser = (new ParserFactory())->createForNewestSupportedVersion();
         $ast = $parser->parse("<?php\n\$array = {$data};");
         return $ast[0]->expr->expr;
