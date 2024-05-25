@@ -459,7 +459,7 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
         string $data,
     ) {
         $parser = (new ParserFactory())->createForNewestSupportedVersion();
-        $ast = $parser->parse("<?php\n" . $data);
+        $ast = $parser->parse("<?php\n\$array = {$data};");
         $dumper = new NodeDumper;
         dump(get_class($ast), $dumper->dump($ast));
     }
