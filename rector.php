@@ -482,7 +482,7 @@ return RectorConfig::configure()
     ->withRules([
         DrupalAnnotationToAttributeRector::class,
     ])
-#    ->withoutParallel()
+    ->withoutParallel()
     ->withImportNames(
         importDocBlockNames: false,
         importShortClasses: false,
