@@ -16,6 +16,7 @@ use PHPStan\Reflection\ClassReflection;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\CoversNothing;
 use PHPUnit\Framework\Attributes\DataProvider;
+use PHPUnit\Framework\Attributes\Depends;
 use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\Attributes\IgnoreDeprecations;
 use PHPUnit\Framework\Attributes\Medium;
@@ -65,7 +66,9 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
         '@dataProvider' => [
             'converter' => 'convertDataProvider',
         ],
-        '@depends' => [],
+        '@depends' => [
+            'converter' => 'convertDepends',
+        ],
         '@doesNotPerformAssertions' => [],
         '@group' => [
             'converter' => 'convertGroup',
@@ -267,6 +270,24 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
 
         $attributeGroup = $this->phpAttributeGroupFactory->createFromClassWithItems(
             DataProvider::class,
+            [$desiredTagValueNode->value->value],
+        );
+
+        $node->attrGroups[] = $attributeGroup;
+
+        // cleanup
+        $this->phpDocTagRemover->removeTagValueFromNode($phpDocInfo, $desiredTagValueNode);
+
+    }
+
+    private function convertDepends(
+        Node $node,
+        $phpDocInfo,
+        $desiredTagValueNode,
+    ): void {
+
+        $attributeGroup = $this->phpAttributeGroupFactory->createFromClassWithItems(
+            Depends::class,
             [$desiredTagValueNode->value->value],
         );
 
@@ -483,7 +504,7 @@ return RectorConfig::configure()
     ->withRules([
         DrupalAnnotationToAttributeRector::class,
     ])
-    ->withoutParallel()
+#    ->withoutParallel()
     ->withImportNames(
         importDocBlockNames: false,
         importShortClasses: false,
