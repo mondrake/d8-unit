@@ -469,8 +469,9 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
 
 return RectorConfig::configure()
     ->withPaths([
+        __DIR__ . '/core/tests/Drupal/Tests',
 #        __DIR__ . '/core/tests/Drupal/Tests/Component',
-        __DIR__ . '/core/tests/Drupal/FunctionalJavascriptTests',
+#        __DIR__ . '/core/tests/Drupal/FunctionalJavascriptTests',
 #        __DIR__ . '/core',
 #        __DIR__ . '/composer',
     ])
