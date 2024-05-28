@@ -434,6 +434,7 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
             [$classConst],
         );
 
+dump(self::$currentClassNode->attrGroups);
         // Attach the attribute to the class.
         self::$currentClassNode->attrGroups[] = $attributeGroup;
 
@@ -485,8 +486,8 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
 
 return RectorConfig::configure()
     ->withPaths([
-#        __DIR__ . '/core/tests/Drupal/Tests',
-        __DIR__ . '/core/tests/Drupal/Tests/Component',
+        __DIR__ . '/core/tests/Drupal/Tests/Component/Plugin/Discovery',
+#        __DIR__ . '/core/tests/Drupal/Tests/Component',
 #        __DIR__ . '/core/tests/Drupal/FunctionalJavascriptTests',
 #        __DIR__ . '/core',
 #        __DIR__ . '/composer',
@@ -499,7 +500,7 @@ return RectorConfig::configure()
     ->withRules([
         DrupalAnnotationToAttributeRector::class,
     ])
-#    ->withoutParallel()
+    ->withoutParallel()
     ->withImportNames(
         importDocBlockNames: false,
         importShortClasses: false,
