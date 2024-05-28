@@ -434,7 +434,8 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
             [$classConst],
         );
 
-dump(self::$currentClassNode->attrGroups);
+
+foreach (self::$currentClassNode->attrGroups as $attr) { dump($attr->name); }
         // Attach the attribute to the class.
         self::$currentClassNode->attrGroups[] = $attributeGroup;
 
@@ -486,7 +487,7 @@ dump(self::$currentClassNode->attrGroups);
 
 return RectorConfig::configure()
     ->withPaths([
-        __DIR__ . '/core/tests/Drupal/Tests/Component/Plugin/Discovery',
+        __DIR__ . '/core/tests/Drupal/Tests/Component/Plugin/Discovery/DiscoveryTraitTest.php',
 #        __DIR__ . '/core/tests/Drupal/Tests/Component',
 #        __DIR__ . '/core/tests/Drupal/FunctionalJavascriptTests',
 #        __DIR__ . '/core',
