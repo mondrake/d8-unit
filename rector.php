@@ -307,7 +307,7 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
         $stringValue = new String_($value);
 
         $attributeGroup = match ($value) {
-            '@legacy' => $this->phpAttributeGroupFactory->createFromClassWithItems(
+            'legacy' => $this->phpAttributeGroupFactory->createFromClassWithItems(
                 IndirectDeprecations::class,
                 [],
             ),
