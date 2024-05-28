@@ -439,7 +439,7 @@ foreach (self::$currentClassNode->attrGroups as $attrGroup) {
     foreach ($attrGroup->attrs as $attr) {
         dump(['*********', $attr->name->toString()]);
         foreach ($attr->args as $arg) {
-            dump($arg->value);
+            dump($arg->value->value);
         }
     }
 }
