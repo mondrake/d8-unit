@@ -438,10 +438,7 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
 foreach (self::$currentClassNode->attrGroups as $attrGroup) {
     foreach ($attrGroup->attrs as $attr) {
         if ($attr->name->toString() === UsesClass::class) {
-            dump(['*********', $attr->name->toString(), $attr->args[0]->value->value->class]);
-            foreach ($attr->args as $arg) {
-                dump($arg->value->value);
-            }
+            dump(['*********', $attr->name->toString(), $attr->args[0]->value->value->class->toString()]);
         }
     }
 }
