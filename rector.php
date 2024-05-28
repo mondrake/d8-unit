@@ -435,7 +435,7 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
         );
 
 
-foreach (self::$currentClassNode->attrGroups as $attr) { dump(['*********', $attr]); }
+foreach (self::$currentClassNode->attrGroups as $attrGroup) { dump(['*********', $attrGroup->attrs]); }
         // Attach the attribute to the class.
         self::$currentClassNode->attrGroups[] = $attributeGroup;
 
