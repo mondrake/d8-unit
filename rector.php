@@ -210,9 +210,8 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
         $desiredTagValueNode,
     ): void {
 
-        $attributeGroup = $this->phpAttributeGroupFactory->createFromClassWithItems(
+        $attributeGroup = $this->phpAttributeGroupFactory->createFromClass(
             RunTestsInSeparateProcesses::class,
-            [],
         );
 
         $node->attrGroups[] = $attributeGroup;
@@ -228,9 +227,8 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
         $desiredTagValueNode,
     ): void {
 
-        $attributeGroup = $this->phpAttributeGroupFactory->createFromClassWithItems(
+        $attributeGroup = $this->phpAttributeGroupFactory->createFromClass(
             RunInSeparateProcess::class,
-            [],
         );
 
         $node->attrGroups[] = $attributeGroup;
@@ -307,9 +305,8 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
         $stringValue = new String_($value);
 
         $attributeGroup = match ($value) {
-            'legacy' => $this->phpAttributeGroupFactory->createFromClassWithItems(
-                IndirectDeprecations::class,
-                [],
+            'legacy' => $this->phpAttributeGroupFactory->createFromClass(
+                IgnoreDeprecations::class,
             ),
             default => $this->phpAttributeGroupFactory->createFromClassWithItems(
                 Group::class,
@@ -410,9 +407,8 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
         $desiredTagValueNode,
     ): void {
 
-        $attributeGroup = $this->phpAttributeGroupFactory->createFromClassWithItems(
+        $attributeGroup = $this->phpAttributeGroupFactory->createFromClass(
             CoversNothing::class,
-            [],
         );
 
         $node->attrGroups[] = $attributeGroup;
@@ -452,9 +448,8 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
         $desiredTagValueNode,
     ): void {
 
-        $attributeGroup = $this->phpAttributeGroupFactory->createFromClassWithItems(
+        $attributeGroup = $this->phpAttributeGroupFactory->createFromClass(
             Medium::class,
-            [],
         );
 
         // Attach the attribute to the class.
@@ -490,8 +485,8 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
 
 return RectorConfig::configure()
     ->withPaths([
-        __DIR__ . '/core/tests/Drupal/Tests',
-#        __DIR__ . '/core/tests/Drupal/Tests/Component',
+#        __DIR__ . '/core/tests/Drupal/Tests',
+        __DIR__ . '/core/tests/Drupal/Tests/Component',
 #        __DIR__ . '/core/tests/Drupal/FunctionalJavascriptTests',
 #        __DIR__ . '/core',
 #        __DIR__ . '/composer',
