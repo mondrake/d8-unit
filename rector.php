@@ -435,15 +435,22 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
         );
 
 
-foreach (self::$currentClassNode->attrGroups as $attrGroup) {
-    foreach ($attrGroup->attrs as $attr) {
-        if ($attr->name->toString() === UsesClass::class) {
-            dump(['*********', $attr->name->toString(), $attr->args[0]->value->value->class->toString()]);
+        // prevent duplicates
+        $existsAlready = false;
+        foreach (self::$currentClassNode->attrGroups as $attrGroup) {
+            foreach ($attrGroup->attrs as $attr) {
+                if ($attr->name->toString() === UsesClass::class && $attr->args[0]->value->value->class->toString() === $classLikeName) {
+                    $existsAlready = true;
+                    break 2;
+                }
+#                dump(['*********', $attr->name->toString(), $attr->args[0]->value->value->class->toString()]);
+            }
         }
-    }
-}
+
         // Attach the attribute to the class.
-        self::$currentClassNode->attrGroups[] = $attributeGroup;
+        if (! $existsAlready) {
+            self::$currentClassNode->attrGroups[] = $attributeGroup;
+        }
 
         // cleanup
         $this->phpDocTagRemover->removeTagValueFromNode($phpDocInfo, $desiredTagValueNode);
@@ -460,8 +467,21 @@ foreach (self::$currentClassNode->attrGroups as $attrGroup) {
             Medium::class,
         );
 
+        // prevent duplicates
+        $existsAlready = false;
+        foreach (self::$currentClassNode->attrGroups as $attrGroup) {
+            foreach ($attrGroup->attrs as $attr) {
+                if ($attr->name->toString() === Medium::class) {
+                    $existsAlready = true;
+                    break 2;
+                }
+            }
+        }
+
         // Attach the attribute to the class.
-        self::$currentClassNode->attrGroups[] = $attributeGroup;
+        if (! $existsAlready) {
+            self::$currentClassNode->attrGroups[] = $attributeGroup;
+        }
 
         // cleanup
         $this->phpDocTagRemover->removeTagValueFromNode($phpDocInfo, $desiredTagValueNode);
