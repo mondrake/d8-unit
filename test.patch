@@ -1,689 +1,163 @@
-diff --git a/core/lib/Drupal/Core/Test/TestDiscovery.php b/core/lib/Drupal/Core/Test/TestDiscovery.php
-index f63510a0d1..4f3b19ac28 100644
---- a/core/lib/Drupal/Core/Test/TestDiscovery.php
-+++ b/core/lib/Drupal/Core/Test/TestDiscovery.php
-@@ -7,6 +7,8 @@
- use Drupal\Component\Utility\NestedArray;
- use Drupal\Core\Extension\ExtensionDiscovery;
- use Drupal\Core\Test\Exception\MissingGroupException;
-+use PHPUnit\Framework\Attributes\CoversClass;
-+use PHPUnit\Framework\Attributes\Group;
+diff --git a/core/phpunit.xml.dist b/core/phpunit.xml.dist
+index 4bfeb0086f..c864b14357 100644
+--- a/core/phpunit.xml.dist
++++ b/core/phpunit.xml.dist
+@@ -28,7 +28,7 @@
+     <!-- Example SIMPLETEST_DB value: mysql://username:password@localhost/database_name#table_prefix -->
+     <env name="SIMPLETEST_DB" value=""/>
+     <!-- Example BROWSERTEST_OUTPUT_DIRECTORY value: /path/to/webroot/sites/simpletest/browser_output -->
+-    <env name="BROWSERTEST_OUTPUT_DIRECTORY" value=""/>
++    <!-- <env name="BROWSERTEST_OUTPUT_DIRECTORY" value=""/> -->
+     <!-- To avoid overcrowding the output in CI environments, browser tests
+      will not print the individual links in the test run report by default.
+      The output in Drupal testing environment is saved as an artifact that
+@@ -65,6 +65,10 @@
+     <!-- Example for changing the driver args to webdriver tests MINK_DRIVER_ARGS_WEBDRIVER value: '["chrome", { "goog:chromeOptions": { "w3c": false } }, "http://localhost:4444/wd/hub"]' For using the Firefox browser, replace "chrome" with "firefox" -->
+     <env name="MINK_DRIVER_ARGS_WEBDRIVER" value=""/>
+   </php>
++  <extensions>
++    <!-- Functional tests HTML output logging. -->
++    <bootstrap class="Drupal\TestTools\Extension\HtmlLogging\HtmlOutputLogger"/>
++  </extensions>
+   <testsuites>
+     <testsuite name="unit">
+       <directory>tests/Drupal/Tests</directory>
+diff --git a/core/tests/Drupal/TestTools/Extension/HtmlLogging/HtmlOutputLogger.php b/core/tests/Drupal/TestTools/Extension/HtmlLogging/HtmlOutputLogger.php
+index 10a8f5a49b..999f8b958d 100644
+--- a/core/tests/Drupal/TestTools/Extension/HtmlLogging/HtmlOutputLogger.php
++++ b/core/tests/Drupal/TestTools/Extension/HtmlLogging/HtmlOutputLogger.php
+@@ -4,21 +4,24 @@
+ 
+ namespace Drupal\TestTools\Extension\HtmlLogging;
+ 
+-use PHPUnit\Event\Facade;
+ use PHPUnit\Event\TestRunner\Finished as TestRunnerFinished;
+ use PHPUnit\Event\TestRunner\Started as TestRunnerStarted;
++use PHPUnit\Runner\Extension\Extension;
++use PHPUnit\Runner\Extension\Facade;
++use PHPUnit\Runner\Extension\ParameterCollection;
++use PHPUnit\TextUI\Configuration\Configuration;
  
  /**
-  * Discovers available tests.
-@@ -294,14 +296,97 @@ public static function scanDirectory($namespace_prefix, $path) {
-    *   - group: The test's first @group (parsed from PHPDoc annotations).
-    *   - groups: All of the test's @group annotations, as an array (parsed from
-    *     PHPDoc annotations).
-+   *   - type: The test's type (for PHPUnit this corresponds to the test suite
-+   *     the test is part of).
-    *
-    * @throws \Drupal\Core\Test\Exception\MissingGroupException
--   *   If the class does not have a @group annotation.
-+   *   If the class does not have a #[Group()] attribute or a @group
-+   *   annotation.
-    */
-   public static function getTestInfo($classname, $doc_comment = NULL) {
--    if ($doc_comment === NULL) {
-+    try {
-       $reflection = new \ReflectionClass($classname);
--      $doc_comment = $reflection->getDocComment();
-+    }
-+    catch (\ReflectionException $e) {
-+      // There are classes that end up here (for example, fixtures), that
-+      // cannot be reflected.
-+      $reflection = NULL;
-+    }
-+
-+    $groupAttributes = $reflection ? $reflection->getAttributes(Group::class, \ReflectionAttribute::IS_INSTANCEOF) : [];
-+
-+    // @todo Remove once all test annotations are removed.
-+    if (empty($groupAttributes)) {
-+      // @phpstan-ignore-next-line
-+      return self::getTestInfoFromAnnotation($classname, $doc_comment, $reflection);
-+    }
-+
-+    // Concrete tests must have a group.
-+    // @todo Checking $groupAttributes emptiness is redundant here for PHPStan,
-+    //   but once the check above is removed, it will become relevant.
-+    // @phpstan-ignore-next-line
-+    if (empty($groupAttributes)) {
-+      throw new MissingGroupException(sprintf('Missing #[Group] attribute in %s', $classname));
-+    }
-+
-+    $info = [
-+      'name' => $classname,
-+      'group' => $groupAttributes[0]->getArguments()[0],
-+      'type' => 'PHPUnit-' . static::getPhpunitTestSuite($classname),
-+    ];
-+
-+    foreach ($groupAttributes as $groupAttribute) {
-+      $info['groups'][] = $groupAttribute->getArguments()[0];
-+    }
-+
-+    $groupCoversClass = $reflection->getAttributes(CoversClass::class, \ReflectionAttribute::IS_INSTANCEOF);
-+
-+    if (!empty($groupCoversClass)) {
-+      $info['description'] = 'Tests \\' . $groupCoversClass[0]->getArguments()[0] . '.';
-+    }
-+    else {
-+      if ($doc_comment === NULL) {
-+        $doc_comment = $reflection ? $reflection->getDocComment() : '';
-+      }
-+      $info['description'] = static::parseTestClassSummary($doc_comment);
-+    }
-+
-+    return $info;
-+  }
-+
-+  /**
-+   * Retrieves information about a test class from docblock annotations.
-+   *
-+   * @param string $classname
-+   *   The test classname.
-+   * @param string $doc_comment
-+   *   (optional) The class PHPDoc comment. If not passed in reflection will
-+   *   be used.
-+   * @param \ReflectionClass|null $reflection
-+   *   (optional) The reflected class.
-+   *
-+   * @return array
-+   *   An associative array containing:
-+   *   - name: The test class name.
-+   *   - description: The test (PHPDoc) summary.
-+   *   - group: The test's first @group (parsed from PHPDoc annotations).
-+   *   - groups: All of the test's @group annotations, as an array (parsed from
-+   *     PHPDoc annotations).
-+   *   - type: The test's type (for PHPUnit this corresponds to the test suite
-+   *     the test is part of).
-+   *
-+   * @throws \Drupal\Core\Test\Exception\MissingGroupException
-+   *   If the class does not have a @group annotation.
-+   *
-+   * @deprecated in drupal:11.0.0 and is removed from drupal:12.0.0. Make sure
-+   *   all tests classes have a #[Group()] attribute.
-+   *
-+   * @see https://www.drupal.org/node/7654321
-+   */
-+  protected static function getTestInfoFromAnnotation($classname, $doc_comment = NULL, ?\ReflectionClass $reflection = NULL) {
-+    @trigger_error(__METHOD__ . '() is deprecated in drupal:11.0.0 and is removed from drupal:12.0.0. Make sure all tests classes have a #[Group()] attribute. See https://www.drupal.org/node/7654321', E_USER_DEPRECATED);
-+    if ($doc_comment === NULL) {
-+      $doc_comment = $reflection ? $reflection->getDocComment() : '';
-     }
-     $info = [
-       'name' => $classname,
-diff --git a/core/modules/user/tests/src/Functional/Rest/UserJsonAnonTest.php b/core/modules/user/tests/src/Functional/Rest/UserJsonAnonTest.php
-index c34d05083c..aa3c3848d2 100644
---- a/core/modules/user/tests/src/Functional/Rest/UserJsonAnonTest.php
-+++ b/core/modules/user/tests/src/Functional/Rest/UserJsonAnonTest.php
-@@ -5,11 +5,10 @@
- namespace Drupal\Tests\user\Functional\Rest;
- 
- use Drupal\Tests\rest\Functional\AnonResourceTestTrait;
-+use PHPUnit\Framework\Attributes\Group;
- 
--/**
-- * @group rest
-- * @group #slow
-- */
-+#[Group('rest')]
-+#[Group('#slow')]
- class UserJsonAnonTest extends UserResourceTestBase {
- 
-   use AnonResourceTestTrait;
-diff --git a/core/tests/Drupal/KernelTests/Core/Archiver/TarTest.php b/core/tests/Drupal/KernelTests/Core/Archiver/TarTest.php
-index a3d300edb6..6b06669875 100644
---- a/core/tests/Drupal/KernelTests/Core/Archiver/TarTest.php
-+++ b/core/tests/Drupal/KernelTests/Core/Archiver/TarTest.php
-@@ -5,11 +5,11 @@
- namespace Drupal\KernelTests\Core\Archiver;
- 
- use Drupal\Core\Archiver\Tar;
-+use PHPUnit\Framework\Attributes\CoversClass;
-+use PHPUnit\Framework\Attributes\Group;
- 
--/**
-- * @coversDefaultClass \Drupal\Core\Archiver\Tar
-- * @group tar
-- */
-+#[CoversClass(Tar::class)]
-+#[Group('tar')]
- class TarTest extends ArchiverTestBase {
-   /**
-    * {@inheritdoc}
-diff --git a/core/tests/Drupal/Tests/Core/Test/AttributeBasedTestDiscoveryTest.php b/core/tests/Drupal/Tests/Core/Test/AttributeBasedTestDiscoveryTest.php
-new file mode 100644
-index 0000000000..5b8bba1035
---- /dev/null
-+++ b/core/tests/Drupal/Tests/Core/Test/AttributeBasedTestDiscoveryTest.php
-@@ -0,0 +1,346 @@
-+<?php
-+
-+declare(strict_types=1);
-+
-+namespace Drupal\Tests\Core\Test;
-+
-+use Composer\Autoload\ClassLoader;
-+use Drupal\Core\DependencyInjection\Container;
-+use Drupal\Core\DrupalKernel;
-+use Drupal\Core\Extension\Extension;
-+use Drupal\Core\Extension\ModuleHandlerInterface;
-+use Drupal\Core\Test\Exception\MissingGroupException;
-+use Drupal\Core\Test\TestDiscovery;
-+use Drupal\Tests\UnitTestCase;
-+use org\bovigo\vfs\vfsStream;
-+use PHPUnit\Framework\Attributes\BeforeClass;
-+use PHPUnit\Framework\Attributes\CoversClass;
-+use PHPUnit\Framework\Attributes\DataProvider;
-+use PHPUnit\Framework\Attributes\Group;
-+use PHPUnit\Framework\Attributes\IgnoreDeprecations;
-+
-+/**
-+ * Tests the TestDiscovery class.
-+ */
-+#[CoversClass(TestDiscovery::class)]
-+#[Group('Test')]
-+class AttributeBasedTestDiscoveryTest extends UnitTestCase {
-+
-+  #[BeforeClass]
-+  public static function fixtureClassAutoloading(): void {
-+    $class_loader = new ClassLoader();
-+    $class_loader->addPsr4("Drupal\\TestDiscoveryFixture\\", __DIR__ . '/../../../../fixtures/test_test_discovery');
-+    $class_loader->addPsr4("Drupal\\Tests\\test_module\\", 'vfs://drupal/modules/test_module/tests/src');
-+    $class_loader->addPsr4("Drupal\\Tests\\test_profile_module\\", 'vfs://drupal/profiles/test_profile/modules/test_profile_module/tests/src');
-+    $class_loader->register(TRUE);
-+  }
-+
-+  #[DataProvider('infoParserProvider')]
-+  public function testTestInfoParser(array $expected, string $classname): void {
-+    $info = TestDiscovery::getTestInfo($classname);
-+    $this->assertEquals($expected, $info);
-+  }
-+
-+  public static function infoParserProvider(): \Generator {
-+    // A core unit test.
-+    yield 'phpunit-unit' => [
-+      // Expected result.
-+      [
-+        'name' => static::class,
-+        'group' => 'Test',
-+        'groups' => ['Test'],
-+        'description' => 'Tests \Drupal\Core\Test\TestDiscovery.',
-+        'type' => 'PHPUnit-Unit',
-+      ],
-+      // Classname.
-+      static::class,
-+    ];
-+
-+    // Functional test.
-+    yield 'phpunit-functional' => [
-+      // Expected result.
-+      [
-+        'name' => 'Drupal\Tests\user\Functional\Rest\UserJsonAnonTest',
-+        'group' => 'rest',
-+        'groups' => ['rest', '#slow'],
-+        'description' => '',
-+        'type' => 'PHPUnit-Functional',
-+      ],
-+      // Classname.
-+      'Drupal\Tests\user\Functional\Rest\UserJsonAnonTest',
-+    ];
-+
-+    // Kernel test.
-+    yield 'phpunit-kernel' => [
-+      // Expected result.
-+      [
-+        'name' => 'Drupal\KernelTests\Core\Archiver\TarTest',
-+        'group' => 'tar',
-+        'groups' => ['tar'],
-+        'description' => 'Tests \Drupal\Core\Archiver\Tar.',
-+        'type' => 'PHPUnit-Kernel',
-+      ],
-+      // Classname.
-+      'Drupal\KernelTests\Core\Archiver\TarTest',
-+    ];
-+  }
-+
-+  /**
-+   * @todo Remove the #[IgnoreDeprecations] attribute once all tests have been
-+   *   converted to use attributes instead of annotation. Until then, we need
-+   *   to accept going through TestDiscovery::getTestInfoFromAnnotation().
-+   */
-+  #[IgnoreDeprecations]
-+  public function testTestInfoParserMissingGroup(): void {
-+    $this->expectException(MissingGroupException::class);
-+    $this->expectExceptionMessage('Missing @group annotation in Drupal\TestDiscoveryFixture\NoGroupAttribute');
-+    TestDiscovery::getTestInfo('Drupal\TestDiscoveryFixture\NoGroupAttribute');
-+  }
-+
-+  public function testTestInfoParserMissingSummary(): void {
-+    $info = TestDiscovery::getTestInfo('Drupal\TestDiscoveryFixture\NoDescription');
-+    $this->assertEmpty($info['description']);
-+  }
-+
-+  protected function setupVfsWithTestClasses() {
-+    vfsStream::setup('drupal');
-+
-+    $test_file = <<<EOF
-+<?php
-+
-+declare(strict_types=1);
-+
-+namespace Drupal\\Tests\\test_module\\Functional;
-+
-+use PHPUnit\\Framework\\Attributes\\Group;
-+
-+/**
-+ * Test description
-+ */
-+#[Group('example')]
-+class FunctionalExampleTest {}
-+EOF;
-+
-+    $test_profile_info = <<<EOF
-+name: Testing
-+type: profile
-+core_version_requirement: '*'
-+EOF;
-+
-+    $test_module_info = <<<EOF
-+name: Testing
-+type: module
-+core_version_requirement: '*'
-+EOF;
-+
-+    vfsStream::create([
-+      'modules' => [
-+        'test_module' => [
-+          'test_module.info.yml' => $test_module_info,
-+          'tests' => [
-+            'src' => [
-+              'Functional' => [
-+                'FunctionalExampleTest.php' => $test_file,
-+                'FunctionalExampleTest2.php' => str_replace(['FunctionalExampleTest', '#[Group(\'example\')]'], ['FunctionalExampleTest2', '#[Group(\'example2\')]'], $test_file),
-+              ],
-+              'Kernel' => [
-+                'KernelExampleTest3.php' => str_replace(['namespace Drupal\\Tests\\test_module\\Functional', 'FunctionalExampleTest', '#[Group(\'example\')]'], ['namespace Drupal\\Tests\\test_module\\Kernel', 'KernelExampleTest3', "#[Group('example2')]\n#[Group('kernel')]"], $test_file),
-+                'KernelExampleTestBase.php' => str_replace(['namespace Drupal\\Tests\\test_module\\Functional', 'FunctionalExampleTest', '#[Group(\'example\')]'], ['namespace Drupal\\Tests\\test_module\\Kernel', 'KernelExampleTestBase', '#[Group(\'example2\')]'], $test_file),
-+                'KernelExampleTrait.php' => str_replace(['namespace Drupal\\Tests\\test_module\\Functional', 'FunctionalExampleTest', '#[Group(\'example\')]'], ['namespace Drupal\\Tests\\test_module\\Kernel', 'KernelExampleTrait', '#[Group(\'example2\')]'], $test_file),
-+                'KernelExampleInterface.php' => str_replace(['namespace Drupal\\Tests\\test_module\\Functional', 'FunctionalExampleTest', '#[Group(\'example\')]'], ['namespace Drupal\\Tests\\test_module\\Kernel', 'KernelExampleInterface', '#[Group(\'example2\')]'], $test_file),
-+              ],
-+            ],
-+          ],
-+        ],
-+      ],
-+      'profiles' => [
-+        'test_profile' => [
-+          'test_profile.info.yml' => $test_profile_info,
-+          'modules' => [
-+            'test_profile_module' => [
-+              'test_profile_module.info.yml' => $test_module_info,
-+              'tests' => [
-+                'src' => [
-+                  'Kernel' => [
-+                    'KernelExampleTest4.php' => str_replace(['namespace Drupal\\Tests\\test_module\\Functional', 'FunctionalExampleTest', '#[Group(\'example\')]'], ['namespace Drupal\\Tests\\test_profile_module\\Kernel', 'KernelExampleTest4', '#[Group(\'example3\')]'], $test_file),
-+                  ],
-+                ],
-+              ],
-+            ],
-+          ],
-+        ],
-+      ],
-+    ]);
-+  }
-+
-+  public function testGetTestClasses() {
-+    $this->setupVfsWithTestClasses();
-+    $extensions = [
-+      'test_module' => new Extension('vfs://drupal', 'module', 'modules/test_module/test_module.info.yml'),
-+    ];
-+    $test_discovery = $this->getTestDiscoveryMock('vfs://drupal', $extensions);
-+
-+    $result = $test_discovery->getTestClasses();
-+    $this->assertCount(3, $result);
-+    $this->assertEquals([
-+      'example' => [
-+        'Drupal\Tests\test_module\Functional\FunctionalExampleTest' => [
-+          'name' => 'Drupal\Tests\test_module\Functional\FunctionalExampleTest',
-+          'description' => 'Test description',
-+          'group' => 'example',
-+          'groups' => ['example'],
-+          'type' => 'PHPUnit-Functional',
-+        ],
-+      ],
-+      'example2' => [
-+        'Drupal\Tests\test_module\Functional\FunctionalExampleTest2' => [
-+          'name' => 'Drupal\Tests\test_module\Functional\FunctionalExampleTest2',
-+          'description' => 'Test description',
-+          'group' => 'example2',
-+          'groups' => ['example2'],
-+          'type' => 'PHPUnit-Functional',
-+        ],
-+        'Drupal\Tests\test_module\Kernel\KernelExampleTest3' => [
-+          'name' => 'Drupal\Tests\test_module\Kernel\KernelExampleTest3',
-+          'description' => 'Test description',
-+          'group' => 'example2',
-+          'groups' => ['example2', 'kernel'],
-+          'type' => 'PHPUnit-Kernel',
-+        ],
-+      ],
-+      'kernel' => [
-+        'Drupal\Tests\test_module\Kernel\KernelExampleTest3' => [
-+          'name' => 'Drupal\Tests\test_module\Kernel\KernelExampleTest3',
-+          'description' => 'Test description',
-+          'group' => 'example2',
-+          'groups' => ['example2', 'kernel'],
-+          'type' => 'PHPUnit-Kernel',
-+        ],
-+      ],
-+    ], $result);
-+  }
-+
-+  /**
-+   * Mock a TestDiscovery object to return specific extension values.
-+   */
-+  protected function getTestDiscoveryMock($app_root, $extensions) {
-+    $class_loader = $this->prophesize(ClassLoader::class);
-+    $module_handler = $this->prophesize(ModuleHandlerInterface::class);
-+
-+    $test_discovery = $this->getMockBuilder(TestDiscovery::class)
-+      ->setConstructorArgs([$app_root, $class_loader->reveal(), $module_handler->reveal()])
-+      ->onlyMethods(['getExtensions'])
-+      ->getMock();
-+
-+    $test_discovery->expects($this->any())
-+      ->method('getExtensions')
-+      ->willReturn($extensions);
-+
-+    return $test_discovery;
-+  }
-+
-+  public function testGetTestClassesWithSelectedTypes() {
-+    $this->setupVfsWithTestClasses();
-+    $extensions = [
-+      'test_module' => new Extension('vfs://drupal', 'module', 'modules/test_module/test_module.info.yml'),
-+      'test_profile_module' => new Extension('vfs://drupal', 'profile', 'profiles/test_profile/modules/test_profile_module/test_profile_module.info.yml'),
-+    ];
-+    $test_discovery = $this->getTestDiscoveryMock('vfs://drupal', $extensions);
-+
-+    $result = $test_discovery->getTestClasses(NULL, ['PHPUnit-Kernel']);
-+    $this->assertCount(4, $result);
-+    $this->assertEquals([
-+      'example' => [],
-+      'example2' => [
-+        'Drupal\Tests\test_module\Kernel\KernelExampleTest3' => [
-+          'name' => 'Drupal\Tests\test_module\Kernel\KernelExampleTest3',
-+          'description' => 'Test description',
-+          'group' => 'example2',
-+          'groups' => ['example2', 'kernel'],
-+          'type' => 'PHPUnit-Kernel',
-+        ],
-+      ],
-+      'kernel' => [
-+        'Drupal\Tests\test_module\Kernel\KernelExampleTest3' => [
-+          'name' => 'Drupal\Tests\test_module\Kernel\KernelExampleTest3',
-+          'description' => 'Test description',
-+          'group' => 'example2',
-+          'groups' => ['example2', 'kernel'],
-+          'type' => 'PHPUnit-Kernel',
-+        ],
-+      ],
-+      'example3' => [
-+        'Drupal\Tests\test_profile_module\Kernel\KernelExampleTest4' => [
-+          'name' => 'Drupal\Tests\test_profile_module\Kernel\KernelExampleTest4',
-+          'description' => 'Test description',
-+          'group' => 'example3',
-+          'groups' => ['example3'],
-+          'type' => 'PHPUnit-Kernel',
-+        ],
-+      ],
-+    ], $result);
-+  }
-+
-+  public function testGetTestsInProfiles() {
-+    $this->setupVfsWithTestClasses();
-+    $class_loader = $this->prophesize(ClassLoader::class);
-+
-+    $container = new Container();
-+    $container->set('kernel', new DrupalKernel('prod', new ClassLoader()));
-+    $container->setParameter('site.path', 'sites/default');
-+    \Drupal::setContainer($container);
-+
-+    $test_discovery = new TestDiscovery('vfs://drupal', $class_loader->reveal());
-+
-+    $result = $test_discovery->getTestClasses('test_profile_module', ['PHPUnit-Kernel']);
-+    $expected = [
-+      'example3' => [
-+        'Drupal\Tests\test_profile_module\Kernel\KernelExampleTest4' => [
-+          'name' => 'Drupal\Tests\test_profile_module\Kernel\KernelExampleTest4',
-+          'description' => 'Test description',
-+          'group' => 'example3',
-+          'groups' => ['example3'],
-+          'type' => 'PHPUnit-Kernel',
-+        ],
-+      ],
-+    ];
-+    $this->assertEquals($expected, $result);
-+  }
-+
-+  #[DataProvider('providerTestGetPhpunitTestSuite')]
-+  public function testGetPhpunitTestSuite($classname, $expected) {
-+    $this->assertEquals($expected, TestDiscovery::getPhpunitTestSuite($classname));
-+  }
-+
-+  public static function providerTestGetPhpunitTestSuite() {
-+    $data = [];
-+    $data['simpletest-web test'] = ['\Drupal\rest\Tests\NodeTest', FALSE];
-+    $data['module-unittest'] = [static::class, 'Unit'];
-+    $data['module-kernel test'] = ['\Drupal\KernelTests\Core\Theme\TwigMarkupInterfaceTest', 'Kernel'];
-+    $data['module-functional test'] = ['\Drupal\FunctionalTests\BrowserTestBaseTest', 'Functional'];
-+    $data['module-functional javascript test'] = ['\Drupal\Tests\toolbar\FunctionalJavascript\ToolbarIntegrationTest', 'FunctionalJavascript'];
-+    $data['core-unittest'] = ['\Drupal\Tests\ComposerIntegrationTest', 'Unit'];
-+    $data['core-unittest2'] = ['Drupal\Tests\Core\DrupalTest', 'Unit'];
-+    $data['core-unittest3'] = ['Drupal\Tests\Scripts\TestSiteApplicationTest', 'Unit'];
-+    $data['core-kernel test'] = ['\Drupal\KernelTests\KernelTestBaseTest', 'Kernel'];
-+    $data['core-functional test'] = ['\Drupal\FunctionalTests\ExampleTest', 'Functional'];
-+    $data['core-functional javascript test'] = ['\Drupal\FunctionalJavascriptTests\ExampleTest', 'FunctionalJavascript'];
-+    $data['core-build test'] = ['\Drupal\BuildTests\Framework\Tests\BuildTestTest', 'Build'];
-+
-+    return $data;
-+  }
-+
-+  /**
-+   * Ensure TestDiscovery::scanDirectory() ignores certain abstract file types.
-+   */
-+  public function testScanDirectoryNoAbstract() {
-+    $this->setupVfsWithTestClasses();
-+    $files = TestDiscovery::scanDirectory('Drupal\\Tests\\test_module\\Kernel\\', vfsStream::url('drupal/modules/test_module/tests/src/Kernel'));
-+    $this->assertNotEmpty($files);
-+    $this->assertArrayNotHasKey('Drupal\Tests\test_module\Kernel\KernelExampleTestBase', $files);
-+    $this->assertArrayNotHasKey('Drupal\Tests\test_module\Kernel\KernelExampleTrait', $files);
-+    $this->assertArrayNotHasKey('Drupal\Tests\test_module\Kernel\KernelExampleInterface', $files);
-+    $this->assertArrayHasKey('Drupal\Tests\test_module\Kernel\KernelExampleTest3', $files);
-+  }
-+
-+}
-diff --git a/core/tests/Drupal/Tests/Core/Test/TestDiscoveryTest.php b/core/tests/Drupal/Tests/Core/Test/TestDiscoveryTest.php
-index 9b9053c3ba..4ff3464198 100644
---- a/core/tests/Drupal/Tests/Core/Test/TestDiscoveryTest.php
-+++ b/core/tests/Drupal/Tests/Core/Test/TestDiscoveryTest.php
-@@ -13,17 +13,27 @@
- use Drupal\Core\Test\TestDiscovery;
- use Drupal\Tests\UnitTestCase;
- use org\bovigo\vfs\vfsStream;
-+use PHPUnit\Framework\Attributes\CoversClass;
-+use PHPUnit\Framework\Attributes\DataProvider;
-+use PHPUnit\Framework\Attributes\Group;
-+use PHPUnit\Framework\Attributes\IgnoreDeprecations;
- 
- /**
-- * @coversDefaultClass \Drupal\Core\Test\TestDiscovery
-- * @group Test
-+ * Tests the TestDiscovery class, using legacy annotations.
-+ *
-+ * @todo 'legacy' group annotation is needed until PHPStan recognizes
-+ *   #[IgnoreDeprecations] as a deprecated scope marker.
-+ *
-+ * @see https://github.com/phpstan/phpstan-deprecation-rules/issues/109
-+ *
-+ * @group legacy
+  * Drupal's extension for providing HTML output results for functional tests.
+  *
+  * @internal
   */
-+#[CoversClass(TestDiscovery::class)]
-+#[Group('Test')]
-+#[IgnoreDeprecations]
- class TestDiscoveryTest extends UnitTestCase {
- 
--  /**
--   * @covers ::getTestInfo
--   * @dataProvider infoParserProvider
--   */
-+  #[DataProvider('infoParserProvider')]
-   public function testTestInfoParser($expected, $classname, $doc_comment = NULL) {
-     $info = TestDiscovery::getTestInfo($classname, $doc_comment);
-     $this->assertEquals($expected, $info);
-@@ -202,10 +212,8 @@ public static function infoParserProvider() {
-     return $tests;
-   }
- 
--  /**
--   * @covers ::getTestInfo
--   */
-   public function testTestInfoParserMissingGroup() {
-+    $this->expectDeprecation('Drupal\Core\Test\TestDiscovery::getTestInfoFromAnnotation() is deprecated in drupal:11.0.0 and is removed from drupal:12.0.0. Make sure all tests classes have a #[Group()] attribute. See https://www.drupal.org/node/7654321');
-     $classname = 'Drupal\KernelTests\field\BulkDeleteTest';
-     $doc_comment = <<<EOT
- /**
-@@ -217,9 +225,6 @@ public function testTestInfoParserMissingGroup() {
-     TestDiscovery::getTestInfo($classname, $doc_comment);
-   }
- 
--  /**
--   * @covers ::getTestInfo
--   */
-   public function testTestInfoParserMissingSummary() {
-     $classname = 'Drupal\KernelTests\field\BulkDeleteTest';
-     $doc_comment = <<<EOT
-@@ -231,7 +236,7 @@ public function testTestInfoParserMissingSummary() {
-     $this->assertEmpty($info['description']);
-   }
- 
--  protected function setupVfsWithTestClasses() {
-+  protected function setupVfsWithLegacyTestClasses() {
-     vfsStream::setup('drupal');
- 
-     $test_file = <<<EOF
-@@ -296,11 +301,9 @@ class FunctionalExampleTest {}
-     ]);
-   }
- 
--  /**
--   * @covers ::getTestClasses
--   */
-   public function testGetTestClasses() {
--    $this->setupVfsWithTestClasses();
-+    $this->expectDeprecation('Drupal\Core\Test\TestDiscovery::getTestInfoFromAnnotation() is deprecated in drupal:11.0.0 and is removed from drupal:12.0.0. Make sure all tests classes have a #[Group()] attribute. See https://www.drupal.org/node/7654321');
-+    $this->setupVfsWithLegacyTestClasses();
-     $extensions = [
-       'test_module' => new Extension('vfs://drupal', 'module', 'modules/test_module/test_module.info.yml'),
-     ];
-@@ -365,11 +368,9 @@ protected function getTestDiscoveryMock($app_root, $extensions) {
-     return $test_discovery;
-   }
- 
--  /**
--   * @covers ::getTestClasses
--   */
-   public function testGetTestClassesWithSelectedTypes() {
--    $this->setupVfsWithTestClasses();
-+    $this->expectDeprecation('Drupal\Core\Test\TestDiscovery::getTestInfoFromAnnotation() is deprecated in drupal:11.0.0 and is removed from drupal:12.0.0. Make sure all tests classes have a #[Group()] attribute. See https://www.drupal.org/node/7654321');
-+    $this->setupVfsWithLegacyTestClasses();
-     $extensions = [
-       'test_module' => new Extension('vfs://drupal', 'module', 'modules/test_module/test_module.info.yml'),
-       'test_profile_module' => new Extension('vfs://drupal', 'profile', 'profiles/test_profile/modules/test_profile_module/test_profile_module.info.yml'),
-@@ -410,11 +411,9 @@ public function testGetTestClassesWithSelectedTypes() {
-     ], $result);
-   }
- 
--  /**
--   * @covers ::getTestClasses
--   */
-   public function testGetTestsInProfiles() {
--    $this->setupVfsWithTestClasses();
-+    $this->expectDeprecation('Drupal\Core\Test\TestDiscovery::getTestInfoFromAnnotation() is deprecated in drupal:11.0.0 and is removed from drupal:12.0.0. Make sure all tests classes have a #[Group()] attribute. See https://www.drupal.org/node/7654321');
-+    $this->setupVfsWithLegacyTestClasses();
-     $class_loader = $this->prophesize(ClassLoader::class);
- 
-     $container = new Container();
-@@ -439,10 +438,7 @@ public function testGetTestsInProfiles() {
-     $this->assertEquals($expected, $result);
-   }
- 
--  /**
--   * @covers ::getPhpunitTestSuite
--   * @dataProvider providerTestGetPhpunitTestSuite
--   */
-+  #[DataProvider('providerTestGetPhpunitTestSuite')]
-   public function testGetPhpunitTestSuite($classname, $expected) {
-     $this->assertEquals($expected, TestDiscovery::getPhpunitTestSuite($classname));
-   }
-@@ -465,12 +461,8 @@ public static function providerTestGetPhpunitTestSuite() {
-     return $data;
-   }
- 
--  /**
--   * Ensure that classes are not reflected when the docblock is empty.
--   *
--   * @covers ::getTestInfo
--   */
-   public function testGetTestInfoEmptyDocblock() {
-+    $this->expectDeprecation('Drupal\Core\Test\TestDiscovery::getTestInfoFromAnnotation() is deprecated in drupal:11.0.0 and is removed from drupal:12.0.0. Make sure all tests classes have a #[Group()] attribute. See https://www.drupal.org/node/7654321');
-     // If getTestInfo() performed reflection, it won't be able to find the
-     // class we asked it to analyze, so it will throw a ReflectionException.
-     // We want to make sure it didn't do that, because we already did some
-@@ -482,11 +474,9 @@ public function testGetTestInfoEmptyDocblock() {
+-final class HtmlOutputLogger {
++final class HtmlOutputLogger implements Extension {
  
    /**
-    * Ensure TestDiscovery::scanDirectory() ignores certain abstract file types.
--   *
--   * @covers ::scanDirectory
+-   * The singleton instance.
++   * The status of the extension.
     */
-   public function testScanDirectoryNoAbstract() {
--    $this->setupVfsWithTestClasses();
-+    $this->setupVfsWithLegacyTestClasses();
-     $files = TestDiscovery::scanDirectory('Drupal\\Tests\\test_module\\Kernel\\', vfsStream::url('drupal/modules/test_module/tests/src/Kernel'));
-     $this->assertNotEmpty($files);
-     $this->assertArrayNotHasKey('Drupal\Tests\test_module\Kernel\KernelExampleTestBase', $files);
-diff --git a/core/tests/fixtures/test_test_discovery/NoDescription.php b/core/tests/fixtures/test_test_discovery/NoDescription.php
-new file mode 100644
-index 0000000000..986cbeb733
---- /dev/null
-+++ b/core/tests/fixtures/test_test_discovery/NoDescription.php
-@@ -0,0 +1,11 @@
-+<?php
+-  private static ?self $instance = NULL;
++  private static bool $enabled = FALSE;
+ 
+   /**
+    * A file with list of links to HTML pages generated.
+@@ -26,43 +29,40 @@ final class HtmlOutputLogger {
+   private ?string $browserOutputFile = NULL;
+ 
+   /**
+-   * @throws \PHPUnit\Event\EventFacadeIsSealedException
+-   * @throws \PHPUnit\Util\Exception
+-   * @throws \PHPUnit\Event\UnknownSubscriberTypeException
+-   * @throws \RuntimeException
++   * A file with list of links to HTML pages generated.
+    */
+-  private function __construct(
+-    private readonly string $outputDirectory,
+-    private readonly bool $outputVerbose,
+-    private readonly Facade $facade,
+-  ) {
+-    $this->facade->registerSubscriber(new TestRunnerStartedSubscriber($this));
+-    $this->facade->registerSubscriber(new TestRunnerFinishedSubscriber($this));
+-  }
++  private string $outputDirectory;
+ 
+   /**
+-   * Initializes the extension.
++   * Verbosity of the final report.
+    *
+-   * @param string $outputDirectory
+-   *   The directory where the HTML pages should be generated.
+-   * @param bool $outputVerbose
+-   *   If TRUE, a list of links generated will be output at the end of the test
+-   *   run; if FALSE, only a summary with the count of pages generated.
+-   *
+-   * @throws \PHPUnit\Event\EventFacadeIsSealedException
+-   * @throws \PHPUnit\Util\Exception
+-   * @throws \PHPUnit\Event\UnknownSubscriberTypeException
+-   * @throws \RuntimeException
++   * If TRUE, a list of links generated will be output at the end of the test
++   * run; if FALSE, only a summary with the count of pages generated.
+    */
+-  public static function init(string $outputDirectory, bool $outputVerbose): void {
+-    if (self::$instance === NULL) {
+-      $realDirectory = realpath($outputDirectory);
+-      if ($realDirectory === FALSE || !is_dir($realDirectory) || !is_writable($realDirectory)) {
+-        print "HTML output directory {$outputDirectory} is not a writable directory.\n\n";
+-        return;
+-      }
+-      self::$instance = new self($realDirectory, $outputVerbose, Facade::instance());
++  private bool $outputVerbose;
 +
-+declare(strict_types=1);
-+
-+namespace Drupal\TestDiscoveryFixture;
-+
-+use PHPUnit\Framework\Attributes\Group;
-+
-+#[Group('field')]
-+class NoDescription {
-+}
-diff --git a/core/tests/fixtures/test_test_discovery/NoGroupAttribute.php b/core/tests/fixtures/test_test_discovery/NoGroupAttribute.php
-new file mode 100644
-index 0000000000..a687d0411f
---- /dev/null
-+++ b/core/tests/fixtures/test_test_discovery/NoGroupAttribute.php
-@@ -0,0 +1,11 @@
-+<?php
-+
-+declare(strict_types=1);
-+
-+namespace Drupal\TestDiscoveryFixture;
-+
-+/**
-+ * Test description, no group attribute.
-+ */
-+class NoGroupAttribute {
-+}
++  /**
++   * {@inheritdoc}
++   */
++  public function bootstrap(
++    Configuration $configuration,
++    Facade $facade,
++    ParameterCollection $parameters,
++  ): void {
++    $browserTestOutputDirectory = getenv('BROWSERTEST_OUTPUT_DIRECTORY');
++    if ($browserTestOutputDirectory === FALSE || $browserTestOutputDirectory === "") {
++      return;
++    }
++    $realDirectory = realpath($browserTestOutputDirectory);
++    if ($realDirectory === FALSE || !is_dir($realDirectory) || !is_writable($realDirectory)) {
++      print "HTML output directory {$browserTestOutputDirectory} is not a writable directory.\n\n";
++      return;
+     }
++    $this->outputDirectory = $realDirectory;
++    $this->outputVerbose = (bool) getenv('BROWSERTEST_OUTPUT_VERBOSE') ?? FALSE;
++    $facade->registerSubscriber(new TestRunnerStartedSubscriber($this));
++    $facade->registerSubscriber(new TestRunnerFinishedSubscriber($this));
++    self::$enabled = TRUE;
+   }
+ 
+   /**
+@@ -72,7 +72,7 @@ public static function init(string $outputDirectory, bool $outputVerbose): void
+    *   TRUE if enabled, FALSE if disabled.
+    */
+   public static function isEnabled(): bool {
+-    return self::$instance !== NULL;
++    return self::$enabled;
+   }
+ 
+   /**
+diff --git a/core/tests/bootstrap.php b/core/tests/bootstrap.php
+index 0d66341040..db54e2dce9 100644
+--- a/core/tests/bootstrap.php
++++ b/core/tests/bootstrap.php
+@@ -9,7 +9,6 @@
+ 
+ use Drupal\TestTools\ErrorHandler\BootstrapErrorHandler;
+ use Drupal\TestTools\Extension\DeprecationBridge\DeprecationHandler;
+-use Drupal\TestTools\Extension\HtmlLogging\HtmlOutputLogger;
+ use PHPUnit\Runner\ErrorHandler as PhpUnitErrorHandler;
+ use Symfony\Component\ErrorHandler\DebugClassLoader;
+ 
+@@ -178,12 +177,6 @@ class_alias('\Drupal\Tests\DocumentElement', '\Behat\Mink\Element\DocumentElemen
+   DebugClassLoader::enable();
+ }
+ 
+-// Functional tests HTML output logging.
+-$browserTestOutputDirectory = getenv('BROWSERTEST_OUTPUT_DIRECTORY');
+-if ($browserTestOutputDirectory !== FALSE) {
+-  HtmlOutputLogger::init($browserTestOutputDirectory, (bool) getenv('BROWSERTEST_OUTPUT_VERBOSE') ?? FALSE);
+-}
+-
+ // Drupal expects to be run from its root directory. This ensures all test types
+ // are consistent.
+ chdir(dirname(__DIR__, 2));
