@@ -1,29 +1,57 @@
 diff --git a/core/phpunit.xml.dist b/core/phpunit.xml.dist
-index 4bfeb0086f..c864b14357 100644
+index 4bfeb0086f..6363ed7f66 100644
 --- a/core/phpunit.xml.dist
 +++ b/core/phpunit.xml.dist
-@@ -28,7 +28,7 @@
+@@ -28,14 +28,7 @@
      <!-- Example SIMPLETEST_DB value: mysql://username:password@localhost/database_name#table_prefix -->
      <env name="SIMPLETEST_DB" value=""/>
      <!-- Example BROWSERTEST_OUTPUT_DIRECTORY value: /path/to/webroot/sites/simpletest/browser_output -->
 -    <env name="BROWSERTEST_OUTPUT_DIRECTORY" value=""/>
+-    <!-- To avoid overcrowding the output in CI environments, browser tests
+-     will not print the individual links in the test run report by default.
+-     The output in Drupal testing environment is saved as an artifact that
+-     can be browsed or downloaded from Gitlab. However, if you need to
+-     print the individual links locally you can set the
+-     BROWSERTEST_OUTPUT_VERBOSE environment variable to "true". -->
+-    <!-- <env name="BROWSERTEST_OUTPUT_VERBOSE" value="true"/> -->
 +    <!-- <env name="BROWSERTEST_OUTPUT_DIRECTORY" value=""/> -->
-     <!-- To avoid overcrowding the output in CI environments, browser tests
-      will not print the individual links in the test run report by default.
-      The output in Drupal testing environment is saved as an artifact that
-@@ -65,6 +65,10 @@
+     <!-- By default, browser tests will output links that use the base URL set
+      in SIMPLETEST_BASE_URL. However, if your SIMPLETEST_BASE_URL is an internal
+      path (such as may be the case in a virtual or Docker-based environment),
+@@ -65,6 +58,18 @@
      <!-- Example for changing the driver args to webdriver tests MINK_DRIVER_ARGS_WEBDRIVER value: '["chrome", { "goog:chromeOptions": { "w3c": false } }, "http://localhost:4444/wd/hub"]' For using the Firefox browser, replace "chrome" with "firefox" -->
      <env name="MINK_DRIVER_ARGS_WEBDRIVER" value=""/>
    </php>
 +  <extensions>
 +    <!-- Functional tests HTML output logging. -->
-+    <bootstrap class="Drupal\TestTools\Extension\HtmlLogging\HtmlOutputLogger"/>
++    <bootstrap class="Drupal\TestTools\Extension\HtmlLogging\HtmlOutputLogger">
++      <!-- To avoid overcrowding the output in CI environments, by default
++      browser tests will not print the individual links in the test run report.
++      The output in Drupal testing environment is saved as an artifact that
++      can be browsed or downloaded from Gitlab. However, if you need to
++      print the individual links locally you can set the "verbose" parameter
++      to "true". -->
++      <parameter name="verbose" value="false"/>
++    </bootstrap>
 +  </extensions>
    <testsuites>
      <testsuite name="unit">
        <directory>tests/Drupal/Tests</directory>
+diff --git a/core/tests/Drupal/FunctionalTests/Test/FunctionalTestDebugHtmlOutputTest.php b/core/tests/Drupal/FunctionalTests/Test/FunctionalTestDebugHtmlOutputTest.php
+index 53c3d130b6..d2afc9c829 100644
+--- a/core/tests/Drupal/FunctionalTests/Test/FunctionalTestDebugHtmlOutputTest.php
++++ b/core/tests/Drupal/FunctionalTests/Test/FunctionalTestDebugHtmlOutputTest.php
+@@ -57,7 +57,7 @@ public function testFunctionalTestDebugHtmlOutput(): void {
+       'COMMAND: ' . $process->getCommandLine() . "\n" .
+       'OUTPUT: ' . $process->getOutput() . "\n" .
+       'ERROR: ' . $process->getErrorOutput() . "\n");
+-    $this->assertStringContainsString('HTML output was generated.', $process->getOutput());
++    $this->assertStringContainsString('HTML outputxxxx was generated.', $process->getOutput());
+     $this->assertStringContainsString('Drupal_FunctionalTests_Test_FunctionalTestDebugHtmlOutputHelperTest', $process->getOutput());
+ 
+     // Test with a wrong output directory.
 diff --git a/core/tests/Drupal/TestTools/Extension/HtmlLogging/HtmlOutputLogger.php b/core/tests/Drupal/TestTools/Extension/HtmlLogging/HtmlOutputLogger.php
-index 10a8f5a49b..a903894bc2 100644
+index 10a8f5a49b..0515e1ea54 100644
 --- a/core/tests/Drupal/TestTools/Extension/HtmlLogging/HtmlOutputLogger.php
 +++ b/core/tests/Drupal/TestTools/Extension/HtmlLogging/HtmlOutputLogger.php
 @@ -4,21 +4,24 @@
@@ -55,7 +83,7 @@ index 10a8f5a49b..a903894bc2 100644
  
    /**
     * A file with list of links to HTML pages generated.
-@@ -26,43 +29,40 @@ final class HtmlOutputLogger {
+@@ -26,53 +29,60 @@ final class HtmlOutputLogger {
    private ?string $browserOutputFile = NULL;
  
    /**
@@ -77,14 +105,14 @@ index 10a8f5a49b..a903894bc2 100644
  
    /**
 -   * Initializes the extension.
--   *
++   * Verbosity of the final report.
+    *
 -   * @param string $outputDirectory
 -   *   The directory where the HTML pages should be generated.
 -   * @param bool $outputVerbose
 -   *   If TRUE, a list of links generated will be output at the end of the test
 -   *   run; if FALSE, only a summary with the count of pages generated.
-+   * Verbosity of the final report.
-    *
+-   *
 -   * @throws \PHPUnit\Event\EventFacadeIsSealedException
 -   * @throws \PHPUnit\Util\Exception
 -   * @throws \PHPUnit\Event\UnknownSubscriberTypeException
@@ -100,11 +128,19 @@ index 10a8f5a49b..a903894bc2 100644
 -        return;
 -      }
 -      self::$instance = new self($realDirectory, $outputVerbose, Facade::instance());
+-    }
+-  }
 +  private bool $outputVerbose;
-+
-+  /**
+ 
+   /**
+-   * Determines if the extension is enabled.
+-   *
+-   * @return bool
+-   *   TRUE if enabled, FALSE if disabled.
 +   * {@inheritdoc}
-+   */
+    */
+-  public static function isEnabled(): bool {
+-    return self::$instance !== NULL;
 +  public function bootstrap(
 +    Configuration $configuration,
 +    Facade $facade,
@@ -118,27 +154,36 @@ index 10a8f5a49b..a903894bc2 100644
 +    if ($realDirectory === FALSE || !is_dir($realDirectory) || !is_writable($realDirectory)) {
 +      print "HTML output directory {$browserTestOutputDirectory} is not a writable directory.\n\n";
 +      return;
-     }
++    }
 +    $this->outputDirectory = $realDirectory;
-+    $this->outputVerbose = (bool) getenv('BROWSERTEST_OUTPUT_VERBOSE') ?? FALSE;
++
++    // Determine verbose output.
++    $envVerbose = getenv('BROWSERTEST_OUTPUT_VERBOSE');
++    if ($envVerbose !== FALSE) {
++      @trigger_error('Using the environment variable \'BROWSERTEST_OUTPUT_VERBOSE\' to determine verbosity of the HTML output logger is deprecated in drupal:11.0.0 and will be removed in drupal:12.0.0. Use the "verbose" parameter for the HtmlOutputLogger extension in the phpunit.xml configuration file instead. See https://www.drupal.org/node/3453468', E_USER_DEPRECATED);
++      print "**************************************************************************\n";
++      print "The environment variable 'BROWSERTEST_OUTPUT_VERBOSE' is deprecated.\n";
++      print "Edit the \"verbose\" parameter for the HtmlOutputLogger extension in the\n";
++      print "phpunit.xml configuration file instead.\n";
++      print "**************************************************************************\n\n";
++      $verbose = $envVerbose;
++    }
++    elseif ($parameters->has('verbose')) {
++      $verbose = $parameters->get('verbose');
++    }
++    else {
++      $verbose = FALSE;
++    }
++    $this->outputVerbose = filter_var($verbose, \FILTER_VALIDATE_BOOLEAN);
++
 +    $facade->registerSubscriber(new TestRunnerStartedSubscriber($this));
 +    $facade->registerSubscriber(new TestRunnerFinishedSubscriber($this));
++
 +    $this->enabled = TRUE;
    }
  
    /**
-@@ -71,8 +71,8 @@ public static function init(string $outputDirectory, bool $outputVerbose): void
-    * @return bool
-    *   TRUE if enabled, FALSE if disabled.
-    */
--  public static function isEnabled(): bool {
--    return self::$instance !== NULL;
-+  protected function isEnabled(): bool {
-+    return $this->enabled;
-   }
- 
-   /**
-@@ -84,11 +84,10 @@ public static function isEnabled(): bool {
+@@ -84,11 +94,10 @@ public static function isEnabled(): bool {
     * @throws \RuntimeException
     */
    public static function log(string $logEntry): void {
@@ -152,21 +197,21 @@ index 10a8f5a49b..a903894bc2 100644
      file_put_contents($browserOutputFile, $logEntry . "\n", FILE_APPEND);
    }
  
-@@ -96,7 +95,7 @@ public static function log(string $logEntry): void {
+@@ -96,7 +105,7 @@ public static function log(string $logEntry): void {
     * Empties the list of the HTML output created during the test run.
     */
    public function testRunnerStarted(TestRunnerStarted $event): void {
 -    if (!self::isEnabled()) {
-+    if (!$this->isEnabled()) {
++    if (!$this->enabled) {
        throw new \RuntimeException("HTML output is not enabled");
      }
  
-@@ -118,7 +117,7 @@ public function testRunnerStarted(TestRunnerStarted $event): void {
+@@ -118,7 +127,7 @@ public function testRunnerStarted(TestRunnerStarted $event): void {
     * Prints the list of HTML output generated during the test.
     */
    public function testRunnerFinished(TestRunnerFinished $event): void {
 -    if (!self::isEnabled()) {
-+    if (!$this->isEnabled()) {
++    if (!$this->enabled) {
        throw new \RuntimeException("HTML output is not enabled");
      }
  
