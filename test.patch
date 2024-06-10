@@ -1,11 +1,12 @@
 diff --git a/core/phpunit.xml.dist b/core/phpunit.xml.dist
-index 4bfeb0086f..6363ed7f66 100644
+index 4bfeb0086f..0c5e4c4f2a 100644
 --- a/core/phpunit.xml.dist
 +++ b/core/phpunit.xml.dist
-@@ -28,14 +28,7 @@
+@@ -27,15 +27,6 @@
+     <env name="SIMPLETEST_BASE_URL" value=""/>
      <!-- Example SIMPLETEST_DB value: mysql://username:password@localhost/database_name#table_prefix -->
      <env name="SIMPLETEST_DB" value=""/>
-     <!-- Example BROWSERTEST_OUTPUT_DIRECTORY value: /path/to/webroot/sites/simpletest/browser_output -->
+-    <!-- Example BROWSERTEST_OUTPUT_DIRECTORY value: /path/to/webroot/sites/simpletest/browser_output -->
 -    <env name="BROWSERTEST_OUTPUT_DIRECTORY" value=""/>
 -    <!-- To avoid overcrowding the output in CI environments, browser tests
 -     will not print the individual links in the test run report by default.
@@ -14,31 +15,33 @@ index 4bfeb0086f..6363ed7f66 100644
 -     print the individual links locally you can set the
 -     BROWSERTEST_OUTPUT_VERBOSE environment variable to "true". -->
 -    <!-- <env name="BROWSERTEST_OUTPUT_VERBOSE" value="true"/> -->
-+    <!-- <env name="BROWSERTEST_OUTPUT_DIRECTORY" value=""/> -->
      <!-- By default, browser tests will output links that use the base URL set
       in SIMPLETEST_BASE_URL. However, if your SIMPLETEST_BASE_URL is an internal
       path (such as may be the case in a virtual or Docker-based environment),
-@@ -65,6 +58,18 @@
+@@ -65,6 +56,21 @@
      <!-- Example for changing the driver args to webdriver tests MINK_DRIVER_ARGS_WEBDRIVER value: '["chrome", { "goog:chromeOptions": { "w3c": false } }, "http://localhost:4444/wd/hub"]' For using the Firefox browser, replace "chrome" with "firefox" -->
      <env name="MINK_DRIVER_ARGS_WEBDRIVER" value=""/>
    </php>
 +  <extensions>
 +    <!-- Functional tests HTML output logging. -->
 +    <bootstrap class="Drupal\TestTools\Extension\HtmlLogging\HtmlOutputLogger">
-+      <!-- To avoid overcrowding the output in CI environments, by default
-+      browser tests will not print the individual links in the test run report.
-+      The output in Drupal testing environment is saved as an artifact that
-+      can be browsed or downloaded from Gitlab. However, if you need to
-+      print the individual links locally you can set the "verbose" parameter
-+      to "true". -->
-+      <parameter name="verbose" value="false"/>
++      <!-- The directory where the browser output will be stored. In CI
++        environments, this cane be overridden by the value set for the
++        "BROWSERTEST_OUTPUT_DIRECTORY" environment variable. -->
++      <parameter name="outputDirectory" value="../sites/simpletest/browser_output"/>
++      <!-- By default browser tests print the individual links in the test run
++        report. To avoid overcrowding the output in CI environments, you can
++        set the "verbose" parameter or the "BROWSERTEST_OUTPUT_VERBOSE"
++        environment variable to "false". In GitLabCI, the output is saved
++        anyway as an artifact that can be browsed or downloaded from Gitlab. -->
++      <parameter name="verbose" value="true"/>
 +    </bootstrap>
 +  </extensions>
    <testsuites>
      <testsuite name="unit">
        <directory>tests/Drupal/Tests</directory>
 diff --git a/core/tests/Drupal/FunctionalTests/Test/FunctionalTestDebugHtmlOutputTest.php b/core/tests/Drupal/FunctionalTests/Test/FunctionalTestDebugHtmlOutputTest.php
-index 53c3d130b6..e7c1579fd7 100644
+index 53c3d130b6..8952eacde0 100644
 --- a/core/tests/Drupal/FunctionalTests/Test/FunctionalTestDebugHtmlOutputTest.php
 +++ b/core/tests/Drupal/FunctionalTests/Test/FunctionalTestDebugHtmlOutputTest.php
 @@ -4,6 +4,7 @@
@@ -49,33 +52,37 @@ index 53c3d130b6..e7c1579fd7 100644
  use Drupal\Tests\BrowserTestBase;
  use Symfony\Component\Process\Process;
  
-@@ -28,13 +29,15 @@ class FunctionalTestDebugHtmlOutputTest extends BrowserTestBase {
+@@ -28,13 +29,36 @@ class FunctionalTestDebugHtmlOutputTest extends BrowserTestBase {
    public function testFunctionalTestDebugHtmlOutput(): void {
      $command = [
        'vendor/bin/phpunit',
--      '--configuration',
--      'core',
-       'core/tests/Drupal/FunctionalTests/Test/FunctionalTestDebugHtmlOutputHelperTest.php',
-     ];
- 
-     // Test with the default output directory, specified by BROWSERTEST_OUTPUT_DIRECTORY.
--    $process = new Process($command);
-+    $config = [
-+      '--configuration',
-+      'core',
++      'core/tests/Drupal/FunctionalTests/Test/FunctionalTestDebugHtmlOutputHelperTest.php',
 +    ];
++
++    // Test with the default settings in phpunit.xml.dist.
++    $config = [
+       '--configuration',
+       'core',
+-      'core/tests/Drupal/FunctionalTests/Test/FunctionalTestDebugHtmlOutputHelperTest.php',
+     ];
 +    $process = new Process(array_merge($command, $config));
-     $process->setWorkingDirectory($this->root)
-       ->setTimeout(300)
-       ->setIdleTimeout(300);
-@@ -46,22 +49,33 @@ public function testFunctionalTestDebugHtmlOutput(): void {
-     $this->assertMatchesRegularExpression('/HTML output was generated, \d+ page\(s\)\./m', $process->getOutput());
++    $process->setWorkingDirectory($this->root)
++      ->setTimeout(300)
++      ->setIdleTimeout(300);
++    $process->run();
++    $this->assertEquals(0, $process->getExitCode(),
++      'COMMAND: ' . $process->getCommandLine() . "\n" .
++      'OUTPUT: ' . $process->getOutput() . "\n" .
++      'ERROR: ' . $process->getErrorOutput() . "\n");
++    $this->assertStringContainsString('HTML output was generated.', $process->getOutput());
++    $this->assertStringContainsString('Drupal_FunctionalTests_Test_FunctionalTestDebugHtmlOutputHelperTest', $process->getOutput());
  
-     // Test with verbose output.
+-    // Test with the default output directory, specified by BROWSERTEST_OUTPUT_DIRECTORY.
 -    $process = new Process($command);
++    // Test without verbose output, set in xml.
 +    $alteredConfigFile = $this->getAlteredPhpunitXmlConfigurationFile(
-+      '<parameter name="verbose" value="false"/>',
 +      '<parameter name="verbose" value="true"/>',
++      '<parameter name="verbose" value="false"/>',
 +    );
 +    $config = [
 +      '--configuration',
@@ -85,20 +92,16 @@ index 53c3d130b6..e7c1579fd7 100644
      $process->setWorkingDirectory($this->root)
        ->setTimeout(300)
        ->setIdleTimeout(300);
--    $process->run(NULL, [
--      'BROWSERTEST_OUTPUT_VERBOSE' => '1',
--    ]);
-+    $process->run();
-     $this->assertEquals(0, $process->getExitCode(),
-       'COMMAND: ' . $process->getCommandLine() . "\n" .
+@@ -44,24 +68,34 @@ public function testFunctionalTestDebugHtmlOutput(): void {
        'OUTPUT: ' . $process->getOutput() . "\n" .
        'ERROR: ' . $process->getErrorOutput() . "\n");
-     $this->assertStringContainsString('HTML output was generated.', $process->getOutput());
-     $this->assertStringContainsString('Drupal_FunctionalTests_Test_FunctionalTestDebugHtmlOutputHelperTest', $process->getOutput());
+     $this->assertMatchesRegularExpression('/HTML output was generated, \d+ page\(s\)\./m', $process->getOutput());
 +    unlink($alteredConfigFile);
  
-     // Test with a wrong output directory.
+-    // Test with verbose output.
 -    $process = new Process($command);
++    // Test without verbose output, overridden by BROWSERTEST_OUTPUT_VERBOSE
++    // environment variable.
 +    $config = [
 +      '--configuration',
 +      'core',
@@ -107,45 +110,34 @@ index 53c3d130b6..e7c1579fd7 100644
      $process->setWorkingDirectory($this->root)
        ->setTimeout(300)
        ->setIdleTimeout(300);
-@@ -75,4 +89,48 @@ public function testFunctionalTestDebugHtmlOutput(): void {
+     $process->run(NULL, [
+-      'BROWSERTEST_OUTPUT_VERBOSE' => '1',
++      'BROWSERTEST_OUTPUT_VERBOSE' => 'false',
+     ]);
+     $this->assertEquals(0, $process->getExitCode(),
+       'COMMAND: ' . $process->getCommandLine() . "\n" .
+       'OUTPUT: ' . $process->getOutput() . "\n" .
+       'ERROR: ' . $process->getErrorOutput() . "\n");
+-    $this->assertStringContainsString('HTML output was generated.', $process->getOutput());
+-    $this->assertStringContainsString('Drupal_FunctionalTests_Test_FunctionalTestDebugHtmlOutputHelperTest', $process->getOutput());
++      $this->assertMatchesRegularExpression('/HTML output was generated, \d+ page\(s\)\./m', $process->getOutput());
+ 
+-    // Test with a wrong output directory.
+-    $process = new Process($command);
++    // Test with a wrong output directory, overridden by
++    // BROWSERTEST_OUTPUT_DIRECTORY environment variable.
++    $config = [
++      '--configuration',
++      'core',
++    ];
++    $process = new Process(array_merge($command, $config));
+     $process->setWorkingDirectory($this->root)
+       ->setTimeout(300)
+       ->setIdleTimeout(300);
+@@ -75,4 +109,14 @@ public function testFunctionalTestDebugHtmlOutput(): void {
      $this->assertStringContainsString('HTML output directory can_we_assume_that_a_subdirectory_with_this_name_does_not_exist is not a writable directory.', $process->getOutput());
    }
  
-+  /**
-+   * Checks functional tests produce HTML output with legacy env variables.
-+   *
-+   * This is a weird deprecation test - we need to check the CLI output of the
-+   * spawned process for explicit deprecation messages. The normal deprecation
-+   * process does not work here as the deprecation is triggered in PHPUnit
-+   * during extensions bootstrap, before we have the tools to capture them.
-+   *
-+   * @group legacy
-+   */
-+  public function testFunctionalTestDebugHtmlOutputWithLegacyEnvironmentVariables(): void {
-+    $command = [
-+      'vendor/bin/phpunit',
-+      '--configuration',
-+      'core',
-+      'core/tests/Drupal/FunctionalTests/Test/FunctionalTestDebugHtmlOutputHelperTest.php',
-+    ];
-+
-+    // Test with verbose output.
-+    $process = new Process($command);
-+    $process->setWorkingDirectory($this->root)
-+      ->setTimeout(300)
-+      ->setIdleTimeout(300);
-+    $process->run(NULL, [
-+      'BROWSERTEST_OUTPUT_VERBOSE' => '1',
-+    ]);
-+    $this->assertEquals(0, $process->getExitCode(),
-+      'COMMAND: ' . $process->getCommandLine() . "\n" .
-+      'OUTPUT: ' . $process->getOutput() . "\n" .
-+      'ERROR: ' . $process->getErrorOutput() . "\n");
-+    $this->assertStringContainsString('The environment variable \'BROWSERTEST_OUTPUT_VERBOSE\' is deprecated.', $process->getOutput());
-+    $this->assertStringContainsString('HTML output was generated.', $process->getOutput());
-+    $this->assertStringContainsString('Drupal_FunctionalTests_Test_FunctionalTestDebugHtmlOutputHelperTest', $process->getOutput());
-+  }
-+
 +  private function getAlteredPhpunitXmlConfigurationFile(array|string $search, array|string $replace): string {
 +    $fileSystem = \Drupal::service('file_system');
 +    $copiedConfigFile = $fileSystem->tempnam($this->root . \DIRECTORY_SEPARATOR . 'core', 'pux');
@@ -155,9 +147,10 @@ index 53c3d130b6..e7c1579fd7 100644
 +    file_put_contents($copiedConfigFile, $content);
 +    return $fileSystem->realpath($copiedConfigFile);
 +  }
++
  }
 diff --git a/core/tests/Drupal/TestTools/Extension/HtmlLogging/HtmlOutputLogger.php b/core/tests/Drupal/TestTools/Extension/HtmlLogging/HtmlOutputLogger.php
-index 10a8f5a49b..0515e1ea54 100644
+index 10a8f5a49b..1e7f65ab6c 100644
 --- a/core/tests/Drupal/TestTools/Extension/HtmlLogging/HtmlOutputLogger.php
 +++ b/core/tests/Drupal/TestTools/Extension/HtmlLogging/HtmlOutputLogger.php
 @@ -4,21 +4,24 @@
@@ -189,7 +182,7 @@ index 10a8f5a49b..0515e1ea54 100644
  
    /**
     * A file with list of links to HTML pages generated.
-@@ -26,53 +29,60 @@ final class HtmlOutputLogger {
+@@ -26,53 +29,66 @@ final class HtmlOutputLogger {
    private ?string $browserOutputFile = NULL;
  
    /**
@@ -211,14 +204,14 @@ index 10a8f5a49b..0515e1ea54 100644
  
    /**
 -   * Initializes the extension.
-+   * Verbosity of the final report.
-    *
+-   *
 -   * @param string $outputDirectory
 -   *   The directory where the HTML pages should be generated.
 -   * @param bool $outputVerbose
 -   *   If TRUE, a list of links generated will be output at the end of the test
 -   *   run; if FALSE, only a summary with the count of pages generated.
--   *
++   * Verbosity of the final report.
+    *
 -   * @throws \PHPUnit\Event\EventFacadeIsSealedException
 -   * @throws \PHPUnit\Util\Exception
 -   * @throws \PHPUnit\Event\UnknownSubscriberTypeException
@@ -252,26 +245,32 @@ index 10a8f5a49b..0515e1ea54 100644
 +    Facade $facade,
 +    ParameterCollection $parameters,
 +  ): void {
-+    $browserTestOutputDirectory = getenv('BROWSERTEST_OUTPUT_DIRECTORY');
-+    if ($browserTestOutputDirectory === FALSE || $browserTestOutputDirectory === "") {
++    // Determine output directory.
++    $envDirectory = getenv('BROWSERTEST_OUTPUT_DIRECTORY');
++    if ($envDirectory === "") {
++      print "HTML output disabled by BROWSERTEST_OUTPUT_DIRECTORY equal to null.\n\n";
 +      return;
 +    }
-+    $realDirectory = realpath($browserTestOutputDirectory);
++    elseif ($envDirectory !== FALSE) {
++      $directory = $envDirectory;
++    }
++    elseif ($parameters->has('outputDirectory')) {
++      $directory = $parameters->get('outputDirectory');
++    }
++    else {
++      print "HTML output directory not specified.\n\n";
++      $return;
++    }
++    $realDirectory = realpath($directory);
 +    if ($realDirectory === FALSE || !is_dir($realDirectory) || !is_writable($realDirectory)) {
-+      print "HTML output directory {$browserTestOutputDirectory} is not a writable directory.\n\n";
++      print "HTML output directory {$directory} is not a writable directory.\n\n";
 +      return;
 +    }
 +    $this->outputDirectory = $realDirectory;
 +
-+    // Determine verbose output.
++    // Determine output verbosity.
 +    $envVerbose = getenv('BROWSERTEST_OUTPUT_VERBOSE');
 +    if ($envVerbose !== FALSE) {
-+      @trigger_error('Using the environment variable \'BROWSERTEST_OUTPUT_VERBOSE\' to determine verbosity of the HTML output logger is deprecated in drupal:11.0.0 and will be removed in drupal:12.0.0. Use the "verbose" parameter for the HtmlOutputLogger extension in the phpunit.xml configuration file instead. See https://www.drupal.org/node/3453468', E_USER_DEPRECATED);
-+      print "**************************************************************************\n";
-+      print "The environment variable 'BROWSERTEST_OUTPUT_VERBOSE' is deprecated.\n";
-+      print "Edit the \"verbose\" parameter for the HtmlOutputLogger extension in the\n";
-+      print "phpunit.xml configuration file instead.\n";
-+      print "**************************************************************************\n\n";
 +      $verbose = $envVerbose;
 +    }
 +    elseif ($parameters->has('verbose')) {
@@ -289,7 +288,7 @@ index 10a8f5a49b..0515e1ea54 100644
    }
  
    /**
-@@ -84,11 +94,10 @@ public static function isEnabled(): bool {
+@@ -84,11 +100,10 @@ public static function isEnabled(): bool {
     * @throws \RuntimeException
     */
    public static function log(string $logEntry): void {
@@ -303,7 +302,7 @@ index 10a8f5a49b..0515e1ea54 100644
      file_put_contents($browserOutputFile, $logEntry . "\n", FILE_APPEND);
    }
  
-@@ -96,7 +105,7 @@ public static function log(string $logEntry): void {
+@@ -96,7 +111,7 @@ public static function log(string $logEntry): void {
     * Empties the list of the HTML output created during the test run.
     */
    public function testRunnerStarted(TestRunnerStarted $event): void {
@@ -312,7 +311,7 @@ index 10a8f5a49b..0515e1ea54 100644
        throw new \RuntimeException("HTML output is not enabled");
      }
  
-@@ -118,7 +127,7 @@ public function testRunnerStarted(TestRunnerStarted $event): void {
+@@ -118,7 +133,7 @@ public function testRunnerStarted(TestRunnerStarted $event): void {
     * Prints the list of HTML output generated during the test.
     */
    public function testRunnerFinished(TestRunnerFinished $event): void {
@@ -335,6 +334,20 @@ index 35400a5c90..dd3430b1d4 100644
      $this->htmlOutputBaseUrl = getenv('BROWSERTEST_OUTPUT_BASE_URL') ?: $GLOBALS['base_url'];
      if ($this->htmlOutputEnabled) {
        $this->htmlOutputClassName = str_replace("\\", "_", static::class);
+diff --git a/core/tests/README.md b/core/tests/README.md
+index da22368696..ddebd55374 100644
+--- a/core/tests/README.md
++++ b/core/tests/README.md
+@@ -29,9 +29,6 @@ Settings to change in this file:
+ * SIMPLETEST_DB: The URL of your Drupal database
+ * The bootstrap attribute of the top-level phpunit tag, to take into account
+   the location of the file
+-* BROWSERTEST_OUTPUT_DIRECTORY: Set to sites/simpletest/browser_output;
+-  you will also want to uncomment the printerClass attribute of the
+-  top-level phpunit tag.
+ 
+ ### Additional setup for JavaScript tests
+ 
 diff --git a/core/tests/bootstrap.php b/core/tests/bootstrap.php
 index 0d66341040..db54e2dce9 100644
 --- a/core/tests/bootstrap.php
