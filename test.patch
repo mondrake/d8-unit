@@ -237,6 +237,49 @@ index 9c5aac09681..e00ce03bf38 100644
      }
    }
  
+diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
+index 4e1fc8352fa..51d8c5c4eea 100644
+--- a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
++++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
+@@ -333,6 +333,7 @@ public function unpile(string $name, string $id): void {
+       }
+       else {
+         // The stack got corrupted.
++        $this->postTransactionCallbacks = [];
+         throw new TransactionOutOfOrderException("Transaction {$id}/{$name} is out of order. Active stack: " . $this->dumpStackItemsAsString());
+       }
+ 
+@@ -342,6 +343,7 @@ public function unpile(string $name, string $id): void {
+     }
+ 
+     // The stack got corrupted.
++    $this->postTransactionCallbacks = [];
+     throw new TransactionOutOfOrderException("Transaction {$id}/{$name} is out of order. Active stack: " . $this->dumpStackItemsAsString());
+   }
+ 
+@@ -351,6 +353,7 @@ public function unpile(string $name, string $id): void {
+   public function rollback(string $name, string $id): void {
+     // Rolled back item should match the last one in stack.
+     if ($id != array_key_last($this->stack()) || $name !== $this->stack()[$id]->name) {
++      $this->postTransactionCallbacks = [];
+       throw new TransactionOutOfOrderException("Error attempting rollback of {$id}\\{$name}. Active stack: " . $this->dumpStackItemsAsString());
+     }
+ 
+@@ -377,12 +380,14 @@ public function rollback(string $name, string $id): void {
+       }
+       else {
+         // The stack got corrupted.
++        $this->postTransactionCallbacks = [];
+         throw new TransactionOutOfOrderException("Error attempting rollback of {$id}\\{$name}. Active stack: " . $this->dumpStackItemsAsString());
+       }
+       return;
+     }
+ 
+     // The stack got corrupted.
++    $this->postTransactionCallbacks = [];
+     throw new TransactionOutOfOrderException("Error attempting rollback of {$id}\\{$name}. Active stack: " . $this->dumpStackItemsAsString());
+   }
+ 
 diff --git a/core/modules/mysql/src/Driver/Database/mysql/ExceptionHandler.php b/core/modules/mysql/src/Driver/Database/mysql/ExceptionHandler.php
 index 7926175e0dc..d06a35ce161 100644
 --- a/core/modules/mysql/src/Driver/Database/mysql/ExceptionHandler.php
@@ -765,7 +808,7 @@ index 18fbd69e85e..a4fd85f3a6b 100644
      // Verify that a nested entity save occurred.
      $this->assertSame('john doe', User::load(1)->getAccountName());
 diff --git a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
-index 3911419ca77..651c5334cbf 100644
+index 3911419ca77..bbc51af1c17 100644
 --- a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
 +++ b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
 @@ -429,18 +429,27 @@ public function testTransactionWithDdlStatement(): void {
@@ -805,59 +848,7 @@ index 3911419ca77..651c5334cbf 100644
      }
    }
  
-@@ -751,6 +760,51 @@ public function testTransactionName(): void {
-     $savepointFailure = $this->connection->startTransaction('savepoint_1');
-   }
- 
-+  /**
-+   * A post-transaction callback for testing purposes.
-+   */
-+  public function rootTransactionCallback(bool $success): void {
-+    $this->postTransactionCallbackAction = $success ? 'rtcCommit' : 'rtcRollback';
-+    $this->insertRow($this->postTransactionCallbackAction);
-+  }
-+
-+  /**
-+   * Tests TransactionManager failure.
-+   */
-+  public function testTransactionManagerFailureOnPendingStackItems(): void {
-+    $connectionInfo = Database::getConnectionInfo();
-+    Database::addConnectionInfo('default', 'test_fail', $connectionInfo['default']);
-+    $testConnection = Database::getConnection('test_fail');
-+
-+    // Add a fake item to the stack.
-+    $manager = $testConnection->transactionManager();
-+    $reflectionMethod = new \ReflectionMethod($manager, 'addStackItem');
-+    $reflectionMethod->invoke($manager, 'bar', new StackItem('qux', StackItemType::Root));
-+    // Ensure transaction state can be determined during object destruction.
-+    // This is necessary for the test to pass when xdebug.mode has the 'develop'
-+    // option enabled.
-+    $reflectionProperty = new \ReflectionProperty(TransactionManagerBase::class, 'connectionTransactionState');
-+    $reflectionProperty->setValue($manager, ClientConnectionTransactionState::Active);
-+
-+    // Ensure that __destruct() results in an assertion error. Note that this
-+    // will normally be called by PHP during the object's destruction but Drupal
-+    // will commit all transactions when a database is closed thereby making
-+    // this impossible to test unless it is called directly.
-+    try {
-+      $manager->__destruct();
-+      $this->fail("Expected AssertionError error not thrown");
-+    }
-+    catch (\AssertionError $e) {
-+      $this->assertStringStartsWith('Transaction $stack was not empty. Active stack: bar\\qux', $e->getMessage());
-+    }
-+
-+    // Clean up.
-+    $reflectionProperty = new \ReflectionProperty(TransactionManagerBase::class, 'stack');
-+    $reflectionProperty->setValue($manager, []);
-+    unset($testConnection);
-+    Database::closeConnection('test_fail');
-+  }
-+
-   /**
-    * Tests that adding a post-transaction callback fails with no transaction.
-    */
-@@ -767,6 +821,7 @@ public function testRootTransactionEndCallbackCalledOnCommit(): void {
+@@ -767,6 +776,7 @@ public function testRootTransactionEndCallbackCalledOnCommit(): void {
      $this->connection->transactionManager()->addPostTransactionCallback([$this, 'rootTransactionCallback']);
      $this->insertRow('row');
      $this->assertNull($this->postTransactionCallbackAction);
@@ -865,19 +856,16 @@ index 3911419ca77..651c5334cbf 100644
      unset($transaction);
      $this->assertSame('rtcCommit', $this->postTransactionCallbackAction);
      $this->assertRowPresent('row');
-@@ -833,48 +888,139 @@ public function testRootTransactionEndCallbackCalledAfterDdlAndDestruction(): vo
+@@ -832,6 +842,99 @@ public function testRootTransactionEndCallbackCalledAfterDdlAndDestruction(): vo
+     $this->assertRowPresent('row');
    }
  
-   /**
--   * A post-transaction callback for testing purposes.
++  /**
 +   * Tests post-transaction rollback executes after a DDL statement.
 +   *
 +   * For database servers that support transactional DDL, a rollback of a
 +   * transaction including DDL statements is possible.
-    */
--  public function rootTransactionCallback(bool $success): void {
--    $this->postTransactionCallbackAction = $success ? 'rtcCommit' : 'rtcRollback';
--    $this->insertRow($this->postTransactionCallbackAction);
++   */
 +  public function testRootTransactionEndCallbackCalledAfterDdlAndRollbackForTransactionalDdlDatabase(): void {
 +    if (!$this->connection->supportsTransactionalDDL()) {
 +      $this->markTestSkipped('This test only works for database supporting transactional DDL.');
@@ -916,35 +904,21 @@ index 3911419ca77..651c5334cbf 100644
 +    $this->assertRowAbsent('rtcCommit');
 +    $this->assertRowPresent('rtcRollback');
 +    $this->assertRowAbsent('row');
-   }
- 
-   /**
--   * Tests TransactionManager failure.
++  }
++
++  /**
 +   * Tests post-transaction rollback failure after a DDL statement.
 +   *
 +   * For database servers that support transactional DDL, a rollback of a
 +   * transaction including DDL statements is not possible, since a commit
 +   * happened already. We cannot decide what should be the status of the
-+   * callback, it is neither successful nor failed.
-    */
--  public function testTransactionManagerFailureOnPendingStackItems(): void {
--    $connectionInfo = Database::getConnectionInfo();
--    Database::addConnectionInfo('default', 'test_fail', $connectionInfo['default']);
--    $testConnection = Database::getConnection('test_fail');
++   * callback, an exception is thrown.
++   */
 +  public function testRootTransactionEndCallbackFailureUponDdlAndRollbackForNonTransactionalDdlDatabase(): void {
 +    if ($this->connection->supportsTransactionalDDL()) {
 +      $this->markTestSkipped('This test only works for database that do not support transactional DDL.');
 +    }
- 
--    // Add a fake item to the stack.
--    $manager = $testConnection->transactionManager();
--    $reflectionMethod = new \ReflectionMethod($manager, 'addStackItem');
--    $reflectionMethod->invoke($manager, 'bar', new StackItem('qux', StackItemType::Root));
--    // Ensure transaction state can be determined during object destruction.
--    // This is necessary for the test to pass when xdebug.mode has the 'develop'
--    // option enabled.
--    $reflectionProperty = new \ReflectionProperty(TransactionManagerBase::class, 'connectionTransactionState');
--    $reflectionProperty->setValue($manager, ClientConnectionTransactionState::Active);
++
 +    $transaction = $this->createRootTransaction('', FALSE);
 +    $this->connection->transactionManager()->addPostTransactionCallback([$this, 'rootTransactionCallback']);
 +    $this->insertRow('row');
@@ -960,19 +934,11 @@ index 3911419ca77..651c5334cbf 100644
 +    $this->assertRowAbsent('rtcCommit');
 +    $this->assertRowAbsent('rtcRollback');
 +    $this->assertRowPresent('row');
- 
--    // Ensure that __destruct() results in an assertion error. Note that this
--    // will normally be called by PHP during the object's destruction but Drupal
--    // will commit all transactions when a database is closed thereby making
--    // this impossible to test unless it is called directly.
-     try {
--      $manager->__destruct();
--      $this->fail("Expected AssertionError error not thrown");
++
++    try {
 +      $transaction->rollBack();
 +      $this->fail('A TransactionOutOfOrderException was expected, but it was not thrown.');
-     }
--    catch (\AssertionError $e) {
--      $this->assertStringStartsWith('Transaction $stack was not empty. Active stack: bar\\qux', $e->getMessage());
++    }
 +    catch (TransactionOutOfOrderException $e) {
 +      $this->assertMatchesRegularExpression("/^Error attempting rollback of .*\\\\drupal_transaction\\. Active stack: .* empty/", $e->getMessage());
 +      unset($transaction);
@@ -984,55 +950,9 @@ index 3911419ca77..651c5334cbf 100644
 +      $reflectedTransactionState = new \ReflectionMethod($manager, 'getConnectionTransactionState');
 +      $this->assertSame(ClientConnectionTransactionState::Voided, $reflectedTransactionState->invoke($manager));
 +      $this->assertRowPresent('row');
-     }
-+  }
- 
--    // Clean up.
--    $reflectionProperty = new \ReflectionProperty(TransactionManagerBase::class, 'stack');
--    $reflectionProperty->setValue($manager, []);
--    unset($testConnection);
--    Database::closeConnection('test_fail');
-+  /**
-+   * Tests post-transaction rollback failure after a DDL statement.
-+   *
-+   * Try a direct rollback on the client connection.
-+   */
-+  public function testRootTransactionEndCallbackFailureUponDdlAndDirectRollbackForNonTransactionalDdlDatabase(): void {
-+    if ($this->connection->supportsTransactionalDDL()) {
-+      $this->markTestSkipped('This test only works for database that do not support transactional DDL.');
 +    }
++  }
 +
-+    $transaction = $this->createRootTransaction('', FALSE);
-+    $this->connection->transactionManager()->addPostTransactionCallback([$this, 'rootTransactionCallback']);
-+    $this->insertRow('row');
-+    $this->assertNull($this->postTransactionCallbackAction);
-+
-+    // Callbacks are processed only when destructing the transaction.
-+    // Executing a DDL statement is not sufficient itself.
-+    // We cannot use truncate here, since it has protective code to fall back
-+    // to a transactional delete when in transaction. We drop an unrelated
-+    // table instead.
-+    $this->connection->schema()->dropTable('test_people');
-+    $this->assertNull($this->postTransactionCallbackAction);
-+    $this->assertRowAbsent('rtcCommit');
-+    $this->assertRowAbsent('rtcRollback');
-+    $this->assertRowPresent('row');
-+
-+    // On MySql, we can check the client transaction status directly.
-+    $this->assertFalse($this->connection->getClientConnection()->inTransaction());
-+
-+    // This is a no-op.
-+    $this->connection->query('ROLLBACK');
-+
-+    unset($transaction);
-+    $this->assertNull($this->postTransactionCallbackAction);
-+    $this->assertRowAbsent('rtcCommit');
-+    $this->assertRowAbsent('rtcRollback');
-+    $manager = $this->connection->transactionManager();
-+    $this->assertSame(0, $manager->stackDepth());
-+    $reflectedTransactionState = new \ReflectionMethod($manager, 'getConnectionTransactionState');
-+    $this->assertSame(ClientConnectionTransactionState::Voided, $reflectedTransactionState->invoke($manager));
-+    $this->assertRowPresent('row');
-   }
- 
- }
+   /**
+    * A post-transaction callback for testing purposes.
+    */
