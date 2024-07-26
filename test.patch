@@ -1,958 +1,119 @@
-diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
-index db2020bc4de..6945c53d5db 100644
---- a/core/lib/Drupal/Core/Database/Connection.php
-+++ b/core/lib/Drupal/Core/Database/Connection.php
-@@ -4,6 +4,9 @@
+diff --git a/core/lib/Drupal/Component/Plugin/Discovery/AttributeClassDiscovery.php b/core/lib/Drupal/Component/Plugin/Discovery/AttributeClassDiscovery.php
+index 3477b746cc8..ed2b78fbde4 100644
+--- a/core/lib/Drupal/Component/Plugin/Discovery/AttributeClassDiscovery.php
++++ b/core/lib/Drupal/Component/Plugin/Discovery/AttributeClassDiscovery.php
+@@ -80,17 +80,37 @@ public function getDefinitions() {
+               $sub_path = $iterator->getSubIterator()->getSubPath();
+               $sub_path = $sub_path ? str_replace(DIRECTORY_SEPARATOR, '\\', $sub_path) . '\\' : '';
+               $class = $namespace . '\\' . $sub_path . $fileinfo->getBasename('.php');
+-
+-              ['id' => $id, 'content' => $content] = $this->parseClass($class, $fileinfo);
+-
++              try {
++                $writeToCache = TRUE;
++                ['id' => $id, 'content' => $content] = $this->parseClass($class, $fileinfo);
++              }
++              catch (\Error $e) {
++                // Plugins may rely on Attribute classes defined by modules that
++                // are not installed. In this case a class not found error may
++                // be thrown from reflection, however this is an unavoidable
++                // situation with optional dependencies and plugins. Just
++                // silently skip over this class and avoid writing to the cache,
++                // so that it is scanned each time. This ensures that the plugin
++                // definition will be found if the module it requires is
++                // enabled.
++dump($e->getMessage());
++                if (preg_match('/(Class|Interface) .* (not found|does not exist)$/', $e->getMessage())) {
++dump('MATCH');
++                  $writeToCache = FALSE;
++                  continue;
++                }
++                throw $e;
++              }
+               if ($id) {
+                 $definitions[$id] = $content;
+                 // Explicitly serialize this to create a new object instance.
+                 $this->fileCache->set($fileinfo->getPathName(), ['id' => $id, 'content' => serialize($content)]);
+               }
+               else {
+-                // Store a NULL object, so the file is not parsed again.
+-                $this->fileCache->set($fileinfo->getPathName(), [NULL]);
++                if ($writeToCache) {
++                  // Store a NULL object, so the file is not parsed again.
++                  $this->fileCache->set($fileinfo->getPathName(), [NULL]);
++                }
+               }
+             }
+           }
+diff --git a/core/phpstan.neon.dist b/core/phpstan.neon.dist
+index 35bcfd1e64b..b261a1b12a1 100644
+--- a/core/phpstan.neon.dist
++++ b/core/phpstan.neon.dist
+@@ -33,10 +33,11 @@ parameters:
+     - scripts/generate-d?-content.sh
+     # Skip data files.
+     - lib/Drupal/Component/Transliteration/data/*.php
+-    # Below extends on purpose a non existing class for testing.
++    # Below extend on purpose non existing classes for testing.
+     - modules/system/tests/modules/plugin_test/src/Plugin/plugin_test/fruit/ExtendingNonInstalledClass.php
+     - modules/system/tests/modules/plugin_test/src/Plugin/plugin_test/custom_annotation/UsingNonInstalledTraitClass.php
+     - modules/system/tests/modules/plugin_test/src/Plugin/plugin_test/custom_annotation/ExtendingNonInstalledClass.php
++    - tests/Drupal/Tests/Component/Plugin/Attribute/Fixtures/Plugins/PluginNamespace/AttributeDiscoveryTest2.php
  
- use Drupal\Component\Assertion\Inspector;
- use Drupal\Core\Database\Event\DatabaseEvent;
-+use Drupal\Core\Database\Event\StatementExecutionEndEvent;
-+use Drupal\Core\Database\Event\StatementExecutionFailureEvent;
-+use Drupal\Core\Database\Event\StatementExecutionStartEvent;
- use Drupal\Core\Database\Exception\EventException;
- use Drupal\Core\Database\Query\Condition;
- use Drupal\Core\Database\Query\Delete;
-@@ -664,6 +667,99 @@ public function query($query, array $args = [], $options = []) {
-     return $result ? $statement : NULL;
-   }
+   ignoreErrors:
+     # new static() is a best practice in Drupal, so we cannot fix that.
+diff --git a/core/tests/Drupal/Tests/Component/Plugin/Attribute/AttributeClassDiscoveryTest.php b/core/tests/Drupal/Tests/Component/Plugin/Attribute/AttributeClassDiscoveryTest.php
+index f6c6370e7e1..28c22904df3 100644
+--- a/core/tests/Drupal/Tests/Component/Plugin/Attribute/AttributeClassDiscoveryTest.php
++++ b/core/tests/Drupal/Tests/Component/Plugin/Attribute/AttributeClassDiscoveryTest.php
+@@ -4,6 +4,7 @@
  
-+  /**
-+   * Executes a data definition language (DDL) statement.
-+   *
-+   * This method allows to void an active transaction when the driver does
-+   * not support transactional DDL.
-+   *
-+   * @param string $sql
-+   *   The DDL statement to execute. This is a SQL string that may contain
-+   *   placeholders.
-+   * @param array $arguments
-+   *   (Optional) The associative array of arguments for the prepared
-+   *   statement.
-+   * @param array $options
-+   *   (Optional) An associative array of options to control how the query is
-+   *   run. The given options will be merged with self::defaultOptions().
-+   */
-+  public function executeDdlStatement(string $sql, array $arguments = [], array $options = []): void {
-+    if (count($arguments) > 0) {
-+      $this->query($sql, $arguments, $options);
-+    }
-+    else {
-+      $this->executeSql($sql, $options);
-+    }
-+
-+    // DDL statements when in a transaction force a commit in some databases.
-+    // Void the transaction in that case.
-+    if (!$this->transactionalDDLSupport && $this->transactionManager()->inTransaction()) {
-+      $this->transactionManager()->voidClientTransaction();
-+    }
-+  }
-+
-+  /**
-+   * Executes an SQL statement, directly through the client connection.
-+   *
-+   * This method does not allow placeholders. It assumes the client connection
-+   * is \PDO. Non-PDO based drivers need to override this method.
-+   *
-+   * @param string $sql
-+   *   The SQL statement to execute.
-+   * @param array $options
-+   *   (Optional) An associative array of options. The given options will be
-+   *    merged with self::defaultOptions().
-+   */
-+  protected function executeSql(string $sql, array $options = []): void {
-+    $sql = $this->preprocessStatement($sql, $options);
-+
-+    if ($this->isEventEnabled(StatementExecutionStartEvent::class)) {
-+      $startEvent = new StatementExecutionStartEvent(
-+        spl_object_id($this),
-+        $this->getKey(),
-+        $this->getTarget(),
-+        $sql,
-+        [],
-+        $this->findCallerFromDebugBacktrace()
-+      );
-+      $this->dispatchEvent($startEvent);
-+    }
-+
-+    try {
-+      $this->getClientConnection()->exec($sql);
-+    }
-+    catch (\Exception $e) {
-+      if (isset($startEvent) && $this->connection->isEventEnabled(StatementExecutionFailureEvent::class)) {
-+        $this->connection->dispatchEvent(new StatementExecutionFailureEvent(
-+          $startEvent->statementObjectId,
-+          $startEvent->key,
-+          $startEvent->target,
-+          $startEvent->queryString,
-+          $startEvent->args,
-+          $startEvent->caller,
-+          $startEvent->time,
-+          get_class($e),
-+          $e->getCode(),
-+          $e->getMessage(),
-+        ));
-+      }
-+      $this->exceptionHandler()->handleExecuteSqlException($e, $sql, $options);
-+      return;
-+    }
-+
-+    if (isset($startEvent) && $this->isEventEnabled(StatementExecutionEndEvent::class)) {
-+      $this->dispatchEvent(new StatementExecutionEndEvent(
-+        $startEvent->statementObjectId,
-+        $startEvent->key,
-+        $startEvent->target,
-+        $startEvent->queryString,
-+        $startEvent->args,
-+        $startEvent->caller,
-+        $startEvent->time
-+      ));
-+    }
-+  }
-+
-   /**
-    * Expands out shorthand placeholders.
-    *
-diff --git a/core/lib/Drupal/Core/Database/ExceptionHandler.php b/core/lib/Drupal/Core/Database/ExceptionHandler.php
-index 5dfd41f41c8..8acb2f05889 100644
---- a/core/lib/Drupal/Core/Database/ExceptionHandler.php
-+++ b/core/lib/Drupal/Core/Database/ExceptionHandler.php
-@@ -55,18 +55,52 @@ public function handleStatementException(\Exception $exception, string $sql, arr
+ namespace Drupal\Tests\Component\Plugin\Attribute;
+ 
++use Composer\Autoload\ClassLoader;
+ use Drupal\Component\Plugin\Discovery\AttributeClassDiscovery;
+ use Drupal\Component\FileCache\FileCacheFactory;
+ use PHPUnit\Framework\TestCase;
+@@ -22,6 +23,7 @@ class AttributeClassDiscoveryTest extends TestCase {
     */
-   public function handleExecutionException(\Exception $exception, StatementInterface $statement, array $arguments = [], array $options = []): void {
-     if ($exception instanceof \PDOException) {
--      // Wrap the exception in another exception, because PHP does not allow
--      // overriding Exception::getMessage(). Its message is the extra database
--      // debug information.
--      $message = $exception->getMessage() . ": " . $statement->getQueryString() . "; " . print_r($arguments, TRUE);
--      // Match all SQLSTATE 23xxx errors.
--      if (substr($exception->getCode(), -6, -3) == '23') {
--        throw new IntegrityConstraintViolationException($message, $exception->getCode(), $exception);
--      }
--      throw new DatabaseExceptionWrapper($message, 0, $exception);
-+      $this->throwExecutionException($exception, $exception->getMessage() . ": " . $statement->getQueryString() . "; " . print_r($arguments, TRUE));
-     }
-+    throw $exception;
-+  }
- 
-+  /**
-+   * Handles exceptions thrown during direct execution of an SQL statement.
-+   *
-+   * @param \Exception $exception
-+   *   The exception to be handled.
-+   * @param string $sql
-+   *   The SQL statement executed.
-+   * @param array $options
-+   *   An associative array of options to control how the database operation is
-+   *   run.
-+   *
-+   * @throws \Drupal\Core\Database\DatabaseExceptionWrapper
-+   * @throws \Drupal\Core\Database\IntegrityConstraintViolationException
-+   */
-+  public function handleExecuteSqlException(\Exception $exception, string $sql, array $options = []): void {
-+    if ($exception instanceof \PDOException) {
-+      $this->throwExecutionException($exception, $exception->getMessage() . ": " . $sql);
-+    }
-     throw $exception;
-   }
- 
-+  /**
-+   * Re-throws the appropriate exception.
-+   *
-+   * @param \Exception $exception
-+   *   The exception to be handled.
-+   * @param string $message
-+   *   The message to be included in the exception.
-+   *
-+   * @throws \Drupal\Core\Database\DatabaseExceptionWrapper
-+   * @throws \Drupal\Core\Database\IntegrityConstraintViolationException
-+   */
-+  protected function throwExecutionException(\Exception $exception, string $message): void {
-+    // Wrap the exception in another exception, because PHP does not allow
-+    // overriding Exception::getMessage(). Its message is the extra database
-+    // debug information.
-+    // Match all SQLSTATE 23xxx errors.
-+    if (substr($exception->getCode(), -6, -3) == '23') {
-+      throw new IntegrityConstraintViolationException($message, $exception->getCode(), $exception);
-+    }
-+    throw new DatabaseExceptionWrapper($message, 0, $exception);
-+  }
+   protected function setUp(): void {
+     parent::setUp();
 +
- }
-diff --git a/core/lib/Drupal/Core/Database/Query/Truncate.php b/core/lib/Drupal/Core/Database/Query/Truncate.php
-index 45f1c8447ac..e99dd28be87 100644
---- a/core/lib/Drupal/Core/Database/Query/Truncate.php
-+++ b/core/lib/Drupal/Core/Database/Query/Truncate.php
-@@ -44,13 +44,23 @@ public function __construct(Connection $connection, $table, array $options = [])
-    * @see https://learnsql.com/blog/difference-between-truncate-delete-and-drop-table-in-sql
-    */
-   public function execute() {
--    $stmt = $this->connection->prepareStatement((string) $this, $this->queryOptions, TRUE);
--    try {
--      $stmt->execute([], $this->queryOptions);
--      return $stmt->rowCount();
-+    // In most cases, TRUNCATE is not a transaction safe statement as it is a
-+    // DDL statement which results in an implicit COMMIT. When we are in a
-+    // transaction, fallback to the slower, but transactional, DELETE.
-+    // PostgreSQL also locks the entire table for a TRUNCATE strongly reducing
-+    // the concurrency with other transactions.
-+    if ($this->connection->inTransaction()) {
-+      $stmt = $this->connection->prepareStatement((string) $this, $this->queryOptions, TRUE);
-+      try {
-+        $stmt->execute([], $this->queryOptions);
-+        return $stmt->rowCount();
-+      }
-+      catch (\Exception $e) {
-+        $this->connection->exceptionHandler()->handleExecutionException($e, $stmt, [], $this->queryOptions);
-+      }
-     }
--    catch (\Exception $e) {
--      $this->connection->exceptionHandler()->handleExecutionException($e, $stmt, [], $this->queryOptions);
-+    else {
-+      $this->connection->executeDdlStatement((string) $this, [], $this->queryOptions);
-     }
+     // Ensure the file cache is disabled.
+     FileCacheFactory::setConfiguration([FileCacheFactory::DISABLE_CACHE => TRUE]);
+     // Ensure that FileCacheFactory has a prefix.
+@@ -29,7 +31,11 @@ protected function setUp(): void {
  
-     return NULL;
-@@ -66,11 +76,6 @@ public function __toString() {
-     // Create a sanitized comment string to prepend to the query.
-     $comments = $this->connection->makeComment($this->comments);
- 
--    // In most cases, TRUNCATE is not a transaction safe statement as it is a
--    // DDL statement which results in an implicit COMMIT. When we are in a
--    // transaction, fallback to the slower, but transactional, DELETE.
--    // PostgreSQL also locks the entire table for a TRUNCATE strongly reducing
--    // the concurrency with other transactions.
-     if ($this->connection->inTransaction()) {
-       return $comments . 'DELETE FROM {' . $this->connection->escapeTable($this->table) . '}';
-     }
-diff --git a/core/lib/Drupal/Core/Database/Schema.php b/core/lib/Drupal/Core/Database/Schema.php
-index 9c5aac09681..e00ce03bf38 100644
---- a/core/lib/Drupal/Core/Database/Schema.php
-+++ b/core/lib/Drupal/Core/Database/Schema.php
-@@ -616,7 +616,7 @@ public function createTable($name, $table) {
-     }
-     $statements = $this->createTableSql($name, $table);
-     foreach ($statements as $statement) {
--      $this->connection->query($statement);
-+      $this->connection->executeDdlStatement($statement);
-     }
-   }
- 
-diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
-index 4e1fc8352fa..51d8c5c4eea 100644
---- a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
-+++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
-@@ -333,6 +333,7 @@ public function unpile(string $name, string $id): void {
-       }
-       else {
-         // The stack got corrupted.
-+        $this->postTransactionCallbacks = [];
-         throw new TransactionOutOfOrderException("Transaction {$id}/{$name} is out of order. Active stack: " . $this->dumpStackItemsAsString());
-       }
- 
-@@ -342,6 +343,7 @@ public function unpile(string $name, string $id): void {
-     }
- 
-     // The stack got corrupted.
-+    $this->postTransactionCallbacks = [];
-     throw new TransactionOutOfOrderException("Transaction {$id}/{$name} is out of order. Active stack: " . $this->dumpStackItemsAsString());
-   }
- 
-@@ -351,6 +353,7 @@ public function unpile(string $name, string $id): void {
-   public function rollback(string $name, string $id): void {
-     // Rolled back item should match the last one in stack.
-     if ($id != array_key_last($this->stack()) || $name !== $this->stack()[$id]->name) {
-+      $this->postTransactionCallbacks = [];
-       throw new TransactionOutOfOrderException("Error attempting rollback of {$id}\\{$name}. Active stack: " . $this->dumpStackItemsAsString());
-     }
- 
-@@ -377,12 +380,14 @@ public function rollback(string $name, string $id): void {
-       }
-       else {
-         // The stack got corrupted.
-+        $this->postTransactionCallbacks = [];
-         throw new TransactionOutOfOrderException("Error attempting rollback of {$id}\\{$name}. Active stack: " . $this->dumpStackItemsAsString());
-       }
-       return;
-     }
- 
-     // The stack got corrupted.
-+    $this->postTransactionCallbacks = [];
-     throw new TransactionOutOfOrderException("Error attempting rollback of {$id}\\{$name}. Active stack: " . $this->dumpStackItemsAsString());
-   }
- 
-diff --git a/core/modules/mysql/src/Driver/Database/mysql/ExceptionHandler.php b/core/modules/mysql/src/Driver/Database/mysql/ExceptionHandler.php
-index 7926175e0dc..d06a35ce161 100644
---- a/core/modules/mysql/src/Driver/Database/mysql/ExceptionHandler.php
-+++ b/core/modules/mysql/src/Driver/Database/mysql/ExceptionHandler.php
-@@ -8,7 +8,6 @@
- use Drupal\Core\Database\Exception\SchemaTableColumnSizeTooLargeException;
- use Drupal\Core\Database\Exception\SchemaTableKeyTooLargeException;
- use Drupal\Core\Database\IntegrityConstraintViolationException;
--use Drupal\Core\Database\StatementInterface;
- 
- /**
-  * MySql database exception handler class.
-@@ -18,45 +17,39 @@ class ExceptionHandler extends BaseExceptionHandler {
-   /**
-    * {@inheritdoc}
-    */
--  public function handleExecutionException(\Exception $exception, StatementInterface $statement, array $arguments = [], array $options = []): void {
--    if ($exception instanceof \PDOException) {
--      // Wrap the exception in another exception, because PHP does not allow
--      // overriding Exception::getMessage(). Its message is the extra database
--      // debug information.
--      $code = is_int($exception->getCode()) ? $exception->getCode() : 0;
--
--      // If a max_allowed_packet error occurs the message length is truncated.
--      // This should prevent the error from recurring if the exception is logged
--      // to the database using dblog or the like.
--      if (($exception->errorInfo[1] ?? NULL) === 1153) {
--        $message = Unicode::truncateBytes($exception->getMessage(), Connection::MIN_MAX_ALLOWED_PACKET);
--        throw new DatabaseExceptionWrapper($message, $code, $exception);
--      }
--
--      $message = $exception->getMessage() . ": " . $statement->getQueryString() . "; " . print_r($arguments, TRUE);
--
--      // SQLSTATE 23xxx errors indicate an integrity constraint violation. Also,
--      // in case of attempted INSERT of a record with an undefined column and no
--      // default value indicated in schema, MySql returns a 1364 error code.
--      if (
--        substr($exception->getCode(), -6, -3) == '23' ||
--        ($exception->errorInfo[1] ?? NULL) === 1364
--      ) {
--        throw new IntegrityConstraintViolationException($message, $code, $exception);
--      }
--
--      if ($exception->getCode() === '42000') {
--        match ($exception->errorInfo[1]) {
--          1071 => throw new SchemaTableKeyTooLargeException($message, $code, $exception),
--          1074 => throw new SchemaTableColumnSizeTooLargeException($message, $code, $exception),
--          default => throw new DatabaseExceptionWrapper($message, 0, $exception),
--        };
--      }
--
--      throw new DatabaseExceptionWrapper($message, 0, $exception);
-+  protected function throwExecutionException(\Exception $exception, string $message): void {
-+    // Wrap the exception in another exception, because PHP does not allow
-+    // overriding Exception::getMessage(). Its message is the extra database
-+    // debug information.
-+    $code = is_int($exception->getCode()) ? $exception->getCode() : 0;
+     // Normally the attribute classes would be autoloaded.
+     include_once __DIR__ . '/Fixtures/CustomPlugin.php';
+-    include_once __DIR__ . '/Fixtures/Plugins/PluginNamespace/AttributeDiscoveryTest1.php';
 +
-+    // If a max_allowed_packet error occurs the message length is truncated.
-+    // This should prevent the error from recurring if the exception is logged
-+    // to the database using dblog or the like.
-+    if (($exception->errorInfo[1] ?? NULL) === 1153) {
-+      $message = Unicode::truncateBytes($exception->getMessage(), Connection::MIN_MAX_ALLOWED_PACKET);
-+      throw new DatabaseExceptionWrapper($message, $code, $exception);
-     }
- 
--    throw $exception;
-+    // SQLSTATE 23xxx errors indicate an integrity constraint violation. Also,
-+    // in case of attempted INSERT of a record with an undefined column and no
-+    // default value indicated in schema, MySql returns a 1364 error code.
-+    if (
-+      substr($exception->getCode(), -6, -3) == '23' ||
-+      ($exception->errorInfo[1] ?? NULL) === 1364
-+    ) {
-+      throw new IntegrityConstraintViolationException($message, $code, $exception);
-+    }
-+
-+    if ($exception->getCode() === '42000') {
-+      match ($exception->errorInfo[1]) {
-+        1071 => throw new SchemaTableKeyTooLargeException($message, $code, $exception),
-+        1074 => throw new SchemaTableColumnSizeTooLargeException($message, $code, $exception),
-+        default => throw new DatabaseExceptionWrapper($message, 0, $exception),
-+      };
-+    }
-+
-+    throw new DatabaseExceptionWrapper($message, 0, $exception);
-   }
- 
- }
-diff --git a/core/modules/mysql/src/Driver/Database/mysql/Schema.php b/core/modules/mysql/src/Driver/Database/mysql/Schema.php
-index 6fdcad7047b..8f9b3980bf6 100644
---- a/core/modules/mysql/src/Driver/Database/mysql/Schema.php
-+++ b/core/modules/mysql/src/Driver/Database/mysql/Schema.php
-@@ -380,7 +380,7 @@ public function renameTable($table, $new_name) {
-     }
- 
-     $info = $this->getPrefixInfo($new_name);
--    $this->connection->query('ALTER TABLE {' . $table . '} RENAME TO [' . $info['table'] . ']');
-+    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} RENAME TO [' . $info['table'] . ']');
++    // Register classloader for the fixture plugins.
++    $additionalClassLoader = new ClassLoader();
++    $additionalClassLoader->addPsr4("com\\example\\PluginNamespace\\", __DIR__ . "/Fixtures/Plugins/PluginNamespace");
++    $additionalClassLoader->register(TRUE);
    }
  
    /**
-@@ -391,7 +391,7 @@ public function dropTable($table) {
-       return FALSE;
-     }
- 
--    $this->connection->query('DROP TABLE {' . $table . '}');
-+    $this->connection->executeDdlStatement('DROP TABLE {' . $table . '}');
-     return TRUE;
-   }
- 
-@@ -430,14 +430,14 @@ public function addField($table, $field, $spec, $keys_new = []) {
-       $query .= ', ADD ' . implode(', ADD ', $keys_sql);
-     }
-     try {
--      $this->connection->query($query);
-+      $this->connection->executeDdlStatement($query);
-     }
-     catch (DatabaseExceptionWrapper $e) {
-       // MySQL error number 4111 (ER_DROP_PK_COLUMN_TO_DROP_GIPK) indicates that
-       // when dropping and adding a primary key, the generated invisible primary
-       // key (GIPK) column must also be dropped.
-       if (isset($e->getPrevious()->errorInfo[1]) && $e->getPrevious()->errorInfo[1] === 4111 && isset($keys_new['primary key']) && $this->indexExists($table, 'PRIMARY') && $this->findPrimaryKeyColumns($table) === ['my_row_id']) {
--        $this->connection->query($query . ', DROP COLUMN [my_row_id]');
-+        $this->connection->executeDdlStatement($query . ', DROP COLUMN [my_row_id]');
-       }
-       else {
-         throw $e;
-@@ -488,7 +488,7 @@ public function dropField($table, $field) {
-       $this->dropPrimaryKey($table);
-     }
- 
--    $this->connection->query('ALTER TABLE {' . $table . '} DROP [' . $field . ']');
-+    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} DROP [' . $field . ']');
-     return TRUE;
-   }
- 
-@@ -513,7 +513,7 @@ public function addPrimaryKey($table, $fields) {
-       throw new SchemaObjectExistsException("Cannot add primary key to table '$table': primary key already exists.");
-     }
- 
--    $this->connection->query('ALTER TABLE {' . $table . '} ADD PRIMARY KEY (' . $this->createKeySql($fields) . ')');
-+    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} ADD PRIMARY KEY (' . $this->createKeySql($fields) . ')');
-   }
- 
-   /**
-@@ -524,7 +524,7 @@ public function dropPrimaryKey($table) {
-       return FALSE;
-     }
- 
--    $this->connection->query('ALTER TABLE {' . $table . '} DROP PRIMARY KEY');
-+    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} DROP PRIMARY KEY');
-     return TRUE;
-   }
- 
-@@ -550,7 +550,7 @@ public function addUniqueKey($table, $name, $fields) {
-       throw new SchemaObjectExistsException("Cannot add unique key '$name' to table '$table': unique key already exists.");
-     }
- 
--    $this->connection->query('ALTER TABLE {' . $table . '} ADD UNIQUE KEY [' . $name . '] (' . $this->createKeySql($fields) . ')');
-+    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} ADD UNIQUE KEY [' . $name . '] (' . $this->createKeySql($fields) . ')');
-   }
- 
-   /**
-@@ -561,7 +561,7 @@ public function dropUniqueKey($table, $name) {
-       return FALSE;
-     }
- 
--    $this->connection->query('ALTER TABLE {' . $table . '} DROP KEY [' . $name . ']');
-+    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} DROP KEY [' . $name . ']');
-     return TRUE;
-   }
- 
-@@ -579,7 +579,7 @@ public function addIndex($table, $name, $fields, array $spec) {
-     $spec['indexes'][$name] = $fields;
-     $indexes = $this->getNormalizedIndexes($spec);
- 
--    $this->connection->query('ALTER TABLE {' . $table . '} ADD INDEX [' . $name . '] (' . $this->createKeySql($indexes[$name]) . ')');
-+    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} ADD INDEX [' . $name . '] (' . $this->createKeySql($indexes[$name]) . ')');
-   }
- 
-   /**
-@@ -590,7 +590,7 @@ public function dropIndex($table, $name) {
-       return FALSE;
-     }
- 
--    $this->connection->query('ALTER TABLE {' . $table . '} DROP INDEX [' . $name . ']');
-+    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} DROP INDEX [' . $name . ']');
-     return TRUE;
-   }
- 
-@@ -642,11 +642,11 @@ public function changeField($table, $field, $field_new, $spec, $keys_new = []) {
-     if ($keys_sql = $this->createKeysSql($keys_new)) {
-       $sql .= ', ADD ' . implode(', ADD ', $keys_sql);
-     }
--    $this->connection->query($sql);
-+    $this->connection->executeDdlStatement($sql);
- 
-     if ($spec['type'] === 'serial') {
-       $max = $this->connection->query('SELECT MAX(`' . $field_new . '`) FROM {' . $table . '}')->fetchField();
--      $this->connection->query("ALTER TABLE {" . $table . "} AUTO_INCREMENT = " . ($max + 1));
-+      $this->connection->executeDdlStatement("ALTER TABLE {" . $table . "} AUTO_INCREMENT = " . ($max + 1));
-     }
-   }
- 
-diff --git a/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php b/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php
-index e55a6ffa402..4e7fdc72d70 100644
---- a/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php
-+++ b/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php
-@@ -589,7 +589,7 @@ public function renameTable($table, $new_name) {
-       // The renaming of an index will fail when the there exists an table with
-       // the same name as the renamed index.
-       if (!$this->tableExists($this->ensureIdentifiersLength($new_name, $index_name, $index_type), FALSE)) {
--        $this->connection->query('ALTER INDEX "' . $this->defaultSchema . '"."' . $index->indexname . '" RENAME TO ' . $this->ensureIdentifiersLength($new_name, $index_name, $index_type));
-+        $this->connection->executeDdlStatement('ALTER INDEX "' . $this->defaultSchema . '"."' . $index->indexname . '" RENAME TO ' . $this->ensureIdentifiersLength($new_name, $index_name, $index_type));
-       }
-     }
- 
-@@ -612,11 +612,11 @@ public function renameTable($table, $new_name) {
-         // subsequent table renames.
-         $new_sequence = $this->ensureIdentifiersLength($new_name, $field, 'seq', '_');
- 
--        $this->connection->query('ALTER SEQUENCE ' . $old_sequence . ' RENAME TO ' . $new_sequence);
-+        $this->connection->executeDdlStatement('ALTER SEQUENCE ' . $old_sequence . ' RENAME TO ' . $new_sequence);
-       }
-     }
-     // Now rename the table.
--    $this->connection->query('ALTER TABLE {' . $table . '} RENAME TO ' . $prefixInfo['table']);
-+    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} RENAME TO ' . $prefixInfo['table']);
-     $this->resetTableInformation($table);
-   }
- 
-@@ -628,7 +628,7 @@ public function dropTable($table) {
-       return FALSE;
-     }
- 
--    $this->connection->query('DROP TABLE {' . $table . '}');
-+    $this->connection->executeDdlStatement('DROP TABLE {' . $table . '}');
-     $this->resetTableInformation($table);
-     return TRUE;
-   }
-@@ -657,7 +657,7 @@ public function addField($table, $field, $spec, $new_keys = []) {
-     }
-     $query = 'ALTER TABLE {' . $table . '} ADD COLUMN ';
-     $query .= $this->createFieldSql($field, $this->processField($spec));
--    $this->connection->query($query);
-+    $this->connection->executeDdlStatement($query);
-     if (isset($spec['initial_from_field'])) {
-       if (isset($spec['initial'])) {
-         $expression = 'COALESCE(' . $spec['initial_from_field'] . ', :default_initial_value)';
-@@ -677,7 +677,7 @@ public function addField($table, $field, $spec, $new_keys = []) {
-         ->execute();
-     }
-     if ($fix_null) {
--      $this->connection->query("ALTER TABLE {" . $table . "} ALTER $field SET NOT NULL");
-+      $this->connection->executeDdlStatement("ALTER TABLE {" . $table . "} ALTER $field SET NOT NULL");
-     }
-     if (isset($new_keys)) {
-       // Make sure to drop the existing primary key before adding a new one.
-@@ -690,7 +690,7 @@ public function addField($table, $field, $spec, $new_keys = []) {
-     }
-     // Add column comment.
-     if (!empty($spec['description'])) {
--      $this->connection->query('COMMENT ON COLUMN {' . $table . '}.' . $field . ' IS ' . $this->prepareComment($spec['description']));
-+      $this->connection->executeDdlStatement('COMMENT ON COLUMN {' . $table . '}.' . $field . ' IS ' . $this->prepareComment($spec['description']));
-     }
-     $this->resetTableInformation($table);
-   }
-@@ -703,7 +703,7 @@ public function dropField($table, $field) {
-       return FALSE;
-     }
- 
--    $this->connection->query('ALTER TABLE {' . $table . '} DROP COLUMN "' . $field . '"');
-+    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} DROP COLUMN "' . $field . '"');
-     $this->resetTableInformation($table);
-     return TRUE;
-   }
-@@ -777,7 +777,7 @@ public function addPrimaryKey($table, $fields) {
-       throw new SchemaObjectExistsException("Cannot add primary key to table '$table': primary key already exists.");
-     }
- 
--    $this->connection->query('ALTER TABLE {' . $table . '} ADD CONSTRAINT ' . $this->ensureIdentifiersLength($table, '', 'pkey') . ' PRIMARY KEY (' . $this->createPrimaryKeySql($fields) . ')');
-+    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} ADD CONSTRAINT ' . $this->ensureIdentifiersLength($table, '', 'pkey') . ' PRIMARY KEY (' . $this->createPrimaryKeySql($fields) . ')');
-     $this->resetTableInformation($table);
-   }
- 
-@@ -789,7 +789,7 @@ public function dropPrimaryKey($table) {
-       return FALSE;
-     }
- 
--    $this->connection->query('ALTER TABLE {' . $table . '} DROP CONSTRAINT ' . $this->ensureIdentifiersLength($table, '', 'pkey'));
-+    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} DROP CONSTRAINT ' . $this->ensureIdentifiersLength($table, '', 'pkey'));
-     $this->resetTableInformation($table);
-     return TRUE;
-   }
-@@ -818,7 +818,7 @@ public function addUniqueKey($table, $name, $fields) {
-     // Use the createPrimaryKeySql(), which already discards any prefix lengths
-     // passed as part of the key column specifiers. (Postgres doesn't support
-     // setting a prefix length for PRIMARY or UNIQUE indices.)
--    $this->connection->query('ALTER TABLE {' . $table . '} ADD CONSTRAINT ' . $this->ensureIdentifiersLength($table, $name, 'key') . ' UNIQUE (' . $this->createPrimaryKeySql($fields) . ')');
-+    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} ADD CONSTRAINT ' . $this->ensureIdentifiersLength($table, $name, 'key') . ' UNIQUE (' . $this->createPrimaryKeySql($fields) . ')');
-     $this->resetTableInformation($table);
-   }
- 
-@@ -830,7 +830,7 @@ public function dropUniqueKey($table, $name) {
-       return FALSE;
-     }
- 
--    $this->connection->query('ALTER TABLE {' . $table . '} DROP CONSTRAINT ' . $this->ensureIdentifiersLength($table, $name, 'key'));
-+    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} DROP CONSTRAINT ' . $this->ensureIdentifiersLength($table, $name, 'key'));
-     $this->resetTableInformation($table);
-     return TRUE;
-   }
-@@ -846,7 +846,7 @@ public function addIndex($table, $name, $fields, array $spec) {
-       throw new SchemaObjectExistsException("Cannot add index '$name' to table '$table': index already exists.");
-     }
- 
--    $this->connection->query($this->_createIndexSql($table, $name, $fields));
-+    $this->connection->executeDdlStatement($this->_createIndexSql($table, $name, $fields));
-     $this->resetTableInformation($table);
-   }
- 
-@@ -858,7 +858,7 @@ public function dropIndex($table, $name) {
-       return FALSE;
-     }
- 
--    $this->connection->query('DROP INDEX ' . $this->defaultSchema . '.' . $this->ensureIdentifiersLength($table, $name, 'idx'));
-+    $this->connection->executeDdlStatement('DROP INDEX ' . $this->defaultSchema . '.' . $this->ensureIdentifiersLength($table, $name, 'idx'));
-     $this->resetTableInformation($table);
-     return TRUE;
-   }
-@@ -937,15 +937,15 @@ public function changeField($table, $field, $field_new, $spec, $new_keys = []) {
-     if (!empty($seq_name)) {
-       // We need to add CASCADE otherwise we cannot alter the sequence because
-       // the table depends on it.
--      $this->connection->query('DROP SEQUENCE IF EXISTS ' . $seq_name . ' CASCADE');
-+      $this->connection->executeDdlStatement('DROP SEQUENCE IF EXISTS ' . $seq_name . ' CASCADE');
-     }
- 
-     foreach ($field_info as $check) {
--      $this->connection->query('ALTER TABLE {' . $table . '} DROP CONSTRAINT [' . $check . ']');
-+      $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} DROP CONSTRAINT [' . $check . ']');
-     }
- 
-     // Remove old default.
--    $this->connection->query('ALTER TABLE {' . $table . '} ALTER COLUMN [' . $field . '] DROP DEFAULT');
-+    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} ALTER COLUMN [' . $field . '] DROP DEFAULT');
- 
-     // Convert field type.
-     // Usually, we do this via a simple typecast 'USING fieldname::type'. But
-@@ -955,10 +955,10 @@ public function changeField($table, $field, $field_new, $spec, $new_keys = []) {
-     $is_bytea = !empty($table_information->blob_fields[$field]);
-     if ($spec['pgsql_type'] != 'bytea') {
-       if ($is_bytea) {
--        $this->connection->query('ALTER TABLE {' . $table . '} ALTER [' . $field . '] TYPE ' . $field_def . ' USING convert_from([' . $field . ']' . ", 'UTF8')");
-+        $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} ALTER [' . $field . '] TYPE ' . $field_def . ' USING convert_from([' . $field . ']' . ", 'UTF8')");
-       }
-       else {
--        $this->connection->query('ALTER TABLE {' . $table . '} ALTER [' . $field . '] TYPE ' . $field_def . ' USING [' . $field . ']::' . $field_def);
-+        $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} ALTER [' . $field . '] TYPE ' . $field_def . ' USING [' . $field . ']::' . $field_def);
-       }
-     }
-     else {
-@@ -967,7 +967,7 @@ public function changeField($table, $field, $field_new, $spec, $new_keys = []) {
-         // Convert to a bytea type by using the SQL replace() function to
-         // convert any single backslashes in the field content to double
-         // backslashes ('\' to '\\').
--        $this->connection->query('ALTER TABLE {' . $table . '} ALTER [' . $field . '] TYPE ' . $field_def . ' USING decode(replace("' . $field . '"' . ", E'\\\\', E'\\\\\\\\'), 'escape');");
-+        $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} ALTER [' . $field . '] TYPE ' . $field_def . ' USING decode(replace("' . $field . '"' . ", E'\\\\', E'\\\\\\\\'), 'escape');");
-       }
-     }
- 
-@@ -978,7 +978,7 @@ public function changeField($table, $field, $field_new, $spec, $new_keys = []) {
-       else {
-         $null_action = 'DROP NOT NULL';
-       }
--      $this->connection->query('ALTER TABLE {' . $table . '} ALTER [' . $field . '] ' . $null_action);
-+      $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} ALTER [' . $field . '] ' . $null_action);
-     }
- 
-     if (in_array($spec['pgsql_type'], ['serial', 'bigserial'])) {
-@@ -986,31 +986,31 @@ public function changeField($table, $field, $field_new, $spec, $new_keys = []) {
-       // not when altering. Because of that, the sequence needs to be created
-       // and initialized by hand.
-       $seq = $this->connection->makeSequenceName($table, $field_new);
--      $this->connection->query("CREATE SEQUENCE " . $seq . " OWNED BY {" . $table . "}.[" . $field_new . ']');
-+      $this->connection->executeDdlStatement("CREATE SEQUENCE " . $seq . " OWNED BY {" . $table . "}.[" . $field_new . ']');
-       // Set sequence to maximal field value to not conflict with existing
-       // entries.
-       $this->connection->query("SELECT setval('" . $seq . "', MAX([" . $field . "])) FROM {" . $table . "}");
--      $this->connection->query('ALTER TABLE {' . $table . '} ALTER [' . $field . '] SET DEFAULT nextval(' . $this->connection->quote($seq) . ')');
-+      $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} ALTER [' . $field . '] SET DEFAULT nextval(' . $this->connection->quote($seq) . ')');
-     }
- 
-     // Rename the column if necessary.
-     if ($field != $field_new) {
--      $this->connection->query('ALTER TABLE {' . $table . '} RENAME [' . $field . '] TO [' . $field_new . ']');
-+      $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} RENAME [' . $field . '] TO [' . $field_new . ']');
-     }
- 
-     // Add unsigned check if necessary.
-     if (!empty($spec['unsigned'])) {
--      $this->connection->query('ALTER TABLE {' . $table . '} ADD CHECK ([' . $field_new . '] >= 0)');
-+      $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} ADD CHECK ([' . $field_new . '] >= 0)');
-     }
- 
-     // Add default if necessary.
-     if (isset($spec['default'])) {
--      $this->connection->query('ALTER TABLE {' . $table . '} ALTER COLUMN [' . $field_new . '] SET DEFAULT ' . $this->escapeDefaultValue($spec['default']));
-+      $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} ALTER COLUMN [' . $field_new . '] SET DEFAULT ' . $this->escapeDefaultValue($spec['default']));
-     }
- 
-     // Change description if necessary.
-     if (!empty($spec['description'])) {
--      $this->connection->query('COMMENT ON COLUMN {' . $table . '}.[' . $field_new . '] IS ' . $this->prepareComment($spec['description']));
-+      $this->connection->executeDdlStatement('COMMENT ON COLUMN {' . $table . '}.[' . $field_new . '] IS ' . $this->prepareComment($spec['description']));
-     }
- 
-     if (isset($new_keys)) {
-diff --git a/core/modules/sqlite/src/Driver/Database/sqlite/Schema.php b/core/modules/sqlite/src/Driver/Database/sqlite/Schema.php
-index 64bdffa8c80..4531e34cc73 100644
---- a/core/modules/sqlite/src/Driver/Database/sqlite/Schema.php
-+++ b/core/modules/sqlite/src/Driver/Database/sqlite/Schema.php
-@@ -272,7 +272,7 @@ public function renameTable($table, $new_name) {
-     // the table with curly braces in case the db_prefix contains a reference
-     // to a database outside of our existing database.
-     $info = $this->getPrefixInfo($new_name);
--    $this->connection->query('ALTER TABLE {' . $table . '} RENAME TO [' . $info['table'] . ']');
-+    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} RENAME TO [' . $info['table'] . ']');
- 
-     // Drop the indexes, there is no RENAME INDEX command in SQLite.
-     if (!empty($schema['unique keys'])) {
-@@ -289,7 +289,7 @@ public function renameTable($table, $new_name) {
-     // Recreate the indexes.
-     $statements = $this->createIndexSql($new_name, $schema);
-     foreach ($statements as $statement) {
--      $this->connection->query($statement);
-+      $this->connection->executeDdlStatement($statement);
-     }
-   }
- 
-@@ -301,7 +301,7 @@ public function dropTable($table) {
-       return FALSE;
-     }
-     $this->connection->tableDropped = TRUE;
--    $this->connection->query('DROP TABLE {' . $table . '}');
-+    $this->connection->executeDdlStatement('DROP TABLE {' . $table . '}');
-     return TRUE;
-   }
- 
-@@ -326,7 +326,7 @@ public function addField($table, $field, $specification, $keys_new = []) {
-       // When we don't have to create new keys and we are not creating a
-       // NOT NULL column without a default value, we can use the quicker version.
-       $query = 'ALTER TABLE {' . $table . '} ADD ' . $this->createFieldSql($field, $this->processField($specification));
--      $this->connection->query($query);
-+      $this->connection->executeDdlStatement($query);
- 
-       // Apply the initial value if set.
-       if (isset($specification['initial_from_field'])) {
-@@ -683,7 +683,7 @@ public function addIndex($table, $name, $fields, array $spec) {
-     $schema['indexes'][$name] = $fields;
-     $statements = $this->createIndexSql($table, $schema);
-     foreach ($statements as $statement) {
--      $this->connection->query($statement);
-+      $this->connection->executeDdlStatement($statement);
-     }
-   }
- 
-@@ -706,7 +706,7 @@ public function dropIndex($table, $name) {
- 
-     $info = $this->getPrefixInfo($table);
- 
--    $this->connection->query('DROP INDEX [' . $info['schema'] . '].[' . $info['table'] . '_' . $name . ']');
-+    $this->connection->executeDdlStatement('DROP INDEX [' . $info['schema'] . '].[' . $info['table'] . '_' . $name . ']');
-     return TRUE;
-   }
- 
-@@ -724,7 +724,7 @@ public function addUniqueKey($table, $name, $fields) {
-     $schema['unique keys'][$name] = $fields;
-     $statements = $this->createIndexSql($table, $schema);
-     foreach ($statements as $statement) {
--      $this->connection->query($statement);
-+      $this->connection->executeDdlStatement($statement);
-     }
-   }
- 
-@@ -738,7 +738,7 @@ public function dropUniqueKey($table, $name) {
- 
-     $info = $this->getPrefixInfo($table);
- 
--    $this->connection->query('DROP INDEX [' . $info['schema'] . '].[' . $info['table'] . '_' . $name . ']');
-+    $this->connection->executeDdlStatement('DROP INDEX [' . $info['schema'] . '].[' . $info['table'] . '_' . $name . ']');
-     return TRUE;
-   }
- 
-diff --git a/core/tests/Drupal/KernelTests/Core/Cache/EndOfTransactionQueriesTest.php b/core/tests/Drupal/KernelTests/Core/Cache/EndOfTransactionQueriesTest.php
-index 18fbd69e85e..a4fd85f3a6b 100644
---- a/core/tests/Drupal/KernelTests/Core/Cache/EndOfTransactionQueriesTest.php
-+++ b/core/tests/Drupal/KernelTests/Core/Cache/EndOfTransactionQueriesTest.php
-@@ -73,6 +73,13 @@ public function testEntitySave(): void {
-     Database::startLog('testEntitySave');
-     $entity->save();
- 
-+    // Entity save should have deferred cache invalidation to after transaction
-+    // completion for the "entity_test_list", "entity_test_list:entity_test"
-+    // and "4xx-response" tags. Since cache invalidation is a MERGE database
-+    // operation, and in core drivers each MERGE is split in two SELECT and
-+    // INSERT|UPDATE operations, we expect the last 6 logged database queries
-+    // to be related to the {cachetags} table.
-+    $expected_tail_length = 6;
-     $executed_statements = [];
-     foreach (Database::getLog('testEntitySave') as $log) {
-       // Exclude transaction related statements from the log.
-@@ -85,9 +92,10 @@ public function testEntitySave(): void {
-       }
-       $executed_statements[] = $log['query'];
-     }
--    $last_statement_index = max(array_keys($executed_statements));
--    $cachetag_statements = array_keys($this->getStatementsForTable($executed_statements, 'cachetags'));
--    $this->assertSame($last_statement_index - count($cachetag_statements) + 1, min($cachetag_statements), 'All of the last queries in the transaction are for the "cachetags" table.');
-+    $expected_post_transaction_statements = array_keys(array_fill(array_key_last($executed_statements) - $expected_tail_length + 1, $expected_tail_length, TRUE));
-+    $cachetag_statements = $this->getStatementsForTable($executed_statements, 'cachetags');
-+    $tail_cachetag_statements = array_keys(array_slice($cachetag_statements, count($cachetag_statements) - $expected_tail_length, $expected_tail_length, TRUE));
-+    $this->assertSame($expected_post_transaction_statements, $tail_cachetag_statements);
- 
-     // Verify that a nested entity save occurred.
-     $this->assertSame('john doe', User::load(1)->getAccountName());
-diff --git a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
-index 3911419ca77..bbc51af1c17 100644
---- a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
-+++ b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
-@@ -429,18 +429,27 @@ public function testTransactionWithDdlStatement(): void {
-       // the DDL statement should commit the transaction stack.
-       $this->cleanUp();
-       $transaction = $this->createRootTransaction('', FALSE);
-+      $reflectionMethod = new \ReflectionMethod(get_class($this->connection->transactionManager()), 'getConnectionTransactionState');
-+      $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
-+      $this->assertEquals(ClientConnectionTransactionState::Active, $reflectionMethod->invoke($this->connection->transactionManager()));
-       $this->insertRow('row');
-       $this->executeDDLStatement();
- 
--      // Try to rollback the outer transaction. It should fail and void
--      // the transaction stack.
--      $transaction->rollBack();
--      $manager = $this->connection->transactionManager();
--      $reflectedTransactionState = new \ReflectionMethod($manager, 'getConnectionTransactionState');
--      $this->assertSame(ClientConnectionTransactionState::Voided, $reflectedTransactionState->invoke($manager));
--
--      unset($transaction);
--      $this->assertRowPresent('row');
-+      // Try to rollback the root transaction. Since the DDL already committed
-+      // it, it should fail.
-+      try {
-+        $transaction->rollBack();
-+        $this->fail('A TransactionOutOfOrderException was expected, but it was not thrown.');
-+      }
-+      catch (TransactionOutOfOrderException $e) {
-+        $this->assertMatchesRegularExpression("/^Error attempting rollback of .*\\\\drupal_transaction\\. Active stack: .* empty/", $e->getMessage());
-+        unset($transaction);
-+        $manager = $this->connection->transactionManager();
-+        $this->assertSame(0, $manager->stackDepth());
-+        $reflectedTransactionState = new \ReflectionMethod($manager, 'getConnectionTransactionState');
-+        $this->assertSame(ClientConnectionTransactionState::Voided, $reflectedTransactionState->invoke($manager));
-+        $this->assertRowPresent('row');
-+      }
-     }
-   }
- 
-@@ -767,6 +776,7 @@ public function testRootTransactionEndCallbackCalledOnCommit(): void {
-     $this->connection->transactionManager()->addPostTransactionCallback([$this, 'rootTransactionCallback']);
-     $this->insertRow('row');
-     $this->assertNull($this->postTransactionCallbackAction);
-+    $this->assertRowAbsent('rtcCommit');
-     unset($transaction);
-     $this->assertSame('rtcCommit', $this->postTransactionCallbackAction);
-     $this->assertRowPresent('row');
-@@ -832,6 +842,99 @@ public function testRootTransactionEndCallbackCalledAfterDdlAndDestruction(): vo
-     $this->assertRowPresent('row');
-   }
- 
-+  /**
-+   * Tests post-transaction rollback executes after a DDL statement.
-+   *
-+   * For database servers that support transactional DDL, a rollback of a
-+   * transaction including DDL statements is possible.
-+   */
-+  public function testRootTransactionEndCallbackCalledAfterDdlAndRollbackForTransactionalDdlDatabase(): void {
-+    if (!$this->connection->supportsTransactionalDDL()) {
-+      $this->markTestSkipped('This test only works for database supporting transactional DDL.');
-+    }
+diff --git a/core/tests/Drupal/Tests/Component/Plugin/Attribute/Fixtures/Plugins/PluginNamespace/AttributeDiscoveryTest2.php b/core/tests/Drupal/Tests/Component/Plugin/Attribute/Fixtures/Plugins/PluginNamespace/AttributeDiscoveryTest2.php
+new file mode 100644
+index 00000000000..d094b3b9793
+--- /dev/null
++++ b/core/tests/Drupal/Tests/Component/Plugin/Attribute/Fixtures/Plugins/PluginNamespace/AttributeDiscoveryTest2.php
+@@ -0,0 +1,16 @@
++<?php
 +
-+    $transaction = $this->createRootTransaction('', FALSE);
-+    $this->connection->transactionManager()->addPostTransactionCallback([$this, 'rootTransactionCallback']);
-+    $this->insertRow('row');
-+    $this->assertNull($this->postTransactionCallbackAction);
++declare(strict_types=1);
 +
-+    // Callbacks are processed only when destructing the transaction.
-+    // Executing a DDL statement is not sufficient itself.
-+    // We cannot use truncate here, since it has protective code to fall back
-+    // to a transactional delete when in transaction. We drop an unrelated
-+    // table instead.
-+    $this->connection->schema()->dropTable('test_people');
-+    $this->assertNull($this->postTransactionCallbackAction);
-+    $this->assertRowAbsent('rtcCommit');
-+    $this->assertRowAbsent('rtcRollback');
-+    $this->assertRowPresent('row');
++namespace com\example\PluginNamespace;
 +
-+    // Callbacks are processed only when destructing the transaction.
-+    // Executing the rollback is not sufficient by itself.
-+    $transaction->rollBack();
-+    $this->assertNull($this->postTransactionCallbackAction);
-+    $this->assertRowAbsent('rtcCommit');
-+    $this->assertRowAbsent('rtcRollback');
-+    $this->assertRowAbsent('row');
++use Drupal\a_module_that_does_not_exist\Plugin\Custom;
 +
-+    // Destruct the transaction.
-+    unset($transaction);
-+
-+    // The post-transaction callback should now have inserted a 'rtcRollback'
-+    // row.
-+    $this->assertSame('rtcRollback', $this->postTransactionCallbackAction);
-+    $this->assertRowAbsent('rtcCommit');
-+    $this->assertRowPresent('rtcRollback');
-+    $this->assertRowAbsent('row');
-+  }
-+
-+  /**
-+   * Tests post-transaction rollback failure after a DDL statement.
-+   *
-+   * For database servers that support transactional DDL, a rollback of a
-+   * transaction including DDL statements is not possible, since a commit
-+   * happened already. We cannot decide what should be the status of the
-+   * callback, an exception is thrown.
-+   */
-+  public function testRootTransactionEndCallbackFailureUponDdlAndRollbackForNonTransactionalDdlDatabase(): void {
-+    if ($this->connection->supportsTransactionalDDL()) {
-+      $this->markTestSkipped('This test only works for database that do not support transactional DDL.');
-+    }
-+
-+    $transaction = $this->createRootTransaction('', FALSE);
-+    $this->connection->transactionManager()->addPostTransactionCallback([$this, 'rootTransactionCallback']);
-+    $this->insertRow('row');
-+    $this->assertNull($this->postTransactionCallbackAction);
-+
-+    // Callbacks are processed only when destructing the transaction.
-+    // Executing a DDL statement is not sufficient itself.
-+    // We cannot use truncate here, since it has protective code to fall back
-+    // to a transactional delete when in transaction. We drop an unrelated
-+    // table instead.
-+    $this->connection->schema()->dropTable('test_people');
-+    $this->assertNull($this->postTransactionCallbackAction);
-+    $this->assertRowAbsent('rtcCommit');
-+    $this->assertRowAbsent('rtcRollback');
-+    $this->assertRowPresent('row');
-+
-+    try {
-+      $transaction->rollBack();
-+      $this->fail('A TransactionOutOfOrderException was expected, but it was not thrown.');
-+    }
-+    catch (TransactionOutOfOrderException $e) {
-+      $this->assertMatchesRegularExpression("/^Error attempting rollback of .*\\\\drupal_transaction\\. Active stack: .* empty/", $e->getMessage());
-+      unset($transaction);
-+      $this->assertNull($this->postTransactionCallbackAction);
-+      $this->assertRowAbsent('rtcCommit');
-+      $this->assertRowAbsent('rtcRollback');
-+      $manager = $this->connection->transactionManager();
-+      $this->assertSame(0, $manager->stackDepth());
-+      $reflectedTransactionState = new \ReflectionMethod($manager, 'getConnectionTransactionState');
-+      $this->assertSame(ClientConnectionTransactionState::Voided, $reflectedTransactionState->invoke($manager));
-+      $this->assertRowPresent('row');
-+    }
-+  }
-+
-   /**
-    * A post-transaction callback for testing purposes.
-    */
++/**
++ * Provides a custom test plugin that extends from a missing dependency.
++ */
++#[CustomPlugin(
++  id: "discovery_test_2",
++  title: "Discovery test plugin 2"
++)]
++class AttributeDiscoveryTest2 extends Custom {}
