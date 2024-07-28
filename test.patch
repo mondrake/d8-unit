@@ -1,50 +1,73 @@
 diff --git a/core/lib/Drupal/Component/Plugin/Discovery/AttributeClassDiscovery.php b/core/lib/Drupal/Component/Plugin/Discovery/AttributeClassDiscovery.php
-index 3477b746cc8..fa0cc074414 100644
+index 3477b746cc8..f02a5aca9c1 100644
 --- a/core/lib/Drupal/Component/Plugin/Discovery/AttributeClassDiscovery.php
 +++ b/core/lib/Drupal/Component/Plugin/Discovery/AttributeClassDiscovery.php
-@@ -80,17 +80,37 @@ public function getDefinitions() {
+@@ -80,17 +80,34 @@ public function getDefinitions() {
                $sub_path = $iterator->getSubIterator()->getSubPath();
                $sub_path = $sub_path ? str_replace(DIRECTORY_SEPARATOR, '\\', $sub_path) . '\\' : '';
                $class = $namespace . '\\' . $sub_path . $fileinfo->getBasename('.php');
 -
 -              ['id' => $id, 'content' => $content] = $this->parseClass($class, $fileinfo);
 -
+-              if ($id) {
+-                $definitions[$id] = $content;
+-                // Explicitly serialize this to create a new object instance.
+-                $this->fileCache->set($fileinfo->getPathName(), ['id' => $id, 'content' => serialize($content)]);
 +              try {
-+                $writeToCache = TRUE;
 +                ['id' => $id, 'content' => $content] = $this->parseClass($class, $fileinfo);
-+              }
-+              catch (\Throwable $t) {
-+                // Plugins may rely on Attribute classes defined by modules that
-+                // are not installed. In this case a class not found error may
-+                // be thrown from reflection, however this is an unavoidable
-+                // situation with optional dependencies and plugins. Just
-+                // silently skip over this class and avoid writing to the cache,
-+                // so that it is scanned each time. This ensures that the plugin
-+                // definition will be found if the module it requires is
-+                // enabled.
-+dump($t->getMessage());
-+                if (preg_match('/(Class|Interface) .* (not found|does not exist)$/', $t->getMessage())) {
-+dump('MATCH');
-+                  $writeToCache = FALSE;
-+                  continue;
++                if ($id) {
++                  $definitions[$id] = $content;
++                  // Explicitly serialize this to create a new object instance.
++                  $this->fileCache->set($fileinfo->getPathName(), ['id' => $id, 'content' => serialize($content)]);
 +                }
-+                throw $t;
-+              }
-               if ($id) {
-                 $definitions[$id] = $content;
-                 // Explicitly serialize this to create a new object instance.
-                 $this->fileCache->set($fileinfo->getPathName(), ['id' => $id, 'content' => serialize($content)]);
-               }
-               else {
--                // Store a NULL object, so the file is not parsed again.
--                $this->fileCache->set($fileinfo->getPathName(), [NULL]);
-+                if ($writeToCache) {
++                else {
 +                  // Store a NULL object, so the file is not parsed again.
 +                  $this->fileCache->set($fileinfo->getPathName(), [NULL]);
 +                }
                }
+-              else {
+-                // Store a NULL object, so the file is not parsed again.
+-                $this->fileCache->set($fileinfo->getPathName(), [NULL]);
++              // Plugins may rely on Attribute classes defined by modules that
++              // are not installed. In this case a class not found error may
++              // be thrown from reflection, however this is an unavoidable
++              // situation with optional dependencies and plugins. Just
++              // silently skip over this class and avoid writing to the cache,
++              // so that it is scanned each time. This ensures that the plugin
++              // definition will be found if the module it requires is
++              // enabled.
++#              catch (\ReflectionException) {
++#                continue;
++#              }
++              catch (\Error $e) {
++                if (preg_match('/(Class|Interface) .* not found$/', $e->getMessage())) {
++                  continue;
++                }
++                throw $e;
+               }
              }
            }
+@@ -118,6 +135,7 @@ public function getDefinitions() {
+    *   'content' is the plugin definition.
+    *
+    * @throws \ReflectionException
++   * @throws \Error
+    */
+   protected function parseClass(string $class, \SplFileInfo $fileinfo): array {
+     // @todo Consider performance improvements over using reflection.
+diff --git a/core/modules/system/system.install b/core/modules/system/system.install
+index 14cecf34341..28e057cacc1 100644
+--- a/core/modules/system/system.install
++++ b/core/modules/system/system.install
+@@ -411,7 +411,7 @@ function system_requirements($phase) {
+       $apcu_actual_size = ByteSizeMarkup::create($memory_info['seg_size']);
+       $apcu_recommended_size = '32 MB';
+       $requirements['php_apcu_enabled']['value'] = t('Enabled (@size)', ['@size' => $apcu_actual_size]);
+-      if ($memory_info['seg_size'] < Bytes::toNumber($apcu_recommended_size)) {
++      if (Bytes::toNumber($apcu_actual_size) < Bytes::toNumber($apcu_recommended_size)) {
+         $requirements['php_apcu_enabled']['severity'] = REQUIREMENT_WARNING;
+         $requirements['php_apcu_enabled']['description'] = t('Depending on your configuration, Drupal can run with a @apcu_size APCu limit. However, a @apcu_default_size APCu limit (the default) or above is recommended, especially if your site uses additional custom or contributed modules.', [
+           '@apcu_size' => $apcu_actual_size,
 diff --git a/core/phpstan.neon.dist b/core/phpstan.neon.dist
 index 35bcfd1e64b..b261a1b12a1 100644
 --- a/core/phpstan.neon.dist
@@ -62,6 +85,71 @@ index 35bcfd1e64b..b261a1b12a1 100644
  
    ignoreErrors:
      # new static() is a best practice in Drupal, so we cannot fix that.
+diff --git a/core/tests/Drupal/Tests/Component/Plugin/Attribute/AttributeClassDiscoveryCachedTest.php b/core/tests/Drupal/Tests/Component/Plugin/Attribute/AttributeClassDiscoveryCachedTest.php
+index 566058d7c88..a591139a8e3 100644
+--- a/core/tests/Drupal/Tests/Component/Plugin/Attribute/AttributeClassDiscoveryCachedTest.php
++++ b/core/tests/Drupal/Tests/Component/Plugin/Attribute/AttributeClassDiscoveryCachedTest.php
+@@ -4,6 +4,7 @@
+ 
+ namespace Drupal\Tests\Component\Plugin\Attribute;
+ 
++use Composer\Autoload\ClassLoader;
+ use Drupal\Component\Plugin\Discovery\AttributeClassDiscovery;
+ use Drupal\Component\FileCache\FileCacheFactory;
+ use PHPUnit\Framework\TestCase;
+@@ -20,6 +21,7 @@ class AttributeClassDiscoveryCachedTest extends TestCase {
+    */
+   protected function setUp(): void {
+     parent::setUp();
++
+     // Ensure FileCacheFactory::DISABLE_CACHE is *not* set, since we're testing
+     // integration with the file cache.
+     FileCacheFactory::setConfiguration([]);
+@@ -28,7 +30,11 @@ protected function setUp(): void {
+ 
+     // Normally the attribute classes would be autoloaded.
+     include_once __DIR__ . '/Fixtures/CustomPlugin.php';
+-    include_once __DIR__ . '/Fixtures/Plugins/PluginNamespace/AttributeDiscoveryTest1.php';
++
++    // Register classloader for the fixture plugins.
++    $additionalClassLoader = new ClassLoader();
++    $additionalClassLoader->addPsr4("com\\example\\PluginNamespace\\", __DIR__ . "/Fixtures/Plugins/PluginNamespace");
++    $additionalClassLoader->register(TRUE);
+   }
+ 
+   /**
+@@ -41,6 +47,8 @@ public function testGetDefinitions(): void {
+     $discovery_path = __DIR__ . '/Fixtures/Plugins';
+     // File path that should be discovered within that directory.
+     $file_path = $discovery_path . '/PluginNamespace/AttributeDiscoveryTest1.php';
++    // File path that should not be discovered within that directory.
++    $file_path_2 = $discovery_path . '/PluginNamespace/AttributeDiscoveryTest2.php';
+ 
+     $discovery = new AttributeClassDiscovery(['com\example' => [$discovery_path]]);
+     $this->assertEquals([
+@@ -50,11 +58,21 @@ public function testGetDefinitions(): void {
+       ],
+     ], $discovery->getDefinitions());
+ 
+-    // Gain access to the file cache so we can change it.
++    // Gain access to the file cache.
+     $ref_file_cache = new \ReflectionProperty($discovery, 'fileCache');
+     $ref_file_cache->setAccessible(TRUE);
+     /** @var \Drupal\Component\FileCache\FileCacheInterface $file_cache */
+     $file_cache = $ref_file_cache->getValue($discovery);
++
++    // The valid plugin definition must have been cached.
++    $this->assertEquals([
++      'id' => 'discovery_test_1',
++      'class' => 'com\example\PluginNamespace\AttributeDiscoveryTest1',
++    ], unserialize($file_cache->get($file_path)['content']));
++    // The plugin that extends a missing class must not have been cached.
++    $this->assertNull($file_cache->get($file_path_2));
++
++    // Change the file cache entry.
+     // The file cache is keyed by the file path, and we'll add some known
+     // content to test against.
+     $file_cache->set($file_path, [
 diff --git a/core/tests/Drupal/Tests/Component/Plugin/Attribute/AttributeClassDiscoveryTest.php b/core/tests/Drupal/Tests/Component/Plugin/Attribute/AttributeClassDiscoveryTest.php
 index f6c6370e7e1..28c22904df3 100644
 --- a/core/tests/Drupal/Tests/Component/Plugin/Attribute/AttributeClassDiscoveryTest.php
