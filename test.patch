@@ -1,1001 +1,112 @@
-diff --git a/core/.cspell.json b/core/.cspell.json
-index 2ea0e7c610aecea81136262fbb1bcc5c3aadb2be..2fb2e803723f3bc9ce4d3f98ef99409c879642ca 100644
---- a/core/.cspell.json
-+++ b/core/.cspell.json
-@@ -26,6 +26,7 @@
-       "profiles/demo_umami/modules/demo_umami_content/default_content/languages/es/**/*",
-       "tests/fixtures/config_install/*",
-       "tests/fixtures/files/*",
-+      "tests/fixtures/phpunit_*.xml",
-       "tests/Drupal/Tests/Component/Annotation/Doctrine/**",
-       "tests/PHPStan/vendor/**",
-       "themes/olivero/fonts/**",
-diff --git a/core/lib/Drupal/Core/Test/JUnitConverter.php b/core/lib/Drupal/Core/Test/JUnitConverter.php
-index 029ff5d04146a4c64a9c62d42118a3fe0a87350d..e3c6b110032101be561166c6f1a52b4068e84fae 100644
---- a/core/lib/Drupal/Core/Test/JUnitConverter.php
-+++ b/core/lib/Drupal/Core/Test/JUnitConverter.php
-@@ -2,6 +2,8 @@
- 
- namespace Drupal\Core\Test;
- 
-+use Drupal\TestTools\PhpUnitTestCaseJUnitResult;
-+
- /**
-  * Converts JUnit XML to Drupal's {simpletest} schema.
-  *
-@@ -70,28 +72,15 @@ public static function xmlElementToRows($test_id, \SimpleXMLElement $element) {
-    * @internal
-    */
-   public static function findTestCases(\SimpleXMLElement $element, ?\SimpleXMLElement $parent = NULL) {
--    if (!isset($parent)) {
--      $parent = $element;
--    }
--
--    if ($element->getName() === 'testcase' && (int) $parent->attributes()->tests > 0) {
--      // Add the class attribute if the test case does not have one. This is the
--      // case for tests using a data provider. The name of the parent testsuite
--      // will be in the format class::method.
--      if (!$element->attributes()->class) {
--        $name = explode('::', $parent->attributes()->name, 2);
--        $element->addAttribute('class', $name[0]);
--      }
-+    if ($element->getName() === 'testcase') {
-       return [$element];
-     }
-+
-     $test_cases = [];
-     foreach ($element as $child) {
--      $file = (string) $parent->attributes()->file;
--      if ($file && !$child->attributes()->file) {
--        $child->addAttribute('file', $file);
--      }
-       $test_cases[] = static::findTestCases($child, $element);
-     }
-+
-     return array_merge(...$test_cases);
-   }
- 
-@@ -109,31 +98,48 @@ public static function findTestCases(\SimpleXMLElement $element, ?\SimpleXMLElem
-    * @internal
-    */
-   public static function convertTestCaseToSimpletestRow($test_id, \SimpleXMLElement $test_case) {
--    $message = '';
--    $pass = TRUE;
--    if ($test_case->failure) {
--      $lines = explode("\n", $test_case->failure);
--      $message = $lines[2];
--      $pass = FALSE;
--    }
--    if ($test_case->error) {
--      $message = $test_case->error;
--      $pass = FALSE;
--    }
--
-+    $status = static::getTestCaseResult($test_case);
-     $attributes = $test_case->attributes();
- 
--    $record = [
-+    $message = match ($status) {
-+      PhpUnitTestCaseJUnitResult::Fail => (string) $test_case->failure[0],
-+      PhpUnitTestCaseJUnitResult::Error => (string) $test_case->error[0],
-+      default => '',
-+    };
-+
-+    return [
-       'test_id' => $test_id,
-       'test_class' => (string) $attributes->class,
--      'status' => $pass ? 'pass' : 'fail',
-+      'status' => $status->value,
-       'message' => $message,
-       'message_group' => 'Other',
--      'function' => $attributes->class . '->' . $attributes->name . '()',
-+      'function' => $attributes->name,
-       'line' => (int) $attributes->line ?: 0,
-       'file' => (string) $attributes->file,
-+      'time' => (float) $attributes->time,
-     ];
--    return $record;
-+  }
-+
-+  /**
-+   * Determine a status string for the given testcase.
-+   *
-+   * @param \SimpleXMLElement $test_case
-+   *   The test case XML element.
-+   *
-+   * @return \Drupal\TestTools\PhpUnitTestCaseJUnitResult
-+   *   The status value to insert into the {simpletest} record.
-+   */
-+  protected static function getTestCaseResult(\SimpleXMLElement $test_case): PhpUnitTestCaseJUnitResult {
-+    if ($test_case->error) {
-+      return PhpUnitTestCaseJUnitResult::Error;
-+    }
-+    if ($test_case->failure) {
-+      return PhpUnitTestCaseJUnitResult::Fail;
-+    }
-+    if ($test_case->skipped) {
-+      return PhpUnitTestCaseJUnitResult::Skip;
-+    }
-+    return PhpUnitTestCaseJUnitResult::Pass;
-   }
- 
- }
-diff --git a/core/lib/Drupal/Core/Test/PhpUnitTestRunner.php b/core/lib/Drupal/Core/Test/PhpUnitTestRunner.php
-index c9341f886b2ead8c1dd8b534877e3c05f0be6866..3df8e7ba104e34c3cf66c2bb7185da3b0d00d4e1 100644
---- a/core/lib/Drupal/Core/Test/PhpUnitTestRunner.php
-+++ b/core/lib/Drupal/Core/Test/PhpUnitTestRunner.php
-@@ -173,23 +173,34 @@ public function execute(TestRun $test_run, string $test_class_name, ?int &$statu
-     $log_junit_file_path = $this->xmlLogFilePath($test_run->id());
-     // Store output from our test run.
-     $output = [];
-+    $start = microtime(TRUE);
-     $this->runCommand($test_class_name, $log_junit_file_path, $status, $output);
-+    $time = microtime(TRUE) - $start;
- 
--    if ($status == TestStatus::PASS) {
--      return JUnitConverter::xmlToRows($test_run->id(), $log_junit_file_path);
-+    if (file_exists($log_junit_file_path)) {
-+      $results = JUnitConverter::xmlToRows($test_run->id(), $log_junit_file_path);
-     }
--    return [
--      [
-+    else {
-+      $results = [];
-+    }
-+
-+    // If not passed, add full PHPUnit run output since individual test cases
-+    // messages may not give full clarity (deprecations, warnings, etc.).
-+    if ($status > TestStatus::PASS) {
-+      $results[] = [
-         'test_id' => $test_run->id(),
-         'test_class' => $test_class_name,
--        'status' => TestStatus::label($status),
--        'message' => 'PHPUnit Test failed to complete; Error: ' . implode("\n", $output),
-+        'status' => $status < TestStatus::SYSTEM ? 'debug' : 'exception',
-+        'message' => implode("\n", $output),
-         'message_group' => 'Other',
--        'function' => $test_class_name,
-+        'function' => '*** PHPUnit runner output ***',
-         'line' => '0',
-         'file' => $log_junit_file_path,
--      ],
--    ];
-+        'time' => $time,
-+      ];
-+    }
-+
-+    return $results;
-   }
- 
-   /**
-@@ -227,11 +238,16 @@ public function summarizeResults(array $results): array {
-         $summaries[$result['test_class']] = [
-           '#pass' => 0,
-           '#fail' => 0,
-+          '#error' => 0,
-+          '#skipped' => 0,
-           '#exception' => 0,
-           '#debug' => 0,
-+          '#time' => 0,
-         ];
-       }
- 
-+      $summaries[$result['test_class']]['#time'] += $result['time'];
-+
-       switch ($result['status']) {
-         case 'pass':
-           $summaries[$result['test_class']]['#pass']++;
-@@ -241,6 +257,14 @@ public function summarizeResults(array $results): array {
-           $summaries[$result['test_class']]['#fail']++;
-           break;
- 
-+        case 'error':
-+          $summaries[$result['test_class']]['#error']++;
-+          break;
-+
-+        case 'skipped':
-+          $summaries[$result['test_class']]['#skipped']++;
-+          break;
-+
-         case 'exception':
-           $summaries[$result['test_class']]['#exception']++;
-           break;
-@@ -248,6 +272,7 @@ public function summarizeResults(array $results): array {
-         case 'debug':
-           $summaries[$result['test_class']]['#debug']++;
-           break;
-+
-       }
-     }
-     return $summaries;
-diff --git a/core/lib/Drupal/Core/Test/SimpletestTestRunResultsStorage.php b/core/lib/Drupal/Core/Test/SimpletestTestRunResultsStorage.php
-index 6addc207a776ee3577f6e8be0c4bc2a262b6138b..cb754e1afaa4eeb2bbaf0b4bb0e3d5e5f83e96dc 100644
---- a/core/lib/Drupal/Core/Test/SimpletestTestRunResultsStorage.php
-+++ b/core/lib/Drupal/Core/Test/SimpletestTestRunResultsStorage.php
-@@ -208,7 +208,7 @@ public static function testingResultsSchema(): array {
-           'length' => 9,
-           'not null' => TRUE,
-           'default' => '',
--          'description' => 'Message status. Core understands pass, fail, exception.',
-+          'description' => 'Message status.',
-         ],
-         'message' => [
-           'type' => 'text',
-@@ -242,6 +242,12 @@ public static function testingResultsSchema(): array {
-           'default' => '',
-           'description' => 'Name of the file where the function is called.',
-         ],
-+        'time' => [
-+          'type' => 'float',
-+          'not null' => TRUE,
-+          'default' => 0,
-+          'description' => 'Time elapsed for the execution of the test.',
-+        ],
-       ],
-       'primary key' => ['message_id'],
-       'indexes' => [
-diff --git a/core/lib/Drupal/Core/Test/TestStatus.php b/core/lib/Drupal/Core/Test/TestStatus.php
-index 79459e4eb06f0b716e0c4746d5c8de384f7c333c..91689eb07339eb5e6573a9f197e32918257eb0f7 100644
---- a/core/lib/Drupal/Core/Test/TestStatus.php
-+++ b/core/lib/Drupal/Core/Test/TestStatus.php
-@@ -6,7 +6,7 @@
-  * Consolidates test result status information.
-  *
-  * For our test runners, a $status of 0 = passed test, 1 = failed test,
-- * 2 = exception, >2 indicates segfault timeout, or other type of system
-+ * 2 = errored test, >2 indicates segfault timeout, or other type of system
-  * failure.
-  */
- class TestStatus {
-@@ -22,11 +22,11 @@ class TestStatus {
-   const FAIL = 1;
- 
-   /**
--   * Signify that the test result was an exception or code error.
-+   * Signify that the test result was a code error.
-    *
-    * This means that the test runner was able to exit and report an error.
-    */
--  const EXCEPTION = 2;
-+  const ERROR = 2;
- 
-   /**
-    * Signify a system error where the test runner was unable to complete.
-@@ -52,10 +52,10 @@ public static function label($status) {
-     $statusMap = [
-       static::PASS => 'pass',
-       static::FAIL => 'fail',
--      static::EXCEPTION => 'exception',
--      static::SYSTEM => 'error',
-+      static::ERROR => 'error',
-+      static::SYSTEM => 'exception',
-     ];
--    // For status 3 and higher, we want 'error.'
-+    // For status 3 and higher, we want 'exception.'
-     $label = $statusMap[$status > static::SYSTEM ? static::SYSTEM : $status];
-     return $label;
-   }
-diff --git a/core/scripts/run-tests.sh b/core/scripts/run-tests.sh
-index 2042c24dd41aab0f52678eca54c4a4eceb41d75a..57b0e2343558dd40e4a9032273de481815036a83 100755
---- a/core/scripts/run-tests.sh
-+++ b/core/scripts/run-tests.sh
-@@ -39,13 +39,16 @@
- const SIMPLETEST_SCRIPT_COLOR_FAIL = 31;
- // An annoying brown.
- const SIMPLETEST_SCRIPT_COLOR_EXCEPTION = 33;
-+// An appeasing cyan.
-+const SIMPLETEST_SCRIPT_COLOR_YELLOW = 33;
- 
- // Restricting the chunk of queries prevents memory exhaustion.
- const SIMPLETEST_SCRIPT_SQLITE_VARIABLE_LIMIT = 350;
- 
- const SIMPLETEST_SCRIPT_EXIT_SUCCESS = 0;
- const SIMPLETEST_SCRIPT_EXIT_FAILURE = 1;
--const SIMPLETEST_SCRIPT_EXIT_EXCEPTION = 2;
-+const SIMPLETEST_SCRIPT_EXIT_ERROR = 2;
-+const SIMPLETEST_SCRIPT_EXIT_EXCEPTION = 3;
- 
- // Set defaults and get overrides.
- [$args, $count] = simpletest_script_parse_args();
-@@ -777,8 +780,11 @@ function simpletest_script_execute_batch(TestRunResultsStorageInterface $test_ru
-         if ($status['exitcode'] === SIMPLETEST_SCRIPT_EXIT_FAILURE) {
-           $total_status = max($status['exitcode'], $total_status);
-         }
-+        elseif ($status['exitcode'] === SIMPLETEST_SCRIPT_EXIT_ERROR) {
-+          $total_status = max($status['exitcode'], $total_status);
-+        }
-         elseif ($status['exitcode']) {
--          $message = 'FATAL ' . $child['class'] . ': test runner returned a non-zero error code (' . $status['exitcode'] . ').';
-+          $message = 'FATAL ' . $child['class'] . ': test runner returned an unexpected error code (' . $status['exitcode'] . ').';
-           echo $message . "\n";
-           // @todo Return SIMPLETEST_SCRIPT_EXIT_EXCEPTION instead, when
-           // DrupalCI supports this.
-@@ -792,10 +798,15 @@ function simpletest_script_execute_batch(TestRunResultsStorageInterface $test_ru
-             'message_group' => 'run-tests.sh check',
-           ]);
-           // Ensure that an error line is displayed for the class.
--          simpletest_script_reporter_display_summary(
--            $child['class'],
--            ['#pass' => 0, '#fail' => 1, '#exception' => 0, '#debug' => 0]
--          );
-+          simpletest_script_reporter_display_summary($child['class'], [
-+            '#pass' => 0,
-+            '#fail' => 0,
-+            '#error' => 1,
-+            '#skipped' => 0,
-+            '#exception' => 0,
-+            '#debug' => 0,
-+            '#time' => 0,
-+          ]);
-           if ($args['die-on-fail']) {
-             $test_db = new TestDatabase($child['test_run']->getDatabasePrefix());
-             $test_directory = $test_db->getTestSitePath();
-@@ -1111,7 +1122,10 @@ function simpletest_script_reporter_init() {
-   $results_map = [
-     'pass' => 'Pass',
-     'fail' => 'Fail',
-+    'error' => 'Error',
-+    'skipped' => 'Skipped',
-     'exception' => 'Exception',
-+    'debug' => 'Log',
-   ];
- 
-   echo "\n";
-@@ -1148,23 +1162,44 @@ function simpletest_script_reporter_init() {
-  *   The test class name that was run.
-  * @param array $results
-  *   The assertion results using #pass, #fail, #exception, #debug array keys.
-- * @param int|null $duration
-+ * @param float|null $duration
-  *   The time taken for the test to complete.
-  */
- function simpletest_script_reporter_display_summary($class, $results, $duration = NULL) {
-   // Output all test results vertically aligned.
--  // Cut off the class name after 60 chars, and pad each group with 3 digits
--  // by default (more than 999 assertions are rare).
--  $output = vsprintf('%-60.60s %10s %5s %9s %14s %12s', [
--    $class,
--    $results['#pass'] . ' passes',
--    isset($duration) ? ceil($duration) . 's' : '',
--    !$results['#fail'] ? '' : $results['#fail'] . ' fails',
--    !$results['#exception'] ? '' : $results['#exception'] . ' exceptions',
--    !$results['#debug'] ? '' : $results['#debug'] . ' messages',
--  ]);
--
--  $status = ($results['#fail'] || $results['#exception'] ? 'fail' : 'pass');
-+  $class_out = $class;
-+  if (strlen($class_out) < 70) {
-+      $class_out = str_pad($class, 70, ' ', STR_PAD_RIGHT);
-+  }
-+  if (strlen($class_out) > 70) {
-+      $class_out = '...' . substr($class_out, -70 + 3);
-+  }
-+  $summary = [str_pad($results['#pass'], 4, " ", STR_PAD_LEFT) . ' passed'];
-+  if ($results['#fail']) {
-+    $summary[] = $results['#fail'] . ' failed';
-+  }
-+  if ($results['#error']) {
-+    $summary[] = $results['#error'] . ' errored';
-+  }
-+  if ($results['#skipped']) {
-+    $summary[] = $results['#skipped'] . ' skipped';
-+  }
-+  if ($results['#exception']) {
-+    $summary[] = $results['#exception'] . ' exception(s)';
-+  }
-+  if ($results['#debug']) {
-+    $summary[] = $results['#debug'] . ' log(s)';
-+  }
-+
-+  if ($results['#time']) {
-+    $time = sprintf('%8.3fs', $results['#time']);
-+  }
-+  else {
-+    $time = sprintf('%8.3fs', $duration);
-+  }
-+
-+  $output = vsprintf('%s %s %s', [$time, $class_out, implode(', ', $summary)]);
-+  $status = ($results['#fail'] || $results['#exception'] || $results['#error'] ? 'fail' : 'pass');
-   simpletest_script_print($output . "\n", simpletest_script_color_code($status));
- }
- 
-@@ -1288,8 +1323,8 @@ function simpletest_script_reporter_display_results(TestRunResultsStorageInterfa
-           $test_class = $result->test_class;
- 
-           // Print table header.
--          echo "Status    Group      Filename          Line Function                            \n";
--          echo "--------------------------------------------------------------------------------\n";
-+          echo "Status      Duration Filename          Line Test                                               \n";
-+          echo "-----------------------------------------------------------------------------------------------\n";
-         }
- 
-         simpletest_script_format_result($result);
-@@ -1307,11 +1342,15 @@ function simpletest_script_reporter_display_results(TestRunResultsStorageInterfa
- function simpletest_script_format_result($result) {
-   global $args, $results_map, $color;
- 
--  $summary = sprintf("%-9.9s %-10.10s %-17.17s %4.4s %-35.35s\n",
--    $results_map[$result->status], $result->message_group, basename($result->file), $result->line, $result->function);
-+  $summary = sprintf("%-9.9s %9.3fs %-17.17s %4.4s %-50.50s\n",
-+    $results_map[$result->status], $result->time, basename($result->file), $result->line, $result->function);
- 
-   simpletest_script_print($summary, simpletest_script_color_code($result->status));
- 
-+  if ($result->message === '') {
-+    return;
-+  }
-+
-   $message = trim(strip_tags($result->message));
-   if ($args['non-html']) {
-     $message = Html::decodeEntities($message);
-@@ -1364,18 +1403,12 @@ function simpletest_script_print($message, $color_code) {
-  *   Color code. Returns 0 for default case.
-  */
- function simpletest_script_color_code($status) {
--  switch ($status) {
--    case 'pass':
--      return SIMPLETEST_SCRIPT_COLOR_PASS;
--
--    case 'fail':
--      return SIMPLETEST_SCRIPT_COLOR_FAIL;
--
--    case 'exception':
--      return SIMPLETEST_SCRIPT_COLOR_EXCEPTION;
--  }
--  // Default formatting.
--  return 0;
-+  return match ($status) {
-+    'pass' => SIMPLETEST_SCRIPT_COLOR_PASS,
-+    'fail', 'error', 'exception' => SIMPLETEST_SCRIPT_COLOR_FAIL,
-+    'skipped' => SIMPLETEST_SCRIPT_COLOR_YELLOW,
-+    default => 0,
-+  };
- }
+diff --git a/core/modules/image/image.module b/core/modules/image/image.module
+index 0d8bd4b1f26..f0b29f6e83b 100644
+--- a/core/modules/image/image.module
++++ b/core/modules/image/image.module
+@@ -15,6 +15,7 @@
+ use Drupal\file\FileInterface;
+ use Drupal\image\Controller\ImageStyleDownloadController;
+ use Drupal\image\Entity\ImageStyle;
++use Drupal\image\ImageProcessor\TransformedDimensions;
  
  /**
-diff --git a/core/tests/Drupal/KernelTests/Core/Test/SimpletestTestRunResultsStorageTest.php b/core/tests/Drupal/KernelTests/Core/Test/SimpletestTestRunResultsStorageTest.php
-index 585902895aee9cdd0a46aa958a6649d101137152..e7074e18bda4320fa7d5f5239bce441eacf68815 100644
---- a/core/tests/Drupal/KernelTests/Core/Test/SimpletestTestRunResultsStorageTest.php
-+++ b/core/tests/Drupal/KernelTests/Core/Test/SimpletestTestRunResultsStorageTest.php
-@@ -145,26 +145,28 @@ public function testGetLogEntriesByTestClass(): void {
-     $this->assertEquals(2, $this->testRunResultsStorage->insertLogEntry($test_run, $this->getTestLogEntry('Test\GroundControl')));
-     $this->assertEquals([
-       0 => (object) [
--        'message_id' => 2,
--        'test_id' => 1,
-+        'message_id' => '2',
-+        'test_id' => '1',
-         'test_class' => 'Test\GroundControl',
-         'status' => 'pass',
-         'message' => 'Major Tom',
-         'message_group' => 'other',
-         'function' => 'Unknown',
--        'line' => 0,
-+        'line' => '0',
-         'file' => 'Unknown',
-+        'time' => '0',
-       ],
-       1 => (object) [
--        'message_id' => 1,
--        'test_id' => 1,
-+        'message_id' => '1',
-+        'test_id' => '1',
-         'test_class' => 'Test\PlanetEarth',
-         'status' => 'pass',
-         'message' => 'Major Tom',
-         'message_group' => 'other',
-         'function' => 'Unknown',
--        'line' => 0,
-+        'line' => '0',
-         'file' => 'Unknown',
-+        'time' => '0',
-       ],
-     ], $this->testRunResultsStorage->getLogEntriesByTestClass($test_run));
+  * The name of the query parameter for image derivative tokens.
+@@ -280,10 +281,7 @@ function template_preprocess_image_style(&$variables) {
+   $style = ImageStyle::load($variables['style_name']);
+ 
+   // Determine the dimensions of the styled image.
+-  $dimensions = [
+-    'width' => $variables['width'],
+-    'height' => $variables['height'],
+-  ];
++  $dimensions = new TransformedDimensions($variables['width'], $variables['height'], $variables['uri']);
+ 
+   $style->transformDimensions($dimensions, $variables['uri']);
+ 
+diff --git a/core/modules/image/src/Entity/ImageStyle.php b/core/modules/image/src/Entity/ImageStyle.php
+index f975dc10932..fe912433e7b 100644
+--- a/core/modules/image/src/Entity/ImageStyle.php
++++ b/core/modules/image/src/Entity/ImageStyle.php
+@@ -348,7 +348,7 @@ public function createDerivative($original_uri, $derivative_uri) {
+    */
+   public function transformDimensions(array &$dimensions, $uri) {
+     foreach ($this->getEffects() as $effect) {
+-      $effect->transformDimensions($dimensions, $uri);
++      $effect->transformDimensions($dimensions, $dimensions->uri);
+     }
    }
-diff --git a/core/tests/Drupal/KernelTests/Core/Test/TestRunTest.php b/core/tests/Drupal/KernelTests/Core/Test/TestRunTest.php
-index 9582fd1196931056e5cfb2e20cd627deace6b3c7..4487e37e73d26ab5899ef759126cae127494e255 100644
---- a/core/tests/Drupal/KernelTests/Core/Test/TestRunTest.php
-+++ b/core/tests/Drupal/KernelTests/Core/Test/TestRunTest.php
-@@ -121,26 +121,28 @@ public function testGetLogEntriesByTestClass(): void {
-     $this->assertEquals(2, $test_run->insertLogEntry($this->getTestLogEntry('Test\GroundControl')));
-     $this->assertEquals([
-       0 => (object) [
--        'message_id' => 2,
--        'test_id' => 1,
-+        'message_id' => '2',
-+        'test_id' => '1',
-         'test_class' => 'Test\GroundControl',
-         'status' => 'pass',
-         'message' => 'Major Tom',
-         'message_group' => 'other',
-         'function' => 'Unknown',
--        'line' => 0,
-+        'line' => '0',
-         'file' => 'Unknown',
-+        'time' => '0',
-       ],
-       1 => (object) [
--        'message_id' => 1,
--        'test_id' => 1,
-+        'message_id' => '1',
-+        'test_id' => '1',
-         'test_class' => 'Test\PlanetEarth',
-         'status' => 'pass',
-         'message' => 'Major Tom',
-         'message_group' => 'other',
-         'function' => 'Unknown',
--        'line' => 0,
-+        'line' => '0',
-         'file' => 'Unknown',
-+        'time' => '0',
-       ],
-     ], $test_run->getLogEntriesByTestClass());
-     $this->assertEquals('oddity1234', $test_run->getDatabasePrefix());
-@@ -168,6 +170,7 @@ public function testProcessPhpErrorLogFile(): void {
-         'function' => 'Unknown',
-         'line' => '18',
-         'file' => '/var/www/core/tests/Drupal/FunctionalTests/Bootstrap/ErrorContainer.php on line 20 in /var/www/core/tests/Drupal/FunctionalTests/Bootstrap/ErrorContainer.php',
-+        'time' => '0',
-       ],
-       1 => (object) [
-         'message_id' => '2',
-@@ -179,6 +182,7 @@ public function testProcessPhpErrorLogFile(): void {
-         'function' => 'Unknown',
-         'line' => '0',
-         'file' => 'Unknown',
-+        'time' => '0',
-       ],
-       2 => (object) [
-         'message_id' => '3',
-@@ -190,6 +194,7 @@ public function testProcessPhpErrorLogFile(): void {
-         'function' => 'Unknown',
-         'line' => '0',
-         'file' => 'Unknown',
-+        'time' => '0',
-       ],
-       3 => (object) [
-         'message_id' => '4',
-@@ -201,6 +206,7 @@ public function testProcessPhpErrorLogFile(): void {
-         'function' => 'Unknown',
-         'line' => '0',
-         'file' => 'Unknown',
-+        'time' => '0',
-       ],
-       4 => (object) [
-         'message_id' => '5',
-@@ -212,6 +218,7 @@ public function testProcessPhpErrorLogFile(): void {
-         'function' => 'Unknown',
-         'line' => '0',
-         'file' => 'Unknown',
-+        'time' => '0',
-       ],
-       5 => (object) [
-         'message_id' => '6',
-@@ -223,6 +230,7 @@ public function testProcessPhpErrorLogFile(): void {
-         'function' => 'Unknown',
-         'line' => '17',
-         'file' => '/var/www/core/tests/Drupal/FunctionalTests/Bootstrap/ExceptionContainer.php',
-+        'time' => '0',
-       ],
-       6 => (object) [
-         'message_id' => '7',
-@@ -234,6 +242,7 @@ public function testProcessPhpErrorLogFile(): void {
-         'function' => 'Unknown',
-         'line' => '0',
-         'file' => 'Unknown',
-+        'time' => '0',
-       ],
-       7 => (object) [
-         'message_id' => '8',
-@@ -245,6 +254,7 @@ public function testProcessPhpErrorLogFile(): void {
-         'function' => 'Unknown',
-         'line' => '0',
-         'file' => 'Unknown',
-+        'time' => '0',
-       ],
-       8 => (object) [
-         'message_id' => '9',
-@@ -256,6 +266,7 @@ public function testProcessPhpErrorLogFile(): void {
-         'function' => 'Unknown',
-         'line' => '0',
-         'file' => 'Unknown',
-+        'time' => '0',
-       ],
-     ], $test_run->getLogEntriesByTestClass());
-   }
-diff --git a/core/tests/Drupal/TestTools/PhpUnitTestCaseJUnitResult.php b/core/tests/Drupal/TestTools/PhpUnitTestCaseJUnitResult.php
+ 
+diff --git a/core/modules/image/src/ImageProcessor/TransformedDimensions.php b/core/modules/image/src/ImageProcessor/TransformedDimensions.php
 new file mode 100644
-index 0000000000000000000000000000000000000000..81d2edfdeae96848693e9ca0278771d985c0299b
+index 00000000000..f5712396172
 --- /dev/null
-+++ b/core/tests/Drupal/TestTools/PhpUnitTestCaseJUnitResult.php
-@@ -0,0 +1,17 @@
++++ b/core/modules/image/src/ImageProcessor/TransformedDimensions.php
+@@ -0,0 +1,69 @@
 +<?php
 +
-+declare(strict_types=1);
-+
-+namespace Drupal\TestTools;
++namespace Drupal\image\ImageProcessor;
 +
 +/**
-+ * @todo add doc.
++ * Keeps track of the image dimensions transformation by a style.
 + */
-+enum PhpUnitTestCaseJUnitResult: string {
++class TransformedDimensions {
 +
-+  case Pass = 'pass';
-+  case Fail = 'fail';
-+  case Error = 'error';
-+  case Skip = 'skipped';
-+
-+}
-diff --git a/core/tests/Drupal/Tests/Core/Test/JUnitConverterTest.php b/core/tests/Drupal/Tests/Core/Test/JUnitConverterTest.php
-index 49599b0e4ae99b0d5871c67655b9f32699471716..fdce967304577324de89da0125761323c3045a43 100644
---- a/core/tests/Drupal/Tests/Core/Test/JUnitConverterTest.php
-+++ b/core/tests/Drupal/Tests/Core/Test/JUnitConverterTest.php
-@@ -28,23 +28,41 @@ class JUnitConverterTest extends UnitTestCase {
-    * @covers ::xmlToRows
-    */
-   public function testXmlToRowsWithErrors(): void {
--    $phpunit_error_xml = __DIR__ . '/fixtures/phpunit_error.xml';
-+    $phpunit_error_xml = __DIR__ . '/../../../../fixtures/phpunit_error.xml';
- 
-     $res = JUnitConverter::xmlToRows(1, $phpunit_error_xml);
-     $this->assertCount(4, $res, 'All test cases got extracted');
--    $this->assertNotEquals('pass', $res[0]['status']);
--    $this->assertEquals('fail', $res[0]['status']);
--
--    // Test nested testsuites, which appear when you use @dataProvider.
--    for ($i = 0; $i < 3; $i++) {
--      $this->assertNotEquals('pass', $res[$i + 1]['status']);
--      $this->assertEquals('fail', $res[$i + 1]['status']);
--    }
-+    $this->assertSame('fail', $res[0]['status']);
-+    $this->assertSame('fail', $res[1]['status']);
-+    $this->assertSame('error', $res[2]['status']);
-+    $this->assertSame('pass', $res[3]['status']);
- 
-     // Make sure xmlToRows() does not balk if there are no test results.
-     $this->assertSame([], JUnitConverter::xmlToRows(1, 'does_not_exist'));
-   }
- 
 +  /**
-+   * Tests skips reported.
++   * The current width.
 +   */
-+  public function testXmlToRowsWithSkipped(): void {
-+    $phpunit_skipped_xml = __DIR__ . '/../../../../fixtures/phpunit_skipped.xml';
++  protected ?int $width;
 +
-+    $res = JUnitConverter::xmlToRows(1, $phpunit_skipped_xml);
-+    $this->assertCount(93, $res, 'All test cases got extracted');
-+    for ($i = 0; $i < 81; $i++) {
-+      $this->assertSame('pass', $res[$i]['status'], 'Fail at offset ' . $i);
-+    }
-+    for ($i = 81; $i < 85; $i++) {
-+      $this->assertSame('skipped', $res[$i]['status'], 'Fail at offset ' . $i);
-+    }
-+    for ($i = 85; $i < 90; $i++) {
-+      $this->assertSame('pass', $res[$i]['status'], 'Fail at offset ' . $i);
-+    }
-+    $this->assertSame('skipped', $res[90]['status']);
-+    $this->assertSame('pass', $res[91]['status']);
-+    $this->assertSame('pass', $res[92]['status']);
++  /**
++   * The current height.
++   */
++  protected ?int $height;
++
++  /**
++   * Any third party key added to legacy $dimensions array.
++   *
++   * @deprecated
++   */
++  protected array $thirdPartyKey = [];
++
++  public function __construct(
++    public readonly int $originalWidth,
++    public readonly int $originalHeight,
++    public readonly string $uri,
++  ) {
++    $this->width = $this->originalWidth;
++    $this->height = $this->originalHeight;
 +  }
 +
-   /**
-    * @covers ::xmlToRows
-    */
-@@ -66,7 +84,7 @@ public function testXmlElementToRows(): void {
-   </testsuite>
- </testsuites>
- EOD;
--    $simpletest = [
-+    $expected = [
-       [
-         'test_id' => 23,
-         'test_class' => 'Drupal\Tests\simpletest\Unit\TestDiscoveryTest',
-@@ -78,7 +96,9 @@ public function testXmlElementToRows(): void {
-         'file' => '/Users/paul/projects/drupal/core/modules/simpletest/tests/src/Unit/TestDiscoveryTest.php',
-       ],
-     ];
--    $this->assertEquals($simpletest, JUnitConverter::xmlElementToRows(23, new \SimpleXMLElement($junit)));
-+    $actual = JUnitConverter::xmlElementToRows(23, new \SimpleXMLElement($junit));
-+    unset($actual['time']);
-+    $this->assertEquals($expected, $expected);
-   }
- 
-   /**
-@@ -88,7 +108,7 @@ public function testConvertTestCaseToSimpletestRow(): void {
-     $junit = <<<EOD
-     <testcase name="testGetTestClasses" class="Drupal\Tests\simpletest\Unit\TestDiscoveryTest" classname="Drupal.Tests.simpletest.Unit.TestDiscoveryTest" file="/Users/paul/projects/drupal/core/modules/simpletest/tests/src/Unit/TestDiscoveryTest.php" line="108" assertions="2" time="0.100787"/>
- EOD;
--    $simpletest = [
-+    $expected = [
-       'test_id' => 23,
-       'test_class' => 'Drupal\Tests\simpletest\Unit\TestDiscoveryTest',
-       'status' => 'pass',
-@@ -98,7 +118,9 @@ public function testConvertTestCaseToSimpletestRow(): void {
-       'line' => 108,
-       'file' => '/Users/paul/projects/drupal/core/modules/simpletest/tests/src/Unit/TestDiscoveryTest.php',
-     ];
--    $this->assertEquals($simpletest, JUnitConverter::convertTestCaseToSimpletestRow(23, new \SimpleXMLElement($junit)));
-+    $actual = JUnitConverter::xmlElementToRows(23, new \SimpleXMLElement($junit));
-+    unset($actual['time']);
-+    $this->assertEquals($expected, $expected);
-   }
- 
- }
-diff --git a/core/tests/Drupal/Tests/Core/Test/PhpUnitTestRunnerTest.php b/core/tests/Drupal/Tests/Core/Test/PhpUnitTestRunnerTest.php
-index 8047ece4fc41027c554d917e3c3a553f826ba1c9..44957ec6512c345d0e04127be3ae8ae58849ea8f 100644
---- a/core/tests/Drupal/Tests/Core/Test/PhpUnitTestRunnerTest.php
-+++ b/core/tests/Drupal/Tests/Core/Test/PhpUnitTestRunnerTest.php
-@@ -53,9 +53,8 @@ public function testRunTestsError(): void {
-     $runner->expects($this->once())
-       ->method('runCommand')
-       ->willReturnCallback(
--        function (string $test_class_name, string $log_junit_file_path, int &$status): string {
--          $status = TestStatus::EXCEPTION;
--          return ' ';
-+        function (string $test_class_name, string $log_junit_file_path, int &$status): void {
-+          $status = TestStatus::ERROR;
-         }
-       );
- 
-@@ -66,14 +65,15 @@ function (string $test_class_name, string $log_junit_file_path, int &$status): s
-     $results = $runner->execute($test_run, 'SomeTest', $status);
- 
-     // Make sure our status code made the round trip.
--    $this->assertEquals(TestStatus::EXCEPTION, $status);
-+    $this->assertEquals(TestStatus::ERROR, $status);
- 
-     // A serious error in runCommand() should give us a fixed set of results.
-     $row = reset($results);
-+    unset($row['time']);
-     $fail_row = [
-       'test_id' => $test_id,
-       'test_class' => 'SomeTest',
--      'status' => TestStatus::label(TestStatus::EXCEPTION),
-+      'status' => TestStatus::label(TestStatus::ERROR),
-       'message' => 'PHPUnit Test failed to complete; Error: ',
-       'message_group' => 'Other',
-       'function' => 'SomeTest',
-@@ -106,6 +106,7 @@ public static function providerTestSummarizeResults() {
-           [
-             'test_class' => static::class,
-             'status' => 'pass',
-+            'time' => 0.010001,
-           ],
-         ],
-         '#pass',
-@@ -115,6 +116,7 @@ public static function providerTestSummarizeResults() {
-           [
-             'test_class' => static::class,
-             'status' => 'fail',
-+            'time' => 0.010002,
-           ],
-         ],
-         '#fail',
-@@ -124,6 +126,7 @@ public static function providerTestSummarizeResults() {
-           [
-             'test_class' => static::class,
-             'status' => 'exception',
-+            'time' => 0.010003,
-           ],
-         ],
-         '#exception',
-@@ -133,6 +136,7 @@ public static function providerTestSummarizeResults() {
-           [
-             'test_class' => static::class,
-             'status' => 'debug',
-+            'time' => 0.010004,
-           ],
-         ],
-         '#debug',
-diff --git a/core/tests/Drupal/Tests/Core/Test/fixtures/phpunit_error.xml b/core/tests/Drupal/Tests/Core/Test/fixtures/phpunit_error.xml
-deleted file mode 100644
-index 3a6f25186fd6cc34c76153395a4950f7f475c329..0000000000000000000000000000000000000000
---- a/core/tests/Drupal/Tests/Core/Test/fixtures/phpunit_error.xml
-+++ /dev/null
-@@ -1,43 +0,0 @@
--<?xml version="1.0" encoding="UTF-8"?>
--<testsuites>
--  <testsuite name="Drupal Unit Test Suite" tests="1" assertions="0" failures="0" errors="1" time="0.002680">
--    <testsuite name="Drupal\Tests\Component\PhpStorage\FileStorageTest" file="/home/chx/www/system/core/tests/Drupal/Tests/Component/PhpStorage/FileStorageTest.php" namespace="Drupal\Tests\Component\PhpStorage" fullPackage="Drupal.Tests.Component.PhpStorage" tests="0" assertions="0" failures="0" errors="0" time="0.000000"/>
--    <testsuite name="Drupal\Tests\Component\PhpStorage\MTimeProtectedFastFileStorageTest" file="/home/chx/www/system/core/tests/Drupal/Tests/Component/PhpStorage/MTimeProtectedFastFileStorageTest.php" namespace="Drupal\Tests\Component\PhpStorage" fullPackage="Drupal.Tests.Component.PhpStorage" tests="0" assertions="0" failures="0" errors="0" time="0.000000"/>
--    <testsuite name="Drupal\Tests\Core\Cache\BackendChainImplementationUnitTest" file="/home/chx/www/system/core/tests/Drupal/Tests/Core/Cache/BackendChainImplementationUnitTest.php" namespace="Drupal\Tests\Core\Cache" fullPackage="Drupal.Tests.Core.Cache" tests="0" assertions="0" failures="0" errors="0" time="0.000000"/>
--    <testsuite name="Drupal\Tests\Core\Cache\NullBackendTest" file="/home/chx/www/system/core/tests/Drupal/Tests/Core/Cache/NullBackendTest.php" namespace="Drupal\Tests\Core\Cache" fullPackage="Drupal.Tests.Core.Cache" tests="0" assertions="0" failures="0" errors="0" time="0.000000"/>
--    <testsuite name="Drupal\Tests\Core\Extension\ModuleHandlerUnitTest" file="/home/chx/www/system/core/tests/Drupal/Tests/Core/Extension/ModuleHandlerUnitTest.php" namespace="Drupal\Tests\Core\Extension" fullPackage="Drupal.Tests.Core.Extension" tests="1" assertions="0" failures="0" errors="1" time="0.002680">
--      <testcase name="testLoadInclude" class="Drupal\Tests\Core\Extension\ModuleHandlerUnitTest" file="/home/chx/www/system/core/tests/Drupal/Tests/Core/Extension/ModuleHandlerUnitTest.php" line="37" assertions="0" time="0.002680">
--        <error type="PHPUnit_Framework_Error_Notice">Drupal\Tests\Core\Extension\ModuleHandlerUnitTest::testLoadInclude
--Undefined index: foo
--
--/home/chx/www/system/core/lib/Drupal/Core/Extension/ModuleHandler.php:219
--/home/chx/www/system/core/tests/Drupal/Tests/Core/Extension/ModuleHandlerUnitTest.php:40
--</error>
--      </testcase>
--    </testsuite>
--    <testsuite name="Drupal\Tests\Core\NestedArrayUnitTest" file="/home/chx/www/system/core/tests/Drupal/Tests/Core/NestedArrayUnitTest.php" namespace="Drupal\Tests\Core" fullPackage="Drupal.Tests.Core" tests="0" assertions="0" failures="0" errors="0" time="0.000000"/>
--    <testsuite name="Drupal\breakpoint\Tests\BreakpointMediaQueryTest" file="/home/chx/www/system/core/modules/breakpoint/tests/Drupal/breakpoint/Tests/BreakpointMediaQueryTest.php" namespace="Drupal\breakpoint\Tests" fullPackage="Drupal.breakpoint.Tests" tests="0" assertions="0" failures="0" errors="0" time="0.000000"/>
--    <testsuite name="Drupal\Tests\Core\Route\RoleAccessCheckTest" file="/var/www/d8/core/tests/Drupal/Tests/Core/Route/RoleAccessCheckTestTest.php" namespace="Drupal\Tests\Core\Route" fullPackage="Drupal.Tests.Core.Route" tests="3" assertions="3" failures="3" errors="0" time="0.009176">
--      <testsuite name="Drupal\Tests\Core\Route\RoleAccessCheckTest::testRoleAccess" tests="3" assertions="3" failures="3" errors="0" time="0.009176">
--        <testcase name="testRoleAccess with data set #0" assertions="1" time="0.004519">
--          <failure type="PHPUnit_Framework_ExpectationFailedException">Drupal\Tests\Core\Route\RoleAccessCheckTest::testRoleAccess with data set #0 ('role_test_1', array(Drupal\user\Entity\User, Drupal\user\Entity\User))
--            Access granted for user with the roles role_test_1 on path: role_test_1
--            Failed asserting that false is true.
--          </failure>
--        </testcase>
--        <testcase name="testRoleAccess with data set #1" assertions="1" time="0.002354">
--          <failure type="PHPUnit_Framework_ExpectationFailedException">Drupal\Tests\Core\Route\RoleAccessCheckTest::testRoleAccess with data set #1 ('role_test_2', array(Drupal\user\Entity\User, Drupal\user\Entity\User))
--            Access granted for user with the roles role_test_2 on path: role_test_2
--            Failed asserting that false is true.
--          </failure>
--        </testcase>
--        <testcase name="testRoleAccess with data set #2" assertions="1" time="0.002303">
--          <failure type="PHPUnit_Framework_ExpectationFailedException">Drupal\Tests\Core\Route\RoleAccessCheckTest::testRoleAccess with data set #2 ('role_test_3', array(Drupal\user\Entity\User))
--            Access granted for user with the roles role_test_1, role_test_2 on path: role_test_3
--            Failed asserting that false is true.
--          </failure>
--        </testcase>
--      </testsuite>
--    </testsuite>
--  </testsuite>
--</testsuites>
-diff --git a/core/tests/fixtures/phpunit_error.xml b/core/tests/fixtures/phpunit_error.xml
-new file mode 100644
-index 0000000000000000000000000000000000000000..6d5d293aa2c3705ab20187efdbf304713498f2b5
---- /dev/null
-+++ b/core/tests/fixtures/phpunit_error.xml
-@@ -0,0 +1,37 @@
-+<?xml version="1.0" encoding="UTF-8"?>
-+<testsuites>
-+  <testsuite name="Drupal\KernelTests\Core\Field\Entity\BaseFieldOverrideTest" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Field/Entity/BaseFieldOverrideTest.php" tests="4" assertions="7" errors="1" failures="2" skipped="0" time="3.305914">
-+    <testsuite name="Drupal\KernelTests\Core\Field\Entity\BaseFieldOverrideTest::testGetClass" tests="2" assertions="2" errors="0" failures="2" skipped="0" time="1.650937">
-+      <testcase name="testGetClass with data set &quot;String (default class)&quot;" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Field/Entity/BaseFieldOverrideTest.php" line="43" class="Drupal\KernelTests\Core\Field\Entity\BaseFieldOverrideTest" classname="Drupal.KernelTests.Core.Field.Entity.BaseFieldOverrideTest" assertions="1" time="0.829654">
-+        <failure type="PHPUnit\Framework\ExpectationFailedException">Drupal\KernelTests\Core\Field\Entity\BaseFieldOverrideTest::testGetClass with data set "String (default class)"
-+Failed asserting that two strings are equal.
-+--- Expected
-++++ Actual
-+@@ @@
-+-'Drupal\Core\Field\FieldItemListfoo'
-++'Drupal\Core\Field\FieldItemList'
++  public function offsetExists(int|string $offset): bool {
++    if (in_array($offset, ['width', 'height'])) {
++      return TRUE;
++    }
++    return array_key_exists($offset, $this->thirdPartyKey);
++  }
 +
-+/var/www/lab01/core/tests/Drupal/KernelTests/Core/Field/Entity/BaseFieldOverrideTest.php:51</failure>
-+      </testcase>
-+      <testcase name="testGetClass with data set &quot;String (overridden class)&quot;" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Field/Entity/BaseFieldOverrideTest.php" line="43" class="Drupal\KernelTests\Core\Field\Entity\BaseFieldOverrideTest" classname="Drupal.KernelTests.Core.Field.Entity.BaseFieldOverrideTest" assertions="1" time="0.821283">
-+        <failure type="PHPUnit\Framework\ExpectationFailedException">Drupal\KernelTests\Core\Field\Entity\BaseFieldOverrideTest::testGetClass with data set "String (overridden class)"
-+Failed asserting that two strings are equal.
-+--- Expected
-++++ Actual
-+@@ @@
-+-'Drupal\KernelTests\Core\Field\Entity\BaseFieldOverrideTestfoo'
-++'Drupal\KernelTests\Core\Field\Entity\BaseFieldOverrideTest'
++  public function offsetGet(int|string $offset): mixed {
++    return match ($offset) {
++      'width' => $this->width,
++      'height' => $this->height,
++      default => $this->thirdPartyKey[$offset],
++    };
++  }
 +
-+/var/www/lab01/core/tests/Drupal/KernelTests/Core/Field/Entity/BaseFieldOverrideTest.php:51</failure>
-+      </testcase>
-+    </testsuite>
-+    <testcase name="testDefaultValueCallback" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Field/Entity/BaseFieldOverrideTest.php" line="75" class="Drupal\KernelTests\Core\Field\Entity\BaseFieldOverrideTest" classname="Drupal.KernelTests.Core.Field.Entity.BaseFieldOverrideTest" assertions="0" time="0.837052">
-+      <error type="TypeError">Drupal\KernelTests\Core\Field\Entity\BaseFieldOverrideTest::testDefaultValueCallback
-+TypeError: call_user_func(): Argument #1 ($callback) must be a valid callback, class Drupal\KernelTests\Core\Field\Entity\BaseFieldOverrideTest does not have a method "defaultValueCallbackPrimitiveBar"
++  public function offsetSet(int|string $offset, mixed $value): void {
++    if ($offset === 'width') {
++      $this->width = $value;
++    }
++    elseif ($offset === 'height') {
++      $this->height = $value;
++    }
++    else {
++      $this->thirdPartyKey[$offset] = $value;
++    }
++  }
 +
-+/var/www/lab01/core/lib/Drupal/Core/Field/BaseFieldDefinition.php:442
-+/var/www/lab01/core/tests/Drupal/KernelTests/Core/Field/Entity/BaseFieldOverrideTest.php:83</error>
-+    </testcase>
-+    <testcase name="testInheritedProperties" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Field/Entity/BaseFieldOverrideTest.php" line="95" class="Drupal\KernelTests\Core\Field\Entity\BaseFieldOverrideTest" classname="Drupal.KernelTests.Core.Field.Entity.BaseFieldOverrideTest" assertions="5" time="0.817925"/>
-+  </testsuite>
-+</testsuites>
-diff --git a/core/tests/fixtures/phpunit_skipped.xml b/core/tests/fixtures/phpunit_skipped.xml
-new file mode 100644
-index 0000000000000000000000000000000000000000..4a8311f5f7a9b987deb35da8df019b4202728b93
---- /dev/null
-+++ b/core/tests/fixtures/phpunit_skipped.xml
-@@ -0,0 +1,114 @@
-+<?xml version="1.0" encoding="UTF-8"?>
-+<testsuites>
-+  <testsuite name="Drupal\KernelTests\Core\Image\ToolkitGdTest" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" tests="93" assertions="1167" errors="0" failures="0" skipped="5" time="88.994903">
-+    <testsuite name="Drupal\KernelTests\Core\Image\ToolkitGdTest::testManipulations" tests="80" assertions="1104" errors="0" failures="0" skipped="0" time="76.846621">
-+      <testcase name="testManipulations with data set #0" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="0.976747"/>
-+      <testcase name="testManipulations with data set #1" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="0.944626"/>
-+      <testcase name="testManipulations with data set #2" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="0.980525"/>
-+      <testcase name="testManipulations with data set #3" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="0.947471"/>
-+      <testcase name="testManipulations with data set #4" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="0.938293"/>
-+      <testcase name="testManipulations with data set #5" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="16" time="0.939534"/>
-+      <testcase name="testManipulations with data set #6" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="16" time="0.940386"/>
-+      <testcase name="testManipulations with data set #7" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="0.934696"/>
-+      <testcase name="testManipulations with data set #8" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="0.943265"/>
-+      <testcase name="testManipulations with data set #9" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="0.941971"/>
-+      <testcase name="testManipulations with data set #10" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="0.936005"/>
-+      <testcase name="testManipulations with data set #11" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="12" time="1.016108"/>
-+      <testcase name="testManipulations with data set #12" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="4" time="1.071908"/>
-+      <testcase name="testManipulations with data set #13" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="1.022994"/>
-+      <testcase name="testManipulations with data set #14" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="0.983351"/>
-+      <testcase name="testManipulations with data set #15" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="0.991556"/>
-+      <testcase name="testManipulations with data set #16" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="0.979027"/>
-+      <testcase name="testManipulations with data set #17" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="1.039585"/>
-+      <testcase name="testManipulations with data set #18" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="0.991826"/>
-+      <testcase name="testManipulations with data set #19" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="0.940721"/>
-+      <testcase name="testManipulations with data set #20" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="0.935326"/>
-+      <testcase name="testManipulations with data set #21" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="16" time="0.954192"/>
-+      <testcase name="testManipulations with data set #22" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="16" time="0.932164"/>
-+      <testcase name="testManipulations with data set #23" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="0.931443"/>
-+      <testcase name="testManipulations with data set #24" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="0.970216"/>
-+      <testcase name="testManipulations with data set #25" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="1.588409"/>
-+      <testcase name="testManipulations with data set #26" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="1.078304"/>
-+      <testcase name="testManipulations with data set #27" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="12" time="1.032428"/>
-+      <testcase name="testManipulations with data set #28" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="4" time="0.936722"/>
-+      <testcase name="testManipulations with data set #29" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="0.941567"/>
-+      <testcase name="testManipulations with data set #30" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="0.931417"/>
-+      <testcase name="testManipulations with data set #31" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="0.933312"/>
-+      <testcase name="testManipulations with data set #32" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="16" time="0.933431"/>
-+      <testcase name="testManipulations with data set #33" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="16" time="0.928300"/>
-+      <testcase name="testManipulations with data set #34" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="16" time="0.961680"/>
-+      <testcase name="testManipulations with data set #35" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="16" time="0.932923"/>
-+      <testcase name="testManipulations with data set #36" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="16" time="0.942173"/>
-+      <testcase name="testManipulations with data set #37" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="16" time="0.925717"/>
-+      <testcase name="testManipulations with data set #38" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="16" time="0.934281"/>
-+      <testcase name="testManipulations with data set #39" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="16" time="0.924183"/>
-+      <testcase name="testManipulations with data set #40" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="16" time="0.923672"/>
-+      <testcase name="testManipulations with data set #41" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="16" time="0.972786"/>
-+      <testcase name="testManipulations with data set #42" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="16" time="0.937621"/>
-+      <testcase name="testManipulations with data set #43" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="12" time="0.934860"/>
-+      <testcase name="testManipulations with data set #44" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="4" time="0.932447"/>
-+      <testcase name="testManipulations with data set #45" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="16" time="0.929079"/>
-+      <testcase name="testManipulations with data set #46" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="16" time="0.943529"/>
-+      <testcase name="testManipulations with data set #47" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="16" time="0.935430"/>
-+      <testcase name="testManipulations with data set #48" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="0.924625"/>
-+      <testcase name="testManipulations with data set #49" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="0.931053"/>
-+      <testcase name="testManipulations with data set #50" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="0.927283"/>
-+      <testcase name="testManipulations with data set #51" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="0.926629"/>
-+      <testcase name="testManipulations with data set #52" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="0.929970"/>
-+      <testcase name="testManipulations with data set #53" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="16" time="0.930390"/>
-+      <testcase name="testManipulations with data set #54" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="16" time="0.950040"/>
-+      <testcase name="testManipulations with data set #55" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="0.930872"/>
-+      <testcase name="testManipulations with data set #56" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="0.958764"/>
-+      <testcase name="testManipulations with data set #57" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="0.935869"/>
-+      <testcase name="testManipulations with data set #58" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="0.932261"/>
-+      <testcase name="testManipulations with data set #59" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="12" time="0.930439"/>
-+      <testcase name="testManipulations with data set #60" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="4" time="0.926069"/>
-+      <testcase name="testManipulations with data set #61" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="0.966578"/>
-+      <testcase name="testManipulations with data set #62" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="0.928829"/>
-+      <testcase name="testManipulations with data set #63" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="0.933807"/>
-+      <testcase name="testManipulations with data set #64" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="0.929979"/>
-+      <testcase name="testManipulations with data set #65" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="0.926004"/>
-+      <testcase name="testManipulations with data set #66" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="0.927559"/>
-+      <testcase name="testManipulations with data set #67" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="0.932268"/>
-+      <testcase name="testManipulations with data set #68" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="0.966589"/>
-+      <testcase name="testManipulations with data set #69" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="16" time="0.930977"/>
-+      <testcase name="testManipulations with data set #70" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="16" time="0.981415"/>
-+      <testcase name="testManipulations with data set #71" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="0.936806"/>
-+      <testcase name="testManipulations with data set #72" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="1.031318"/>
-+      <testcase name="testManipulations with data set #73" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="0.940179"/>
-+      <testcase name="testManipulations with data set #74" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="1.084237"/>
-+      <testcase name="testManipulations with data set #75" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="12" time="0.937176"/>
-+      <testcase name="testManipulations with data set #76" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="4" time="0.933190"/>
-+      <testcase name="testManipulations with data set #77" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="0.934827"/>
-+      <testcase name="testManipulations with data set #78" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="0.940150"/>
-+      <testcase name="testManipulations with data set #79" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="287" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="14" time="0.932256"/>
-+    </testsuite>
-+    <testcase name="testSupportedExtensions" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="359" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="8" time="0.934511"/>
-+    <testsuite name="Drupal\KernelTests\Core\Image\ToolkitGdTest::testGdFunctionsExist" tests="4" assertions="4" errors="0" failures="0" skipped="4" time="3.704495">
-+      <testcase name="testGdFunctionsExist with data set #0" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="397" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="1" time="0.954038">
-+        <skipped/>
-+      </testcase>
-+      <testcase name="testGdFunctionsExist with data set #1" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="397" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="1" time="0.917938">
-+        <skipped/>
-+      </testcase>
-+      <testcase name="testGdFunctionsExist with data set #2" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="397" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="1" time="0.921161">
-+        <skipped/>
-+      </testcase>
-+      <testcase name="testGdFunctionsExist with data set #3" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="397" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="1" time="0.911357">
-+        <skipped/>
-+      </testcase>
-+    </testsuite>
-+    <testsuite name="Drupal\KernelTests\Core\Image\ToolkitGdTest::testCreateImageFromScratch" tests="4" assertions="40" errors="0" failures="0" skipped="0" time="3.750441">
-+      <testcase name="testCreateImageFromScratch with data set #0" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="409" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="10" time="0.926113"/>
-+      <testcase name="testCreateImageFromScratch with data set #1" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="409" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="10" time="0.927924"/>
-+      <testcase name="testCreateImageFromScratch with data set #2" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="409" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="10" time="0.925613"/>
-+      <testcase name="testCreateImageFromScratch with data set #3" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="409" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="10" time="0.970791"/>
-+    </testsuite>
-+    <testcase name="testCreateNewFailures" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="437" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="5" time="0.924227"/>
-+    <testcase name="testGifTransparentImages" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="452" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="1" time="0.951413">
-+      <skipped/>
-+    </testcase>
-+    <testcase name="testMissingOperation" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="506" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="3" time="0.935700"/>
-+    <testcase name="testGetRequirements" file="/var/www/lab01/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php" line="518" class="Drupal\KernelTests\Core\Image\ToolkitGdTest" classname="Drupal.KernelTests.Core.Image.ToolkitGdTest" assertions="2" time="0.947495"/>
-+  </testsuite>
-+</testsuites>
++  public function offsetUnset(int|string $offset): void {
++    if (!in_array($offset, ['width', 'height'])) {
++      unset($offset);
++    }
++  }
++
++}
