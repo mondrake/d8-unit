@@ -317,7 +317,7 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
         $node->attrGroups[] = $attributeGroup;
 
         // cleanup
-        $this->phpDocTagRemover->removeTagValueFromNode($phpDocInfo, $desiredTagValueNode);
+        // $this->phpDocTagRemover->removeTagValueFromNode($phpDocInfo, $desiredTagValueNode);
 
     }
 
