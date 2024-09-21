@@ -1,5 +1,30 @@
+diff --git a/.gitlab-ci/pipeline.yml b/.gitlab-ci/pipeline.yml
+index fec13acc7b3..180810a74e6 100644
+--- a/.gitlab-ci/pipeline.yml
++++ b/.gitlab-ci/pipeline.yml
+@@ -71,6 +71,7 @@ variables:
+   MINK_DRIVER_ARGS_WEBDRIVER_CHROMEDRIVER_NON_W3C: '["chrome", {"browserName":"chrome","goog:chromeOptions":{"args":["--disable-dev-shm-usage","--disable-gpu","--headless","--dns-prefetch-disable"]}}, "http://localhost:9515"]'
+   CI_PARALLEL_NODE_INDEX: $CI_NODE_INDEX
+   CI_PARALLEL_NODE_TOTAL: $CI_NODE_TOTAL
++  BROWSERTEST_OUTPUT_VERBOSE: mimmo
+ 
+ .with-database: &with-database
+   name: $_CONFIG_DOCKERHUB_ROOT/$_TARGET_DB:production
+diff --git a/core/modules/image/tests/src/Functional/ImageAdminStylesTest.php b/core/modules/image/tests/src/Functional/ImageAdminStylesTest.php
+index 9b3a3106333..5f13aec79ee 100644
+--- a/core/modules/image/tests/src/Functional/ImageAdminStylesTest.php
++++ b/core/modules/image/tests/src/Functional/ImageAdminStylesTest.php
+@@ -275,7 +275,7 @@ public function testStyle(): void {
+     $this->submitForm($edit, 'Add effect');
+     $entity_type_manager = $this->container->get('entity_type.manager');
+     $style = $entity_type_manager->getStorage('image_style')->loadUnchanged($style_name);
+-    $this->assertCount(6, $style->getEffects(), 'Rotate effect with transparent background was added.');
++    $this->assertCount(12, $style->getEffects(), 'Rotate effect with transparent background was added.');
+ 
+     // Style deletion form.
+ 
 diff --git a/core/scripts/run-tests.sh b/core/scripts/run-tests.sh
-index bf53cfa8d59..625798037e8 100755
+index bf53cfa8d59..43d1e29d619 100755
 --- a/core/scripts/run-tests.sh
 +++ b/core/scripts/run-tests.sh
 @@ -34,6 +34,7 @@
@@ -10,7 +35,15 @@ index bf53cfa8d59..625798037e8 100755
  
  // cspell:ignore exitcode wwwrun
  
-@@ -754,9 +755,12 @@ function simpletest_script_execute_batch(TestRunResultsStorageInterface $test_ru
+@@ -730,6 +731,7 @@ function simpletest_script_setup_test_run_results_storage($new = FALSE) {
+  * Execute a batch of tests.
+  */
+ function simpletest_script_execute_batch(TestRunResultsStorageInterface $test_run_results_storage, $test_classes) {
++  echo __METHOD__ . ' env ' . getenv('BROWSERTEST_OUTPUT_VERBOSE');
+   global $args, $test_ids;
+ 
+   $total_status = SIMPLETEST_SCRIPT_EXIT_SUCCESS;
+@@ -754,9 +756,12 @@ function simpletest_script_execute_batch(TestRunResultsStorageInterface $test_ru
        $test_class = array_shift($test_classes);
        // Fork a child process.
        $command = simpletest_script_command($test_run, $test_class);
@@ -26,7 +59,7 @@ index bf53cfa8d59..625798037e8 100755
          echo "Unable to fork test process. Aborting.\n";
          exit(SIMPLETEST_SCRIPT_EXIT_SUCCESS);
        }
-@@ -766,7 +770,6 @@ function simpletest_script_execute_batch(TestRunResultsStorageInterface $test_ru
+@@ -766,7 +771,6 @@ function simpletest_script_execute_batch(TestRunResultsStorageInterface $test_ru
          'process' => $process,
          'test_run' => $test_run,
          'class' => $test_class,
@@ -34,7 +67,7 @@ index bf53cfa8d59..625798037e8 100755
        ];
      }
  
-@@ -775,15 +778,13 @@ function simpletest_script_execute_batch(TestRunResultsStorageInterface $test_ru
+@@ -775,15 +779,18 @@ function simpletest_script_execute_batch(TestRunResultsStorageInterface $test_ru
  
      // Check if some children finished.
      foreach ($children as $cid => $child) {
@@ -44,19 +77,40 @@ index bf53cfa8d59..625798037e8 100755
 -        proc_close($child['process']);
 -        if ($status['exitcode'] === SIMPLETEST_SCRIPT_EXIT_FAILURE) {
 -          $total_status = max($status['exitcode'], $total_status);
-+      if (!$child['process']->isRunning()) {
++      if ($child['process']->isTerminated()) {
 +        // The child exited.
-+        if ($child['process']->getExitCode() === SIMPLETEST_SCRIPT_EXIT_FAILURE) {
-+          $total_status = max($child['process']->getExitCode(), $total_status);
++        echo $child['process']->getOutput();
++        $errorOutput = $child['process']->getErrorOutput();
++        if ($errorOutput) {
++          echo 'ERROR: ' . $errorOutput;
          }
 -        elseif ($status['exitcode']) {
 -          $message = 'FATAL ' . $child['class'] . ': test runner returned a non-zero error code (' . $status['exitcode'] . ').';
++        if ($child['process']->getExitCode() === SIMPLETEST_SCRIPT_EXIT_FAILURE) {
++          $total_status = max($child['process']->getExitCode(), $total_status);
++        }
 +        elseif ($child['process']->getExitCode()) {
 +          $message = 'FATAL ' . $child['class'] . ': test runner returned a non-zero error code (' . $child['process']->getExitCode() . ').';
            echo $message . "\n";
            // @todo Return SIMPLETEST_SCRIPT_EXIT_EXCEPTION instead, when
            // DrupalCI supports this.
-@@ -866,29 +867,38 @@ function simpletest_script_run_one_test(TestRun $test_run, $test_class) {
+@@ -823,6 +830,7 @@ function simpletest_script_execute_batch(TestRunResultsStorageInterface $test_ru
+  * Run a PHPUnit-based test.
+  */
+ function simpletest_script_run_phpunit(TestRun $test_run, $class) {
++  echo __METHOD__ . ' env ' . getenv('BROWSERTEST_OUTPUT_VERBOSE');
+   $runner = PhpUnitTestRunner::create(\Drupal::getContainer());
+   $start = microtime(TRUE);
+   $results = $runner->execute($test_run, $class, $status);
+@@ -841,6 +849,7 @@ function simpletest_script_run_phpunit(TestRun $test_run, $class) {
+  * Run a single test, bootstrapping Drupal if needed.
+  */
+ function simpletest_script_run_one_test(TestRun $test_run, $test_class) {
++  echo __METHOD__ . ' env ' . getenv('BROWSERTEST_OUTPUT_VERBOSE');
+   global $args;
+ 
+   try {
+@@ -866,29 +875,38 @@ function simpletest_script_run_one_test(TestRun $test_run, $test_class) {
   * @param string $test_class
   *   The name of the test class to run.
   *
@@ -106,7 +160,7 @@ index bf53cfa8d59..625798037e8 100755
    return $command;
  }
  
-@@ -1132,7 +1142,7 @@ function get_test_class_method_count(string $class): int {
+@@ -1132,7 +1150,7 @@ function get_test_class_method_count(string $class): int {
   * @return array
   *   An associative array of bins and the test class names in each bin.
   */
