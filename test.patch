@@ -1,61 +1,117 @@
-diff --git a/core/modules/image/src/Form/ImageEffectFormBase.php b/core/modules/image/src/Form/ImageEffectFormBase.php
-index 8541b5c449ad03b983a8454e14b07c6dd907a339..54367f22f13039034457ceb6b6bc092528251106 100644
---- a/core/modules/image/src/Form/ImageEffectFormBase.php
-+++ b/core/modules/image/src/Form/ImageEffectFormBase.php
-@@ -122,7 +122,10 @@ public function submitForm(array &$form, FormStateInterface $form_state) {
-     $this->imageEffect->submitConfigurationForm($form['data'], SubformState::createForSubform($form['data'], $form, $form_state));
+diff --git a/core/scripts/run-tests.sh b/core/scripts/run-tests.sh
+index bf53cfa8d59..edc0327e2bc 100755
+--- a/core/scripts/run-tests.sh
++++ b/core/scripts/run-tests.sh
+@@ -34,6 +34,7 @@
+ use PHPUnit\Runner\Version;
+ use Symfony\Component\Console\Output\ConsoleOutput;
+ use Symfony\Component\HttpFoundation\Request;
++use Symfony\Component\Process\Process;
  
-     $this->imageEffect->setWeight($form_state->getValue('weight'));
--    if (!$this->imageEffect->getUuid()) {
-+    if ($uuid = $this->imageEffect->getUuid()) {
-+      $this->imageStyle->getEffect($uuid)->setConfiguration($this->imageEffect->getConfiguration());
-+    }
-+    else {
-       $this->imageStyle->addImageEffect($this->imageEffect->getConfiguration());
+ // cspell:ignore exitcode wwwrun
+ 
+@@ -754,9 +755,12 @@ function simpletest_script_execute_batch(TestRunResultsStorageInterface $test_ru
+       $test_class = array_shift($test_classes);
+       // Fork a child process.
+       $command = simpletest_script_command($test_run, $test_class);
+-      $process = proc_open($command, [], $pipes, NULL, NULL, ['bypass_shell' => TRUE]);
+-
+-      if (!is_resource($process)) {
++      try {
++        $process = new Process($command, NULL, ['bypass_shell' => TRUE]);
++        $process->setTimeout(10);
++        $process->start();
++      }
++      catch (\Exception) {
+         echo "Unable to fork test process. Aborting.\n";
+         exit(SIMPLETEST_SCRIPT_EXIT_SUCCESS);
+       }
+@@ -766,7 +770,6 @@ function simpletest_script_execute_batch(TestRunResultsStorageInterface $test_ru
+         'process' => $process,
+         'test_run' => $test_run,
+         'class' => $test_class,
+-        'pipes' => $pipes,
+       ];
      }
-     $this->imageStyle->save();
-diff --git a/core/modules/image/tests/src/FunctionalJavascript/ImageAdminStylesTest.php b/core/modules/image/tests/src/FunctionalJavascript/ImageAdminStylesTest.php
-index faea9dd8d4b39c37d01976e65354304ce9f43739..17f32c9598018fed886ac20b6bbde4e75ae62a7c 100644
---- a/core/modules/image/tests/src/FunctionalJavascript/ImageAdminStylesTest.php
-+++ b/core/modules/image/tests/src/FunctionalJavascript/ImageAdminStylesTest.php
-@@ -57,6 +57,7 @@ public function testAjaxEnabledEffectForm(): void {
-     foreach ($style->getEffects() as $uuid => $effect) {
-       $effect_path = $admin_path . '/manage/' . $style_name . '/effects/' . $uuid;
-       $this->drupalGet($effect_path);
-+      $this->assertSession()->fieldValueEquals('data[test_parameter]', '100');
-       $page->findField('data[test_parameter]')->setValue(111);
-       $ajax_value = $page->find('css', '#ajax-value')->getText();
-       $this->assertSame('Ajax value bar', $ajax_value);
-@@ -67,7 +68,32 @@ public function testAjaxEnabledEffectForm(): void {
-       }));
-       $page->pressButton('Update effect');
-       $assert->statusMessageContains('The image effect was successfully applied.', 'status');
-+      $this->drupalGet($effect_path);
-+      $this->assertSession()->fieldValueEquals('data[test_parameter]', '111');
-     }
-+
-+    // Edit the 1st effect, multiple AJAX calls before updating.
-+    $style = ImageStyle::load($style_name);
-+    $uuid = array_values($style->getEffects()->getInstanceIds())[0];
-+    $this->drupalGet($admin_path . '/manage/' . $style_name . '/effects/' . $uuid);
-+    $this->assertSession()->fieldValueEquals('data[test_parameter]', '111');
-+    $field = $page->findField('data[test_parameter]');
-+    $field->setValue(200);
-+    $page->pressButton('Ajax refresh');
-+    $this->assertSession()->assertWaitOnAjaxRequest();
-+    $field->setValue(300);
-+    $page->pressButton('Ajax refresh');
-+    $this->assertSession()->assertWaitOnAjaxRequest();
-+    $field->setValue(400);
-+    $page->pressButton('Ajax refresh');
-+    $this->assertSession()->assertWaitOnAjaxRequest();
-+    $page->pressButton('Update effect');
-+    $this->assertSession()->statusMessageContains('The image effect was successfully applied.', 'status');
-+    $style = ImageStyle::load($style_name);
-+    $effectConfiguration = $style->getEffect($uuid)->getConfiguration();
-+    $this->assertSame(400, $effectConfiguration['data']['test_parameter']);
-+    $this->drupalGet($admin_path . '/manage/' . $style_name . '/effects/' . $uuid);
-+    $this->assertSession()->fieldValueEquals('data[test_parameter]', '400');
+ 
+@@ -775,15 +778,13 @@ function simpletest_script_execute_batch(TestRunResultsStorageInterface $test_ru
+ 
+     // Check if some children finished.
+     foreach ($children as $cid => $child) {
+-      $status = proc_get_status($child['process']);
+-      if (empty($status['running'])) {
+-        // The child exited, unregister it.
+-        proc_close($child['process']);
+-        if ($status['exitcode'] === SIMPLETEST_SCRIPT_EXIT_FAILURE) {
+-          $total_status = max($status['exitcode'], $total_status);
++      if (!$child['process']->isRunning()) {
++        // The child exited.
++        if ($child['process']->getExitCode() === SIMPLETEST_SCRIPT_EXIT_FAILURE) {
++          $total_status = max($child['process']->getExitCode(), $total_status);
+         }
+-        elseif ($status['exitcode']) {
+-          $message = 'FATAL ' . $child['class'] . ': test runner returned a non-zero error code (' . $status['exitcode'] . ').';
++        elseif ($child['process']->getExitCode()) {
++          $message = 'FATAL ' . $child['class'] . ': test runner returned a non-zero error code (' . $child['process']->getExitCode() . ').';
+           echo $message . "\n";
+           // @todo Return SIMPLETEST_SCRIPT_EXIT_EXCEPTION instead, when
+           // DrupalCI supports this.
+@@ -866,29 +867,38 @@ function simpletest_script_run_one_test(TestRun $test_run, $test_class) {
+  * @param string $test_class
+  *   The name of the test class to run.
+  *
+- * @return string
+- *   The assembled command string.
++ * @return list<string>
++ *   The list of command-line elements.
+  */
+-function simpletest_script_command(TestRun $test_run, $test_class) {
++function simpletest_script_command(TestRun $test_run, string $test_class): array {
+   global $args, $php;
+ 
+-  $command = escapeshellarg($php) . ' ' . escapeshellarg('./core/scripts/' . $args['script']);
+-  $command .= ' --url ' . escapeshellarg($args['url']);
++  $command = [];
++  $command[] = $php;
++  $command[] = './core/scripts/' . $args['script'];
++  $command[] = '--url';
++  $command[] = $args['url'];
+   if (!empty($args['sqlite'])) {
+-    $command .= ' --sqlite ' . escapeshellarg($args['sqlite']);
++    $command[] = '--sqlite';
++    $command[] = $args['sqlite'];
    }
- 
+   if (!empty($args['dburl'])) {
+-    $command .= ' --dburl ' . escapeshellarg($args['dburl']);
++    $command[] = '--dburl';
++    $command[] = $args['dburl'];
+   }
+-  $command .= ' --php ' . escapeshellarg($php);
+-  $command .= " --test-id {$test_run->id()}";
++  $command[] = '--php';
++  $command[] = $php;
++  $command[] = '--test-id';
++  $command[] = $test_run->id();
+   foreach (['verbose', 'keep-results', 'color', 'die-on-fail', 'suppress-deprecations'] as $arg) {
+     if ($args[$arg]) {
+-      $command .= ' --' . $arg;
++      $command[] = '--' . $arg;
+     }
+   }
+   // --execute-test and class name needs to come last.
+-  $command .= ' --execute-test ' . escapeshellarg($test_class);
++  $command[] = '--execute-test';
++  $command[] = $test_class;
++
+   return $command;
  }
+ 
+@@ -1132,7 +1142,7 @@ function get_test_class_method_count(string $class): int {
+  * @return array
+  *   An associative array of bins and the test class names in each bin.
+  */
+- function place_tests_into_bins(array $tests, int $bin_count) {
++function place_tests_into_bins(array $tests, int $bin_count) {
+   // Create a bin corresponding to each parallel test job.
+   $bins = array_fill(0, $bin_count, []);
+   // Go through each test and add them to one bin at a time.
