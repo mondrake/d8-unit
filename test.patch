@@ -1,15 +1,42 @@
 diff --git a/.gitlab-ci/pipeline.yml b/.gitlab-ci/pipeline.yml
-index fec13acc7b3..97a534e72ef 100644
+index fec13acc7b3..2788c5558b8 100644
 --- a/.gitlab-ci/pipeline.yml
 +++ b/.gitlab-ci/pipeline.yml
 @@ -71,6 +71,7 @@ variables:
    MINK_DRIVER_ARGS_WEBDRIVER_CHROMEDRIVER_NON_W3C: '["chrome", {"browserName":"chrome","goog:chromeOptions":{"args":["--disable-dev-shm-usage","--disable-gpu","--headless","--dns-prefetch-disable"]}}, "http://localhost:9515"]'
    CI_PARALLEL_NODE_INDEX: $CI_NODE_INDEX
    CI_PARALLEL_NODE_TOTAL: $CI_NODE_TOTAL
-+  BROWSERTEST_OUTPUT_VERBOSE: female
++  BROWSERTEST_OUTPUT_VERBOSE: "false"
  
  .with-database: &with-database
    name: $_CONFIG_DOCKERHUB_ROOT/$_TARGET_DB:production
+@@ -101,7 +102,7 @@ variables:
+ .run-tests: &run-tests
+   script:
+     # Need to pass this along directly.
+-    - sudo MINK_DRIVER_ARGS_WEBDRIVER="$MINK_DRIVER_ARGS_WEBDRIVER" -u www-data php ./core/scripts/run-tests.sh --color --keep-results --types "$TESTSUITE" --concurrency "$CONCURRENCY" --repeat "1" --sqlite "./sites/default/files/tests.sqlite" --dburl $SIMPLETEST_DB --url $SIMPLETEST_BASE_URL --verbose --non-html --all --ci-parallel-node-index $CI_PARALLEL_NODE_INDEX --ci-parallel-node-total $CI_PARALLEL_NODE_TOTAL
++    - sudo -u www-data -E php ./core/scripts/run-tests.sh --color --keep-results --types "$TESTSUITE" --concurrency "$CONCURRENCY" --repeat "1" --sqlite "./sites/default/files/tests.sqlite" --dburl $SIMPLETEST_DB --url $SIMPLETEST_BASE_URL --verbose --non-html --all --ci-parallel-node-index $CI_PARALLEL_NODE_INDEX --ci-parallel-node-total $CI_PARALLEL_NODE_TOTAL
+ 
+ .run-repeat-class-test: &run-repeat-class-test
+   script:
+@@ -113,7 +114,7 @@ variables:
+         echo '   "Key" to "REPEAT_TEST_CLASS" and "Value" to "Drupal\Tests\ckeditor5\FunctionalJavascript\MediaLinkabilityTest"';
+         exit 1;
+       else
+-        sudo MINK_DRIVER_ARGS_WEBDRIVER="$MINK_DRIVER_ARGS_WEBDRIVER" -u www-data php ./core/scripts/run-tests.sh --color --keep-results --concurrency "$CONCURRENCY" --repeat "100" --sqlite "./sites/default/files/tests.sqlite" --dburl $SIMPLETEST_DB --url $SIMPLETEST_BASE_URL --verbose --non-html --class $REPEAT_TEST_CLASS
++        sudo -u www-data -E php ./core/scripts/run-tests.sh --color --keep-results --concurrency "$CONCURRENCY" --repeat "100" --sqlite "./sites/default/files/tests.sqlite" --dburl $SIMPLETEST_DB --url $SIMPLETEST_BASE_URL --verbose --non-html --class $REPEAT_TEST_CLASS
+       fi
+ 
+ ################
+@@ -164,7 +165,7 @@ variables:
+     - <<: *with-chrome
+   script:
+     # Run a small subset of tests to prove non W3C testing still works.
+-    - sudo MINK_DRIVER_ARGS_WEBDRIVER="$MINK_DRIVER_ARGS_WEBDRIVER" -u www-data php ./core/scripts/run-tests.sh --color --keep-results --types "$TESTSUITE" --concurrency "$CONCURRENCY" --repeat "1" --sqlite "./sites/default/files/tests.sqlite" --dburl $SIMPLETEST_DB --url $SIMPLETEST_BASE_URL --verbose --non-html javascript
++    - sudo -u www-data -E php ./core/scripts/run-tests.sh --color --keep-results --types "$TESTSUITE" --concurrency "$CONCURRENCY" --repeat "1" --sqlite "./sites/default/files/tests.sqlite" --dburl $SIMPLETEST_DB --url $SIMPLETEST_BASE_URL --verbose --non-html javascript
+ 
+   after_script:
+     - sed -i "s#$CI_PROJECT_DIR/##" ./sites/default/files/simpletest/phpunit-*.xml || true
 diff --git a/core/modules/image/tests/src/Functional/ImageAdminStylesTest.php b/core/modules/image/tests/src/Functional/ImageAdminStylesTest.php
 index 9b3a3106333..5f13aec79ee 100644
 --- a/core/modules/image/tests/src/Functional/ImageAdminStylesTest.php
@@ -24,7 +51,7 @@ index 9b3a3106333..5f13aec79ee 100644
      // Style deletion form.
  
 diff --git a/core/scripts/run-tests.sh b/core/scripts/run-tests.sh
-index bf53cfa8d59..8cb3e591e79 100755
+index bf53cfa8d59..8f3e9a3aee9 100755
 --- a/core/scripts/run-tests.sh
 +++ b/core/scripts/run-tests.sh
 @@ -34,6 +34,7 @@
@@ -35,15 +62,7 @@ index bf53cfa8d59..8cb3e591e79 100755
  
  // cspell:ignore exitcode wwwrun
  
-@@ -730,6 +731,7 @@ function simpletest_script_setup_test_run_results_storage($new = FALSE) {
-  * Execute a batch of tests.
-  */
- function simpletest_script_execute_batch(TestRunResultsStorageInterface $test_run_results_storage, $test_classes) {
-+  echo __METHOD__ . ' env ' . getenv('BROWSERTEST_OUTPUT_VERBOSE') . "\n";
-   global $args, $test_ids;
- 
-   $total_status = SIMPLETEST_SCRIPT_EXIT_SUCCESS;
-@@ -754,9 +756,12 @@ function simpletest_script_execute_batch(TestRunResultsStorageInterface $test_ru
+@@ -754,9 +755,13 @@ function simpletest_script_execute_batch(TestRunResultsStorageInterface $test_ru
        $test_class = array_shift($test_classes);
        // Fork a child process.
        $command = simpletest_script_command($test_run, $test_class);
@@ -51,11 +70,12 @@ index bf53cfa8d59..8cb3e591e79 100755
 -
 -      if (!is_resource($process)) {
 +      try {
-+        $process = new Process($command, NULL, ['bypass_shell' => TRUE]);
-+        $process->setTimeout(NULL);
++        $process = new Process($command);
++        $process->setOptions(['bypass_shell' => TRUE]);
 +        $process->start();
 +      }
-+      catch (\Exception) {
++      catch (\Exception $e) {
++        echo get_class($e) . ": " . $e->getMessage() . "\n";
          echo "Unable to fork test process. Aborting.\n";
          exit(SIMPLETEST_SCRIPT_EXIT_SUCCESS);
        }
@@ -94,23 +114,7 @@ index bf53cfa8d59..8cb3e591e79 100755
            echo $message . "\n";
            // @todo Return SIMPLETEST_SCRIPT_EXIT_EXCEPTION instead, when
            // DrupalCI supports this.
-@@ -823,6 +830,7 @@ function simpletest_script_execute_batch(TestRunResultsStorageInterface $test_ru
-  * Run a PHPUnit-based test.
-  */
- function simpletest_script_run_phpunit(TestRun $test_run, $class) {
-+  echo __METHOD__ . ' env ' . getenv('BROWSERTEST_OUTPUT_VERBOSE') . "\n";
-   $runner = PhpUnitTestRunner::create(\Drupal::getContainer());
-   $start = microtime(TRUE);
-   $results = $runner->execute($test_run, $class, $status);
-@@ -841,6 +849,7 @@ function simpletest_script_run_phpunit(TestRun $test_run, $class) {
-  * Run a single test, bootstrapping Drupal if needed.
-  */
- function simpletest_script_run_one_test(TestRun $test_run, $test_class) {
-+  echo __METHOD__ . ' env ' . getenv('BROWSERTEST_OUTPUT_VERBOSE') . "\n";
-   global $args;
- 
-   try {
-@@ -866,29 +875,38 @@ function simpletest_script_run_one_test(TestRun $test_run, $test_class) {
+@@ -866,29 +873,38 @@ function simpletest_script_run_one_test(TestRun $test_run, $test_class) {
   * @param string $test_class
   *   The name of the test class to run.
   *
@@ -160,7 +164,7 @@ index bf53cfa8d59..8cb3e591e79 100755
    return $command;
  }
  
-@@ -1132,7 +1150,7 @@ function get_test_class_method_count(string $class): int {
+@@ -1132,7 +1148,7 @@ function get_test_class_method_count(string $class): int {
   * @return array
   *   An associative array of bins and the test class names in each bin.
   */
