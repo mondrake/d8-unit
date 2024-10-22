@@ -613,7 +613,7 @@ index 0414b6e6fd1..b564fa58725 100644
      // Verify that a nested entity save occurred.
      $this->assertSame('john doe', User::load(1)->getAccountName());
 diff --git a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
-index 3911419ca77..49c842a73f5 100644
+index 3911419ca77..ce3213af44a 100644
 --- a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
 +++ b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
 @@ -12,6 +12,7 @@
@@ -624,44 +624,64 @@ index 3911419ca77..49c842a73f5 100644
  
  /**
   * Tests the transaction abstraction system.
-@@ -429,18 +430,27 @@ public function testTransactionWithDdlStatement(): void {
-       // the DDL statement should commit the transaction stack.
-       $this->cleanUp();
-       $transaction = $this->createRootTransaction('', FALSE);
-+      $reflectionMethod = new \ReflectionMethod(get_class($this->connection->transactionManager()), 'getConnectionTransactionState');
-+      $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
-+      $this->assertEquals(ClientConnectionTransactionState::Active, $reflectionMethod->invoke($this->connection->transactionManager()));
-       $this->insertRow('row');
-       $this->executeDDLStatement();
- 
+@@ -424,24 +425,40 @@ public function testTransactionWithDdlStatement(): void {
+       unset($transaction);
+       $this->assertRowAbsent('row');
+     }
+-    else {
+-      // For database servers that do not support transactional DDL,
+-      // the DDL statement should commit the transaction stack.
+-      $this->cleanUp();
+-      $transaction = $this->createRootTransaction('', FALSE);
+-      $this->insertRow('row');
+-      $this->executeDDLStatement();
+-
 -      // Try to rollback the outer transaction. It should fail and void
 -      // the transaction stack.
 -      $transaction->rollBack();
 -      $manager = $this->connection->transactionManager();
 -      $reflectedTransactionState = new \ReflectionMethod($manager, 'getConnectionTransactionState');
 -      $this->assertSame(ClientConnectionTransactionState::Voided, $reflectedTransactionState->invoke($manager));
--
++  }
+ 
 -      unset($transaction);
 -      $this->assertRowPresent('row');
-+      // Try to rollback the root transaction. Since the DDL already committed
-+      // it, it should fail.
-+      try {
-+        $transaction->rollBack();
-+        $this->fail('A TransactionOutOfOrderException was expected, but it was not thrown.');
-+      }
-+      catch (TransactionOutOfOrderException $e) {
-+        $this->assertMatchesRegularExpression("/^Error attempting rollback of .*\\\\drupal_transaction\\. Active stack: .* empty/", $e->getMessage());
-+        unset($transaction);
-+        $manager = $this->connection->transactionManager();
-+        $this->assertSame(0, $manager->stackDepth());
-+        $reflectedTransactionState = new \ReflectionMethod($manager, 'getConnectionTransactionState');
-+        $this->assertSame(ClientConnectionTransactionState::Voided, $reflectedTransactionState->invoke($manager));
-+        $this->assertRowPresent('row');
-+      }
++  /**
++   * Tests rollback after a DDL statement when no transactional DDL supported.
++   *
++   * @todo In drupal:12.0.0, rollBack will throw a
++   *   TransactionOutOfOrderException. Adjust the test accordingly.
++   */
++  #[IgnoreDeprecations]
++  public function testRollbackAfterDdlStatementForNonTransactionalDdlDatabase(): void {
++    if ($this->connection->supportsTransactionalDDL()) {
++      $this->markTestSkipped('This test only works for database that do not support transactional DDL.');
      }
++    $this->expectDeprecation('Calling Drupal\Core\Database\Transaction::rollBack() after a DDL statement is deprecated in drupal:11.1.0 and will throw a TransactionOutOfOrderException in drupal:12.0.0. See https://www.drupal.org/node/3402926');
++
++    // For database servers that do not support transactional DDL,
++    // the DDL statement should commit the transaction stack.
++    $this->cleanUp();
++    $transaction = $this->createRootTransaction('', FALSE);
++    $reflectionMethod = new \ReflectionMethod(get_class($this->connection->transactionManager()), 'getConnectionTransactionState');
++    $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
++    $this->assertEquals(ClientConnectionTransactionState::Active, $reflectionMethod->invoke($this->connection->transactionManager()));
++    $this->insertRow('row');
++    $this->executeDDLStatement();
++
++    // Try to rollback the root transaction. Since the DDL already committed
++    // it, it should fail.
++    $transaction->rollBack();
++    unset($transaction);
++    $manager = $this->connection->transactionManager();
++    $this->assertSame(0, $manager->stackDepth());
++    $reflectedTransactionState = new \ReflectionMethod($manager, 'getConnectionTransactionState');
++    $this->assertSame(ClientConnectionTransactionState::Voided, $reflectedTransactionState->invoke($manager));
++    $this->assertRowPresent('row');
    }
  
-@@ -767,6 +777,7 @@ public function testRootTransactionEndCallbackCalledOnCommit(): void {
+   /**
+@@ -767,6 +784,7 @@ public function testRootTransactionEndCallbackCalledOnCommit(): void {
      $this->connection->transactionManager()->addPostTransactionCallback([$this, 'rootTransactionCallback']);
      $this->insertRow('row');
      $this->assertNull($this->postTransactionCallbackAction);
@@ -669,7 +689,7 @@ index 3911419ca77..49c842a73f5 100644
      unset($transaction);
      $this->assertSame('rtcCommit', $this->postTransactionCallbackAction);
      $this->assertRowPresent('row');
-@@ -832,6 +843,99 @@ public function testRootTransactionEndCallbackCalledAfterDdlAndDestruction(): vo
+@@ -832,6 +850,98 @@ public function testRootTransactionEndCallbackCalledAfterDdlAndDestruction(): vo
      $this->assertRowPresent('row');
    }
  
@@ -754,7 +774,6 @@ index 3911419ca77..49c842a73f5 100644
 +    $this->assertRowPresent('row');
 +
 +    $transaction->rollBack();
-+    $this->assertMatchesRegularExpression("/^Error attempting rollback of .*\\\\drupal_transaction\\. Active stack: .* empty/", $e->getMessage());
 +    unset($transaction);
 +    $this->assertNull($this->postTransactionCallbackAction);
 +    $this->assertRowAbsent('rtcCommit');
