@@ -103,36 +103,8 @@ index ee8d1469eba..6037e1a5632 100644
      }
    }
  
-diff --git a/core/lib/Drupal/Core/Database/Transaction.php b/core/lib/Drupal/Core/Database/Transaction.php
-index 617013d7b5d..277c6bd93aa 100644
---- a/core/lib/Drupal/Core/Database/Transaction.php
-+++ b/core/lib/Drupal/Core/Database/Transaction.php
-@@ -2,6 +2,8 @@
- 
- namespace Drupal\Core\Database;
- 
-+use Drupal\Core\Database\Transaction\ClientConnectionTransactionState;
-+
- /**
-  * A wrapper class for creating and managing database transactions.
-  *
-@@ -56,7 +58,13 @@ public function name() {
-    * @see \Drupal\Core\Database\Connection::rollBack()
-    */
-   public function rollBack() {
--    $this->connection->transactionManager()->rollback($this->name, $this->id);
-+    $manager = $this->connection->transactionManager();
-+    $reflectedTransactionState = new \ReflectionMethod($manager, 'getConnectionTransactionState');
-+    if ($reflectedTransactionState->invoke($manager) === ClientConnectionTransactionState::Voided) {
-+      @trigger_error('Calling ' . __METHOD__ . '() after a DDL statement is deprecated in drupal:11.1.0 and will throw a TransactionOutOfOrderException in drupal:12.0.0. See https://www.drupal.org/node/3402926', E_USER_DEPRECATED);
-+      return;
-+    }
-+    $manager->rollback($this->name, $this->id);
-   }
- 
- }
 diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
-index 4e1fc8352fa..51d8c5c4eea 100644
+index 4e1fc8352fa..e3ca10e76cc 100644
 --- a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
 +++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
 @@ -333,6 +333,7 @@ public function unpile(string $name, string $id): void {
@@ -151,15 +123,27 @@ index 4e1fc8352fa..51d8c5c4eea 100644
      throw new TransactionOutOfOrderException("Transaction {$id}/{$name} is out of order. Active stack: " . $this->dumpStackItemsAsString());
    }
  
-@@ -351,6 +353,7 @@ public function unpile(string $name, string $id): void {
+@@ -349,8 +351,19 @@ public function unpile(string $name, string $id): void {
+    * {@inheritdoc}
+    */
    public function rollback(string $name, string $id): void {
++    // If the transaction was voided, we cannot rollback. Fail silently in
++    // Drupal 11.
++    // @todo In drupal:12.0.0, throw a TransactionOutOfOrderException, just
++    //   removing this check.
++    if ($this->getConnectionTransactionState() === ClientConnectionTransactionState::Voided) {
++      @trigger_error('Calling Transaction::rollBack() after a DDL statement is deprecated in drupal:11.1.0 and will throw a TransactionOutOfOrderException in drupal:12.0.0. See https://www.drupal.org/node/3402926', E_USER_DEPRECATED);
++      $this->postTransactionCallbacks = [];
++      return;
++    }
++
      // Rolled back item should match the last one in stack.
      if ($id != array_key_last($this->stack()) || $name !== $this->stack()[$id]->name) {
 +      $this->postTransactionCallbacks = [];
        throw new TransactionOutOfOrderException("Error attempting rollback of {$id}\\{$name}. Active stack: " . $this->dumpStackItemsAsString());
      }
  
-@@ -377,12 +380,14 @@ public function rollback(string $name, string $id): void {
+@@ -377,12 +390,14 @@ public function rollback(string $name, string $id): void {
        }
        else {
          // The stack got corrupted.
@@ -613,7 +597,7 @@ index 0414b6e6fd1..b564fa58725 100644
      // Verify that a nested entity save occurred.
      $this->assertSame('john doe', User::load(1)->getAccountName());
 diff --git a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
-index 3911419ca77..ce3213af44a 100644
+index 3911419ca77..c260fb9fa00 100644
 --- a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
 +++ b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
 @@ -12,6 +12,7 @@
@@ -657,7 +641,7 @@ index 3911419ca77..ce3213af44a 100644
 +    if ($this->connection->supportsTransactionalDDL()) {
 +      $this->markTestSkipped('This test only works for database that do not support transactional DDL.');
      }
-+    $this->expectDeprecation('Calling Drupal\Core\Database\Transaction::rollBack() after a DDL statement is deprecated in drupal:11.1.0 and will throw a TransactionOutOfOrderException in drupal:12.0.0. See https://www.drupal.org/node/3402926');
++    $this->expectDeprecation('Calling Transaction::rollBack() after a DDL statement is deprecated in drupal:11.1.0 and will throw a TransactionOutOfOrderException in drupal:12.0.0. See https://www.drupal.org/node/3402926');
 +
 +    // For database servers that do not support transactional DDL,
 +    // the DDL statement should commit the transaction stack.
@@ -755,7 +739,7 @@ index 3911419ca77..ce3213af44a 100644
 +    if ($this->connection->supportsTransactionalDDL()) {
 +      $this->markTestSkipped('This test only works for database that do not support transactional DDL.');
 +    }
-+    $this->expectDeprecation('Calling Drupal\Core\Database\Transaction::rollBack() after a DDL statement is deprecated in drupal:11.1.0 and will throw a TransactionOutOfOrderException in drupal:12.0.0. See https://www.drupal.org/node/3402926');
++    $this->expectDeprecation('Calling Transaction::rollBack() after a DDL statement is deprecated in drupal:11.1.0 and will throw a TransactionOutOfOrderException in drupal:12.0.0. See https://www.drupal.org/node/3402926');
 +
 +    $transaction = $this->createRootTransaction('', FALSE);
 +    $this->connection->transactionManager()->addPostTransactionCallback([$this, 'rootTransactionCallback']);
