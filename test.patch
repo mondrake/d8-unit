@@ -1,9 +1,40 @@
-diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
-index 7a9de46a7d4..12dad114a13 100644
---- a/core/lib/Drupal/Core/Database/Connection.php
-+++ b/core/lib/Drupal/Core/Database/Connection.php
-@@ -664,6 +664,31 @@ public function query($query, array $args = [], $options = []) {
-     return $result ? $statement : NULL;
+diff --git a/core/lib/Drupal/Core/Database/Query/Truncate.php b/core/lib/Drupal/Core/Database/Query/Truncate.php
+index 45f1c8447ac..33676e7534a 100644
+--- a/core/lib/Drupal/Core/Database/Query/Truncate.php
++++ b/core/lib/Drupal/Core/Database/Query/Truncate.php
+@@ -34,6 +34,12 @@ public function __construct(Connection $connection, $table, array $options = [])
+   /**
+    * Executes the TRUNCATE query.
+    *
++   * In most cases, TRUNCATE is not a transaction safe statement as it is a DDL
++   * statement which results in an implicit COMMIT. When we are in a
++   * transaction, fallback to the slower, but transactional, DELETE.
++   * PostgreSQL also locks the entire table for a TRUNCATE strongly reducing
++   * the concurrency with other transactions.
++   *
+    * @return int|null
+    *   Return value is dependent on whether the executed SQL statement is a
+    *   TRUNCATE or a DELETE. TRUNCATE is DDL and no information on affected
+@@ -66,11 +72,8 @@ public function __toString() {
+     // Create a sanitized comment string to prepend to the query.
+     $comments = $this->connection->makeComment($this->comments);
+ 
+-    // In most cases, TRUNCATE is not a transaction safe statement as it is a
+-    // DDL statement which results in an implicit COMMIT. When we are in a
+-    // transaction, fallback to the slower, but transactional, DELETE.
+-    // PostgreSQL also locks the entire table for a TRUNCATE strongly reducing
+-    // the concurrency with other transactions.
++    // The statement actually built depends on whether a transaction is active.
++    // @see ::execute()
+     if ($this->connection->inTransaction()) {
+       return $comments . 'DELETE FROM {' . $this->connection->escapeTable($this->table) . '}';
+     }
+diff --git a/core/lib/Drupal/Core/Database/Schema.php b/core/lib/Drupal/Core/Database/Schema.php
+index ee8d1469eba..7b5d585de94 100644
+--- a/core/lib/Drupal/Core/Database/Schema.php
++++ b/core/lib/Drupal/Core/Database/Schema.php
+@@ -117,6 +117,31 @@ public function prefixNonTable($table) {
+     return implode('_', $args);
    }
  
 +  /**
@@ -22,89 +53,29 @@ index 7a9de46a7d4..12dad114a13 100644
 +   *   (Optional) An associative array of options to control how the query is
 +   *   run. The given options will be merged with self::defaultOptions().
 +   */
-+  public function executeDdlStatement(string $sql, array $arguments = [], array $options = []): void {
-+    $this->query($sql, $arguments, $options);
++  protected function executeDdlStatement(string $sql, array $arguments = [], array $options = []): void {
++    $this->connection->query($sql, $arguments, $options);
 +    // DDL statements when in a transaction force a commit in some databases.
 +    // Void the transaction in that case.
-+    if (!$this->transactionalDDLSupport && $this->transactionManager()->inTransaction()) {
-+      $this->transactionManager()->voidClientTransaction();
++    if (!$this->connection->supportsTransactionalDDL() && $this->connection->transactionManager()->inTransaction()) {
++      $this->connection->transactionManager()->voidClientTransaction();
 +    }
 +  }
 +
    /**
-    * Expands out shorthand placeholders.
+    * Build a condition to match a table name against a standard information_schema.
     *
-diff --git a/core/lib/Drupal/Core/Database/Query/Truncate.php b/core/lib/Drupal/Core/Database/Query/Truncate.php
-index 45f1c8447ac..607839664d1 100644
---- a/core/lib/Drupal/Core/Database/Query/Truncate.php
-+++ b/core/lib/Drupal/Core/Database/Query/Truncate.php
-@@ -34,6 +34,12 @@ public function __construct(Connection $connection, $table, array $options = [])
-   /**
-    * Executes the TRUNCATE query.
-    *
-+   * In most cases, TRUNCATE is not a transaction safe statement as it is a DDL
-+   * statement which results in an implicit COMMIT. When we are in a
-+   * transaction, fallback to the slower, but transactional, DELETE.
-+   * PostgreSQL also locks the entire table for a TRUNCATE strongly reducing
-+   * the concurrency with other transactions.
-+   *
-    * @return int|null
-    *   Return value is dependent on whether the executed SQL statement is a
-    *   TRUNCATE or a DELETE. TRUNCATE is DDL and no information on affected
-@@ -44,13 +50,18 @@ public function __construct(Connection $connection, $table, array $options = [])
-    * @see https://learnsql.com/blog/difference-between-truncate-delete-and-drop-table-in-sql
-    */
-   public function execute() {
--    $stmt = $this->connection->prepareStatement((string) $this, $this->queryOptions, TRUE);
--    try {
--      $stmt->execute([], $this->queryOptions);
--      return $stmt->rowCount();
-+    if ($this->connection->inTransaction()) {
-+      $stmt = $this->connection->prepareStatement((string) $this, $this->queryOptions, TRUE);
-+      try {
-+        $stmt->execute([], $this->queryOptions);
-+        return $stmt->rowCount();
-+      }
-+      catch (\Exception $e) {
-+        $this->connection->exceptionHandler()->handleExecutionException($e, $stmt, [], $this->queryOptions);
-+      }
-     }
--    catch (\Exception $e) {
--      $this->connection->exceptionHandler()->handleExecutionException($e, $stmt, [], $this->queryOptions);
-+    else {
-+      $this->connection->executeDdlStatement((string) $this, [], $this->queryOptions);
-     }
- 
-     return NULL;
-@@ -66,11 +77,8 @@ public function __toString() {
-     // Create a sanitized comment string to prepend to the query.
-     $comments = $this->connection->makeComment($this->comments);
- 
--    // In most cases, TRUNCATE is not a transaction safe statement as it is a
--    // DDL statement which results in an implicit COMMIT. When we are in a
--    // transaction, fallback to the slower, but transactional, DELETE.
--    // PostgreSQL also locks the entire table for a TRUNCATE strongly reducing
--    // the concurrency with other transactions.
-+    // The statement actually built depends on whether a transaction is active.
-+    // @see ::execute()
-     if ($this->connection->inTransaction()) {
-       return $comments . 'DELETE FROM {' . $this->connection->escapeTable($this->table) . '}';
-     }
-diff --git a/core/lib/Drupal/Core/Database/Schema.php b/core/lib/Drupal/Core/Database/Schema.php
-index ee8d1469eba..6037e1a5632 100644
---- a/core/lib/Drupal/Core/Database/Schema.php
-+++ b/core/lib/Drupal/Core/Database/Schema.php
-@@ -616,7 +616,7 @@ public function createTable($name, $table) {
+@@ -616,7 +641,7 @@ public function createTable($name, $table) {
      }
      $statements = $this->createTableSql($name, $table);
      foreach ($statements as $statement) {
 -      $this->connection->query($statement);
-+      $this->connection->executeDdlStatement($statement);
++      $this->executeDdlStatement($statement);
      }
    }
  
 diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
-index 4e1fc8352fa..e3ca10e76cc 100644
+index 4e1fc8352fa..9f48a4a3317 100644
 --- a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
 +++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
 @@ -333,6 +333,7 @@ public function unpile(string $name, string $id): void {
@@ -132,7 +103,7 @@ index 4e1fc8352fa..e3ca10e76cc 100644
 +    // @todo In drupal:12.0.0, throw a TransactionOutOfOrderException, just
 +    //   removing this check.
 +    if ($this->getConnectionTransactionState() === ClientConnectionTransactionState::Voided) {
-+      @trigger_error('Calling Transaction::rollBack() after a DDL statement is deprecated in drupal:11.1.0 and will throw a TransactionOutOfOrderException in drupal:12.0.0. See https://www.drupal.org/node/3402926', E_USER_DEPRECATED);
++      trigger_error('Transaction::rollBack() failed because of a prior execution of a DDL statement. In drupal:12.0.0 a TransactionOutOfOrderException will be thrown.', E_USER_WARNING);
 +      $this->postTransactionCallbacks = [];
 +      return;
 +    }
@@ -159,7 +130,7 @@ index 4e1fc8352fa..e3ca10e76cc 100644
    }
  
 diff --git a/core/modules/mysql/src/Driver/Database/mysql/Schema.php b/core/modules/mysql/src/Driver/Database/mysql/Schema.php
-index 6fdcad7047b..8f9b3980bf6 100644
+index 6fdcad7047b..56c8b909257 100644
 --- a/core/modules/mysql/src/Driver/Database/mysql/Schema.php
 +++ b/core/modules/mysql/src/Driver/Database/mysql/Schema.php
 @@ -380,7 +380,7 @@ public function renameTable($table, $new_name) {
@@ -167,7 +138,7 @@ index 6fdcad7047b..8f9b3980bf6 100644
  
      $info = $this->getPrefixInfo($new_name);
 -    $this->connection->query('ALTER TABLE {' . $table . '} RENAME TO [' . $info['table'] . ']');
-+    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} RENAME TO [' . $info['table'] . ']');
++    $this->executeDdlStatement('ALTER TABLE {' . $table . '} RENAME TO [' . $info['table'] . ']');
    }
  
    /**
@@ -176,7 +147,7 @@ index 6fdcad7047b..8f9b3980bf6 100644
      }
  
 -    $this->connection->query('DROP TABLE {' . $table . '}');
-+    $this->connection->executeDdlStatement('DROP TABLE {' . $table . '}');
++    $this->executeDdlStatement('DROP TABLE {' . $table . '}');
      return TRUE;
    }
  
@@ -185,7 +156,7 @@ index 6fdcad7047b..8f9b3980bf6 100644
      }
      try {
 -      $this->connection->query($query);
-+      $this->connection->executeDdlStatement($query);
++      $this->executeDdlStatement($query);
      }
      catch (DatabaseExceptionWrapper $e) {
        // MySQL error number 4111 (ER_DROP_PK_COLUMN_TO_DROP_GIPK) indicates that
@@ -193,7 +164,7 @@ index 6fdcad7047b..8f9b3980bf6 100644
        // key (GIPK) column must also be dropped.
        if (isset($e->getPrevious()->errorInfo[1]) && $e->getPrevious()->errorInfo[1] === 4111 && isset($keys_new['primary key']) && $this->indexExists($table, 'PRIMARY') && $this->findPrimaryKeyColumns($table) === ['my_row_id']) {
 -        $this->connection->query($query . ', DROP COLUMN [my_row_id]');
-+        $this->connection->executeDdlStatement($query . ', DROP COLUMN [my_row_id]');
++        $this->executeDdlStatement($query . ', DROP COLUMN [my_row_id]');
        }
        else {
          throw $e;
@@ -202,7 +173,7 @@ index 6fdcad7047b..8f9b3980bf6 100644
      }
  
 -    $this->connection->query('ALTER TABLE {' . $table . '} DROP [' . $field . ']');
-+    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} DROP [' . $field . ']');
++    $this->executeDdlStatement('ALTER TABLE {' . $table . '} DROP [' . $field . ']');
      return TRUE;
    }
  
@@ -211,7 +182,7 @@ index 6fdcad7047b..8f9b3980bf6 100644
      }
  
 -    $this->connection->query('ALTER TABLE {' . $table . '} ADD PRIMARY KEY (' . $this->createKeySql($fields) . ')');
-+    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} ADD PRIMARY KEY (' . $this->createKeySql($fields) . ')');
++    $this->executeDdlStatement('ALTER TABLE {' . $table . '} ADD PRIMARY KEY (' . $this->createKeySql($fields) . ')');
    }
  
    /**
@@ -220,7 +191,7 @@ index 6fdcad7047b..8f9b3980bf6 100644
      }
  
 -    $this->connection->query('ALTER TABLE {' . $table . '} DROP PRIMARY KEY');
-+    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} DROP PRIMARY KEY');
++    $this->executeDdlStatement('ALTER TABLE {' . $table . '} DROP PRIMARY KEY');
      return TRUE;
    }
  
@@ -229,7 +200,7 @@ index 6fdcad7047b..8f9b3980bf6 100644
      }
  
 -    $this->connection->query('ALTER TABLE {' . $table . '} ADD UNIQUE KEY [' . $name . '] (' . $this->createKeySql($fields) . ')');
-+    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} ADD UNIQUE KEY [' . $name . '] (' . $this->createKeySql($fields) . ')');
++    $this->executeDdlStatement('ALTER TABLE {' . $table . '} ADD UNIQUE KEY [' . $name . '] (' . $this->createKeySql($fields) . ')');
    }
  
    /**
@@ -238,7 +209,7 @@ index 6fdcad7047b..8f9b3980bf6 100644
      }
  
 -    $this->connection->query('ALTER TABLE {' . $table . '} DROP KEY [' . $name . ']');
-+    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} DROP KEY [' . $name . ']');
++    $this->executeDdlStatement('ALTER TABLE {' . $table . '} DROP KEY [' . $name . ']');
      return TRUE;
    }
  
@@ -247,7 +218,7 @@ index 6fdcad7047b..8f9b3980bf6 100644
      $indexes = $this->getNormalizedIndexes($spec);
  
 -    $this->connection->query('ALTER TABLE {' . $table . '} ADD INDEX [' . $name . '] (' . $this->createKeySql($indexes[$name]) . ')');
-+    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} ADD INDEX [' . $name . '] (' . $this->createKeySql($indexes[$name]) . ')');
++    $this->executeDdlStatement('ALTER TABLE {' . $table . '} ADD INDEX [' . $name . '] (' . $this->createKeySql($indexes[$name]) . ')');
    }
  
    /**
@@ -256,7 +227,7 @@ index 6fdcad7047b..8f9b3980bf6 100644
      }
  
 -    $this->connection->query('ALTER TABLE {' . $table . '} DROP INDEX [' . $name . ']');
-+    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} DROP INDEX [' . $name . ']');
++    $this->executeDdlStatement('ALTER TABLE {' . $table . '} DROP INDEX [' . $name . ']');
      return TRUE;
    }
  
@@ -265,17 +236,17 @@ index 6fdcad7047b..8f9b3980bf6 100644
        $sql .= ', ADD ' . implode(', ADD ', $keys_sql);
      }
 -    $this->connection->query($sql);
-+    $this->connection->executeDdlStatement($sql);
++    $this->executeDdlStatement($sql);
  
      if ($spec['type'] === 'serial') {
        $max = $this->connection->query('SELECT MAX(`' . $field_new . '`) FROM {' . $table . '}')->fetchField();
 -      $this->connection->query("ALTER TABLE {" . $table . "} AUTO_INCREMENT = " . ($max + 1));
-+      $this->connection->executeDdlStatement("ALTER TABLE {" . $table . "} AUTO_INCREMENT = " . ($max + 1));
++      $this->executeDdlStatement("ALTER TABLE {" . $table . "} AUTO_INCREMENT = " . ($max + 1));
      }
    }
  
 diff --git a/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php b/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php
-index 32a12b44ec1..7433caa23b0 100644
+index 32a12b44ec1..29cb7c67856 100644
 --- a/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php
 +++ b/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php
 @@ -590,7 +590,7 @@ public function renameTable($table, $new_name) {
@@ -283,7 +254,7 @@ index 32a12b44ec1..7433caa23b0 100644
        // the same name as the renamed index.
        if (!$this->tableExists($this->ensureIdentifiersLength($new_name, $index_name, $index_type), FALSE)) {
 -        $this->connection->query('ALTER INDEX "' . $this->defaultSchema . '"."' . $index->indexname . '" RENAME TO ' . $this->ensureIdentifiersLength($new_name, $index_name, $index_type));
-+        $this->connection->executeDdlStatement('ALTER INDEX "' . $this->defaultSchema . '"."' . $index->indexname . '" RENAME TO ' . $this->ensureIdentifiersLength($new_name, $index_name, $index_type));
++        $this->executeDdlStatement('ALTER INDEX "' . $this->defaultSchema . '"."' . $index->indexname . '" RENAME TO ' . $this->ensureIdentifiersLength($new_name, $index_name, $index_type));
        }
      }
  
@@ -292,12 +263,12 @@ index 32a12b44ec1..7433caa23b0 100644
          $new_sequence = $this->ensureIdentifiersLength($new_name, $field, 'seq', '_');
  
 -        $this->connection->query('ALTER SEQUENCE ' . $old_sequence . ' RENAME TO ' . $new_sequence);
-+        $this->connection->executeDdlStatement('ALTER SEQUENCE ' . $old_sequence . ' RENAME TO ' . $new_sequence);
++        $this->executeDdlStatement('ALTER SEQUENCE ' . $old_sequence . ' RENAME TO ' . $new_sequence);
        }
      }
      // Now rename the table.
 -    $this->connection->query('ALTER TABLE {' . $table . '} RENAME TO ' . $prefixInfo['table']);
-+    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} RENAME TO ' . $prefixInfo['table']);
++    $this->executeDdlStatement('ALTER TABLE {' . $table . '} RENAME TO ' . $prefixInfo['table']);
      $this->resetTableInformation($table);
    }
  
@@ -306,7 +277,7 @@ index 32a12b44ec1..7433caa23b0 100644
      }
  
 -    $this->connection->query('DROP TABLE {' . $table . '}');
-+    $this->connection->executeDdlStatement('DROP TABLE {' . $table . '}');
++    $this->executeDdlStatement('DROP TABLE {' . $table . '}');
      $this->resetTableInformation($table);
      return TRUE;
    }
@@ -315,7 +286,7 @@ index 32a12b44ec1..7433caa23b0 100644
      $query = 'ALTER TABLE {' . $table . '} ADD COLUMN ';
      $query .= $this->createFieldSql($field, $this->processField($spec));
 -    $this->connection->query($query);
-+    $this->connection->executeDdlStatement($query);
++    $this->executeDdlStatement($query);
      if (isset($spec['initial_from_field'])) {
        if (isset($spec['initial'])) {
          $expression = 'COALESCE(' . $spec['initial_from_field'] . ', :default_initial_value)';
@@ -324,7 +295,7 @@ index 32a12b44ec1..7433caa23b0 100644
      }
      if ($fix_null) {
 -      $this->connection->query("ALTER TABLE {" . $table . "} ALTER $field SET NOT NULL");
-+      $this->connection->executeDdlStatement("ALTER TABLE {" . $table . "} ALTER $field SET NOT NULL");
++      $this->executeDdlStatement("ALTER TABLE {" . $table . "} ALTER $field SET NOT NULL");
      }
      if (isset($new_keys)) {
        // Make sure to drop the existing primary key before adding a new one.
@@ -333,7 +304,7 @@ index 32a12b44ec1..7433caa23b0 100644
      // Add column comment.
      if (!empty($spec['description'])) {
 -      $this->connection->query('COMMENT ON COLUMN {' . $table . '}.' . $field . ' IS ' . $this->prepareComment($spec['description']));
-+      $this->connection->executeDdlStatement('COMMENT ON COLUMN {' . $table . '}.' . $field . ' IS ' . $this->prepareComment($spec['description']));
++      $this->executeDdlStatement('COMMENT ON COLUMN {' . $table . '}.' . $field . ' IS ' . $this->prepareComment($spec['description']));
      }
      $this->resetTableInformation($table);
    }
@@ -342,7 +313,7 @@ index 32a12b44ec1..7433caa23b0 100644
      }
  
 -    $this->connection->query('ALTER TABLE {' . $table . '} DROP COLUMN "' . $field . '"');
-+    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} DROP COLUMN "' . $field . '"');
++    $this->executeDdlStatement('ALTER TABLE {' . $table . '} DROP COLUMN "' . $field . '"');
      $this->resetTableInformation($table);
      return TRUE;
    }
@@ -351,7 +322,7 @@ index 32a12b44ec1..7433caa23b0 100644
      }
  
 -    $this->connection->query('ALTER TABLE {' . $table . '} ADD CONSTRAINT ' . $this->ensureIdentifiersLength($table, '', 'pkey') . ' PRIMARY KEY (' . $this->createPrimaryKeySql($fields) . ')');
-+    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} ADD CONSTRAINT ' . $this->ensureIdentifiersLength($table, '', 'pkey') . ' PRIMARY KEY (' . $this->createPrimaryKeySql($fields) . ')');
++    $this->executeDdlStatement('ALTER TABLE {' . $table . '} ADD CONSTRAINT ' . $this->ensureIdentifiersLength($table, '', 'pkey') . ' PRIMARY KEY (' . $this->createPrimaryKeySql($fields) . ')');
      $this->resetTableInformation($table);
    }
  
@@ -360,7 +331,7 @@ index 32a12b44ec1..7433caa23b0 100644
      }
  
 -    $this->connection->query('ALTER TABLE {' . $table . '} DROP CONSTRAINT ' . $this->ensureIdentifiersLength($table, '', 'pkey'));
-+    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} DROP CONSTRAINT ' . $this->ensureIdentifiersLength($table, '', 'pkey'));
++    $this->executeDdlStatement('ALTER TABLE {' . $table . '} DROP CONSTRAINT ' . $this->ensureIdentifiersLength($table, '', 'pkey'));
      $this->resetTableInformation($table);
      return TRUE;
    }
@@ -369,7 +340,7 @@ index 32a12b44ec1..7433caa23b0 100644
      // passed as part of the key column specifiers. (Postgres doesn't support
      // setting a prefix length for PRIMARY or UNIQUE indices.)
 -    $this->connection->query('ALTER TABLE {' . $table . '} ADD CONSTRAINT ' . $this->ensureIdentifiersLength($table, $name, 'key') . ' UNIQUE (' . $this->createPrimaryKeySql($fields) . ')');
-+    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} ADD CONSTRAINT ' . $this->ensureIdentifiersLength($table, $name, 'key') . ' UNIQUE (' . $this->createPrimaryKeySql($fields) . ')');
++    $this->executeDdlStatement('ALTER TABLE {' . $table . '} ADD CONSTRAINT ' . $this->ensureIdentifiersLength($table, $name, 'key') . ' UNIQUE (' . $this->createPrimaryKeySql($fields) . ')');
      $this->resetTableInformation($table);
    }
  
@@ -378,7 +349,7 @@ index 32a12b44ec1..7433caa23b0 100644
      }
  
 -    $this->connection->query('ALTER TABLE {' . $table . '} DROP CONSTRAINT ' . $this->ensureIdentifiersLength($table, $name, 'key'));
-+    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} DROP CONSTRAINT ' . $this->ensureIdentifiersLength($table, $name, 'key'));
++    $this->executeDdlStatement('ALTER TABLE {' . $table . '} DROP CONSTRAINT ' . $this->ensureIdentifiersLength($table, $name, 'key'));
      $this->resetTableInformation($table);
      return TRUE;
    }
@@ -387,7 +358,7 @@ index 32a12b44ec1..7433caa23b0 100644
      }
  
 -    $this->connection->query($this->_createIndexSql($table, $name, $fields));
-+    $this->connection->executeDdlStatement($this->_createIndexSql($table, $name, $fields));
++    $this->executeDdlStatement($this->_createIndexSql($table, $name, $fields));
      $this->resetTableInformation($table);
    }
  
@@ -396,7 +367,7 @@ index 32a12b44ec1..7433caa23b0 100644
      }
  
 -    $this->connection->query('DROP INDEX ' . $this->defaultSchema . '.' . $this->ensureIdentifiersLength($table, $name, 'idx'));
-+    $this->connection->executeDdlStatement('DROP INDEX ' . $this->defaultSchema . '.' . $this->ensureIdentifiersLength($table, $name, 'idx'));
++    $this->executeDdlStatement('DROP INDEX ' . $this->defaultSchema . '.' . $this->ensureIdentifiersLength($table, $name, 'idx'));
      $this->resetTableInformation($table);
      return TRUE;
    }
@@ -405,17 +376,17 @@ index 32a12b44ec1..7433caa23b0 100644
        // We need to add CASCADE otherwise we cannot alter the sequence because
        // the table depends on it.
 -      $this->connection->query('DROP SEQUENCE IF EXISTS ' . $seq_name . ' CASCADE');
-+      $this->connection->executeDdlStatement('DROP SEQUENCE IF EXISTS ' . $seq_name . ' CASCADE');
++      $this->executeDdlStatement('DROP SEQUENCE IF EXISTS ' . $seq_name . ' CASCADE');
      }
  
      foreach ($field_info as $check) {
 -      $this->connection->query('ALTER TABLE {' . $table . '} DROP CONSTRAINT [' . $check . ']');
-+      $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} DROP CONSTRAINT [' . $check . ']');
++      $this->executeDdlStatement('ALTER TABLE {' . $table . '} DROP CONSTRAINT [' . $check . ']');
      }
  
      // Remove old default.
 -    $this->connection->query('ALTER TABLE {' . $table . '} ALTER COLUMN [' . $field . '] DROP DEFAULT');
-+    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} ALTER COLUMN [' . $field . '] DROP DEFAULT');
++    $this->executeDdlStatement('ALTER TABLE {' . $table . '} ALTER COLUMN [' . $field . '] DROP DEFAULT');
  
      // Convert field type.
      // Usually, we do this via a simple typecast 'USING fieldname::type'. But
@@ -424,11 +395,11 @@ index 32a12b44ec1..7433caa23b0 100644
      if ($spec['pgsql_type'] != 'bytea') {
        if ($is_bytea) {
 -        $this->connection->query('ALTER TABLE {' . $table . '} ALTER [' . $field . '] TYPE ' . $field_def . ' USING convert_from([' . $field . ']' . ", 'UTF8')");
-+        $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} ALTER [' . $field . '] TYPE ' . $field_def . ' USING convert_from([' . $field . ']' . ", 'UTF8')");
++        $this->executeDdlStatement('ALTER TABLE {' . $table . '} ALTER [' . $field . '] TYPE ' . $field_def . ' USING convert_from([' . $field . ']' . ", 'UTF8')");
        }
        else {
 -        $this->connection->query('ALTER TABLE {' . $table . '} ALTER [' . $field . '] TYPE ' . $field_def . ' USING [' . $field . ']::' . $field_def);
-+        $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} ALTER [' . $field . '] TYPE ' . $field_def . ' USING [' . $field . ']::' . $field_def);
++        $this->executeDdlStatement('ALTER TABLE {' . $table . '} ALTER [' . $field . '] TYPE ' . $field_def . ' USING [' . $field . ']::' . $field_def);
        }
      }
      else {
@@ -437,7 +408,7 @@ index 32a12b44ec1..7433caa23b0 100644
          // convert any single backslashes in the field content to double
          // backslashes ('\' to '\\').
 -        $this->connection->query('ALTER TABLE {' . $table . '} ALTER [' . $field . '] TYPE ' . $field_def . ' USING decode(replace("' . $field . '"' . ", E'\\\\', E'\\\\\\\\'), 'escape');");
-+        $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} ALTER [' . $field . '] TYPE ' . $field_def . ' USING decode(replace("' . $field . '"' . ", E'\\\\', E'\\\\\\\\'), 'escape');");
++        $this->executeDdlStatement('ALTER TABLE {' . $table . '} ALTER [' . $field . '] TYPE ' . $field_def . ' USING decode(replace("' . $field . '"' . ", E'\\\\', E'\\\\\\\\'), 'escape');");
        }
      }
  
@@ -446,7 +417,7 @@ index 32a12b44ec1..7433caa23b0 100644
          $null_action = 'DROP NOT NULL';
        }
 -      $this->connection->query('ALTER TABLE {' . $table . '} ALTER [' . $field . '] ' . $null_action);
-+      $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} ALTER [' . $field . '] ' . $null_action);
++      $this->executeDdlStatement('ALTER TABLE {' . $table . '} ALTER [' . $field . '] ' . $null_action);
      }
  
      if (in_array($spec['pgsql_type'], ['serial', 'bigserial'])) {
@@ -455,41 +426,41 @@ index 32a12b44ec1..7433caa23b0 100644
        // and initialized by hand.
        $seq = $this->connection->makeSequenceName($table, $field_new);
 -      $this->connection->query("CREATE SEQUENCE " . $seq . " OWNED BY {" . $table . "}.[" . $field_new . ']');
-+      $this->connection->executeDdlStatement("CREATE SEQUENCE " . $seq . " OWNED BY {" . $table . "}.[" . $field_new . ']');
++      $this->executeDdlStatement("CREATE SEQUENCE " . $seq . " OWNED BY {" . $table . "}.[" . $field_new . ']');
        // Set sequence to maximal field value to not conflict with existing
        // entries.
        $this->connection->query("SELECT setval('" . $seq . "', MAX([" . $field . "])) FROM {" . $table . "}");
 -      $this->connection->query('ALTER TABLE {' . $table . '} ALTER [' . $field . '] SET DEFAULT nextval(' . $this->connection->quote($seq) . ')');
-+      $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} ALTER [' . $field . '] SET DEFAULT nextval(' . $this->connection->quote($seq) . ')');
++      $this->executeDdlStatement('ALTER TABLE {' . $table . '} ALTER [' . $field . '] SET DEFAULT nextval(' . $this->connection->quote($seq) . ')');
      }
  
      // Rename the column if necessary.
      if ($field != $field_new) {
 -      $this->connection->query('ALTER TABLE {' . $table . '} RENAME [' . $field . '] TO [' . $field_new . ']');
-+      $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} RENAME [' . $field . '] TO [' . $field_new . ']');
++      $this->executeDdlStatement('ALTER TABLE {' . $table . '} RENAME [' . $field . '] TO [' . $field_new . ']');
      }
  
      // Add unsigned check if necessary.
      if (!empty($spec['unsigned'])) {
 -      $this->connection->query('ALTER TABLE {' . $table . '} ADD CHECK ([' . $field_new . '] >= 0)');
-+      $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} ADD CHECK ([' . $field_new . '] >= 0)');
++      $this->executeDdlStatement('ALTER TABLE {' . $table . '} ADD CHECK ([' . $field_new . '] >= 0)');
      }
  
      // Add default if necessary.
      if (isset($spec['default'])) {
 -      $this->connection->query('ALTER TABLE {' . $table . '} ALTER COLUMN [' . $field_new . '] SET DEFAULT ' . $this->escapeDefaultValue($spec['default']));
-+      $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} ALTER COLUMN [' . $field_new . '] SET DEFAULT ' . $this->escapeDefaultValue($spec['default']));
++      $this->executeDdlStatement('ALTER TABLE {' . $table . '} ALTER COLUMN [' . $field_new . '] SET DEFAULT ' . $this->escapeDefaultValue($spec['default']));
      }
  
      // Change description if necessary.
      if (!empty($spec['description'])) {
 -      $this->connection->query('COMMENT ON COLUMN {' . $table . '}.[' . $field_new . '] IS ' . $this->prepareComment($spec['description']));
-+      $this->connection->executeDdlStatement('COMMENT ON COLUMN {' . $table . '}.[' . $field_new . '] IS ' . $this->prepareComment($spec['description']));
++      $this->executeDdlStatement('COMMENT ON COLUMN {' . $table . '}.[' . $field_new . '] IS ' . $this->prepareComment($spec['description']));
      }
  
      if (isset($new_keys)) {
 diff --git a/core/modules/sqlite/src/Driver/Database/sqlite/Schema.php b/core/modules/sqlite/src/Driver/Database/sqlite/Schema.php
-index 64bdffa8c80..4531e34cc73 100644
+index 64bdffa8c80..4e11322c8eb 100644
 --- a/core/modules/sqlite/src/Driver/Database/sqlite/Schema.php
 +++ b/core/modules/sqlite/src/Driver/Database/sqlite/Schema.php
 @@ -272,7 +272,7 @@ public function renameTable($table, $new_name) {
@@ -497,7 +468,7 @@ index 64bdffa8c80..4531e34cc73 100644
      // to a database outside of our existing database.
      $info = $this->getPrefixInfo($new_name);
 -    $this->connection->query('ALTER TABLE {' . $table . '} RENAME TO [' . $info['table'] . ']');
-+    $this->connection->executeDdlStatement('ALTER TABLE {' . $table . '} RENAME TO [' . $info['table'] . ']');
++    $this->executeDdlStatement('ALTER TABLE {' . $table . '} RENAME TO [' . $info['table'] . ']');
  
      // Drop the indexes, there is no RENAME INDEX command in SQLite.
      if (!empty($schema['unique keys'])) {
@@ -506,7 +477,7 @@ index 64bdffa8c80..4531e34cc73 100644
      $statements = $this->createIndexSql($new_name, $schema);
      foreach ($statements as $statement) {
 -      $this->connection->query($statement);
-+      $this->connection->executeDdlStatement($statement);
++      $this->executeDdlStatement($statement);
      }
    }
  
@@ -515,7 +486,7 @@ index 64bdffa8c80..4531e34cc73 100644
      }
      $this->connection->tableDropped = TRUE;
 -    $this->connection->query('DROP TABLE {' . $table . '}');
-+    $this->connection->executeDdlStatement('DROP TABLE {' . $table . '}');
++    $this->executeDdlStatement('DROP TABLE {' . $table . '}');
      return TRUE;
    }
  
@@ -524,7 +495,7 @@ index 64bdffa8c80..4531e34cc73 100644
        // NOT NULL column without a default value, we can use the quicker version.
        $query = 'ALTER TABLE {' . $table . '} ADD ' . $this->createFieldSql($field, $this->processField($specification));
 -      $this->connection->query($query);
-+      $this->connection->executeDdlStatement($query);
++      $this->executeDdlStatement($query);
  
        // Apply the initial value if set.
        if (isset($specification['initial_from_field'])) {
@@ -533,7 +504,7 @@ index 64bdffa8c80..4531e34cc73 100644
      $statements = $this->createIndexSql($table, $schema);
      foreach ($statements as $statement) {
 -      $this->connection->query($statement);
-+      $this->connection->executeDdlStatement($statement);
++      $this->executeDdlStatement($statement);
      }
    }
  
@@ -542,7 +513,7 @@ index 64bdffa8c80..4531e34cc73 100644
      $info = $this->getPrefixInfo($table);
  
 -    $this->connection->query('DROP INDEX [' . $info['schema'] . '].[' . $info['table'] . '_' . $name . ']');
-+    $this->connection->executeDdlStatement('DROP INDEX [' . $info['schema'] . '].[' . $info['table'] . '_' . $name . ']');
++    $this->executeDdlStatement('DROP INDEX [' . $info['schema'] . '].[' . $info['table'] . '_' . $name . ']');
      return TRUE;
    }
  
@@ -551,7 +522,7 @@ index 64bdffa8c80..4531e34cc73 100644
      $statements = $this->createIndexSql($table, $schema);
      foreach ($statements as $statement) {
 -      $this->connection->query($statement);
-+      $this->connection->executeDdlStatement($statement);
++      $this->executeDdlStatement($statement);
      }
    }
  
@@ -560,12 +531,12 @@ index 64bdffa8c80..4531e34cc73 100644
      $info = $this->getPrefixInfo($table);
  
 -    $this->connection->query('DROP INDEX [' . $info['schema'] . '].[' . $info['table'] . '_' . $name . ']');
-+    $this->connection->executeDdlStatement('DROP INDEX [' . $info['schema'] . '].[' . $info['table'] . '_' . $name . ']');
++    $this->executeDdlStatement('DROP INDEX [' . $info['schema'] . '].[' . $info['table'] . '_' . $name . ']');
      return TRUE;
    }
  
 diff --git a/core/tests/Drupal/KernelTests/Core/Cache/EndOfTransactionQueriesTest.php b/core/tests/Drupal/KernelTests/Core/Cache/EndOfTransactionQueriesTest.php
-index 0414b6e6fd1..b564fa58725 100644
+index 9ff9b1d488c..9e3ea67c055 100644
 --- a/core/tests/Drupal/KernelTests/Core/Cache/EndOfTransactionQueriesTest.php
 +++ b/core/tests/Drupal/KernelTests/Core/Cache/EndOfTransactionQueriesTest.php
 @@ -75,6 +75,13 @@ public function testEntitySave(): void {
@@ -597,18 +568,10 @@ index 0414b6e6fd1..b564fa58725 100644
      // Verify that a nested entity save occurred.
      $this->assertSame('john doe', User::load(1)->getAccountName());
 diff --git a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
-index 3911419ca77..c260fb9fa00 100644
+index 3911419ca77..ffbe22d8532 100644
 --- a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
 +++ b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
-@@ -12,6 +12,7 @@
- use Drupal\Core\Database\Transaction\TransactionManagerBase;
- use Drupal\Core\Database\TransactionNameNonUniqueException;
- use Drupal\Core\Database\TransactionOutOfOrderException;
-+use PHPUnit\Framework\Attributes\IgnoreDeprecations;
- 
- /**
-  * Tests the transaction abstraction system.
-@@ -424,24 +425,40 @@ public function testTransactionWithDdlStatement(): void {
+@@ -424,24 +424,50 @@ public function testTransactionWithDdlStatement(): void {
        unset($transaction);
        $this->assertRowAbsent('row');
      }
@@ -619,30 +582,27 @@ index 3911419ca77..c260fb9fa00 100644
 -      $transaction = $this->createRootTransaction('', FALSE);
 -      $this->insertRow('row');
 -      $this->executeDDLStatement();
--
++  }
+ 
 -      // Try to rollback the outer transaction. It should fail and void
 -      // the transaction stack.
 -      $transaction->rollBack();
 -      $manager = $this->connection->transactionManager();
 -      $reflectedTransactionState = new \ReflectionMethod($manager, 'getConnectionTransactionState');
 -      $this->assertSame(ClientConnectionTransactionState::Voided, $reflectedTransactionState->invoke($manager));
-+  }
- 
--      unset($transaction);
--      $this->assertRowPresent('row');
 +  /**
 +   * Tests rollback after a DDL statement when no transactional DDL supported.
 +   *
 +   * @todo In drupal:12.0.0, rollBack will throw a
 +   *   TransactionOutOfOrderException. Adjust the test accordingly.
 +   */
-+  #[IgnoreDeprecations]
 +  public function testRollbackAfterDdlStatementForNonTransactionalDdlDatabase(): void {
 +    if ($this->connection->supportsTransactionalDDL()) {
 +      $this->markTestSkipped('This test only works for database that do not support transactional DDL.');
-     }
-+    $this->expectDeprecation('Calling Transaction::rollBack() after a DDL statement is deprecated in drupal:11.1.0 and will throw a TransactionOutOfOrderException in drupal:12.0.0. See https://www.drupal.org/node/3402926');
-+
++    }
+ 
+-      unset($transaction);
+-      $this->assertRowPresent('row');
 +    // For database servers that do not support transactional DDL,
 +    // the DDL statement should commit the transaction stack.
 +    $this->cleanUp();
@@ -655,7 +615,19 @@ index 3911419ca77..c260fb9fa00 100644
 +
 +    // Try to rollback the root transaction. Since the DDL already committed
 +    // it, it should fail.
-+    $transaction->rollBack();
++    set_error_handler(static function (int $errno, string  $errstr): bool {
++      throw new \ErrorException($errstr);
++    });
++    try {
++      $transaction->rollBack();
++    }
++    catch (\ErrorException $e) {
++      $this->assertSame('Transaction::rollBack() failed because of a prior execution of a DDL statement. In drupal:12.0.0 a TransactionOutOfOrderException will be thrown.', $e->getMessage());
+     }
++    finally {
++      restore_error_handler();
++    }
++
 +    unset($transaction);
 +    $manager = $this->connection->transactionManager();
 +    $this->assertSame(0, $manager->stackDepth());
@@ -665,7 +637,7 @@ index 3911419ca77..c260fb9fa00 100644
    }
  
    /**
-@@ -767,6 +784,7 @@ public function testRootTransactionEndCallbackCalledOnCommit(): void {
+@@ -767,6 +793,7 @@ public function testRootTransactionEndCallbackCalledOnCommit(): void {
      $this->connection->transactionManager()->addPostTransactionCallback([$this, 'rootTransactionCallback']);
      $this->insertRow('row');
      $this->assertNull($this->postTransactionCallbackAction);
@@ -673,7 +645,7 @@ index 3911419ca77..c260fb9fa00 100644
      unset($transaction);
      $this->assertSame('rtcCommit', $this->postTransactionCallbackAction);
      $this->assertRowPresent('row');
-@@ -832,6 +850,98 @@ public function testRootTransactionEndCallbackCalledAfterDdlAndDestruction(): vo
+@@ -832,6 +859,98 @@ public function testRootTransactionEndCallbackCalledAfterDdlAndDestruction(): vo
      $this->assertRowPresent('row');
    }
  
