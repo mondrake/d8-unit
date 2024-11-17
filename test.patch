@@ -94,10 +94,10 @@ index 00000000000..051ed412a2b
 +}
 diff --git a/core/lib/Drupal/Core/Database/Statement/PdoTrait.php b/core/lib/Drupal/Core/Database/Statement/PdoTrait.php
 new file mode 100644
-index 00000000000..c34de9d5a0c
+index 00000000000..cb3b4a3dba9
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/Statement/PdoTrait.php
-@@ -0,0 +1,190 @@
+@@ -0,0 +1,209 @@
 +<?php
 +
 +declare(strict_types=1);
@@ -232,6 +232,25 @@ index 00000000000..c34de9d5a0c
 +   */
 +  protected function clientFetchColumn(int $column = 0): mixed {
 +    return $this->getClientStatement()->fetchColumn($column);
++  }
++
++  /**
++   * Fetches the next row and returns it as an object.
++   *
++   * @param class-string|null $class
++   *   Name of the class to be instantiated.
++   * @param list<mixed>|null $constructorArguments
++   *   The arguments to be passed to the constructor.
++   *
++   * @return object|false
++   *   An instance of the required class with property names that correspond
++   *   to the column names, or FALSE on failure.
++   */
++  protected function clientFetchObject(?string $class = NULL, array $constructorArguments = []): object|FALSE {
++    if ($class) {
++      return $this->getClientStatement()->fetchObject($class, $constructorArguments);
++    }
++    return $this->getClientStatement()->fetchObject();
 +  }
 +
 +  /**
@@ -374,7 +393,7 @@ index be86951f970..4354cec63dd 100644
     * @return array
     *   An associative array, or an empty array if there is no result set.
 diff --git a/core/lib/Drupal/Core/Database/StatementPrefetchIterator.php b/core/lib/Drupal/Core/Database/StatementPrefetchIterator.php
-index 40f2f2bf297..af63fbf40a9 100644
+index 40f2f2bf297..e589804ea70 100644
 --- a/core/lib/Drupal/Core/Database/StatementPrefetchIterator.php
 +++ b/core/lib/Drupal/Core/Database/StatementPrefetchIterator.php
 @@ -5,6 +5,8 @@
@@ -469,7 +488,13 @@ index 40f2f2bf297..af63fbf40a9 100644
      }
      catch (\Exception $e) {
        if (isset($startEvent) && $this->connection->isEventEnabled(StatementExecutionFailureEvent::class)) {
-@@ -137,11 +160,11 @@ public function execute($args = [], $options = []) {
+@@ -132,16 +155,17 @@ public function execute($args = [], $options = []) {
+           $e->getMessage(),
+         ));
+       }
++      unset($this->clientStatement);
+       throw $e;
+     }
  
      // Fetch all the data from the reply, in order to release any lock as soon
      // as possible.
@@ -484,14 +509,13 @@ index 40f2f2bf297..af63fbf40a9 100644
      $this->markResultsetIterable($return);
  
      $this->columnNames = count($this->data) > 0 ? array_keys($this->data[0]) : [];
-@@ -190,24 +213,28 @@ public function getQueryString() {
+@@ -190,24 +214,27 @@ public function getQueryString() {
     * {@inheritdoc}
     */
    public function setFetchMode($mode, $a1 = NULL, $a2 = []) {
 -    assert(in_array($mode, $this->supportedFetchModes), 'Fetch mode ' . ($this->fetchModeLiterals[$mode] ?? $mode) . ' is not supported. Use supported modes only.');
 +    if (is_int($mode)) {
 +      @trigger_error("Passing the \$mode argument as an integer to setFetchMode() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321", E_USER_DEPRECATED);
-+      assert(in_array($mode, $this->supportedFetchModes), 'Fetch mode ' . ($this->fetchModeLiterals[$mode] ?? $mode) . ' is not supported. Use supported modes only.');
 +      $mode = $this->pdoToFetchAs($mode);
 +    }
  
@@ -578,7 +602,7 @@ index 40f2f2bf297..af63fbf40a9 100644
    }
  
    /**
-@@ -277,29 +312,33 @@ public function fetchField($index = 0) {
+@@ -277,30 +312,32 @@ public function fetchField($index = 0) {
     */
    public function fetchObject(?string $class_name = NULL, array $constructor_arguments = []) {
      if (!isset($class_name)) {
@@ -606,18 +630,18 @@ index 40f2f2bf297..af63fbf40a9 100644
     */
    public function fetchAll($mode = NULL, $column_index = NULL, $constructor_arguments = NULL) {
 -    $fetchStyle = $mode ?? $this->defaultFetchStyle;
+-
+-    assert(in_array($fetchStyle, $this->supportedFetchModes), 'Fetch mode ' . ($this->fetchModeLiterals[$fetchStyle] ?? $fetchStyle) . ' is not supported. Use supported modes only.');
 +    if (is_int($mode)) {
 +      @trigger_error("Passing the \$mode argument as an integer to fetchAll() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321", E_USER_DEPRECATED);
-+      assert(in_array($mode, $this->supportedFetchModes), 'Fetch mode ' . ($this->fetchModeLiterals[$mode] ?? $mode) . ' is not supported. Use supported modes only.');
 +      $mode = $this->pdoToFetchAs($mode);
 +    }
  
--    assert(in_array($fetchStyle, $this->supportedFetchModes), 'Fetch mode ' . ($this->fetchModeLiterals[$fetchStyle] ?? $fetchStyle) . ' is not supported. Use supported modes only.');
 +    $fetchStyle = $mode ?? $this->defaultFetchMode;
- 
      if (isset($column_index)) {
        $this->fetchOptions['column'] = $column_index;
-@@ -321,7 +360,7 @@ public function fetchAll($mode = NULL, $column_index = NULL, $constructor_argume
+     }
+@@ -321,7 +358,7 @@ public function fetchAll($mode = NULL, $column_index = NULL, $constructor_argume
    public function fetchCol($index = 0) {
      if (isset($this->columnNames[$index])) {
        $result = [];
@@ -626,7 +650,7 @@ index 40f2f2bf297..af63fbf40a9 100644
          $result[] = $row[$this->columnNames[$index]];
        }
        return $result;
-@@ -341,7 +380,7 @@ public function fetchAllKeyed($key_index = 0, $value_index = 1) {
+@@ -341,7 +378,7 @@ public function fetchAllKeyed($key_index = 0, $value_index = 1) {
      $value = $this->columnNames[$value_index];
  
      $result = [];
@@ -635,7 +659,7 @@ index 40f2f2bf297..af63fbf40a9 100644
        $result[$row[$key]] = $row[$value];
      }
      return $result;
-@@ -351,10 +390,13 @@ public function fetchAllKeyed($key_index = 0, $value_index = 1) {
+@@ -351,10 +388,13 @@ public function fetchAllKeyed($key_index = 0, $value_index = 1) {
     * {@inheritdoc}
     */
    public function fetchAllAssoc($key, $fetch_style = NULL) {
@@ -652,7 +676,7 @@ index 40f2f2bf297..af63fbf40a9 100644
      }
      return $result;
 diff --git a/core/lib/Drupal/Core/Database/StatementWrapperIterator.php b/core/lib/Drupal/Core/Database/StatementWrapperIterator.php
-index 980ef74ed2e..8e58431fdd6 100644
+index 980ef74ed2e..7a9a0d24fce 100644
 --- a/core/lib/Drupal/Core/Database/StatementWrapperIterator.php
 +++ b/core/lib/Drupal/Core/Database/StatementWrapperIterator.php
 @@ -5,6 +5,8 @@
@@ -745,7 +769,7 @@ index 980ef74ed2e..8e58431fdd6 100644
        $this->markResultsetIterable($return);
      }
      catch (\Exception $e) {
-@@ -150,14 +159,14 @@ public function execute($args = [], $options = []) {
+@@ -150,23 +159,28 @@ public function execute($args = [], $options = []) {
     * {@inheritdoc}
     */
    public function getQueryString() {
@@ -762,8 +786,14 @@ index 980ef74ed2e..8e58431fdd6 100644
    }
  
    /**
-@@ -166,7 +175,7 @@ public function fetchCol($index = 0) {
+    * {@inheritdoc}
+    */
    public function fetchAllAssoc($key, $fetch = NULL) {
++    if (is_int($fetch)) {
++      @trigger_error("Passing the \$fetch argument as an integer to fetchAllAssoc() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321", E_USER_DEPRECATED);
++      $fetch_style = $this->pdoToFetchAs($fetch);
++    }
++
      if (isset($fetch)) {
        if (is_string($fetch)) {
 -        $this->setFetchMode(\PDO::FETCH_CLASS, $fetch);
@@ -771,7 +801,7 @@ index 980ef74ed2e..8e58431fdd6 100644
        }
        else {
          $this->setFetchMode($fetch);
-@@ -193,7 +202,7 @@ public function fetchAllAssoc($key, $fetch = NULL) {
+@@ -193,7 +207,7 @@ public function fetchAllAssoc($key, $fetch = NULL) {
     * {@inheritdoc}
     */
    public function fetchAllKeyed($key_index = 0, $value_index = 1) {
@@ -780,7 +810,7 @@ index 980ef74ed2e..8e58431fdd6 100644
  
      // Return early if the statement was already fully traversed.
      if (!$this->isResultsetIterable) {
-@@ -213,8 +222,7 @@ public function fetchAllKeyed($key_index = 0, $value_index = 1) {
+@@ -213,8 +227,7 @@ public function fetchAllKeyed($key_index = 0, $value_index = 1) {
     * {@inheritdoc}
     */
    public function fetchField($index = 0) {
@@ -790,7 +820,7 @@ index 980ef74ed2e..8e58431fdd6 100644
  
      if ($column === FALSE) {
        $this->markResultsetFetchingComplete();
-@@ -229,27 +237,21 @@ public function fetchField($index = 0) {
+@@ -229,19 +242,14 @@ public function fetchField($index = 0) {
     * {@inheritdoc}
     */
    public function fetchAssoc() {
@@ -807,26 +837,12 @@ index 980ef74ed2e..8e58431fdd6 100644
 -    }
 -    else {
 -      $row = $this->clientStatement->fetchObject();
-+    if (!isset($class_name)) {
-+      return $this->fetch(FetchAs::Object);
-     }
--
--    if ($row === FALSE) {
--      $this->markResultsetFetchingComplete();
--      return FALSE;
 -    }
--
--    $this->setResultsetCurrentRow($row);
--    return $row;
-+    $this->fetchOptions = [
-+      'class' => $class_name,
-+      'constructor_args' => $constructor_arguments,
-+    ];
-+    return $this->fetch(FetchAs::ClassObject);
-   }
++    $row = $this->clientFetchObject($class_name, $constructor_arguments);
  
-   /**
-@@ -258,7 +260,7 @@ public function fetchObject(?string $class_name = NULL, array $constructor_argum
+     if ($row === FALSE) {
+       $this->markResultsetFetchingComplete();
+@@ -258,7 +266,7 @@ public function fetchObject(?string $class_name = NULL, array $constructor_argum
    public function rowCount() {
      // SELECT query should not use the method.
      if ($this->rowCountEnabled) {
@@ -835,17 +851,12 @@ index 980ef74ed2e..8e58431fdd6 100644
      }
      else {
        throw new RowCountException();
-@@ -269,33 +271,41 @@ public function rowCount() {
+@@ -269,33 +277,39 @@ public function rowCount() {
     * {@inheritdoc}
     */
    public function setFetchMode($mode, $a1 = NULL, $a2 = []) {
 -    assert(in_array($mode, $this->supportedFetchModes), 'Fetch mode ' . ($this->fetchModeLiterals[$mode] ?? $mode) . ' is not supported. Use supported modes only.');
-+    if (is_int($mode)) {
-+      @trigger_error("Passing the \$mode argument as an integer to setFetchMode() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321", E_USER_DEPRECATED);
-+      assert(in_array($mode, $this->supportedFetchModes), 'Fetch mode ' . ($this->fetchModeLiterals[$mode] ?? $mode) . ' is not supported. Use supported modes only.');
-+      $mode = $this->pdoToFetchAs($mode);
-+    }
- 
+-
 -    // Call \PDOStatement::setFetchMode to set fetch mode.
 -    // \PDOStatement is picky about the number of arguments in some cases so we
 -    // need to be pass the exact number of arguments we where given.
@@ -854,6 +865,11 @@ index 980ef74ed2e..8e58431fdd6 100644
 -      2 => $this->clientStatement->setFetchMode($mode, $a1),
 -      default => $this->clientStatement->setFetchMode($mode, $a1, $a2),
 -    };
++    if (is_int($mode)) {
++      @trigger_error("Passing the \$mode argument as an integer to setFetchMode() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321", E_USER_DEPRECATED);
++      $mode = $this->pdoToFetchAs($mode);
++    }
++
 +    $this->defaultFetchMode = $mode;
 +    switch ($mode) {
 +      case FetchAs::ClassObject:
@@ -877,12 +893,7 @@ index 980ef74ed2e..8e58431fdd6 100644
     */
    public function fetch($mode = NULL, $cursor_orientation = NULL, $cursor_offset = NULL) {
 -    assert(!isset($mode) || in_array($mode, $this->supportedFetchModes), 'Fetch mode ' . ($this->fetchModeLiterals[$mode] ?? $mode) . ' is not supported. Use supported modes only.');
-+    if (is_int($mode)) {
-+      @trigger_error("Passing the \$mode argument as an integer to fetch() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321", E_USER_DEPRECATED);
-+      assert(in_array($mode, $this->supportedFetchModes), 'Fetch mode ' . ($this->fetchModeLiterals[$mode] ?? $mode) . ' is not supported. Use supported modes only.');
-+      $mode = $this->pdoToFetchAs($mode);
-+    }
- 
+-
 -    // Call \PDOStatement::fetchAll to fetch all rows.
 -    // \PDOStatement is picky about the number of arguments in some cases so we
 -    // need to pass the exact number of arguments we were given.
@@ -892,25 +903,47 @@ index 980ef74ed2e..8e58431fdd6 100644
 -      2 => $this->clientStatement->fetch($mode, $cursor_orientation),
 -      default => $this->clientStatement->fetch($mode, $cursor_orientation, $cursor_offset),
 -    };
++    if (is_int($mode)) {
++      @trigger_error("Passing the \$mode argument as an integer to fetch() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321", E_USER_DEPRECATED);
++      $mode = $this->pdoToFetchAs($mode);
++    }
++
 +    $row = $this->clientFetch($mode, $cursor_orientation, $cursor_offset);
  
      if ($row === FALSE) {
        $this->markResultsetFetchingComplete();
-@@ -310,7 +320,13 @@ public function fetch($mode = NULL, $cursor_orientation = NULL, $cursor_offset =
+@@ -310,17 +324,20 @@ public function fetch($mode = NULL, $cursor_orientation = NULL, $cursor_offset =
     * {@inheritdoc}
     */
    public function fetchAll($mode = NULL, $column_index = NULL, $constructor_arguments = NULL) {
 -    assert(!isset($mode) || in_array($mode, $this->supportedFetchModes), 'Fetch mode ' . ($this->fetchModeLiterals[$mode] ?? $mode) . ' is not supported. Use supported modes only.');
+-
+-    // Call \PDOStatement::fetchAll to fetch all rows.
+-    // \PDOStatement is picky about the number of arguments in some cases so we
+-    // need to be pass the exact number of arguments we where given.
+-    $return = match(func_num_args()) {
+-      0 => $this->clientStatement->fetchAll(),
+-      1 => $this->clientStatement->fetchAll($mode),
+-      2 => $this->clientStatement->fetchAll($mode, $column_index),
+-      default => $this->clientStatement->fetchAll($mode, $column_index, $constructor_arguments),
+-    };
 +    if (is_int($mode)) {
-+      assert(in_array($mode, $this->supportedFetchModes), 'Fetch mode ' . ($this->fetchModeLiterals[$mode] ?? $mode) . ' is not supported. Use supported modes only.');
 +      @trigger_error("Passing the \$mode argument as an integer to fetch() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321", E_USER_DEPRECATED);
++      $mode = $this->pdoToFetchAs($mode);
 +    }
-+    elseif ($mode instanceof FetchAs) {
-+      $mode = $this->fetchAsToPdo($mode);
++
++    $fetchMode = $mode ?? $this->defaultFetchMode;
++    if (isset($column_index)) {
++      $this->fetchOptions['column'] = $column_index;
 +    }
++    if (isset($constructor_arguments)) {
++      $this->fetchOptions['constructor_args'] = $constructor_arguments;
++    }
++
++    $return = $this->clientFetchAll($fetchMode, $column_index, $constructor_arguments);
  
-     // Call \PDOStatement::fetchAll to fetch all rows.
-     // \PDOStatement is picky about the number of arguments in some cases so we
+     $this->markResultsetFetchingComplete();
+ 
 diff --git a/core/lib/Drupal/Core/Entity/Sql/SqlContentEntityStorage.php b/core/lib/Drupal/Core/Entity/Sql/SqlContentEntityStorage.php
 index 93029c399df..ae8a23f3350 100644
 --- a/core/lib/Drupal/Core/Entity/Sql/SqlContentEntityStorage.php
@@ -1606,7 +1639,7 @@ index baa01d730b2..cf26cb9b3c1 100644
      $raw = reset($all);
  
 diff --git a/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php b/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
-index 7e9ae828063..41e827383be 100644
+index 7e9ae828063..d94082b44f6 100644
 --- a/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
 +++ b/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
 @@ -6,10 +6,13 @@
@@ -1676,7 +1709,7 @@ index 7e9ae828063..41e827383be 100644
      $mockPdo = $this->createMock(StubPDO::class);
      $mockConnection = new StubConnection($mockPdo, []);
      $statement = new StatementPrefetchIterator($mockPdo, $mockConnection, '');
-@@ -937,11 +970,12 @@ public static function providerUnsupportedFetchModes(): array {
+@@ -937,12 +970,13 @@ public static function providerUnsupportedFetchModes(): array {
    }
  
    /**
@@ -1688,7 +1721,9 @@ index 7e9ae828063..41e827383be 100644
 +  #[IgnoreDeprecations]
 +  #[DataProvider('providerUnsupportedFetchModes')]
    public function testUnsupportedFetchModes(int $mode): void {
+-    $this->expectException(\AssertionError::class);
 +    $this->expectDeprecation("Passing the \$mode argument as an integer to setFetchMode() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321");
-     $this->expectException(\AssertionError::class);
++    $this->expectException(\RuntimeException::class);
      $this->expectExceptionMessageMatches("/^Fetch mode FETCH_.* is not supported\\. Use supported modes only/");
      $mockPdo = $this->createMock(StubPDO::class);
+     $mockConnection = new StubConnection($mockPdo, []);
