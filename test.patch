@@ -1,725 +1,1470 @@
-diff --git a/core/lib/Drupal/Core/Database/Query/Truncate.php b/core/lib/Drupal/Core/Database/Query/Truncate.php
-index 45f1c8447ac..33676e7534a 100644
---- a/core/lib/Drupal/Core/Database/Query/Truncate.php
-+++ b/core/lib/Drupal/Core/Database/Query/Truncate.php
-@@ -34,6 +34,12 @@ public function __construct(Connection $connection, $table, array $options = [])
-   /**
-    * Executes the TRUNCATE query.
-    *
-+   * In most cases, TRUNCATE is not a transaction safe statement as it is a DDL
-+   * statement which results in an implicit COMMIT. When we are in a
-+   * transaction, fallback to the slower, but transactional, DELETE.
-+   * PostgreSQL also locks the entire table for a TRUNCATE strongly reducing
-+   * the concurrency with other transactions.
-+   *
-    * @return int|null
-    *   Return value is dependent on whether the executed SQL statement is a
-    *   TRUNCATE or a DELETE. TRUNCATE is DDL and no information on affected
-@@ -66,11 +72,8 @@ public function __toString() {
-     // Create a sanitized comment string to prepend to the query.
-     $comments = $this->connection->makeComment($this->comments);
+diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
+index 7a9de46a7d4..3abbce286cf 100644
+--- a/core/lib/Drupal/Core/Database/Connection.php
++++ b/core/lib/Drupal/Core/Database/Connection.php
+@@ -12,6 +12,7 @@
+ use Drupal\Core\Database\Query\Select;
+ use Drupal\Core\Database\Query\Truncate;
+ use Drupal\Core\Database\Query\Update;
++use Drupal\Core\Database\Statement\FetchAs;
+ use Drupal\Core\Database\Transaction\TransactionManagerInterface;
+ use Drupal\Core\Pager\PagerManagerInterface;
  
--    // In most cases, TRUNCATE is not a transaction safe statement as it is a
--    // DDL statement which results in an implicit COMMIT. When we are in a
--    // transaction, fallback to the slower, but transactional, DELETE.
--    // PostgreSQL also locks the entire table for a TRUNCATE strongly reducing
--    // the concurrency with other transactions.
-+    // The statement actually built depends on whether a transaction is active.
-+    // @see ::execute()
-     if ($this->connection->inTransaction()) {
-       return $comments . 'DELETE FROM {' . $this->connection->escapeTable($this->table) . '}';
-     }
-diff --git a/core/lib/Drupal/Core/Database/Schema.php b/core/lib/Drupal/Core/Database/Schema.php
-index ee8d1469eba..7b5d585de94 100644
---- a/core/lib/Drupal/Core/Database/Schema.php
-+++ b/core/lib/Drupal/Core/Database/Schema.php
-@@ -117,6 +117,31 @@ public function prefixNonTable($table) {
-     return implode('_', $args);
+@@ -250,11 +251,10 @@ public function getClientConnection(): object {
+    * A given query can be customized with a number of option flags in an
+    * associative array:
+    * - fetch: This element controls how rows from a result set will be
+-   *   returned. Legal values include \PDO::FETCH_ASSOC, \PDO::FETCH_BOTH,
+-   *   \PDO::FETCH_OBJ, \PDO::FETCH_NUM, or a string representing the name of a
+-   *   class. If a string is specified, each record will be fetched into a new
+-   *   object of that class. The behavior of all other values is defined by PDO.
+-   *   See http://php.net/manual/pdostatement.fetch.php
++   *   returned. Legal values include one of the enumeration cases of FetchAs or
++   *   a string representing the name of a class. If a string is specified, each
++   *   record will be fetched into a new object of that class. The behavior of
++   *   all other values is described in the FetchAs enum.
+    * - allow_delimiter_in_query: By default, queries which have the ; delimiter
+    *   any place in them will cause an exception. This reduces the chance of SQL
+    *   injection attacks that terminate the original query and add one or more
+@@ -277,7 +277,7 @@ public function getClientConnection(): object {
+    */
+   protected function defaultOptions() {
+     return [
+-      'fetch' => \PDO::FETCH_OBJ,
++      'fetch' => FetchAs::Object,
+       'allow_delimiter_in_query' => FALSE,
+       'allow_square_brackets' => FALSE,
+       'pdo' => [],
+@@ -430,6 +430,9 @@ public function getFullQualifiedTableName($table) {
+    */
+   public function prepareStatement(string $query, array $options, bool $allow_row_count = FALSE): StatementInterface {
+     assert(!isset($options['return']), 'Passing "return" option to prepareStatement() has no effect. See https://www.drupal.org/node/3185520');
++    if (isset($options['fetch']) && is_int($options['fetch'])) {
++      @trigger_error("Passing the 'fetch' key as an integer to \$options in prepareStatement() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321", E_USER_DEPRECATED);
++    }
+ 
+     try {
+       $query = $this->preprocessStatement($query, $options);
+@@ -648,6 +651,9 @@ public function query($query, array $args = [], $options = []) {
+     assert(is_string($query), 'The \'$query\' argument to ' . __METHOD__ . '() must be a string');
+     assert(!isset($options['return']), 'Passing "return" option to query() has no effect. See https://www.drupal.org/node/3185520');
+     assert(!isset($options['target']), 'Passing "target" option to query() has no effect. See https://www.drupal.org/node/2993033');
++    if (isset($options['fetch']) && is_int($options['fetch'])) {
++      @trigger_error("Passing the 'fetch' key as an integer to \$options in query() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321", E_USER_DEPRECATED);
++    }
+ 
+     // Use default values if not already set.
+     $options += $this->defaultOptions();
+diff --git a/core/lib/Drupal/Core/Database/Statement/FetchAs.php b/core/lib/Drupal/Core/Database/Statement/FetchAs.php
+new file mode 100644
+index 00000000000..b637b92029a
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/Statement/FetchAs.php
+@@ -0,0 +1,29 @@
++<?php
++
++namespace Drupal\Core\Database\Statement;
++
++/**
++ * Enumeration of the fetch modes for result sets.
++ */
++enum FetchAs {
++
++  // Returns an anonymous object with property names that correspond to the
++  // column names returned in the result set. This is the default fetch mode
++  // for Drupal.
++  case Object;
++
++  // Returns a new instance of a requested class, mapping the columns of the
++  // result set to named properties in the class.
++  case ClassObject;
++
++  // Returns an array indexed by column name as returned in the result set.
++  case Associative;
++
++  // Returns an array indexed by column number as returned in the result set,
++  // starting at column 0.
++  case List;
++
++  // Returns a single column from the next row of a result set.
++  case Column;
++
++}
+diff --git a/core/lib/Drupal/Core/Database/Statement/PdoTrait.php b/core/lib/Drupal/Core/Database/Statement/PdoTrait.php
+new file mode 100644
+index 00000000000..69917c4a40b
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/Statement/PdoTrait.php
+@@ -0,0 +1,73 @@
++<?php
++
++namespace Drupal\Core\Database\Statement;
++
++/**
++ * Provide helper methods for statement fetching.
++ */
++trait PdoTrait {
++
++  protected function fetchAsToPdo(FetchAs $mode): int {
++    return match ($mode) {
++      FetchAs::Associative => \PDO::FETCH_ASSOC,
++      FetchAs::ClassObject => \PDO::FETCH_CLASS,
++      FetchAs::Column => \PDO::FETCH_COLUMN,
++      FetchAs::List => \PDO::FETCH_NUM,
++      FetchAs::Object => \PDO::FETCH_OBJ,
++    };
++  }
++
++  protected function pdoToFetchAs(int $mode): FetchAs {
++    return match ($mode) {
++      \PDO::FETCH_ASSOC => FetchAs::Associative,
++      \PDO::FETCH_CLASS, \PDO::FETCH_CLASS | \PDO::FETCH_PROPS_LATE => FetchAs::ClassObject,
++      \PDO::FETCH_COLUMN => FetchAs::Column,
++      \PDO::FETCH_NUM => FetchAs::List,
++      \PDO::FETCH_OBJ => FetchAs::Object,
++    };
++  }
++
++  /**
++   * Executes a prepared PDO statement.
++   *
++   * @param array|null $arguments
++   *   An array of values with as many elements as there are bound parameters in
++   *   the SQL statement being executed. This can be NULL.
++   * @param array $options
++   *   An array of options for this query.
++   *
++   * @return bool
++   *   TRUE on success, or FALSE on failure.
++   */
++  protected function clientExecute(?array $arguments = [], array $options = []): bool {
++    return $this->getClientStatement()->execute($arguments);
++  }
++
++  /**
++   * Fetches the next row from the PDO statement.
++   *
++   * @param \Drupal\Core\Database\FetchAs|null $mode
++   *   (Optional) one of the cases of the FetchAs enum. If not specified,
++   *   defaults to what is specified by setFetchMode().
++   * @param int|null $cursorOrientation
++   *   Not implemented in all database drivers, don't use.
++   * @param int|null $cursorOffset
++   *   Not implemented in all database drivers, don't use.
++   *
++   * @return array<string|int|float|bool>|object|false
++   *   A result, formatted according to $mode, or FALSE on failure.
++   */
++  protected function clientFetch(?FetchAs $mode = NULL, ?int $cursorOrientation = NULL, ?int $cursorOffset = NULL) {
++    // Call \PDOStatement::fetchAll to fetch all rows.
++    // \PDOStatement is picky about the number of arguments in some cases so we
++    // need to pass the exact number of arguments we were given.
++    return match(func_num_args()) {
++      0 => $this->getClientStatement()->fetch(),
++      1 => $this->getClientStatement()->fetch($this->fetchAsToPdo($mode)),
++      2 => $this->getClientStatement()->fetch($this->fetchAsToPdo($mode), $cursorOrientation ?? \PDO::FETCH_ORI_NEXT),
++      3 => $this->getClientStatement()->fetch($this->fetchAsToPdo($mode), $cursorOrientation ?? \PDO::FETCH_ORI_NEXT, $cursorOffset ?? 0),
++      default => throw new DatabaseExceptionWrapper('Invalid number of arguments passed to ' . __METHOD__ . '()'),
++    };
++  }
++
++}
+diff --git a/core/lib/Drupal/Core/Database/StatementInterface.php b/core/lib/Drupal/Core/Database/StatementInterface.php
+index be86951f970..4354cec63dd 100644
+--- a/core/lib/Drupal/Core/Database/StatementInterface.php
++++ b/core/lib/Drupal/Core/Database/StatementInterface.php
+@@ -65,18 +65,15 @@ public function rowCount();
+   /**
+    * Sets the default fetch mode for this statement.
+    *
+-   * See http://php.net/manual/pdo.constants.php for the definition of the
+-   * constants used.
+-   *
+-   * @param $mode
+-   *   One of the \PDO::FETCH_* constants.
+-   * @param $a1
++   * @param \Drupal\Core\Database\FetchAs|int $mode
++   *   One of the cases of the FetchAs enum, or (deprecated) a \PDO::FETCH_*
++   *   constant.
++   * @param string|int|null $a1
+    *   An option depending of the fetch mode specified by $mode:
+-   *   - for \PDO::FETCH_COLUMN, the index of the column to fetch
+-   *   - for \PDO::FETCH_CLASS, the name of the class to create
+-   *   - for \PDO::FETCH_INTO, the object to add the data to
+-   * @param $a2
+-   *   If $mode is \PDO::FETCH_CLASS, the optional arguments to pass to the
++   *   - for FetchAs::Column, the index of the column to fetch;
++   *   - for FetchAs::ClassObject, the name of the class to create.
++   * @param list<mixed> $a2
++   *   If $mode is FetchAs::ClassObject, the optional arguments to pass to the
+    *   constructor.
+    */
+   public function setFetchMode($mode, $a1 = NULL, $a2 = []);
+@@ -84,12 +81,10 @@ public function setFetchMode($mode, $a1 = NULL, $a2 = []);
+   /**
+    * Fetches the next row from a result set.
+    *
+-   * See http://php.net/manual/pdo.constants.php for the definition of the
+-   * constants used.
+-   *
+-   * @param $mode
+-   *   One of the \PDO::FETCH_* constants.
+-   *   Default to what was specified by setFetchMode().
++   * @param \Drupal\Core\Database\FetchAs|int|null $mode
++   *   (Optional) one of the cases of the FetchAs enum, or (deprecated) a
++   *   \PDO::FETCH_* constant. If not specified, defaults to what is specified
++   *   by setFetchMode().
+    * @param $cursor_orientation
+    *   Not implemented in all database drivers, don't use.
+    * @param $cursor_offset
+@@ -143,12 +138,14 @@ public function fetchAssoc();
+   /**
+    * Returns an array containing all of the result set rows.
+    *
+-   * @param $mode
+-   *   One of the \PDO::FETCH_* constants.
++   * @param \Drupal\Core\Database\FetchAs|int|null $mode
++   *   (Optional) one of the cases of the FetchAs enum, or (deprecated) a
++   *   \PDO::FETCH_* constant. If not specified, defaults to what is specified
++   *   by setFetchMode().
+    * @param $column_index
+-   *   If $mode is \PDO::FETCH_COLUMN, the index of the column to fetch.
++   *   If $mode is FetchAs::Column, the index of the column to fetch.
+    * @param $constructor_arguments
+-   *   If $mode is \PDO::FETCH_CLASS, the arguments to pass to the constructor.
++   *   If $mode is FetchAs::ClassObject, the arguments to pass to the constructor.
+    *
+    * @return array
+    *   An array of results.
+@@ -196,11 +193,12 @@ public function fetchAllKeyed($key_index = 0, $value_index = 1);
+    *
+    * @param $key
+    *   The name of the field on which to index the array.
+-   * @param $fetch
+-   *   The fetch mode to use. If set to \PDO::FETCH_ASSOC, \PDO::FETCH_NUM, or
+-   *   \PDO::FETCH_BOTH the returned value with be an array of arrays. For any
+-   *   other value it will be an array of objects. By default, the fetch mode
+-   *   set for the query will be used.
++   * @param \Drupal\Core\Database\FetchAs|int|string|null $fetch
++   *   (Optional) the fetch mode to use. One of the cases of the FetchAs enum,
++   *   or (deprecated) a \PDO::FETCH_* constant. If set to FetchAs::Associative
++   *   or FetchAs::List the returned value with be an array of arrays. For any
++   *   other value it will be an array of objects. If not specified, defaults to
++   *   what is specified by setFetchMode().
+    *
+    * @return array
+    *   An associative array, or an empty array if there is no result set.
+diff --git a/core/lib/Drupal/Core/Database/StatementPrefetchIterator.php b/core/lib/Drupal/Core/Database/StatementPrefetchIterator.php
+index 40f2f2bf297..35296788846 100644
+--- a/core/lib/Drupal/Core/Database/StatementPrefetchIterator.php
++++ b/core/lib/Drupal/Core/Database/StatementPrefetchIterator.php
+@@ -5,6 +5,8 @@
+ use Drupal\Core\Database\Event\StatementExecutionEndEvent;
+ use Drupal\Core\Database\Event\StatementExecutionFailureEvent;
+ use Drupal\Core\Database\Event\StatementExecutionStartEvent;
++use Drupal\Core\Database\Statement\FetchAs;
++use Drupal\Core\Database\Statement\PdoTrait;
+ 
+ /**
+  * An implementation of StatementInterface that prefetches all data.
+@@ -15,13 +17,21 @@
+  */
+ class StatementPrefetchIterator implements \Iterator, StatementInterface {
+ 
+-  use StatementIteratorTrait;
+   use FetchModeTrait;
++  use PdoTrait;
++  use StatementIteratorTrait;
++
++  /**
++   * The client database Statement object.
++   *
++   * For a \PDO client connection, this will be a \PDOStatement object.
++   */
++  protected ?object $clientStatement;
+ 
+   /**
+    * Main data store.
+    *
+-   * The resultset is stored as a \PDO::FETCH_ASSOC array.
++   * The resultset is stored as a FetchAs::Associative array.
+    */
+   protected array $data = [];
+ 
+@@ -39,9 +49,19 @@ class StatementPrefetchIterator implements \Iterator, StatementInterface {
+ 
+   /**
+    * Holds the default fetch style.
++   *
++   * @deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use
++   * $defaultFetchMode instead.
++   *
++   * @see https://www.drupal.org/node/7654321
+    */
+   protected int $defaultFetchStyle = \PDO::FETCH_OBJ;
+ 
++  /**
++   * Holds the default fetch mode.
++   */
++  protected FetchAs $defaultFetchMode = FetchAs::Object;
++
+   /**
+    * Holds fetch options.
+    *
+@@ -77,6 +97,18 @@ public function __construct(
+   ) {
    }
  
 +  /**
-+   * Executes a data definition language (DDL) statement.
++   * Returns the client-level database statement object.
 +   *
-+   * This method allows to void an active transaction when the driver does
-+   * not support transactional DDL.
++   * This method should normally be used only within database driver code.
 +   *
-+   * @param string $sql
-+   *   The DDL statement to execute. This is a SQL string that may contain
-+   *   placeholders.
-+   * @param array $arguments
-+   *   (Optional) The associative array of arguments for the prepared
-+   *   statement.
-+   * @param array $options
-+   *   (Optional) An associative array of options to control how the query is
-+   *   run. The given options will be merged with self::defaultOptions().
++   * @return object
++   *   The client-level database statement, for example \PDOStatement.
 +   */
-+  protected function executeDdlStatement(string $sql, array $arguments = [], array $options = []): void {
-+    $this->connection->query($sql, $arguments, $options);
-+    // DDL statements when in a transaction force a commit in some databases.
-+    // Void the transaction in that case.
-+    if (!$this->connection->supportsTransactionalDDL() && $this->connection->transactionManager()->inTransaction()) {
-+      $this->connection->transactionManager()->voidClientTransaction();
-+    }
++  public function getClientStatement(): object {
++    return $this->clientStatement;
 +  }
 +
    /**
-    * Build a condition to match a table name against a standard information_schema.
-    *
-@@ -616,7 +641,7 @@ public function createTable($name, $table) {
-     }
-     $statements = $this->createTableSql($name, $table);
-     foreach ($statements as $statement) {
--      $this->connection->query($statement);
-+      $this->executeDdlStatement($statement);
-     }
-   }
- 
-diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
-index 4e1fc8352fa..8f5da2c8214 100644
---- a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
-+++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
-@@ -349,6 +349,16 @@ public function unpile(string $name, string $id): void {
     * {@inheritdoc}
     */
-   public function rollback(string $name, string $id): void {
-+    // If the transaction was voided, we cannot rollback. Fail silently in
-+    // Drupal 11.
-+    // @todo In drupal:12.0.0, throw a TransactionOutOfOrderException, just
-+    //   removing this check.
-+    if ($this->getConnectionTransactionState() === ClientConnectionTransactionState::Voided) {
-+      $this->connectionTransactionState = ClientConnectionTransactionState::RollbackFailed;
-+      trigger_error('Transaction::rollBack() failed because of a prior execution of a DDL statement. In drupal:12.0.0 a TransactionOutOfOrderException will be thrown.', E_USER_WARNING);
-+      return;
-+    }
-+
-     // Rolled back item should match the last one in stack.
-     if ($id != array_key_last($this->stack()) || $name !== $this->stack()[$id]->name) {
-       throw new TransactionOutOfOrderException("Error attempting rollback of {$id}\\{$name}. Active stack: " . $this->dumpStackItemsAsString());
-diff --git a/core/modules/mysql/src/Driver/Database/mysql/Schema.php b/core/modules/mysql/src/Driver/Database/mysql/Schema.php
-index 6fdcad7047b..56c8b909257 100644
---- a/core/modules/mysql/src/Driver/Database/mysql/Schema.php
-+++ b/core/modules/mysql/src/Driver/Database/mysql/Schema.php
-@@ -380,7 +380,7 @@ public function renameTable($table, $new_name) {
-     }
- 
-     $info = $this->getPrefixInfo($new_name);
--    $this->connection->query('ALTER TABLE {' . $table . '} RENAME TO [' . $info['table'] . ']');
-+    $this->executeDdlStatement('ALTER TABLE {' . $table . '} RENAME TO [' . $info['table'] . ']');
-   }
- 
-   /**
-@@ -391,7 +391,7 @@ public function dropTable($table) {
-       return FALSE;
-     }
- 
--    $this->connection->query('DROP TABLE {' . $table . '}');
-+    $this->executeDdlStatement('DROP TABLE {' . $table . '}');
-     return TRUE;
-   }
- 
-@@ -430,14 +430,14 @@ public function addField($table, $field, $spec, $keys_new = []) {
-       $query .= ', ADD ' . implode(', ADD ', $keys_sql);
-     }
-     try {
--      $this->connection->query($query);
-+      $this->executeDdlStatement($query);
-     }
-     catch (DatabaseExceptionWrapper $e) {
-       // MySQL error number 4111 (ER_DROP_PK_COLUMN_TO_DROP_GIPK) indicates that
-       // when dropping and adding a primary key, the generated invisible primary
-       // key (GIPK) column must also be dropped.
-       if (isset($e->getPrevious()->errorInfo[1]) && $e->getPrevious()->errorInfo[1] === 4111 && isset($keys_new['primary key']) && $this->indexExists($table, 'PRIMARY') && $this->findPrimaryKeyColumns($table) === ['my_row_id']) {
--        $this->connection->query($query . ', DROP COLUMN [my_row_id]');
-+        $this->executeDdlStatement($query . ', DROP COLUMN [my_row_id]');
-       }
-       else {
-         throw $e;
-@@ -488,7 +488,7 @@ public function dropField($table, $field) {
-       $this->dropPrimaryKey($table);
-     }
- 
--    $this->connection->query('ALTER TABLE {' . $table . '} DROP [' . $field . ']');
-+    $this->executeDdlStatement('ALTER TABLE {' . $table . '} DROP [' . $field . ']');
-     return TRUE;
-   }
- 
-@@ -513,7 +513,7 @@ public function addPrimaryKey($table, $fields) {
-       throw new SchemaObjectExistsException("Cannot add primary key to table '$table': primary key already exists.");
-     }
- 
--    $this->connection->query('ALTER TABLE {' . $table . '} ADD PRIMARY KEY (' . $this->createKeySql($fields) . ')');
-+    $this->executeDdlStatement('ALTER TABLE {' . $table . '} ADD PRIMARY KEY (' . $this->createKeySql($fields) . ')');
-   }
- 
-   /**
-@@ -524,7 +524,7 @@ public function dropPrimaryKey($table) {
-       return FALSE;
-     }
- 
--    $this->connection->query('ALTER TABLE {' . $table . '} DROP PRIMARY KEY');
-+    $this->executeDdlStatement('ALTER TABLE {' . $table . '} DROP PRIMARY KEY');
-     return TRUE;
-   }
- 
-@@ -550,7 +550,7 @@ public function addUniqueKey($table, $name, $fields) {
-       throw new SchemaObjectExistsException("Cannot add unique key '$name' to table '$table': unique key already exists.");
-     }
- 
--    $this->connection->query('ALTER TABLE {' . $table . '} ADD UNIQUE KEY [' . $name . '] (' . $this->createKeySql($fields) . ')');
-+    $this->executeDdlStatement('ALTER TABLE {' . $table . '} ADD UNIQUE KEY [' . $name . '] (' . $this->createKeySql($fields) . ')');
-   }
- 
-   /**
-@@ -561,7 +561,7 @@ public function dropUniqueKey($table, $name) {
-       return FALSE;
-     }
- 
--    $this->connection->query('ALTER TABLE {' . $table . '} DROP KEY [' . $name . ']');
-+    $this->executeDdlStatement('ALTER TABLE {' . $table . '} DROP KEY [' . $name . ']');
-     return TRUE;
-   }
- 
-@@ -579,7 +579,7 @@ public function addIndex($table, $name, $fields, array $spec) {
-     $spec['indexes'][$name] = $fields;
-     $indexes = $this->getNormalizedIndexes($spec);
- 
--    $this->connection->query('ALTER TABLE {' . $table . '} ADD INDEX [' . $name . '] (' . $this->createKeySql($indexes[$name]) . ')');
-+    $this->executeDdlStatement('ALTER TABLE {' . $table . '} ADD INDEX [' . $name . '] (' . $this->createKeySql($indexes[$name]) . ')');
-   }
- 
-   /**
-@@ -590,7 +590,7 @@ public function dropIndex($table, $name) {
-       return FALSE;
-     }
- 
--    $this->connection->query('ALTER TABLE {' . $table . '} DROP INDEX [' . $name . ']');
-+    $this->executeDdlStatement('ALTER TABLE {' . $table . '} DROP INDEX [' . $name . ']');
-     return TRUE;
-   }
- 
-@@ -642,11 +642,11 @@ public function changeField($table, $field, $field_new, $spec, $keys_new = []) {
-     if ($keys_sql = $this->createKeysSql($keys_new)) {
-       $sql .= ', ADD ' . implode(', ADD ', $keys_sql);
-     }
--    $this->connection->query($sql);
-+    $this->executeDdlStatement($sql);
- 
-     if ($spec['type'] === 'serial') {
-       $max = $this->connection->query('SELECT MAX(`' . $field_new . '`) FROM {' . $table . '}')->fetchField();
--      $this->connection->query("ALTER TABLE {" . $table . "} AUTO_INCREMENT = " . ($max + 1));
-+      $this->executeDdlStatement("ALTER TABLE {" . $table . "} AUTO_INCREMENT = " . ($max + 1));
-     }
-   }
- 
-diff --git a/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php b/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php
-index 32a12b44ec1..29cb7c67856 100644
---- a/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php
-+++ b/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php
-@@ -590,7 +590,7 @@ public function renameTable($table, $new_name) {
-       // The renaming of an index will fail when the there exists an table with
-       // the same name as the renamed index.
-       if (!$this->tableExists($this->ensureIdentifiersLength($new_name, $index_name, $index_type), FALSE)) {
--        $this->connection->query('ALTER INDEX "' . $this->defaultSchema . '"."' . $index->indexname . '" RENAME TO ' . $this->ensureIdentifiersLength($new_name, $index_name, $index_type));
-+        $this->executeDdlStatement('ALTER INDEX "' . $this->defaultSchema . '"."' . $index->indexname . '" RENAME TO ' . $this->ensureIdentifiersLength($new_name, $index_name, $index_type));
-       }
-     }
- 
-@@ -613,11 +613,11 @@ public function renameTable($table, $new_name) {
-         // subsequent table renames.
-         $new_sequence = $this->ensureIdentifiersLength($new_name, $field, 'seq', '_');
- 
--        $this->connection->query('ALTER SEQUENCE ' . $old_sequence . ' RENAME TO ' . $new_sequence);
-+        $this->executeDdlStatement('ALTER SEQUENCE ' . $old_sequence . ' RENAME TO ' . $new_sequence);
-       }
-     }
-     // Now rename the table.
--    $this->connection->query('ALTER TABLE {' . $table . '} RENAME TO ' . $prefixInfo['table']);
-+    $this->executeDdlStatement('ALTER TABLE {' . $table . '} RENAME TO ' . $prefixInfo['table']);
-     $this->resetTableInformation($table);
-   }
- 
-@@ -629,7 +629,7 @@ public function dropTable($table) {
-       return FALSE;
-     }
- 
--    $this->connection->query('DROP TABLE {' . $table . '}');
-+    $this->executeDdlStatement('DROP TABLE {' . $table . '}');
-     $this->resetTableInformation($table);
-     return TRUE;
-   }
-@@ -658,7 +658,7 @@ public function addField($table, $field, $spec, $new_keys = []) {
-     }
-     $query = 'ALTER TABLE {' . $table . '} ADD COLUMN ';
-     $query .= $this->createFieldSql($field, $this->processField($spec));
--    $this->connection->query($query);
-+    $this->executeDdlStatement($query);
-     if (isset($spec['initial_from_field'])) {
-       if (isset($spec['initial'])) {
-         $expression = 'COALESCE(' . $spec['initial_from_field'] . ', :default_initial_value)';
-@@ -678,7 +678,7 @@ public function addField($table, $field, $spec, $new_keys = []) {
-         ->execute();
-     }
-     if ($fix_null) {
--      $this->connection->query("ALTER TABLE {" . $table . "} ALTER $field SET NOT NULL");
-+      $this->executeDdlStatement("ALTER TABLE {" . $table . "} ALTER $field SET NOT NULL");
-     }
-     if (isset($new_keys)) {
-       // Make sure to drop the existing primary key before adding a new one.
-@@ -691,7 +691,7 @@ public function addField($table, $field, $spec, $new_keys = []) {
-     }
-     // Add column comment.
-     if (!empty($spec['description'])) {
--      $this->connection->query('COMMENT ON COLUMN {' . $table . '}.' . $field . ' IS ' . $this->prepareComment($spec['description']));
-+      $this->executeDdlStatement('COMMENT ON COLUMN {' . $table . '}.' . $field . ' IS ' . $this->prepareComment($spec['description']));
-     }
-     $this->resetTableInformation($table);
-   }
-@@ -704,7 +704,7 @@ public function dropField($table, $field) {
-       return FALSE;
-     }
- 
--    $this->connection->query('ALTER TABLE {' . $table . '} DROP COLUMN "' . $field . '"');
-+    $this->executeDdlStatement('ALTER TABLE {' . $table . '} DROP COLUMN "' . $field . '"');
-     $this->resetTableInformation($table);
-     return TRUE;
-   }
-@@ -778,7 +778,7 @@ public function addPrimaryKey($table, $fields) {
-       throw new SchemaObjectExistsException("Cannot add primary key to table '$table': primary key already exists.");
-     }
- 
--    $this->connection->query('ALTER TABLE {' . $table . '} ADD CONSTRAINT ' . $this->ensureIdentifiersLength($table, '', 'pkey') . ' PRIMARY KEY (' . $this->createPrimaryKeySql($fields) . ')');
-+    $this->executeDdlStatement('ALTER TABLE {' . $table . '} ADD CONSTRAINT ' . $this->ensureIdentifiersLength($table, '', 'pkey') . ' PRIMARY KEY (' . $this->createPrimaryKeySql($fields) . ')');
-     $this->resetTableInformation($table);
-   }
- 
-@@ -790,7 +790,7 @@ public function dropPrimaryKey($table) {
-       return FALSE;
-     }
- 
--    $this->connection->query('ALTER TABLE {' . $table . '} DROP CONSTRAINT ' . $this->ensureIdentifiersLength($table, '', 'pkey'));
-+    $this->executeDdlStatement('ALTER TABLE {' . $table . '} DROP CONSTRAINT ' . $this->ensureIdentifiersLength($table, '', 'pkey'));
-     $this->resetTableInformation($table);
-     return TRUE;
-   }
-@@ -819,7 +819,7 @@ public function addUniqueKey($table, $name, $fields) {
-     // Use the createPrimaryKeySql(), which already discards any prefix lengths
-     // passed as part of the key column specifiers. (Postgres doesn't support
-     // setting a prefix length for PRIMARY or UNIQUE indices.)
--    $this->connection->query('ALTER TABLE {' . $table . '} ADD CONSTRAINT ' . $this->ensureIdentifiersLength($table, $name, 'key') . ' UNIQUE (' . $this->createPrimaryKeySql($fields) . ')');
-+    $this->executeDdlStatement('ALTER TABLE {' . $table . '} ADD CONSTRAINT ' . $this->ensureIdentifiersLength($table, $name, 'key') . ' UNIQUE (' . $this->createPrimaryKeySql($fields) . ')');
-     $this->resetTableInformation($table);
-   }
- 
-@@ -831,7 +831,7 @@ public function dropUniqueKey($table, $name) {
-       return FALSE;
-     }
- 
--    $this->connection->query('ALTER TABLE {' . $table . '} DROP CONSTRAINT ' . $this->ensureIdentifiersLength($table, $name, 'key'));
-+    $this->executeDdlStatement('ALTER TABLE {' . $table . '} DROP CONSTRAINT ' . $this->ensureIdentifiersLength($table, $name, 'key'));
-     $this->resetTableInformation($table);
-     return TRUE;
-   }
-@@ -847,7 +847,7 @@ public function addIndex($table, $name, $fields, array $spec) {
-       throw new SchemaObjectExistsException("Cannot add index '$name' to table '$table': index already exists.");
-     }
- 
--    $this->connection->query($this->_createIndexSql($table, $name, $fields));
-+    $this->executeDdlStatement($this->_createIndexSql($table, $name, $fields));
-     $this->resetTableInformation($table);
-   }
- 
-@@ -859,7 +859,7 @@ public function dropIndex($table, $name) {
-       return FALSE;
-     }
- 
--    $this->connection->query('DROP INDEX ' . $this->defaultSchema . '.' . $this->ensureIdentifiersLength($table, $name, 'idx'));
-+    $this->executeDdlStatement('DROP INDEX ' . $this->defaultSchema . '.' . $this->ensureIdentifiersLength($table, $name, 'idx'));
-     $this->resetTableInformation($table);
-     return TRUE;
-   }
-@@ -938,15 +938,15 @@ public function changeField($table, $field, $field_new, $spec, $new_keys = []) {
-     if (!empty($seq_name)) {
-       // We need to add CASCADE otherwise we cannot alter the sequence because
-       // the table depends on it.
--      $this->connection->query('DROP SEQUENCE IF EXISTS ' . $seq_name . ' CASCADE');
-+      $this->executeDdlStatement('DROP SEQUENCE IF EXISTS ' . $seq_name . ' CASCADE');
-     }
- 
-     foreach ($field_info as $check) {
--      $this->connection->query('ALTER TABLE {' . $table . '} DROP CONSTRAINT [' . $check . ']');
-+      $this->executeDdlStatement('ALTER TABLE {' . $table . '} DROP CONSTRAINT [' . $check . ']');
-     }
- 
-     // Remove old default.
--    $this->connection->query('ALTER TABLE {' . $table . '} ALTER COLUMN [' . $field . '] DROP DEFAULT');
-+    $this->executeDdlStatement('ALTER TABLE {' . $table . '} ALTER COLUMN [' . $field . '] DROP DEFAULT');
- 
-     // Convert field type.
-     // Usually, we do this via a simple typecast 'USING fieldname::type'. But
-@@ -956,10 +956,10 @@ public function changeField($table, $field, $field_new, $spec, $new_keys = []) {
-     $is_bytea = !empty($table_information->blob_fields[$field]);
-     if ($spec['pgsql_type'] != 'bytea') {
-       if ($is_bytea) {
--        $this->connection->query('ALTER TABLE {' . $table . '} ALTER [' . $field . '] TYPE ' . $field_def . ' USING convert_from([' . $field . ']' . ", 'UTF8')");
-+        $this->executeDdlStatement('ALTER TABLE {' . $table . '} ALTER [' . $field . '] TYPE ' . $field_def . ' USING convert_from([' . $field . ']' . ", 'UTF8')");
-       }
-       else {
--        $this->connection->query('ALTER TABLE {' . $table . '} ALTER [' . $field . '] TYPE ' . $field_def . ' USING [' . $field . ']::' . $field_def);
-+        $this->executeDdlStatement('ALTER TABLE {' . $table . '} ALTER [' . $field . '] TYPE ' . $field_def . ' USING [' . $field . ']::' . $field_def);
-       }
-     }
-     else {
-@@ -968,7 +968,7 @@ public function changeField($table, $field, $field_new, $spec, $new_keys = []) {
-         // Convert to a bytea type by using the SQL replace() function to
-         // convert any single backslashes in the field content to double
-         // backslashes ('\' to '\\').
--        $this->connection->query('ALTER TABLE {' . $table . '} ALTER [' . $field . '] TYPE ' . $field_def . ' USING decode(replace("' . $field . '"' . ", E'\\\\', E'\\\\\\\\'), 'escape');");
-+        $this->executeDdlStatement('ALTER TABLE {' . $table . '} ALTER [' . $field . '] TYPE ' . $field_def . ' USING decode(replace("' . $field . '"' . ", E'\\\\', E'\\\\\\\\'), 'escape');");
-       }
-     }
- 
-@@ -979,7 +979,7 @@ public function changeField($table, $field, $field_new, $spec, $new_keys = []) {
-       else {
-         $null_action = 'DROP NOT NULL';
-       }
--      $this->connection->query('ALTER TABLE {' . $table . '} ALTER [' . $field . '] ' . $null_action);
-+      $this->executeDdlStatement('ALTER TABLE {' . $table . '} ALTER [' . $field . '] ' . $null_action);
-     }
- 
-     if (in_array($spec['pgsql_type'], ['serial', 'bigserial'])) {
-@@ -987,31 +987,31 @@ public function changeField($table, $field, $field_new, $spec, $new_keys = []) {
-       // not when altering. Because of that, the sequence needs to be created
-       // and initialized by hand.
-       $seq = $this->connection->makeSequenceName($table, $field_new);
--      $this->connection->query("CREATE SEQUENCE " . $seq . " OWNED BY {" . $table . "}.[" . $field_new . ']');
-+      $this->executeDdlStatement("CREATE SEQUENCE " . $seq . " OWNED BY {" . $table . "}.[" . $field_new . ']');
-       // Set sequence to maximal field value to not conflict with existing
-       // entries.
-       $this->connection->query("SELECT setval('" . $seq . "', MAX([" . $field . "])) FROM {" . $table . "}");
--      $this->connection->query('ALTER TABLE {' . $table . '} ALTER [' . $field . '] SET DEFAULT nextval(' . $this->connection->quote($seq) . ')');
-+      $this->executeDdlStatement('ALTER TABLE {' . $table . '} ALTER [' . $field . '] SET DEFAULT nextval(' . $this->connection->quote($seq) . ')');
-     }
- 
-     // Rename the column if necessary.
-     if ($field != $field_new) {
--      $this->connection->query('ALTER TABLE {' . $table . '} RENAME [' . $field . '] TO [' . $field_new . ']');
-+      $this->executeDdlStatement('ALTER TABLE {' . $table . '} RENAME [' . $field . '] TO [' . $field_new . ']');
-     }
- 
-     // Add unsigned check if necessary.
-     if (!empty($spec['unsigned'])) {
--      $this->connection->query('ALTER TABLE {' . $table . '} ADD CHECK ([' . $field_new . '] >= 0)');
-+      $this->executeDdlStatement('ALTER TABLE {' . $table . '} ADD CHECK ([' . $field_new . '] >= 0)');
-     }
- 
-     // Add default if necessary.
-     if (isset($spec['default'])) {
--      $this->connection->query('ALTER TABLE {' . $table . '} ALTER COLUMN [' . $field_new . '] SET DEFAULT ' . $this->escapeDefaultValue($spec['default']));
-+      $this->executeDdlStatement('ALTER TABLE {' . $table . '} ALTER COLUMN [' . $field_new . '] SET DEFAULT ' . $this->escapeDefaultValue($spec['default']));
-     }
- 
-     // Change description if necessary.
-     if (!empty($spec['description'])) {
--      $this->connection->query('COMMENT ON COLUMN {' . $table . '}.[' . $field_new . '] IS ' . $this->prepareComment($spec['description']));
-+      $this->executeDdlStatement('COMMENT ON COLUMN {' . $table . '}.[' . $field_new . '] IS ' . $this->prepareComment($spec['description']));
-     }
- 
-     if (isset($new_keys)) {
-diff --git a/core/modules/sqlite/src/Driver/Database/sqlite/Schema.php b/core/modules/sqlite/src/Driver/Database/sqlite/Schema.php
-index 64bdffa8c80..4e11322c8eb 100644
---- a/core/modules/sqlite/src/Driver/Database/sqlite/Schema.php
-+++ b/core/modules/sqlite/src/Driver/Database/sqlite/Schema.php
-@@ -272,7 +272,7 @@ public function renameTable($table, $new_name) {
-     // the table with curly braces in case the db_prefix contains a reference
-     // to a database outside of our existing database.
-     $info = $this->getPrefixInfo($new_name);
--    $this->connection->query('ALTER TABLE {' . $table . '} RENAME TO [' . $info['table'] . ']');
-+    $this->executeDdlStatement('ALTER TABLE {' . $table . '} RENAME TO [' . $info['table'] . ']');
- 
-     // Drop the indexes, there is no RENAME INDEX command in SQLite.
-     if (!empty($schema['unique keys'])) {
-@@ -289,7 +289,7 @@ public function renameTable($table, $new_name) {
-     // Recreate the indexes.
-     $statements = $this->createIndexSql($new_name, $schema);
-     foreach ($statements as $statement) {
--      $this->connection->query($statement);
-+      $this->executeDdlStatement($statement);
-     }
-   }
- 
-@@ -301,7 +301,7 @@ public function dropTable($table) {
-       return FALSE;
-     }
-     $this->connection->tableDropped = TRUE;
--    $this->connection->query('DROP TABLE {' . $table . '}');
-+    $this->executeDdlStatement('DROP TABLE {' . $table . '}');
-     return TRUE;
-   }
- 
-@@ -326,7 +326,7 @@ public function addField($table, $field, $specification, $keys_new = []) {
-       // When we don't have to create new keys and we are not creating a
-       // NOT NULL column without a default value, we can use the quicker version.
-       $query = 'ALTER TABLE {' . $table . '} ADD ' . $this->createFieldSql($field, $this->processField($specification));
--      $this->connection->query($query);
-+      $this->executeDdlStatement($query);
- 
-       // Apply the initial value if set.
-       if (isset($specification['initial_from_field'])) {
-@@ -683,7 +683,7 @@ public function addIndex($table, $name, $fields, array $spec) {
-     $schema['indexes'][$name] = $fields;
-     $statements = $this->createIndexSql($table, $schema);
-     foreach ($statements as $statement) {
--      $this->connection->query($statement);
-+      $this->executeDdlStatement($statement);
-     }
-   }
- 
-@@ -706,7 +706,7 @@ public function dropIndex($table, $name) {
- 
-     $info = $this->getPrefixInfo($table);
- 
--    $this->connection->query('DROP INDEX [' . $info['schema'] . '].[' . $info['table'] . '_' . $name . ']');
-+    $this->executeDdlStatement('DROP INDEX [' . $info['schema'] . '].[' . $info['table'] . '_' . $name . ']');
-     return TRUE;
-   }
- 
-@@ -724,7 +724,7 @@ public function addUniqueKey($table, $name, $fields) {
-     $schema['unique keys'][$name] = $fields;
-     $statements = $this->createIndexSql($table, $schema);
-     foreach ($statements as $statement) {
--      $this->connection->query($statement);
-+      $this->executeDdlStatement($statement);
-     }
-   }
- 
-@@ -738,7 +738,7 @@ public function dropUniqueKey($table, $name) {
- 
-     $info = $this->getPrefixInfo($table);
- 
--    $this->connection->query('DROP INDEX [' . $info['schema'] . '].[' . $info['table'] . '_' . $name . ']');
-+    $this->executeDdlStatement('DROP INDEX [' . $info['schema'] . '].[' . $info['table'] . '_' . $name . ']');
-     return TRUE;
-   }
- 
-diff --git a/core/tests/Drupal/KernelTests/Core/Cache/EndOfTransactionQueriesTest.php b/core/tests/Drupal/KernelTests/Core/Cache/EndOfTransactionQueriesTest.php
-index 9ff9b1d488c..9e3ea67c055 100644
---- a/core/tests/Drupal/KernelTests/Core/Cache/EndOfTransactionQueriesTest.php
-+++ b/core/tests/Drupal/KernelTests/Core/Cache/EndOfTransactionQueriesTest.php
-@@ -75,6 +75,13 @@ public function testEntitySave(): void {
-     Database::startLog('testEntitySave');
-     $entity->save();
- 
-+    // Entity save should have deferred cache invalidation to after transaction
-+    // completion for the "entity_test_list", "entity_test_list:entity_test"
-+    // and "4xx-response" tags. Since cache invalidation is a MERGE database
-+    // operation, and in core drivers each MERGE is split in two SELECT and
-+    // INSERT|UPDATE operations, we expect the last 6 logged database queries
-+    // to be related to the {cachetags} table.
-+    $expected_tail_length = 6;
-     $executed_statements = [];
-     foreach (Database::getLog('testEntitySave') as $log) {
-       // Exclude transaction related statements from the log.
-@@ -87,9 +94,10 @@ public function testEntitySave(): void {
-       }
-       $executed_statements[] = $log['query'];
-     }
--    $last_statement_index = max(array_keys($executed_statements));
--    $cachetag_statements = array_keys($this->getStatementsForTable($executed_statements, 'cachetags'));
--    $this->assertSame($last_statement_index - count($cachetag_statements) + 1, min($cachetag_statements), 'All of the last queries in the transaction are for the "cachetags" table.');
-+    $expected_post_transaction_statements = array_keys(array_fill(array_key_last($executed_statements) - $expected_tail_length + 1, $expected_tail_length, TRUE));
-+    $cachetag_statements = $this->getStatementsForTable($executed_statements, 'cachetags');
-+    $tail_cachetag_statements = array_keys(array_slice($cachetag_statements, count($cachetag_statements) - $expected_tail_length, $expected_tail_length, TRUE));
-+    $this->assertSame($expected_post_transaction_statements, $tail_cachetag_statements);
- 
-     // Verify that a nested entity save occurred.
-     $this->assertSame('john doe', User::load(1)->getAccountName());
-diff --git a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
-index 3911419ca77..08c652b69e9 100644
---- a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
-+++ b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
-@@ -424,24 +424,50 @@ public function testTransactionWithDdlStatement(): void {
-       unset($transaction);
-       $this->assertRowAbsent('row');
-     }
--    else {
--      // For database servers that do not support transactional DDL,
--      // the DDL statement should commit the transaction stack.
--      $this->cleanUp();
--      $transaction = $this->createRootTransaction('', FALSE);
--      $this->insertRow('row');
--      $this->executeDDLStatement();
-+  }
- 
--      // Try to rollback the outer transaction. It should fail and void
--      // the transaction stack.
--      $transaction->rollBack();
--      $manager = $this->connection->transactionManager();
--      $reflectedTransactionState = new \ReflectionMethod($manager, 'getConnectionTransactionState');
--      $this->assertSame(ClientConnectionTransactionState::Voided, $reflectedTransactionState->invoke($manager));
-+  /**
-+   * Tests rollback after a DDL statement when no transactional DDL supported.
-+   *
-+   * @todo In drupal:12.0.0, rollBack will throw a
-+   *   TransactionOutOfOrderException. Adjust the test accordingly.
-+   */
-+  public function testRollbackAfterDdlStatementForNonTransactionalDdlDatabase(): void {
-+    if ($this->connection->supportsTransactionalDDL()) {
-+      $this->markTestSkipped('This test only works for database that do not support transactional DDL.');
-+    }
- 
--      unset($transaction);
--      $this->assertRowPresent('row');
-+    // For database servers that do not support transactional DDL,
-+    // the DDL statement should commit the transaction stack.
-+    $this->cleanUp();
-+    $transaction = $this->createRootTransaction('', FALSE);
-+    $reflectionMethod = new \ReflectionMethod(get_class($this->connection->transactionManager()), 'getConnectionTransactionState');
-+    $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
-+    $this->assertEquals(ClientConnectionTransactionState::Active, $reflectionMethod->invoke($this->connection->transactionManager()));
-+    $this->insertRow('row');
-+    $this->executeDDLStatement();
-+
-+    // Try to rollback the root transaction. Since the DDL already committed
-+    // it, it should fail.
-+    set_error_handler(static function (int $errno, string $errstr): bool {
-+      throw new \ErrorException($errstr);
-+    });
-+    try {
-+      $transaction->rollBack();
-     }
-+    catch (\ErrorException $e) {
-+      $this->assertSame('Transaction::rollBack() failed because of a prior execution of a DDL statement. In drupal:12.0.0 a TransactionOutOfOrderException will be thrown.', $e->getMessage());
-+    }
-+    finally {
-+      restore_error_handler();
-+    }
-+
-+    unset($transaction);
-+    $manager = $this->connection->transactionManager();
-+    $this->assertSame(0, $manager->stackDepth());
-+    $reflectedTransactionState = new \ReflectionMethod($manager, 'getConnectionTransactionState');
-+    $this->assertSame(ClientConnectionTransactionState::RollbackFailed, $reflectedTransactionState->invoke($manager));
-+    $this->assertRowPresent('row');
-   }
- 
-   /**
-@@ -767,6 +793,7 @@ public function testRootTransactionEndCallbackCalledOnCommit(): void {
-     $this->connection->transactionManager()->addPostTransactionCallback([$this, 'rootTransactionCallback']);
-     $this->insertRow('row');
-     $this->assertNull($this->postTransactionCallbackAction);
-+    $this->assertRowAbsent('rtcCommit');
-     unset($transaction);
-     $this->assertSame('rtcCommit', $this->postTransactionCallbackAction);
-     $this->assertRowPresent('row');
-@@ -832,6 +859,111 @@ public function testRootTransactionEndCallbackCalledAfterDdlAndDestruction(): vo
-     $this->assertRowPresent('row');
-   }
- 
-+  /**
-+   * Tests post-transaction rollback executes after a DDL statement.
-+   *
-+   * For database servers that support transactional DDL, a rollback of a
-+   * transaction including DDL statements is possible.
-+   */
-+  public function testRootTransactionEndCallbackCalledAfterDdlAndRollbackForTransactionalDdlDatabase(): void {
-+    if (!$this->connection->supportsTransactionalDDL()) {
-+      $this->markTestSkipped('This test only works for database supporting transactional DDL.');
-+    }
-+
-+    $transaction = $this->createRootTransaction('', FALSE);
-+    $this->connection->transactionManager()->addPostTransactionCallback([$this, 'rootTransactionCallback']);
-+    $this->insertRow('row');
-+    $this->assertNull($this->postTransactionCallbackAction);
-+
-+    // Callbacks are processed only when destructing the transaction.
-+    // Executing a DDL statement is not sufficient itself.
-+    // We cannot use truncate here, since it has protective code to fall back
-+    // to a transactional delete when in transaction. We drop an unrelated
-+    // table instead.
-+    $this->connection->schema()->dropTable('test_people');
-+    $this->assertNull($this->postTransactionCallbackAction);
-+    $this->assertRowAbsent('rtcCommit');
-+    $this->assertRowAbsent('rtcRollback');
-+    $this->assertRowPresent('row');
-+
-+    // Callbacks are processed only when destructing the transaction.
-+    // Executing the rollback is not sufficient by itself.
-+    $transaction->rollBack();
-+    $this->assertNull($this->postTransactionCallbackAction);
-+    $this->assertRowAbsent('rtcCommit');
-+    $this->assertRowAbsent('rtcRollback');
-+    $this->assertRowAbsent('row');
-+
-+    // Destruct the transaction.
-+    unset($transaction);
-+
-+    // The post-transaction callback should now have inserted a 'rtcRollback'
-+    // row.
-+    $this->assertSame('rtcRollback', $this->postTransactionCallbackAction);
-+    $this->assertRowAbsent('rtcCommit');
-+    $this->assertRowPresent('rtcRollback');
-+    $this->assertRowAbsent('row');
-+  }
-+
-+  /**
-+   * Tests post-transaction rollback failure after a DDL statement.
-+   *
-+   * For database servers that support transactional DDL, a rollback of a
-+   * transaction including DDL statements is not possible, since a commit
-+   * happened already. We cannot decide what should be the status of the
-+   * callback, an exception is thrown.
-+   *
-+   * @todo In drupal:12.0.0, rollBack will throw a
-+   *   TransactionOutOfOrderException. Adjust the test accordingly.
-+   */
-+  public function testRootTransactionEndCallbackFailureUponDdlAndRollbackForNonTransactionalDdlDatabase(): void {
-+    if ($this->connection->supportsTransactionalDDL()) {
-+      $this->markTestSkipped('This test only works for database that do not support transactional DDL.');
-+    }
-+
-+    $transaction = $this->createRootTransaction('', FALSE);
-+    $this->connection->transactionManager()->addPostTransactionCallback([$this, 'rootTransactionCallback']);
-+    $this->insertRow('row');
-+    $this->assertNull($this->postTransactionCallbackAction);
-+
-+    // Callbacks are processed only when destructing the transaction.
-+    // Executing a DDL statement is not sufficient itself.
-+    // We cannot use truncate here, since it has protective code to fall back
-+    // to a transactional delete when in transaction. We drop an unrelated
-+    // table instead.
-+    $this->connection->schema()->dropTable('test_people');
-+    $this->assertNull($this->postTransactionCallbackAction);
-+    $this->assertRowAbsent('rtcCommit');
-+    $this->assertRowAbsent('rtcRollback');
-+    $this->assertRowPresent('row');
-+
-+    set_error_handler(static function (int $errno, string $errstr): bool {
-+      throw new \ErrorException($errstr);
-+    });
-+    try {
-+      $transaction->rollBack();
-+    }
-+    catch (\ErrorException $e) {
-+      $this->assertSame('Transaction::rollBack() failed because of a prior execution of a DDL statement. In drupal:12.0.0 a TransactionOutOfOrderException will be thrown.', $e->getMessage());
-+    }
-+    finally {
-+      restore_error_handler();
-+    }
-+
-+    unset($transaction);
-+
-+    // The post-transaction callback should now have inserted a 'rtcRollback'
-+    // row.
-+    $this->assertSame('rtcRollback', $this->postTransactionCallbackAction);
-+    $this->assertRowAbsent('rtcCommit');
-+    $this->assertRowPresent('rtcRollback');
-+    $manager = $this->connection->transactionManager();
-+    $this->assertSame(0, $manager->stackDepth());
-+    $reflectedTransactionState = new \ReflectionMethod($manager, 'getConnectionTransactionState');
-+    $this->assertSame(ClientConnectionTransactionState::RollbackFailed, $reflectedTransactionState->invoke($manager));
-+    $this->assertRowPresent('row');
-+  }
-+
-   /**
-    * A post-transaction callback for testing purposes.
+@@ -88,12 +120,16 @@ public function getConnectionTarget(): string {
+    * {@inheritdoc}
     */
+   public function execute($args = [], $options = []) {
++    if (isset($options['fetch']) && is_int($options['fetch'])) {
++      @trigger_error("Passing the 'fetch' key as an integer to \$options in execute() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321", E_USER_DEPRECATED);
++    }
++
+     if (isset($options['fetch'])) {
+       if (is_string($options['fetch'])) {
+         // Default to an object. Note: db fields will be added to the object
+         // before the constructor is run. If you need to assign fields after
+         // the constructor is run. See https://www.drupal.org/node/315092.
+-        $this->setFetchMode(\PDO::FETCH_CLASS, $options['fetch']);
++        $this->setFetchMode(FetchAs::ClassObject, $options['fetch']);
+       }
+       else {
+         $this->setFetchMode($options['fetch']);
+@@ -114,8 +150,8 @@ public function execute($args = [], $options = []) {
+ 
+     // Prepare and execute the statement.
+     try {
+-      $statement = $this->getStatement($this->queryString, $args);
+-      $return = $statement->execute($args);
++      $this->clientStatement = $this->getStatement($this->queryString, $args);
++      $return = $this->clientExecute($args, $options);
+     }
+     catch (\Exception $e) {
+       if (isset($startEvent) && $this->connection->isEventEnabled(StatementExecutionFailureEvent::class)) {
+@@ -137,11 +173,11 @@ public function execute($args = [], $options = []) {
+ 
+     // Fetch all the data from the reply, in order to release any lock as soon
+     // as possible.
+-    $this->data = $statement->fetchAll(\PDO::FETCH_ASSOC);
+-    $this->rowCount = $this->rowCountEnabled ? $statement->rowCount() : NULL;
++    $this->data = $this->clientStatement->fetchAll($this->fetchAsToPdo(FetchAs::Associative));
++    $this->rowCount = $this->rowCountEnabled ? $this->clientStatement->rowCount() : NULL;
+     // Destroy the statement as soon as possible. See the documentation of
+     // \Drupal\sqlite\Driver\Database\sqlite\Statement for an explanation.
+-    unset($statement);
++    unset($this->clientStatement);
+     $this->markResultsetIterable($return);
+ 
+     $this->columnNames = count($this->data) > 0 ? array_keys($this->data[0]) : [];
+@@ -190,24 +226,28 @@ public function getQueryString() {
+    * {@inheritdoc}
+    */
+   public function setFetchMode($mode, $a1 = NULL, $a2 = []) {
+-    assert(in_array($mode, $this->supportedFetchModes), 'Fetch mode ' . ($this->fetchModeLiterals[$mode] ?? $mode) . ' is not supported. Use supported modes only.');
++    if (is_int($mode)) {
++      @trigger_error("Passing the \$mode argument as an integer to setFetchMode() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321", E_USER_DEPRECATED);
++      assert(in_array($mode, $this->supportedFetchModes), 'Fetch mode ' . ($this->fetchModeLiterals[$mode] ?? $mode) . ' is not supported. Use supported modes only.');
++      $mode = $this->pdoToFetchAs($mode);
++    }
+ 
+-    $this->defaultFetchStyle = $mode;
++    $this->defaultFetchMode = $mode;
++    // @todo Remove backwards compatibility statement below in drupal:12.0.0.
++    // @phpstan-ignore property.deprecated
++    $this->defaultFetchStyle = $this->fetchAsToPdo($mode);
+     switch ($mode) {
+-      case \PDO::FETCH_CLASS:
++      case FetchAs::ClassObject:
+         $this->fetchOptions['class'] = $a1;
+         if ($a2) {
+           $this->fetchOptions['constructor_args'] = $a2;
+         }
+         break;
+ 
+-      case \PDO::FETCH_COLUMN:
++      case FetchAs::Column:
+         $this->fetchOptions['column'] = $a1;
+         break;
+ 
+-      case \PDO::FETCH_INTO:
+-        $this->fetchOptions['object'] = $a1;
+-        break;
+     }
+   }
+ 
+@@ -228,6 +268,11 @@ public function rowCount() {
+    * {@inheritdoc}
+    */
+   public function fetch($fetch_style = NULL, $cursor_orientation = \PDO::FETCH_ORI_NEXT, $cursor_offset = NULL) {
++    if (is_int($fetch_style)) {
++      @trigger_error("Passing the \$fetch_style argument as an integer to fetch() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321", E_USER_DEPRECATED);
++      $fetch_style = $this->pdoToFetchAs($fetch_style);
++    }
++
+     $currentKey = $this->getResultsetCurrentRowIndex();
+ 
+     // We can remove the current record from the prefetched data, before
+@@ -242,13 +287,13 @@ public function fetch($fetch_style = NULL, $cursor_orientation = \PDO::FETCH_ORI
+     // Now, format the next prefetched record according to the required fetch
+     // style.
+     $rowAssoc = $this->data[$currentKey];
+-    $mode = $fetch_style ?? $this->defaultFetchStyle;
++    $mode = $fetch_style ?? $this->defaultFetchMode;
+     $row = match($mode) {
+-      \PDO::FETCH_ASSOC => $rowAssoc,
+-      \PDO::FETCH_CLASS, \PDO::FETCH_CLASS | \PDO::FETCH_PROPS_LATE => $this->assocToClass($rowAssoc, $this->fetchOptions['class'], $this->fetchOptions['constructor_args']),
+-      \PDO::FETCH_COLUMN => $this->assocToColumn($rowAssoc, $this->columnNames, $this->fetchOptions['column']),
+-      \PDO::FETCH_NUM => $this->assocToNum($rowAssoc),
+-      \PDO::FETCH_OBJ => $this->assocToObj($rowAssoc),
++      FetchAs::Associative => $rowAssoc,
++      FetchAs::ClassObject => $this->assocToClass($rowAssoc, $this->fetchOptions['class'], $this->fetchOptions['constructor_args']),
++      FetchAs::Column => $this->assocToColumn($rowAssoc, $this->columnNames, $this->fetchOptions['column']),
++      FetchAs::List => $this->assocToNum($rowAssoc),
++      FetchAs::Object => $this->assocToObj($rowAssoc),
+       default => throw new DatabaseExceptionWrapper('Fetch mode ' . ($this->fetchModeLiterals[$mode] ?? $mode) . ' is not supported. Use supported modes only.'),
+     };
+     $this->setResultsetCurrentRow($row);
+@@ -259,7 +304,7 @@ public function fetch($fetch_style = NULL, $cursor_orientation = \PDO::FETCH_ORI
+    * {@inheritdoc}
+    */
+   public function fetchColumn($index = 0) {
+-    if ($row = $this->fetch(\PDO::FETCH_ASSOC)) {
++    if ($row = $this->fetch(FetchAs::Associative)) {
+       return $row[$this->columnNames[$index]];
+     }
+     return FALSE;
+@@ -277,29 +322,33 @@ public function fetchField($index = 0) {
+    */
+   public function fetchObject(?string $class_name = NULL, array $constructor_arguments = []) {
+     if (!isset($class_name)) {
+-      return $this->fetch(\PDO::FETCH_OBJ);
++      return $this->fetch(FetchAs::Object);
+     }
+     $this->fetchOptions = [
+       'class' => $class_name,
+       'constructor_args' => $constructor_arguments,
+     ];
+-    return $this->fetch(\PDO::FETCH_CLASS);
++    return $this->fetch(FetchAs::ClassObject);
+   }
+ 
+   /**
+    * {@inheritdoc}
+    */
+   public function fetchAssoc() {
+-    return $this->fetch(\PDO::FETCH_ASSOC);
++    return $this->fetch(FetchAs::Associative);
+   }
+ 
+   /**
+    * {@inheritdoc}
+    */
+   public function fetchAll($mode = NULL, $column_index = NULL, $constructor_arguments = NULL) {
+-    $fetchStyle = $mode ?? $this->defaultFetchStyle;
++    if (is_int($mode)) {
++      @trigger_error("Passing the \$mode argument as an integer to fetchAll() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321", E_USER_DEPRECATED);
++      assert(in_array($mode, $this->supportedFetchModes), 'Fetch mode ' . ($this->fetchModeLiterals[$mode] ?? $mode) . ' is not supported. Use supported modes only.');
++      $mode = $this->pdoToFetchAs($mode);
++    }
+ 
+-    assert(in_array($fetchStyle, $this->supportedFetchModes), 'Fetch mode ' . ($this->fetchModeLiterals[$fetchStyle] ?? $fetchStyle) . ' is not supported. Use supported modes only.');
++    $fetchStyle = $mode ?? $this->defaultFetchMode;
+ 
+     if (isset($column_index)) {
+       $this->fetchOptions['column'] = $column_index;
+@@ -321,7 +370,7 @@ public function fetchAll($mode = NULL, $column_index = NULL, $constructor_argume
+   public function fetchCol($index = 0) {
+     if (isset($this->columnNames[$index])) {
+       $result = [];
+-      while ($row = $this->fetch(\PDO::FETCH_ASSOC)) {
++      while ($row = $this->fetch(FetchAs::Associative)) {
+         $result[] = $row[$this->columnNames[$index]];
+       }
+       return $result;
+@@ -341,7 +390,7 @@ public function fetchAllKeyed($key_index = 0, $value_index = 1) {
+     $value = $this->columnNames[$value_index];
+ 
+     $result = [];
+-    while ($row = $this->fetch(\PDO::FETCH_ASSOC)) {
++    while ($row = $this->fetch(FetchAs::Associative)) {
+       $result[$row[$key]] = $row[$value];
+     }
+     return $result;
+@@ -351,10 +400,13 @@ public function fetchAllKeyed($key_index = 0, $value_index = 1) {
+    * {@inheritdoc}
+    */
+   public function fetchAllAssoc($key, $fetch_style = NULL) {
+-    $fetchStyle = $fetch_style ?? $this->defaultFetchStyle;
++    if (is_int($fetch_style)) {
++      @trigger_error("Passing the \$fetch_style argument as an integer to fetchAllAssoc() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321", E_USER_DEPRECATED);
++      $fetch_style = $this->pdoToFetchAs($fetch_style);
++    }
+ 
+     $result = [];
+-    while ($row = $this->fetch($fetchStyle)) {
++    while ($row = $this->fetch($fetch_style ?? $this->defaultFetchMode)) {
+       $result[$this->data[$this->getResultsetCurrentRowIndex()][$key]] = $row;
+     }
+     return $result;
+diff --git a/core/lib/Drupal/Core/Database/StatementWrapperIterator.php b/core/lib/Drupal/Core/Database/StatementWrapperIterator.php
+index 980ef74ed2e..f7272d6efb7 100644
+--- a/core/lib/Drupal/Core/Database/StatementWrapperIterator.php
++++ b/core/lib/Drupal/Core/Database/StatementWrapperIterator.php
+@@ -5,6 +5,7 @@
+ use Drupal\Core\Database\Event\StatementExecutionEndEvent;
+ use Drupal\Core\Database\Event\StatementExecutionFailureEvent;
+ use Drupal\Core\Database\Event\StatementExecutionStartEvent;
++use Drupal\Core\Database\Statement\FetchAs;
+ 
+ // cSpell:ignore maxlen driverdata INOUT
+ 
+@@ -28,8 +29,9 @@
+  */
+ class StatementWrapperIterator implements \Iterator, StatementInterface {
+ 
+-  use StatementIteratorTrait;
+   use FetchModeTrait;
++  use PdoTrait;
++  use StatementIteratorTrait;
+ 
+   /**
+    * The client database Statement object.
+@@ -60,7 +62,7 @@ public function __construct(
+     protected readonly bool $rowCountEnabled = FALSE,
+   ) {
+     $this->clientStatement = $clientConnection->prepare($query, $options);
+-    $this->setFetchMode(\PDO::FETCH_OBJ);
++    $this->setFetchMode(FetchAs::Object);
+   }
+ 
+   /**
+@@ -86,11 +88,13 @@ public function getConnectionTarget(): string {
+    * {@inheritdoc}
+    */
+   public function execute($args = [], $options = []) {
++    if (isset($options['fetch']) && is_int($options['fetch'])) {
++      @trigger_error("Passing the 'fetch' key as an integer to \$options in execute() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321", E_USER_DEPRECATED);
++    }
++
+     if (isset($options['fetch'])) {
+       if (is_string($options['fetch'])) {
+-        // \PDO::FETCH_PROPS_LATE tells __construct() to run before properties
+-        // are added to the object.
+-        $this->setFetchMode(\PDO::FETCH_CLASS | \PDO::FETCH_PROPS_LATE, $options['fetch']);
++        $this->setFetchMode(FetchAs::ClassObject, $options['fetch']);
+       }
+       else {
+         $this->setFetchMode($options['fetch']);
+@@ -110,7 +114,7 @@ public function execute($args = [], $options = []) {
+     }
+ 
+     try {
+-      $return = $this->clientStatement->execute($args);
++      $return = $this->clientExecute($args, $options);
+       $this->markResultsetIterable($return);
+     }
+     catch (\Exception $e) {
+@@ -157,7 +161,7 @@ public function getQueryString() {
+    * {@inheritdoc}
+    */
+   public function fetchCol($index = 0) {
+-    return $this->fetchAll(\PDO::FETCH_COLUMN, $index);
++    return $this->fetchAll(FetchAs::Column, $index);
+   }
+ 
+   /**
+@@ -166,7 +170,7 @@ public function fetchCol($index = 0) {
+   public function fetchAllAssoc($key, $fetch = NULL) {
+     if (isset($fetch)) {
+       if (is_string($fetch)) {
+-        $this->setFetchMode(\PDO::FETCH_CLASS, $fetch);
++        $this->setFetchMode(FetchAs::ClassObject, $fetch);
+       }
+       else {
+         $this->setFetchMode($fetch);
+@@ -193,7 +197,7 @@ public function fetchAllAssoc($key, $fetch = NULL) {
+    * {@inheritdoc}
+    */
+   public function fetchAllKeyed($key_index = 0, $value_index = 1) {
+-    $this->setFetchMode(\PDO::FETCH_NUM);
++    $this->setFetchMode(FetchAs::List);
+ 
+     // Return early if the statement was already fully traversed.
+     if (!$this->isResultsetIterable) {
+@@ -229,7 +233,7 @@ public function fetchField($index = 0) {
+    * {@inheritdoc}
+    */
+   public function fetchAssoc() {
+-    return $this->fetch(\PDO::FETCH_ASSOC);
++    return $this->fetch(FetchAs::Associative);
+   }
+ 
+   /**
+@@ -269,15 +273,25 @@ public function rowCount() {
+    * {@inheritdoc}
+    */
+   public function setFetchMode($mode, $a1 = NULL, $a2 = []) {
+-    assert(in_array($mode, $this->supportedFetchModes), 'Fetch mode ' . ($this->fetchModeLiterals[$mode] ?? $mode) . ' is not supported. Use supported modes only.');
++    if (is_int($mode)) {
++      @trigger_error("Passing the \$mode argument as an integer to setFetchMode() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321", E_USER_DEPRECATED);
++      assert(in_array($mode, $this->supportedFetchModes), 'Fetch mode ' . ($this->fetchModeLiterals[$mode] ?? $mode) . ' is not supported. Use supported modes only.');
++      $pdoMode = $mode;
++    }
++    elseif ($mode instanceof FetchAs) {
++      $pdoMode = $this->fetchAsToPdo($mode);
++    }
++    else {
++      $pdoMode = $mode;
++    }
+ 
+     // Call \PDOStatement::setFetchMode to set fetch mode.
+     // \PDOStatement is picky about the number of arguments in some cases so we
+     // need to be pass the exact number of arguments we where given.
+     return match(func_num_args()) {
+-      1 => $this->clientStatement->setFetchMode($mode),
+-      2 => $this->clientStatement->setFetchMode($mode, $a1),
+-      default => $this->clientStatement->setFetchMode($mode, $a1, $a2),
++      1 => $this->clientStatement->setFetchMode($pdoMode),
++      2 => $this->clientStatement->setFetchMode($pdoMode, $a1),
++      default => $this->clientStatement->setFetchMode($pdoMode, $a1, $a2),
+     };
+   }
+ 
+@@ -285,17 +299,13 @@ public function setFetchMode($mode, $a1 = NULL, $a2 = []) {
+    * {@inheritdoc}
+    */
+   public function fetch($mode = NULL, $cursor_orientation = NULL, $cursor_offset = NULL) {
+-    assert(!isset($mode) || in_array($mode, $this->supportedFetchModes), 'Fetch mode ' . ($this->fetchModeLiterals[$mode] ?? $mode) . ' is not supported. Use supported modes only.');
++    if (is_int($mode)) {
++      @trigger_error("Passing the \$mode argument as an integer to fetch() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321", E_USER_DEPRECATED);
++      assert(in_array($mode, $this->supportedFetchModes), 'Fetch mode ' . ($this->fetchModeLiterals[$mode] ?? $mode) . ' is not supported. Use supported modes only.');
++      $mode = $this->pdoToFetchAs($mode);
++    }
+ 
+-    // Call \PDOStatement::fetchAll to fetch all rows.
+-    // \PDOStatement is picky about the number of arguments in some cases so we
+-    // need to pass the exact number of arguments we were given.
+-    $row = match(func_num_args()) {
+-      0 => $this->clientStatement->fetch(),
+-      1 => $this->clientStatement->fetch($mode),
+-      2 => $this->clientStatement->fetch($mode, $cursor_orientation),
+-      default => $this->clientStatement->fetch($mode, $cursor_orientation, $cursor_offset),
+-    };
++    $row = $this->clientFetch($mode, $cursor_orientation, $cursor_offset);
+ 
+     if ($row === FALSE) {
+       $this->markResultsetFetchingComplete();
+@@ -310,7 +320,13 @@ public function fetch($mode = NULL, $cursor_orientation = NULL, $cursor_offset =
+    * {@inheritdoc}
+    */
+   public function fetchAll($mode = NULL, $column_index = NULL, $constructor_arguments = NULL) {
+-    assert(!isset($mode) || in_array($mode, $this->supportedFetchModes), 'Fetch mode ' . ($this->fetchModeLiterals[$mode] ?? $mode) . ' is not supported. Use supported modes only.');
++    if (is_int($mode)) {
++      assert(in_array($mode, $this->supportedFetchModes), 'Fetch mode ' . ($this->fetchModeLiterals[$mode] ?? $mode) . ' is not supported. Use supported modes only.');
++      @trigger_error("Passing the \$mode argument as an integer to fetch() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321", E_USER_DEPRECATED);
++    }
++    elseif ($mode instanceof FetchAs) {
++      $mode = $this->fetchAsToPdo($mode);
++    }
+ 
+     // Call \PDOStatement::fetchAll to fetch all rows.
+     // \PDOStatement is picky about the number of arguments in some cases so we
+diff --git a/core/lib/Drupal/Core/Entity/Sql/SqlContentEntityStorage.php b/core/lib/Drupal/Core/Entity/Sql/SqlContentEntityStorage.php
+index 93029c399df..ae8a23f3350 100644
+--- a/core/lib/Drupal/Core/Entity/Sql/SqlContentEntityStorage.php
++++ b/core/lib/Drupal/Core/Entity/Sql/SqlContentEntityStorage.php
+@@ -7,6 +7,7 @@
+ use Drupal\Core\Database\Connection;
+ use Drupal\Core\Database\DatabaseExceptionWrapper;
+ use Drupal\Core\Database\SchemaException;
++use Drupal\Core\Database\Statement\FetchAs;
+ use Drupal\Core\Entity\ContentEntityInterface;
+ use Drupal\Core\Entity\ContentEntityStorageBase;
+ use Drupal\Core\Entity\ContentEntityTypeInterface;
+@@ -530,7 +531,7 @@ protected function loadFromSharedTables(array &$values, array &$translations, $l
+       // latest revision. Otherwise we fall back to the data table.
+       $table = $this->revisionDataTable ?: $this->dataTable;
+       $alias = $this->revisionDataTable ? 'revision' : 'data';
+-      $query = $this->database->select($table, $alias, ['fetch' => \PDO::FETCH_ASSOC])
++      $query = $this->database->select($table, $alias, ['fetch' => FetchAs::Associative])
+         ->fields($alias)
+         ->condition($alias . '.' . $record_key, array_keys($values), 'IN')
+         ->orderBy($alias . '.' . $record_key);
+@@ -1645,7 +1646,7 @@ protected function readFieldItemsToPurge(FieldDefinitionInterface $field_definit
+     $table_name = $table_mapping->getDedicatedDataTableName($storage_definition, $storage_definition->isDeleted());
+ 
+     // Get the entities which we want to purge first.
+-    $entity_query = $this->database->select($table_name, 't', ['fetch' => \PDO::FETCH_ASSOC]);
++    $entity_query = $this->database->select($table_name, 't', ['fetch' => FetchAs::Associative]);
+     $or = $entity_query->orConditionGroup();
+     foreach ($storage_definition->getColumns() as $column_name => $data) {
+       $or->isNotNull($table_mapping->getFieldColumnName($storage_definition, $column_name));
+@@ -1665,7 +1666,7 @@ protected function readFieldItemsToPurge(FieldDefinitionInterface $field_definit
+     $entities = [];
+     $items_by_entity = [];
+     foreach ($entity_query->execute() as $row) {
+-      $item_query = $this->database->select($table_name, 't', ['fetch' => \PDO::FETCH_ASSOC])
++      $item_query = $this->database->select($table_name, 't', ['fetch' => FetchAs::Associative])
+         ->fields('t')
+         ->condition('entity_id', $row['entity_id'])
+         ->condition('deleted', 1)
+diff --git a/core/lib/Drupal/Core/Menu/MenuTreeStorage.php b/core/lib/Drupal/Core/Menu/MenuTreeStorage.php
+index 78f1d3de5d2..394621c0a4b 100644
+--- a/core/lib/Drupal/Core/Menu/MenuTreeStorage.php
++++ b/core/lib/Drupal/Core/Menu/MenuTreeStorage.php
+@@ -10,6 +10,7 @@
+ use Drupal\Core\Database\Connection;
+ use Drupal\Core\Database\DatabaseException;
+ use Drupal\Core\Database\Query\SelectInterface;
++use Drupal\Core\Database\Statement\FetchAs;
+ 
+ // cspell:ignore mlid
+ 
+@@ -642,7 +643,7 @@ public function loadByProperties(array $properties) {
+       }
+       $query->condition($name, $value);
+     }
+-    $loaded = $this->safeExecuteSelect($query)->fetchAllAssoc('id', \PDO::FETCH_ASSOC);
++    $loaded = $this->safeExecuteSelect($query)->fetchAllAssoc('id', FetchAs::Associative);
+     foreach ($loaded as $id => $link) {
+       $loaded[$id] = $this->prepareLink($link);
+     }
+@@ -671,7 +672,7 @@ public function loadByRoute($route_name, array $route_parameters = [], $menu_nam
+     $query->orderBy('depth');
+     $query->orderBy('weight');
+     $query->orderBy('id');
+-    $loaded = $this->safeExecuteSelect($query)->fetchAllAssoc('id', \PDO::FETCH_ASSOC);
++    $loaded = $this->safeExecuteSelect($query)->fetchAllAssoc('id', FetchAs::Associative);
+     foreach ($loaded as $id => $link) {
+       $loaded[$id] = $this->prepareLink($link);
+     }
+@@ -688,7 +689,7 @@ public function loadMultiple(array $ids) {
+       $query = $this->connection->select($this->table, NULL, $this->options);
+       $query->fields($this->table, $this->definitionFields());
+       $query->condition('id', $missing_ids, 'IN');
+-      $loaded = $this->safeExecuteSelect($query)->fetchAllAssoc('id', \PDO::FETCH_ASSOC);
++      $loaded = $this->safeExecuteSelect($query)->fetchAllAssoc('id', FetchAs::Associative);
+       foreach ($loaded as $id => $link) {
+         $this->definitions[$id] = $this->prepareLink($link);
+       }
+@@ -734,7 +735,7 @@ protected function loadFullMultiple(array $ids) {
+     $query = $this->connection->select($this->table, NULL, $this->options);
+     $query->fields($this->table);
+     $query->condition('id', $ids, 'IN');
+-    $loaded = $this->safeExecuteSelect($query)->fetchAllAssoc('id', \PDO::FETCH_ASSOC);
++    $loaded = $this->safeExecuteSelect($query)->fetchAllAssoc('id', FetchAs::Associative);
+     foreach ($loaded as &$link) {
+       foreach ($this->serializedFields() as $name) {
+         if (isset($link[$name])) {
+@@ -755,7 +756,7 @@ public function getRootPathIds($id) {
+     //   https://www.drupal.org/node/2302043
+     $subquery->fields($this->table, ['p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7', 'p8', 'p9']);
+     $subquery->condition('id', $id);
+-    $result = current($subquery->execute()->fetchAll(\PDO::FETCH_ASSOC));
++    $result = current($subquery->execute()->fetchAll(FetchAs::Associative));
+     $ids = array_filter($result);
+     if ($ids) {
+       $query = $this->connection->select($this->table, NULL, $this->options);
+@@ -942,7 +943,7 @@ protected function loadLinks($menu_name, MenuTreeParameters $parameters) {
+       }
+     }
+ 
+-    $links = $this->safeExecuteSelect($query)->fetchAllAssoc('id', \PDO::FETCH_ASSOC);
++    $links = $this->safeExecuteSelect($query)->fetchAllAssoc('id', FetchAs::Associative);
+ 
+     return $links;
+   }
+diff --git a/core/lib/Drupal/Core/Routing/RouteProvider.php b/core/lib/Drupal/Core/Routing/RouteProvider.php
+index 132f89631b0..b9f76950c06 100644
+--- a/core/lib/Drupal/Core/Routing/RouteProvider.php
++++ b/core/lib/Drupal/Core/Routing/RouteProvider.php
+@@ -5,6 +5,7 @@
+ use Drupal\Core\Cache\Cache;
+ use Drupal\Core\Cache\CacheBackendInterface;
+ use Drupal\Core\Cache\CacheTagsInvalidatorInterface;
++use Drupal\Core\Database\Statement\FetchAs;
+ use Drupal\Core\Language\LanguageInterface;
+ use Drupal\Core\Language\LanguageManagerInterface;
+ use Drupal\Core\Path\CurrentPathStack;
+@@ -371,7 +372,7 @@ protected function getRoutesByPath($path) {
+         ':patterns[]' => $ancestors,
+         ':count_parts' => count($parts),
+       ])
+-        ->fetchAll(\PDO::FETCH_ASSOC);
++        ->fetchAll(FetchAs::Associative);
+     }
+     catch (\Exception) {
+       $routes = [];
+diff --git a/core/modules/migrate/src/Plugin/migrate/id_map/Sql.php b/core/modules/migrate/src/Plugin/migrate/id_map/Sql.php
+index 1df1b2f96c7..c71e8efea0f 100644
+--- a/core/modules/migrate/src/Plugin/migrate/id_map/Sql.php
++++ b/core/modules/migrate/src/Plugin/migrate/id_map/Sql.php
+@@ -6,6 +6,7 @@
+ use Drupal\Core\Database\DatabaseException;
+ use Drupal\Core\Database\DatabaseExceptionWrapper;
+ use Drupal\Core\Database\Exception\SchemaTableKeyTooLargeException;
++use Drupal\Core\Database\Statement\FetchAs;
+ use Drupal\Core\Field\BaseFieldDefinition;
+ use Drupal\Core\Plugin\ContainerFactoryPluginInterface;
+ use Drupal\Core\Plugin\PluginBase;
+@@ -655,7 +656,7 @@ public function lookupDestinationIds(array $source_id_values) {
+     }
+ 
+     try {
+-      return $query->execute()->fetchAll(\PDO::FETCH_NUM);
++      return $query->execute()->fetchAll(FetchAs::List);
+     }
+     catch (DatabaseExceptionWrapper) {
+       // It's possible that the query will cause an exception to be thrown. For
+diff --git a/core/modules/migrate/src/Plugin/migrate/source/SqlBase.php b/core/modules/migrate/src/Plugin/migrate/source/SqlBase.php
+index 090e9383713..f1ce4af8d15 100644
+--- a/core/modules/migrate/src/Plugin/migrate/source/SqlBase.php
++++ b/core/modules/migrate/src/Plugin/migrate/source/SqlBase.php
+@@ -5,6 +5,7 @@
+ use Drupal\Core\Database\ConnectionNotDefinedException;
+ use Drupal\Core\Database\Database;
+ use Drupal\Core\Database\DatabaseException;
++use Drupal\Core\Database\Statement\FetchAs;
+ use Drupal\Core\Plugin\ContainerFactoryPluginInterface;
+ use Drupal\Core\State\StateInterface;
+ use Drupal\migrate\Exception\RequirementsException;
+@@ -224,7 +225,7 @@ public function checkRequirements() {
+    * Wrapper for database select.
+    */
+   protected function select($table, $alias = NULL, array $options = []) {
+-    $options['fetch'] = \PDO::FETCH_ASSOC;
++    $options['fetch'] = FetchAs::Associative;
+     return $this->getDatabase()->select($table, $alias, $options);
+   }
+ 
+@@ -347,7 +348,7 @@ protected function initializeIterator() {
+       $this->query->range($this->batch * $this->batchSize, $this->batchSize);
+     }
+     $statement = $this->query->execute();
+-    $statement->setFetchMode(\PDO::FETCH_ASSOC);
++    $statement->setFetchMode(FetchAs::Associative);
+     return new \IteratorIterator($statement);
+   }
+ 
+diff --git a/core/modules/migrate/tests/src/Kernel/SqlBaseTest.php b/core/modules/migrate/tests/src/Kernel/SqlBaseTest.php
+index ad1b0f0eeb9..79b9b2c3874 100644
+--- a/core/modules/migrate/tests/src/Kernel/SqlBaseTest.php
++++ b/core/modules/migrate/tests/src/Kernel/SqlBaseTest.php
+@@ -6,6 +6,7 @@
+ 
+ use Drupal\Core\Database\Query\ConditionInterface;
+ use Drupal\Core\Database\Query\SelectInterface;
++use Drupal\Core\Database\Statement\FetchAs;
+ use Drupal\Core\Database\StatementInterface;
+ use Drupal\migrate\Exception\RequirementsException;
+ use Drupal\Core\Database\Database;
+@@ -173,7 +174,7 @@ public function testHighWater($high_water = NULL, array $query_result = []): voi
+     }
+ 
+     $statement = $this->createMock(StatementInterface::class);
+-    $statement->expects($this->atLeastOnce())->method('setFetchMode')->with(\PDO::FETCH_ASSOC);
++    $statement->expects($this->atLeastOnce())->method('setFetchMode')->with(FetchAs::Associative);
+     $query = $this->createMock(SelectInterface::class);
+     $query->method('execute')->willReturn($statement);
+     $query->expects($this->atLeastOnce())->method('orderBy')->with('order', 'ASC');
+diff --git a/core/modules/migrate_drupal/src/MigrationConfigurationTrait.php b/core/modules/migrate_drupal/src/MigrationConfigurationTrait.php
+index 035b2e5fb66..1af72b9c3d9 100644
+--- a/core/modules/migrate_drupal/src/MigrationConfigurationTrait.php
++++ b/core/modules/migrate_drupal/src/MigrationConfigurationTrait.php
+@@ -5,6 +5,7 @@
+ use Drupal\Core\Database\Connection;
+ use Drupal\Core\Database\Database;
+ use Drupal\Core\Database\DatabaseExceptionWrapper;
++use Drupal\Core\Database\Statement\FetchAs;
+ use Drupal\migrate\Exception\RequirementsException;
+ use Drupal\migrate\Plugin\RequirementsInterface;
+ 
+@@ -70,7 +71,7 @@ protected function getSystemData(Connection $connection) {
+     $system_data = [];
+     try {
+       $results = $connection->select('system', 's', [
+-        'fetch' => \PDO::FETCH_ASSOC,
++        'fetch' => FetchAs::Associative,
+       ])
+         ->fields('s')
+         ->execute();
+diff --git a/core/modules/node/tests/src/Kernel/Migrate/d6/MigrateNodeCompleteTest.php b/core/modules/node/tests/src/Kernel/Migrate/d6/MigrateNodeCompleteTest.php
+index 90dcb8c92a4..8f30abbc564 100644
+--- a/core/modules/node/tests/src/Kernel/Migrate/d6/MigrateNodeCompleteTest.php
++++ b/core/modules/node/tests/src/Kernel/Migrate/d6/MigrateNodeCompleteTest.php
+@@ -4,6 +4,7 @@
+ 
+ namespace Drupal\Tests\node\Kernel\Migrate\d6;
+ 
++use Drupal\Core\Database\Statement\FetchAs;
+ use Drupal\node\NodeInterface;
+ use Drupal\Tests\file\Kernel\Migrate\d6\FileMigrationTestTrait;
+ use Drupal\Tests\migrate_drupal\Traits\CreateTestContentEntitiesTrait;
+@@ -65,14 +66,14 @@ public function testNodeCompleteMigration(): void {
+       ->orderBy('vid')
+       ->orderBy('langcode')
+       ->execute()
+-      ->fetchAll(\PDO::FETCH_ASSOC));
++      ->fetchAll(FetchAs::Associative));
+     $this->assertEquals($this->expectedNodeFieldDataTable(), $db->select('node_field_data', 'nr')
+       ->fields('nr')
+       ->orderBy('nid')
+       ->orderBy('vid')
+       ->orderBy('langcode')
+       ->execute()
+-      ->fetchAll(\PDO::FETCH_ASSOC));
++      ->fetchAll(FetchAs::Associative));
+ 
+     // Now load and test each revision, including the field 'field_text_plain'
+     // which has text reflecting the revision.
+diff --git a/core/modules/node/tests/src/Kernel/Migrate/d7/MigrateNodeCompleteTest.php b/core/modules/node/tests/src/Kernel/Migrate/d7/MigrateNodeCompleteTest.php
+index 304747081ad..cbe9b346623 100644
+--- a/core/modules/node/tests/src/Kernel/Migrate/d7/MigrateNodeCompleteTest.php
++++ b/core/modules/node/tests/src/Kernel/Migrate/d7/MigrateNodeCompleteTest.php
+@@ -4,6 +4,7 @@
+ 
+ namespace Drupal\Tests\node\Kernel\Migrate\d7;
+ 
++use Drupal\Core\Database\Statement\FetchAs;
+ use Drupal\migrate\MigrateExecutable;
+ use Drupal\migrate_drupal\NodeMigrateType;
+ use Drupal\node\Entity\Node;
+@@ -112,14 +113,14 @@ public function testNodeCompleteMigration(): void {
+       ->orderBy('vid')
+       ->orderBy('langcode')
+       ->execute()
+-      ->fetchAll(\PDO::FETCH_ASSOC));
++      ->fetchAll(FetchAs::Associative));
+     $this->assertEquals($this->expectedNodeFieldDataTable(), $db->select('node_field_data', 'nr')
+       ->fields('nr')
+       ->orderBy('nid')
+       ->orderBy('vid')
+       ->orderBy('langcode')
+       ->execute()
+-      ->fetchAll(\PDO::FETCH_ASSOC));
++      ->fetchAll(FetchAs::Associative));
+ 
+     // Load and test each revision.
+     $data = $this->expectedRevisionEntityData()[0];
+diff --git a/core/modules/path_alias/src/AliasRepository.php b/core/modules/path_alias/src/AliasRepository.php
+index 21eb3daef0d..0172b8da57b 100644
+--- a/core/modules/path_alias/src/AliasRepository.php
++++ b/core/modules/path_alias/src/AliasRepository.php
+@@ -4,6 +4,7 @@
+ 
+ use Drupal\Core\Database\Connection;
+ use Drupal\Core\Database\Query\SelectInterface;
++use Drupal\Core\Database\Statement\FetchAs;
+ use Drupal\Core\Language\LanguageInterface;
+ 
+ /**
+@@ -53,7 +54,7 @@ public function preloadPathAlias($preloaded, $langcode) {
+     // 'base_table.id' column, as that would not guarantee other conditions
+     // added to the query, such as those in ::addLanguageFallback, would be
+     // reversed.
+-    $results = $select->execute()->fetchAll(\PDO::FETCH_ASSOC);
++    $results = $select->execute()->fetchAll(FetchAs::Associative);
+     $aliases = [];
+     foreach (array_reverse($results) as $result) {
+       $aliases[$result['path']] = $result['alias'];
+diff --git a/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php b/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php
+index 53c2fa0c1fe..5588dd81805 100644
+--- a/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php
++++ b/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php
+@@ -400,6 +400,9 @@ public function mapConditionOperator($operator) {
+    */
+   public function prepareStatement(string $query, array $options, bool $allow_row_count = FALSE): StatementInterface {
+     assert(!isset($options['return']), 'Passing "return" option to prepareStatement() has no effect. See https://www.drupal.org/node/3185520');
++    if (isset($options['fetch']) && is_int($options['fetch'])) {
++      @trigger_error("Passing the 'fetch' key as an integer to \$options in prepareStatement() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321", E_USER_DEPRECATED);
++    }
+ 
+     try {
+       $query = $this->preprocessStatement($query, $options);
+diff --git a/core/modules/sqlite/src/Driver/Database/sqlite/Statement.php b/core/modules/sqlite/src/Driver/Database/sqlite/Statement.php
+index d7d8daf46ac..871aaec29f9 100644
+--- a/core/modules/sqlite/src/Driver/Database/sqlite/Statement.php
++++ b/core/modules/sqlite/src/Driver/Database/sqlite/Statement.php
+@@ -86,6 +86,10 @@ protected function getStatement(string $query, ?array &$args = []): object {
+    * {@inheritdoc}
+    */
+   public function execute($args = [], $options = []) {
++    if (isset($options['fetch']) && is_int($options['fetch'])) {
++      @trigger_error("Passing the 'fetch' key as an integer to \$options in execute() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321", E_USER_DEPRECATED);
++    }
++
+     try {
+       $return = parent::execute($args, $options);
+     }
+diff --git a/core/modules/system/tests/modules/database_test/database_test.install b/core/modules/system/tests/modules/database_test/database_test.install
+index 774d8f624c8..c480c1a7cf3 100644
+--- a/core/modules/system/tests/modules/database_test/database_test.install
++++ b/core/modules/system/tests/modules/database_test/database_test.install
+@@ -57,7 +57,7 @@ function database_test_schema() {
+   ];
+ 
+   $schema['test_classtype'] = [
+-    'description' => 'A duplicate version of the test table, used for fetch_style PDO::FETCH_CLASSTYPE tests.',
++    'description' => 'A duplicate version of the test table, used for obsolete fetch_style PDO::FETCH_CLASSTYPE tests.',
+     'fields' => [
+       'classname' => [
+         'description' => "A custom class name",
+diff --git a/core/modules/views/src/Plugin/views/query/Sql.php b/core/modules/views/src/Plugin/views/query/Sql.php
+index 9ca4b8e1279..5ce7b4817bf 100644
+--- a/core/modules/views/src/Plugin/views/query/Sql.php
++++ b/core/modules/views/src/Plugin/views/query/Sql.php
+@@ -5,6 +5,7 @@
+ use Drupal\Component\Utility\NestedArray;
+ use Drupal\Core\Cache\Cache;
+ use Drupal\Core\Database\Database;
++use Drupal\Core\Database\Statement\FetchAs;
+ use Drupal\Core\Entity\EntityTypeManagerInterface;
+ use Drupal\Core\Form\FormStateInterface;
+ use Drupal\Core\Messenger\MessengerInterface;
+@@ -1563,7 +1564,7 @@ public function execute(ViewExecutable $view) {
+         }
+ 
+         $result = $query->execute();
+-        $result->setFetchMode(\PDO::FETCH_CLASS, 'Drupal\views\ResultRow');
++        $result->setFetchMode(FetchAs::ClassObject, 'Drupal\views\ResultRow');
+ 
+         // Setup the result row objects.
+         $view->result = iterator_to_array($result);
+diff --git a/core/tests/Drupal/KernelTests/Core/Database/FetchLegacyTest.php b/core/tests/Drupal/KernelTests/Core/Database/FetchLegacyTest.php
+new file mode 100644
+index 00000000000..32681ab04c7
+--- /dev/null
++++ b/core/tests/Drupal/KernelTests/Core/Database/FetchLegacyTest.php
+@@ -0,0 +1,123 @@
++<?php
++
++declare(strict_types=1);
++
++namespace Drupal\KernelTests\Core\Database;
++
++use PHPUnit\Framework\Attributes\IgnoreDeprecations;
++
++/**
++ * Tests the Database system's various fetch capabilities.
++ *
++ * We get timeout errors if we try to run too many tests at once.
++ *
++ * @group Database
++ */
++class FetchLegacyTest extends DatabaseTestBase {
++
++  /**
++   * Confirms that we can fetch a record to an object explicitly.
++   */
++  #[IgnoreDeprecations]
++  public function testQueryFetchObject(): void {
++    $this->expectDeprecation("Passing the 'fetch' key as an integer to \$options in query() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321");
++    $this->expectDeprecation("Passing the 'fetch' key as an integer to \$options in prepareStatement() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321");
++    $this->expectDeprecation("Passing the 'fetch' key as an integer to \$options in execute() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321");
++    $records = [];
++    $result = $this->connection->query('SELECT [name] FROM {test} WHERE [age] = :age', [':age' => 25], ['fetch' => \PDO::FETCH_OBJ]);
++    foreach ($result as $record) {
++      $records[] = $record;
++      $this->assertIsObject($record);
++      $this->assertSame('John', $record->name);
++    }
++
++    $this->assertCount(1, $records, 'There is only one record.');
++  }
++
++  /**
++   * Confirms that we can fetch a record to an associative array explicitly.
++   */
++  #[IgnoreDeprecations]
++  public function testQueryFetchArray(): void {
++    $this->expectDeprecation("Passing the 'fetch' key as an integer to \$options in query() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321");
++    $this->expectDeprecation("Passing the 'fetch' key as an integer to \$options in prepareStatement() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321");
++    $this->expectDeprecation("Passing the 'fetch' key as an integer to \$options in execute() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321");
++    $records = [];
++    $result = $this->connection->query('SELECT [name] FROM {test} WHERE [age] = :age', [':age' => 25], ['fetch' => \PDO::FETCH_ASSOC]);
++    foreach ($result as $record) {
++      $records[] = $record;
++      $this->assertIsArray($record);
++      $this->assertArrayHasKey('name', $record);
++      $this->assertSame('John', $record['name']);
++    }
++
++    $this->assertCount(1, $records, 'There is only one record.');
++  }
++
++  /**
++   * Confirms that we can fetch a record into an indexed array explicitly.
++   */
++  #[IgnoreDeprecations]
++  public function testQueryFetchNum(): void {
++    $this->expectDeprecation("Passing the 'fetch' key as an integer to \$options in query() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321");
++    $this->expectDeprecation("Passing the 'fetch' key as an integer to \$options in prepareStatement() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321");
++    $this->expectDeprecation("Passing the 'fetch' key as an integer to \$options in execute() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321");
++    $records = [];
++    $result = $this->connection->query('SELECT [name] FROM {test} WHERE [age] = :age', [':age' => 25], ['fetch' => \PDO::FETCH_NUM]);
++    foreach ($result as $record) {
++      $records[] = $record;
++      $this->assertIsArray($record);
++      $this->assertArrayHasKey(0, $record);
++      $this->assertSame('John', $record[0]);
++    }
++
++    $this->assertCount(1, $records, 'There is only one record');
++  }
++
++  /**
++   * Confirms that we can fetch all records into an array explicitly.
++   */
++  #[IgnoreDeprecations]
++  public function testQueryFetchAllColumn(): void {
++    $this->expectDeprecation("Passing the \$mode argument as an integer to fetchAll() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321");
++    $query = $this->connection->select('test');
++    $query->addField('test', 'name');
++    $query->orderBy('name');
++    $query_result = $query->execute()->fetchAll(\PDO::FETCH_COLUMN);
++
++    $expected_result = ['George', 'John', 'Paul', 'Ringo'];
++    $this->assertEquals($expected_result, $query_result, 'Returned the correct result.');
++  }
++
++  /**
++   * Tests ::fetchAllAssoc().
++   */
++  #[IgnoreDeprecations]
++  public function testQueryFetchAllAssoc(): void {
++    $this->expectDeprecation("Passing the \$fetch_style argument as an integer to fetchAllAssoc() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321");
++    $expected_result = [
++      "Singer" => [
++        "id" => "2",
++        "name" => "George",
++        "age" => "27",
++        "job" => "Singer",
++      ],
++      "Drummer" => [
++        "id" => "3",
++        "name" => "Ringo",
++        "age" => "28",
++        "job" => "Drummer",
++      ],
++    ];
++
++    $statement = $this->connection->query('SELECT * FROM {test} WHERE [age] > :age', [':age' => 26]);
++    $result = $statement->fetchAllAssoc('job', \PDO::FETCH_ASSOC);
++    $this->assertSame($expected_result, $result);
++
++    $statement = $this->connection->query('SELECT * FROM {test} WHERE [age] > :age', [':age' => 26]);
++    $result = $statement->fetchAllAssoc('job', \PDO::FETCH_OBJ);
++    $this->assertEquals((object) $expected_result['Singer'], $result['Singer']);
++    $this->assertEquals((object) $expected_result['Drummer'], $result['Drummer']);
++  }
++
++}
+diff --git a/core/tests/Drupal/KernelTests/Core/Database/FetchTest.php b/core/tests/Drupal/KernelTests/Core/Database/FetchTest.php
+index 447779349ce..d7ccae9abd5 100644
+--- a/core/tests/Drupal/KernelTests/Core/Database/FetchTest.php
++++ b/core/tests/Drupal/KernelTests/Core/Database/FetchTest.php
+@@ -5,6 +5,7 @@
+ namespace Drupal\KernelTests\Core\Database;
+ 
+ use Drupal\Core\Database\RowCountException;
++use Drupal\Core\Database\Statement\FetchAs;
+ use Drupal\Core\Database\StatementInterface;
+ use Drupal\Tests\system\Functional\Database\FakeRecord;
+ 
+@@ -38,7 +39,7 @@ public function testQueryFetchDefault(): void {
+    */
+   public function testQueryFetchObject(): void {
+     $records = [];
+-    $result = $this->connection->query('SELECT [name] FROM {test} WHERE [age] = :age', [':age' => 25], ['fetch' => \PDO::FETCH_OBJ]);
++    $result = $this->connection->query('SELECT [name] FROM {test} WHERE [age] = :age', [':age' => 25], ['fetch' => FetchAs::Object]);
+     foreach ($result as $record) {
+       $records[] = $record;
+       $this->assertIsObject($record);
+@@ -53,7 +54,7 @@ public function testQueryFetchObject(): void {
+    */
+   public function testQueryFetchArray(): void {
+     $records = [];
+-    $result = $this->connection->query('SELECT [name] FROM {test} WHERE [age] = :age', [':age' => 25], ['fetch' => \PDO::FETCH_ASSOC]);
++    $result = $this->connection->query('SELECT [name] FROM {test} WHERE [age] = :age', [':age' => 25], ['fetch' => FetchAs::Associative]);
+     foreach ($result as $record) {
+       $records[] = $record;
+       $this->assertIsArray($record);
+@@ -122,7 +123,7 @@ public function testQueryFetchObjectClassNoConstructorArgs(): void {
+    */
+   public function testQueryFetchNum(): void {
+     $records = [];
+-    $result = $this->connection->query('SELECT [name] FROM {test} WHERE [age] = :age', [':age' => 25], ['fetch' => \PDO::FETCH_NUM]);
++    $result = $this->connection->query('SELECT [name] FROM {test} WHERE [age] = :age', [':age' => 25], ['fetch' => FetchAs::List]);
+     foreach ($result as $record) {
+       $records[] = $record;
+       $this->assertIsArray($record);
+@@ -140,7 +141,7 @@ public function testQueryFetchAllColumn(): void {
+     $query = $this->connection->select('test');
+     $query->addField('test', 'name');
+     $query->orderBy('name');
+-    $query_result = $query->execute()->fetchAll(\PDO::FETCH_COLUMN);
++    $query_result = $query->execute()->fetchAll(FetchAs::Column);
+ 
+     $expected_result = ['George', 'John', 'Paul', 'Ringo'];
+     $this->assertEquals($expected_result, $query_result, 'Returned the correct result.');
+@@ -181,11 +182,11 @@ public function testQueryFetchAllAssoc(): void {
+     ];
+ 
+     $statement = $this->connection->query('SELECT * FROM {test} WHERE [age] > :age', [':age' => 26]);
+-    $result = $statement->fetchAllAssoc('job', \PDO::FETCH_ASSOC);
++    $result = $statement->fetchAllAssoc('job', FetchAs::Associative);
+     $this->assertSame($expected_result, $result);
+ 
+     $statement = $this->connection->query('SELECT * FROM {test} WHERE [age] > :age', [':age' => 26]);
+-    $result = $statement->fetchAllAssoc('job', \PDO::FETCH_OBJ);
++    $result = $statement->fetchAllAssoc('job', FetchAs::Object);
+     $this->assertEquals((object) $expected_result['Singer'], $result['Singer']);
+     $this->assertEquals((object) $expected_result['Drummer'], $result['Drummer']);
+   }
+diff --git a/core/tests/Drupal/KernelTests/Core/Database/SelectComplexTest.php b/core/tests/Drupal/KernelTests/Core/Database/SelectComplexTest.php
+index 836b2f65797..c0c42af83b6 100644
+--- a/core/tests/Drupal/KernelTests/Core/Database/SelectComplexTest.php
++++ b/core/tests/Drupal/KernelTests/Core/Database/SelectComplexTest.php
+@@ -7,6 +7,7 @@
+ use Drupal\Core\Database\Database;
+ use Drupal\Core\Database\Query\PagerSelectExtender;
+ use Drupal\Core\Database\RowCountException;
++use Drupal\Core\Database\Statement\FetchAs;
+ use Drupal\user\Entity\User;
+ 
+ /**
+@@ -185,7 +186,7 @@ public function testDistinct(): void {
+     $query->addField('test_task', 'task');
+     $query->orderBy('task');
+     $query->distinct();
+-    $query_result = $query->execute()->fetchAll(\PDO::FETCH_COLUMN);
++    $query_result = $query->execute()->fetchAll(FetchAs::Column);
+ 
+     $expected_result = ['code', 'eat', 'found new band', 'perform at superbowl', 'sing', 'sleep'];
+     $this->assertEquals($query_result, $expected_result, 'Returned the correct result.');
+diff --git a/core/tests/Drupal/KernelTests/Core/Database/SelectOrderedTest.php b/core/tests/Drupal/KernelTests/Core/Database/SelectOrderedTest.php
+index b3cc7c2d2ce..8a319448790 100644
+--- a/core/tests/Drupal/KernelTests/Core/Database/SelectOrderedTest.php
++++ b/core/tests/Drupal/KernelTests/Core/Database/SelectOrderedTest.php
+@@ -4,6 +4,8 @@
+ 
+ namespace Drupal\KernelTests\Core\Database;
+ 
++use Drupal\Core\Database\Statement\FetchAs;
++
+ /**
+  * Tests the Select query builder.
+  *
+@@ -52,7 +54,7 @@ public function testSimpleSelectMultiOrdered(): void {
+       ['George', 27, 'Singer'],
+       ['Paul', 26, 'Songwriter'],
+     ];
+-    $results = $result->fetchAll(\PDO::FETCH_NUM);
++    $results = $result->fetchAll(FetchAs::List);
+     foreach ($expected as $k => $record) {
+       $num_records++;
+       foreach ($record as $kk => $col) {
+diff --git a/core/tests/Drupal/KernelTests/Core/Entity/EntityDefinitionUpdateProviderTest.php b/core/tests/Drupal/KernelTests/Core/Entity/EntityDefinitionUpdateProviderTest.php
+index 810915aff6e..f8c62110eb1 100644
+--- a/core/tests/Drupal/KernelTests/Core/Entity/EntityDefinitionUpdateProviderTest.php
++++ b/core/tests/Drupal/KernelTests/Core/Entity/EntityDefinitionUpdateProviderTest.php
+@@ -4,6 +4,7 @@
+ 
+ namespace Drupal\KernelTests\Core\Entity;
+ 
++use Drupal\Core\Database\Statement\FetchAs;
+ use Drupal\Core\Field\BaseFieldDefinition;
+ use Drupal\language\Entity\ConfigurableLanguage;
+ use Drupal\Tests\system\Functional\Entity\Traits\EntityDefinitionTestTrait;
+@@ -152,7 +153,7 @@ public function testBaseFieldDeleteWithExistingData($entity_type_id, $create_ent
+       ->orderBy('revision_id', 'ASC')
+       ->orderBy('langcode', 'ASC')
+       ->execute()
+-      ->fetchAll(\PDO::FETCH_ASSOC);
++      ->fetchAll(FetchAs::Associative);
+     $this->assertSameSize($expected, $result);
+ 
+     // Use assertEquals and not assertSame here to prevent that a different
+@@ -192,7 +193,7 @@ public function testBaseFieldDeleteWithExistingData($entity_type_id, $create_ent
+         ->orderBy('revision_id', 'ASC')
+         ->orderBy('langcode', 'ASC')
+         ->execute()
+-        ->fetchAll(\PDO::FETCH_ASSOC);
++        ->fetchAll(FetchAs::Associative);
+       $this->assertSameSize($expected, $result);
+ 
+       // Use assertEquals and not assertSame here to prevent that a different
+diff --git a/core/tests/Drupal/KernelTests/Core/Entity/FieldSqlStorageTest.php b/core/tests/Drupal/KernelTests/Core/Entity/FieldSqlStorageTest.php
+index 77ffe920d8f..e18c0aeab6e 100644
+--- a/core/tests/Drupal/KernelTests/Core/Entity/FieldSqlStorageTest.php
++++ b/core/tests/Drupal/KernelTests/Core/Entity/FieldSqlStorageTest.php
+@@ -5,6 +5,7 @@
+ namespace Drupal\KernelTests\Core\Entity;
+ 
+ use Drupal\Core\Database\Database;
++use Drupal\Core\Database\Statement\FetchAs;
+ use Drupal\Core\Entity\Exception\FieldStorageDefinitionUpdateForbiddenException;
+ use Drupal\field\Entity\FieldConfig;
+ use Drupal\field\Entity\FieldStorageConfig;
+@@ -201,7 +202,7 @@ public function testFieldWrite(): void {
+ 
+     $connection = Database::getConnection();
+     // Read the tables and check the correct values have been stored.
+-    $rows = $connection->select($this->table, 't')->fields('t')->execute()->fetchAllAssoc('delta', \PDO::FETCH_ASSOC);
++    $rows = $connection->select($this->table, 't')->fields('t')->execute()->fetchAllAssoc('delta', FetchAs::Associative);
+     $this->assertCount($this->fieldCardinality, $rows);
+     foreach ($rows as $delta => $row) {
+       $expected = [
+@@ -225,7 +226,7 @@ public function testFieldWrite(): void {
+     $values_count = count($values);
+     $entity->{$this->fieldName} = $values;
+     $entity->save();
+-    $rows = $connection->select($this->table, 't')->fields('t')->execute()->fetchAllAssoc('delta', \PDO::FETCH_ASSOC);
++    $rows = $connection->select($this->table, 't')->fields('t')->execute()->fetchAllAssoc('delta', FetchAs::Associative);
+     $this->assertCount($values_count, $rows);
+     foreach ($rows as $delta => $row) {
+       $expected = [
+@@ -253,7 +254,7 @@ public function testFieldWrite(): void {
+ 
+     // Check that data for both revisions are in the revision table.
+     foreach ($revision_values as $revision_id => $values) {
+-      $rows = $connection->select($this->revisionTable, 't')->fields('t')->condition('revision_id', $revision_id)->execute()->fetchAllAssoc('delta', \PDO::FETCH_ASSOC);
++      $rows = $connection->select($this->revisionTable, 't')->fields('t')->condition('revision_id', $revision_id)->execute()->fetchAllAssoc('delta', FetchAs::Associative);
+       $this->assertCount(min(count($values), $this->fieldCardinality), $rows);
+       foreach ($rows as $delta => $row) {
+         $expected = [
+@@ -272,7 +273,7 @@ public function testFieldWrite(): void {
+     // Test emptying the field.
+     $entity->{$this->fieldName} = NULL;
+     $entity->save();
+-    $rows = $connection->select($this->table, 't')->fields('t')->execute()->fetchAllAssoc('delta', \PDO::FETCH_ASSOC);
++    $rows = $connection->select($this->table, 't')->fields('t')->execute()->fetchAllAssoc('delta', FetchAs::Associative);
+     $this->assertCount(0, $rows);
+   }
+ 
+diff --git a/core/tests/Drupal/KernelTests/Core/Menu/MenuTreeStorageTest.php b/core/tests/Drupal/KernelTests/Core/Menu/MenuTreeStorageTest.php
+index baa01d730b2..cf26cb9b3c1 100644
+--- a/core/tests/Drupal/KernelTests/Core/Menu/MenuTreeStorageTest.php
++++ b/core/tests/Drupal/KernelTests/Core/Menu/MenuTreeStorageTest.php
+@@ -5,6 +5,7 @@
+ namespace Drupal\KernelTests\Core\Menu;
+ 
+ use Drupal\Component\Plugin\Exception\PluginException;
++use Drupal\Core\Database\Statement\FetchAs;
+ use Drupal\Core\Menu\MenuTreeParameters;
+ use Drupal\Core\Menu\MenuTreeStorage;
+ use Drupal\KernelTests\KernelTestBase;
+@@ -426,7 +427,7 @@ protected function assertMenuLink(string $id, array $expected_properties, array
+     foreach ($expected_properties as $field => $value) {
+       $query->condition($field, $value);
+     }
+-    $all = $query->execute()->fetchAll(\PDO::FETCH_ASSOC);
++    $all = $query->execute()->fetchAll(FetchAs::Associative);
+     $this->assertCount(1, $all, "Found link $id matching all the expected properties");
+     $raw = reset($all);
+ 
+diff --git a/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php b/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
+index 7e9ae828063..41e827383be 100644
+--- a/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
++++ b/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
+@@ -6,10 +6,13 @@
+ 
+ use Composer\Autoload\ClassLoader;
+ use Drupal\Core\Database\Database;
++use Drupal\Core\Database\Statement\FetchAs;
+ use Drupal\Core\Database\StatementPrefetchIterator;
+ use Drupal\Tests\Core\Database\Stub\StubConnection;
+ use Drupal\Tests\Core\Database\Stub\StubPDO;
+ use Drupal\Tests\UnitTestCase;
++use PHPUnit\Framework\Attributes\DataProvider;
++use PHPUnit\Framework\Attributes\IgnoreDeprecations;
+ 
+ /**
+  * Tests the Connection class.
+@@ -890,7 +893,7 @@ public static function providerMockedBacktrace(): array {
+    *   elements:
+    *   - a PDO fetch mode.
+    */
+-  public static function providerSupportedFetchModes(): array {
++  public static function providerSupportedLegacyFetchModes(): array {
+     return [
+       'FETCH_ASSOC' => [\PDO::FETCH_ASSOC],
+       'FETCH_CLASS' => [\PDO::FETCH_CLASS],
+@@ -901,12 +904,42 @@ public static function providerSupportedFetchModes(): array {
+     ];
+   }
+ 
++  /**
++   * Tests supported fetch modes.
++   */
++  #[IgnoreDeprecations]
++  #[DataProvider('providerSupportedLegacyFetchModes')]
++  public function testSupportedLegacyFetchModes(int $mode): void {
++    $this->expectDeprecation("Passing the \$mode argument as an integer to setFetchMode() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321");
++    $mockPdo = $this->createMock(StubPDO::class);
++    $mockConnection = new StubConnection($mockPdo, []);
++    $statement = new StatementPrefetchIterator($mockPdo, $mockConnection, '');
++    $this->assertInstanceOf(StatementPrefetchIterator::class, $statement);
++    $statement->setFetchMode($mode);
++  }
++
++  /**
++   * Provides data for testSupportedFetchModes.
++   *
++   * @return array<string,array<\Drupal\Core\Database\FetchAs>>
++   *   The FetchAs cases.
++   */
++  public static function providerSupportedFetchModes(): array {
++    return [
++      'Associative array' => [FetchAs::Associative],
++      'Classed object' => [FetchAs::ClassObject],
++      'Single column' => [FetchAs::Column],
++      'Simple array' => [FetchAs::List],
++      'Standard object' => [FetchAs::Object],
++    ];
++  }
++
+   /**
+    * Tests supported fetch modes.
+    *
+    * @dataProvider providerSupportedFetchModes
+    */
+-  public function testSupportedFetchModes(int $mode): void {
++  public function testSupportedFetchModes(FetchAs $mode): void {
+     $mockPdo = $this->createMock(StubPDO::class);
+     $mockConnection = new StubConnection($mockPdo, []);
+     $statement = new StatementPrefetchIterator($mockPdo, $mockConnection, '');
+@@ -937,11 +970,12 @@ public static function providerUnsupportedFetchModes(): array {
+   }
+ 
+   /**
+-   * Tests unsupported fetch modes.
+-   *
+-   * @dataProvider providerUnsupportedFetchModes
++   * Tests unsupported legacy fetch modes.
+    */
++  #[IgnoreDeprecations]
++  #[DataProvider('providerUnsupportedFetchModes')]
+   public function testUnsupportedFetchModes(int $mode): void {
++    $this->expectDeprecation("Passing the \$mode argument as an integer to setFetchMode() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321");
+     $this->expectException(\AssertionError::class);
+     $this->expectExceptionMessageMatches("/^Fetch mode FETCH_.* is not supported\\. Use supported modes only/");
+     $mockPdo = $this->createMock(StubPDO::class);
