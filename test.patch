@@ -1,5 +1,5 @@
 diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
-index 7a9de46a7d4..3abbce286cf 100644
+index 7a9de46a7d4..930c53d1d91 100644
 --- a/core/lib/Drupal/Core/Database/Connection.php
 +++ b/core/lib/Drupal/Core/Database/Connection.php
 @@ -12,6 +12,7 @@
@@ -40,7 +40,7 @@ index 7a9de46a7d4..3abbce286cf 100644
    public function prepareStatement(string $query, array $options, bool $allow_row_count = FALSE): StatementInterface {
      assert(!isset($options['return']), 'Passing "return" option to prepareStatement() has no effect. See https://www.drupal.org/node/3185520');
 +    if (isset($options['fetch']) && is_int($options['fetch'])) {
-+      @trigger_error("Passing the 'fetch' key as an integer to \$options in prepareStatement() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321", E_USER_DEPRECATED);
++      @trigger_error("Passing the 'fetch' key as an integer to \$options in prepareStatement() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/3488338", E_USER_DEPRECATED);
 +    }
  
      try {
@@ -50,7 +50,7 @@ index 7a9de46a7d4..3abbce286cf 100644
      assert(!isset($options['return']), 'Passing "return" option to query() has no effect. See https://www.drupal.org/node/3185520');
      assert(!isset($options['target']), 'Passing "target" option to query() has no effect. See https://www.drupal.org/node/2993033');
 +    if (isset($options['fetch']) && is_int($options['fetch'])) {
-+      @trigger_error("Passing the 'fetch' key as an integer to \$options in query() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321", E_USER_DEPRECATED);
++      @trigger_error("Passing the 'fetch' key as an integer to \$options in query() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/3488338", E_USER_DEPRECATED);
 +    }
  
      // Use default values if not already set.
@@ -94,10 +94,10 @@ index 00000000000..051ed412a2b
 +}
 diff --git a/core/lib/Drupal/Core/Database/Statement/PdoTrait.php b/core/lib/Drupal/Core/Database/Statement/PdoTrait.php
 new file mode 100644
-index 00000000000..cb3b4a3dba9
+index 00000000000..638f0d36021
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/Statement/PdoTrait.php
-@@ -0,0 +1,209 @@
+@@ -0,0 +1,210 @@
 +<?php
 +
 +declare(strict_types=1);
@@ -112,7 +112,7 @@ index 00000000000..cb3b4a3dba9
 +  protected function fetchAsToPdo(FetchAs $mode): int {
 +    return match ($mode) {
 +      FetchAs::Associative => \PDO::FETCH_ASSOC,
-+      FetchAs::ClassObject => \PDO::FETCH_CLASS,
++      FetchAs::ClassObject => \PDO::FETCH_CLASS | \PDO::FETCH_PROPS_LATE,
 +      FetchAs::Column => \PDO::FETCH_COLUMN,
 +      FetchAs::List => \PDO::FETCH_NUM,
 +      FetchAs::Object => \PDO::FETCH_OBJ,
@@ -211,12 +211,13 @@ index 00000000000..cb3b4a3dba9
 +   * @return array<string|int|float|bool>|object|false
 +   *   A result, formatted according to $mode, or FALSE on failure.
 +   */
-+  protected function clientFetch(?FetchAs $mode = NULL, ?int $cursorOrientation = NULL, ?int $cursorOffset = NULL) {
-+    return $this->getClientStatement()->fetch(
-+      $mode ? $this->fetchAsToPdo($mode) : \PDO::FETCH_DEFAULT,
-+      $cursorOrientation ?? \PDO::FETCH_ORI_NEXT,
-+      $cursorOffset ?? 0,
-+    );
++  protected function clientFetch(?FetchAs $mode = NULL, ?int $cursorOrientation = NULL, ?int $cursorOffset = NULL): array|object|string|int|float|bool {
++    return match(func_num_args()) {
++      0 => $this->getClientStatement()->fetch(),
++      1 => $this->getClientStatement()->fetch($this->fetchAsToPdo($mode)),
++      2 => $this->getClientStatement()->fetch($this->fetchAsToPdo($mode), $cursorOrientation),
++      default => $this->getClientStatement()->fetch($this->fetchAsToPdo($mode), $cursorOrientation, $cursorOffset),
++    };
 +  }
 +
 +  /**
@@ -238,7 +239,7 @@ index 00000000000..cb3b4a3dba9
 +   * Fetches the next row and returns it as an object.
 +   *
 +   * @param class-string|null $class
-+   *   Name of the class to be instantiated.
++   *   FQCN of the class to be instantiated.
 +   * @param list<mixed>|null $constructorArguments
 +   *   The arguments to be passed to the constructor.
 +   *
@@ -281,7 +282,7 @@ index 00000000000..cb3b4a3dba9
 +        $constructorArguments ?? $this->fetchOptions['constructor_args'],
 +      ),
 +      default => $this->getClientStatement()->fetchAll(
-+        $mode ? $this->fetchAsToPdo($mode) : $this->fetchAsToPdo($this->defaultFetchMode),
++        $this->fetchAsToPdo($mode ?? $this->defaultFetchMode),
 +      ),
 +    };
 +  }
@@ -305,6 +306,426 @@ index 00000000000..cb3b4a3dba9
 +  protected function clientQueryString(): string {
 +    return $this->getClientStatement()->queryString;
 +  }
++
++}
+diff --git a/core/lib/Drupal/Core/Database/Statement/StatementBase.php b/core/lib/Drupal/Core/Database/Statement/StatementBase.php
+new file mode 100644
+index 00000000000..e314291849c
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/Statement/StatementBase.php
+@@ -0,0 +1,414 @@
++<?php
++
++namespace Drupal\Core\Database\Statement;
++
++use Drupal\Core\Database\Event\StatementExecutionEndEvent;
++use Drupal\Core\Database\Event\StatementExecutionFailureEvent;
++use Drupal\Core\Database\Event\StatementExecutionStartEvent;
++use Drupal\Core\Database\FetchModeTrait;
++use Drupal\Core\Database\StatementIteratorTrait;
++
++/**
++ * StatementInterface base implementation.
++ *
++ * This class is meant to be generic enough for any type of database clients,
++ * even if all Drupal core database drivers currently use PDO clients. We
++ * implement \Iterator instead of \IteratorAggregate to allow iteration to be
++ * kept in sync with the underlying database resultset cursor. PDO is not able
++ * to execute a database operation while a cursor is open on the result of an
++ * earlier select query, so Drupal by default uses buffered queries setting
++ * \PDO::MYSQL_ATTR_USE_BUFFERED_QUERY to TRUE on the connection. This forces
++ * the query to return all the results in a buffer local to the client library,
++ * potentially leading to memory issues in case of large datasets being
++ * returned by a query. Other database clients, however, could allow
++ * multithread queries, or developers could disable buffered queries in PDO:
++ * in that case, this class prevents the resultset to be entirely fetched in
++ * PHP memory (that an \IteratorAggregate implementation would force) and
++ * therefore optimize memory usage while iterating the resultset.
++ */
++abstract class StatementBase implements \Iterator, StatementInterface {
++
++  use FetchModeTrait;
++  use StatementIteratorTrait;
++
++  /**
++   * Holds the default fetch mode.
++   */
++  protected FetchAs $defaultFetchMode = FetchAs::Object;
++
++  /**
++   * Holds fetch options.
++   *
++   * @var array{'class': class-string, 'constructor_args': array<mixed>, 'column': int}
++   */
++  protected array $fetchOptions = [
++    'class' => 'stdClass',
++    'constructor_args' => [],
++    'column' => 0,
++  ];
++
++  /**
++   * {@inheritdoc}
++   */
++  public function getConnectionTarget(): string {
++    return $this->connection->getTarget();
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function execute($args = [], $options = []) {
++    if (isset($options['fetch'])) {
++      if (is_string($options['fetch'])) {
++        $this->setFetchMode(FetchAs::ClassObject, $options['fetch']);
++      }
++      else {
++        $this->setFetchMode($options['fetch']);
++      }
++    }
++
++    if ($this->connection->isEventEnabled(StatementExecutionStartEvent::class)) {
++      $startEvent = new StatementExecutionStartEvent(
++        spl_object_id($this),
++        $this->connection->getKey(),
++        $this->connection->getTarget(),
++        $this->getQueryString(),
++        $args ?? [],
++        $this->connection->findCallerFromDebugBacktrace()
++      );
++      $this->connection->dispatchEvent($startEvent);
++    }
++
++    try {
++      $return = $this->clientExecute($args, $options);
++      $this->markResultsetIterable($return);
++    }
++    catch (\Exception $e) {
++      if (isset($startEvent) && $this->connection->isEventEnabled(StatementExecutionFailureEvent::class)) {
++        $this->connection->dispatchEvent(new StatementExecutionFailureEvent(
++          $startEvent->statementObjectId,
++          $startEvent->key,
++          $startEvent->target,
++          $startEvent->queryString,
++          $startEvent->args,
++          $startEvent->caller,
++          $startEvent->time,
++          get_class($e),
++          $e->getCode(),
++          $e->getMessage(),
++        ));
++      }
++      throw $e;
++    }
++
++    if (isset($startEvent) && $this->connection->isEventEnabled(StatementExecutionEndEvent::class)) {
++      $this->connection->dispatchEvent(new StatementExecutionEndEvent(
++        $startEvent->statementObjectId,
++        $startEvent->key,
++        $startEvent->target,
++        $startEvent->queryString,
++        $startEvent->args,
++        $startEvent->caller,
++        $startEvent->time
++      ));
++    }
++
++    return $return;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function getQueryString() {
++    return $this->clientQueryString();
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function fetchCol($index = 0) {
++    return $this->fetchAll(FetchAs::Column, $index);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function fetchAllAssoc($key, $fetch = NULL) {
++    if (isset($fetch)) {
++      if (is_string($fetch)) {
++        $this->setFetchMode(FetchAs::ClassObject, $fetch);
++      }
++      else {
++        $this->setFetchMode($fetch);
++      }
++    }
++
++    // Return early if the statement was already fully traversed.
++    if (!$this->isResultsetIterable) {
++      return [];
++    }
++
++    // Once the while loop is completed, the resultset is marked so not to
++    // allow more fetching.
++    $return = [];
++    while ($record = $this->fetch()) {
++      $recordKey = is_object($record) ? $record->$key : $record[$key];
++      $return[$recordKey] = $record;
++    }
++
++    return $return;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function fetchAllKeyed($keyIndex = 0, $valueIndex = 1) {
++    $this->setFetchMode(FetchAs::List);
++
++    // Return early if the statement was already fully traversed.
++    if (!$this->isResultsetIterable) {
++      return [];
++    }
++
++    // Once the while loop is completed, the resultset is marked so not to
++    // allow more fetching.
++    $return = [];
++    while ($record = $this->fetch()) {
++      $return[$record[$keyIndex]] = $record[$valueIndex];
++    }
++    return $return;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function fetchField($index = 0) {
++    $column = $this->clientFetchColumn($index);
++
++    if ($column === FALSE) {
++      $this->markResultsetFetchingComplete();
++      return FALSE;
++    }
++
++    $this->setResultsetCurrentRow($column);
++    return $column;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function fetchAssoc() {
++    return $this->fetch(FetchAs::Associative);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function fetchObject(?string $className = NULL, array $constructorArguments = []) {
++    $row = $this->clientFetchObject($className, $constructorArguments);
++
++    if ($row === FALSE) {
++      $this->markResultsetFetchingComplete();
++      return FALSE;
++    }
++
++    $this->setResultsetCurrentRow($row);
++    return $row;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function rowCount() {
++    // SELECT query should not use the method.
++    if ($this->rowCountEnabled) {
++      return $this->clientRowCount();
++    }
++    else {
++      throw new RowCountException();
++    }
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function setFetchMode($mode, $a1 = NULL, $a2 = []) {
++    $this->defaultFetchMode = $mode;
++    switch ($mode) {
++      case FetchAs::ClassObject:
++        $this->fetchOptions['class'] = $a1;
++        if ($a2) {
++          $this->fetchOptions['constructor_args'] = $a2;
++        }
++        break;
++
++      case FetchAs::Column:
++        $this->fetchOptions['column'] = $a1;
++        break;
++
++    }
++
++    return $this->clientSetFetchMode($mode, $a1, $a2);
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function fetch($mode = NULL, $cursorOrientation = NULL, $cursorOffset = NULL) {
++    $row = match(func_num_args()) {
++      0 => $this->clientFetch(),
++      1 => $this->clientFetch($mode),
++      2 => $this->clientFetch($mode, $cursorOrientation),
++      default => $this->clientFetch($mode, $cursorOrientation, $cursorOffset),
++    };
++
++    if ($row === FALSE) {
++      $this->markResultsetFetchingComplete();
++      return FALSE;
++    }
++
++    $this->setResultsetCurrentRow($row);
++    return $row;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function fetchAll($mode = NULL, $columnIndex = NULL, $constructorArguments = NULL) {
++    $fetchMode = $mode ?? $this->defaultFetchMode;
++    if (isset($columnIndex)) {
++      $this->fetchOptions['column'] = $columnIndex;
++    }
++    if (isset($constructorArguments)) {
++      $this->fetchOptions['constructor_args'] = $constructorArguments;
++    }
++
++    $return = $this->clientFetchAll($fetchMode, $columnIndex, $constructorArguments);
++
++    $this->markResultsetFetchingComplete();
++
++    return $return;
++  }
++
++  /**
++   * Returns the client-level database PDO statement object.
++   *
++   * This method should normally be used only within database driver code.
++   *
++   * @return \PDOStatement
++   *   The client-level database PDO statement.
++   *
++   * @throws \RuntimeException
++   *   If the client-level statement is not set.
++   */
++  abstract public function getClientStatement(): object;
++
++  /**
++   * Sets the default fetch mode for the PDO statement.
++   *
++   * @param \Drupal\Core\Database\FetchAs $mode
++   *   One of the cases of the FetchAs enum.
++   * @param int|class-string|null $columnOrClass
++   *   If $mode is FetchAs::Column, the index of the column to fetch.
++   *   If $mode is FetchAs::ClassObject, the FQCN of the object.
++   * @param list<mixed>|null $constructorArguments
++   *   If $mode is FetchAs::ClassObject, the arguments to pass to the
++   *   constructor.
++   *
++   * @return bool
++   *   Returns true on success or false on failure.
++   */
++  abstract protected function clientSetFetchMode(FetchAs $mode, int|string|null $columnOrClass = NULL, array|null $constructorArguments = NULL): bool;
++
++  /**
++   * Executes the prepared PDO statement.
++   *
++   * @param array|null $arguments
++   *   An array of values with as many elements as there are bound parameters in
++   *   the SQL statement being executed. This can be NULL.
++   * @param array $options
++   *   An array of options for this query.
++   *
++   * @return bool
++   *   TRUE on success, or FALSE on failure.
++   */
++  abstract protected function clientExecute(?array $arguments = [], array $options = []): bool;
++
++  /**
++   * Fetches the next row from the PDO statement.
++   *
++   * @param \Drupal\Core\Database\FetchAs|null $mode
++   *   (Optional) one of the cases of the FetchAs enum. If not specified,
++   *   defaults to what is specified by setFetchMode().
++   * @param int|null $cursorOrientation
++   *   Not implemented in all database drivers, don't use.
++   * @param int|null $cursorOffset
++   *   Not implemented in all database drivers, don't use.
++   *
++   * @return array<string|int|float|bool>|object|false
++   *   A result, formatted according to $mode, or FALSE on failure.
++   */
++  abstract protected function clientFetch(?FetchAs $mode = NULL, ?int $cursorOrientation = NULL, ?int $cursorOffset = NULL): array|object|string|int|float|bool;
++
++  /**
++   * Returns a single column from the next row of a result set.
++   *
++   * @param int $column
++   *   0-indexed number of the column to retrieve from the row. If no value is
++   *   supplied, the first column is fetched.
++   *
++   * @return string|int|float|bool|false
++   *   A single column from the next row of a result set or false if there are
++   *   no more rows.
++   */
++  abstract protected function clientFetchColumn(int $column = 0): mixed;
++
++  /**
++   * Fetches the next row and returns it as an object.
++   *
++   * @param class-string|null $class
++   *   FQCN of the class to be instantiated.
++   * @param list<mixed>|null $constructorArguments
++   *   The arguments to be passed to the constructor.
++   *
++   * @return object|false
++   *   An instance of the required class with property names that correspond
++   *   to the column names, or FALSE on failure.
++   */
++  abstract protected function clientFetchObject(?string $class = NULL, array $constructorArguments = []): object|FALSE;
++
++  /**
++   * Returns an array containing all of the result set rows.
++   *
++   * @param \Drupal\Core\Database\FetchAs|null $mode
++   *   (Optional) one of the cases of the FetchAs enum. If not specified,
++   *   defaults to what is specified by setFetchMode().
++   * @param int|class-string|null $columnOrClass
++   *   If $mode is FetchAs::Column, the index of the column to fetch.
++   *   If $mode is FetchAs::ClassObject, the FQCN of the object.
++   * @param list<mixed>|null $constructorArguments
++   *   If $mode is FetchAs::ClassObject, the arguments to pass to the
++   *   constructor.
++   *
++   * @return array
++   *   An array of results.
++   */
++  abstract protected function clientFetchAll(?FetchAs $mode = NULL, int|string|null $columnOrClass = NULL, array|null $constructorArguments = NULL): array;
++
++  /**
++   * Returns the number of rows affected by the last SQL statement.
++   *
++   * @return int
++   *   The number of rows.
++   */
++  abstract protected function clientRowCount(): int;
++
++  /**
++   * Returns the query string used to prepare the statement.
++   *
++   * @return string
++   *   The query string.
++   */
++  abstract protected function clientQueryString(): string;
 +
 +}
 diff --git a/core/lib/Drupal/Core/Database/StatementInterface.php b/core/lib/Drupal/Core/Database/StatementInterface.php
@@ -393,7 +814,7 @@ index be86951f970..4354cec63dd 100644
     * @return array
     *   An associative array, or an empty array if there is no result set.
 diff --git a/core/lib/Drupal/Core/Database/StatementPrefetchIterator.php b/core/lib/Drupal/Core/Database/StatementPrefetchIterator.php
-index 40f2f2bf297..b5f0563e8b6 100644
+index 40f2f2bf297..cba7e923b23 100644
 --- a/core/lib/Drupal/Core/Database/StatementPrefetchIterator.php
 +++ b/core/lib/Drupal/Core/Database/StatementPrefetchIterator.php
 @@ -5,6 +5,8 @@
@@ -437,7 +858,7 @@ index 40f2f2bf297..b5f0563e8b6 100644
 +   * @deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use
 +   * $defaultFetchMode instead.
 +   *
-+   * @see https://www.drupal.org/node/7654321
++   * @see https://www.drupal.org/node/3488338
     */
    protected int $defaultFetchStyle = \PDO::FETCH_OBJ;
  
@@ -464,7 +885,7 @@ index 40f2f2bf297..b5f0563e8b6 100644
     */
    public function execute($args = [], $options = []) {
 +    if (isset($options['fetch']) && is_int($options['fetch'])) {
-+      @trigger_error("Passing the 'fetch' key as an integer to \$options in execute() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321", E_USER_DEPRECATED);
++      @trigger_error("Passing the 'fetch' key as an integer to \$options in execute() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/3488338", E_USER_DEPRECATED);
 +    }
 +
      if (isset($options['fetch'])) {
@@ -515,7 +936,7 @@ index 40f2f2bf297..b5f0563e8b6 100644
    public function setFetchMode($mode, $a1 = NULL, $a2 = []) {
 -    assert(in_array($mode, $this->supportedFetchModes), 'Fetch mode ' . ($this->fetchModeLiterals[$mode] ?? $mode) . ' is not supported. Use supported modes only.');
 +    if (is_int($mode)) {
-+      @trigger_error("Passing the \$mode argument as an integer to setFetchMode() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321", E_USER_DEPRECATED);
++      @trigger_error("Passing the \$mode argument as an integer to setFetchMode() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/3488338", E_USER_DEPRECATED);
 +      $mode = $this->pdoToFetchAs($mode);
 +    }
  
@@ -549,7 +970,7 @@ index 40f2f2bf297..b5f0563e8b6 100644
     */
    public function fetch($fetch_style = NULL, $cursor_orientation = \PDO::FETCH_ORI_NEXT, $cursor_offset = NULL) {
 +    if (is_int($fetch_style)) {
-+      @trigger_error("Passing the \$fetch_style argument as an integer to fetch() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321", E_USER_DEPRECATED);
++      @trigger_error("Passing the \$fetch_style argument as an integer to fetch() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/3488338", E_USER_DEPRECATED);
 +      $fetch_style = $this->pdoToFetchAs($fetch_style);
 +    }
 +
@@ -633,7 +1054,7 @@ index 40f2f2bf297..b5f0563e8b6 100644
 -
 -    assert(in_array($fetchStyle, $this->supportedFetchModes), 'Fetch mode ' . ($this->fetchModeLiterals[$fetchStyle] ?? $fetchStyle) . ' is not supported. Use supported modes only.');
 +    if (is_int($mode)) {
-+      @trigger_error("Passing the \$mode argument as an integer to fetchAll() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321", E_USER_DEPRECATED);
++      @trigger_error("Passing the \$mode argument as an integer to fetchAll() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/3488338", E_USER_DEPRECATED);
 +      $mode = $this->pdoToFetchAs($mode);
 +    }
  
@@ -667,7 +1088,7 @@ index 40f2f2bf297..b5f0563e8b6 100644
 -    $fetchStyle = $fetch_style ?? $this->defaultFetchStyle;
 +  public function fetchAllAssoc($key, $fetch = NULL) {
 +    if (is_int($fetch)) {
-+      @trigger_error("Passing the \$fetch argument as an integer to fetchAllAssoc() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321", E_USER_DEPRECATED);
++      @trigger_error("Passing the \$fetch argument as an integer to fetchAllAssoc() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/3488338", E_USER_DEPRECATED);
 +      $fetch = $this->pdoToFetchAs($fetch);
 +    }
  
@@ -678,53 +1099,50 @@ index 40f2f2bf297..b5f0563e8b6 100644
      }
      return $result;
 diff --git a/core/lib/Drupal/Core/Database/StatementWrapperIterator.php b/core/lib/Drupal/Core/Database/StatementWrapperIterator.php
-index 980ef74ed2e..60261269a9d 100644
+index 980ef74ed2e..a177d62300b 100644
 --- a/core/lib/Drupal/Core/Database/StatementWrapperIterator.php
 +++ b/core/lib/Drupal/Core/Database/StatementWrapperIterator.php
-@@ -5,6 +5,8 @@
- use Drupal\Core\Database\Event\StatementExecutionEndEvent;
- use Drupal\Core\Database\Event\StatementExecutionFailureEvent;
- use Drupal\Core\Database\Event\StatementExecutionStartEvent;
+@@ -2,34 +2,16 @@
+ 
+ namespace Drupal\Core\Database;
+ 
+-use Drupal\Core\Database\Event\StatementExecutionEndEvent;
+-use Drupal\Core\Database\Event\StatementExecutionFailureEvent;
+-use Drupal\Core\Database\Event\StatementExecutionStartEvent;
+-
+-// cSpell:ignore maxlen driverdata INOUT
 +use Drupal\Core\Database\Statement\FetchAs;
 +use Drupal\Core\Database\Statement\PdoTrait;
++use Drupal\Core\Database\Statement\StatementBase;
  
- // cSpell:ignore maxlen driverdata INOUT
- 
-@@ -28,8 +30,9 @@
+ /**
+  * StatementInterface iterator implementation.
+- *
+- * This class is meant to be generic enough for any type of database clients,
+- * even if all Drupal core database drivers currently use PDO clients. We
+- * implement \Iterator instead of \IteratorAggregate to allow iteration to be
+- * kept in sync with the underlying database resultset cursor. PDO is not able
+- * to execute a database operation while a cursor is open on the result of an
+- * earlier select query, so Drupal by default uses buffered queries setting
+- * \PDO::MYSQL_ATTR_USE_BUFFERED_QUERY to TRUE on the connection. This forces
+- * the query to return all the results in a buffer local to the client library,
+- * potentially leading to memory issues in case of large datasets being
+- * returned by a query. Other database clients, however, could allow
+- * multithread queries, or developers could disable buffered queries in PDO:
+- * in that case, this class prevents the resultset to be entirely fetched in
+- * PHP memory (that an \IteratorAggregate implementation would force) and
+- * therefore optimize memory usage while iterating the resultset.
   */
- class StatementWrapperIterator implements \Iterator, StatementInterface {
+-class StatementWrapperIterator implements \Iterator, StatementInterface {
++class StatementWrapperIterator extends StatementBase {
  
 -  use StatementIteratorTrait;
-   use FetchModeTrait;
+-  use FetchModeTrait;
 +  use PdoTrait;
-+  use StatementIteratorTrait;
  
    /**
     * The client database Statement object.
-@@ -38,6 +41,22 @@ class StatementWrapperIterator implements \Iterator, StatementInterface {
-    */
-   protected object $clientStatement;
- 
-+  /**
-+   * Holds the default fetch mode.
-+   */
-+  protected FetchAs $defaultFetchMode = FetchAs::Object;
-+
-+  /**
-+   * Holds fetch options.
-+   *
-+   * @var array{'class': class-string, 'constructor_args': array<mixed>, 'column': int}
-+   */
-+  protected array $fetchOptions = [
-+    'class' => 'stdClass',
-+    'constructor_args' => [],
-+    'column' => 0,
-+  ];
-+
-   /**
-    * Constructs a StatementWrapperIterator object.
-    *
-@@ -60,19 +79,7 @@ public function __construct(
+@@ -60,271 +42,66 @@ public function __construct(
      protected readonly bool $rowCountEnabled = FALSE,
    ) {
      $this->clientStatement = $clientConnection->prepare($query, $options);
@@ -741,159 +1159,239 @@ index 980ef74ed2e..60261269a9d 100644
 -   */
 -  public function getClientStatement(): object {
 -    return $this->clientStatement;
+-  }
+-
+-  /**
+-   * {@inheritdoc}
+-   */
+-  public function getConnectionTarget(): string {
+-    return $this->connection->getTarget();
 +    $this->setFetchMode(FetchAs::Object);
    }
  
    /**
-@@ -86,11 +93,13 @@ public function getConnectionTarget(): string {
     * {@inheritdoc}
     */
    public function execute($args = [], $options = []) {
-+    if (isset($options['fetch']) && is_int($options['fetch'])) {
-+      @trigger_error("Passing the 'fetch' key as an integer to \$options in execute() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321", E_USER_DEPRECATED);
-+    }
-+
-     if (isset($options['fetch'])) {
-       if (is_string($options['fetch'])) {
+-    if (isset($options['fetch'])) {
+-      if (is_string($options['fetch'])) {
 -        // \PDO::FETCH_PROPS_LATE tells __construct() to run before properties
 -        // are added to the object.
 -        $this->setFetchMode(\PDO::FETCH_CLASS | \PDO::FETCH_PROPS_LATE, $options['fetch']);
-+        $this->setFetchMode(FetchAs::ClassObject, $options['fetch']);
-       }
-       else {
-         $this->setFetchMode($options['fetch']);
-@@ -110,7 +119,7 @@ public function execute($args = [], $options = []) {
-     }
- 
-     try {
+-      }
+-      else {
+-        $this->setFetchMode($options['fetch']);
+-      }
+-    }
+-
+-    if ($this->connection->isEventEnabled(StatementExecutionStartEvent::class)) {
+-      $startEvent = new StatementExecutionStartEvent(
+-        spl_object_id($this),
+-        $this->connection->getKey(),
+-        $this->connection->getTarget(),
+-        $this->getQueryString(),
+-        $args ?? [],
+-        $this->connection->findCallerFromDebugBacktrace()
+-      );
+-      $this->connection->dispatchEvent($startEvent);
+-    }
+-
+-    try {
 -      $return = $this->clientStatement->execute($args);
-+      $return = $this->clientExecute($args, $options);
-       $this->markResultsetIterable($return);
+-      $this->markResultsetIterable($return);
+-    }
+-    catch (\Exception $e) {
+-      if (isset($startEvent) && $this->connection->isEventEnabled(StatementExecutionFailureEvent::class)) {
+-        $this->connection->dispatchEvent(new StatementExecutionFailureEvent(
+-          $startEvent->statementObjectId,
+-          $startEvent->key,
+-          $startEvent->target,
+-          $startEvent->queryString,
+-          $startEvent->args,
+-          $startEvent->caller,
+-          $startEvent->time,
+-          get_class($e),
+-          $e->getCode(),
+-          $e->getMessage(),
+-        ));
+-      }
+-      throw $e;
++    if (isset($options['fetch']) && is_int($options['fetch'])) {
++      @trigger_error("Passing the 'fetch' key as an integer to \$options in execute() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/3488338", E_USER_DEPRECATED);
      }
-     catch (\Exception $e) {
-@@ -150,23 +159,28 @@ public function execute($args = [], $options = []) {
-    * {@inheritdoc}
-    */
-   public function getQueryString() {
+-
+-    if (isset($startEvent) && $this->connection->isEventEnabled(StatementExecutionEndEvent::class)) {
+-      $this->connection->dispatchEvent(new StatementExecutionEndEvent(
+-        $startEvent->statementObjectId,
+-        $startEvent->key,
+-        $startEvent->target,
+-        $startEvent->queryString,
+-        $startEvent->args,
+-        $startEvent->caller,
+-        $startEvent->time
+-      ));
+-    }
+-
+-    return $return;
+-  }
+-
+-  /**
+-   * {@inheritdoc}
+-   */
+-  public function getQueryString() {
 -    return $this->clientStatement->queryString;
-+    return $this->clientQueryString();
-   }
- 
-   /**
-    * {@inheritdoc}
-    */
-   public function fetchCol($index = 0) {
+-  }
+-
+-  /**
+-   * {@inheritdoc}
+-   */
+-  public function fetchCol($index = 0) {
 -    return $this->fetchAll(\PDO::FETCH_COLUMN, $index);
-+    return $this->fetchAll(FetchAs::Column, $index);
++    return parent::execute($args, $options);
    }
  
    /**
     * {@inheritdoc}
     */
    public function fetchAllAssoc($key, $fetch = NULL) {
-+    if (is_int($fetch)) {
-+      @trigger_error("Passing the \$fetch argument as an integer to fetchAllAssoc() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321", E_USER_DEPRECATED);
-+      $fetch_style = $this->pdoToFetchAs($fetch);
-+    }
-+
-     if (isset($fetch)) {
-       if (is_string($fetch)) {
+-    if (isset($fetch)) {
+-      if (is_string($fetch)) {
 -        $this->setFetchMode(\PDO::FETCH_CLASS, $fetch);
-+        $this->setFetchMode(FetchAs::ClassObject, $fetch);
-       }
-       else {
-         $this->setFetchMode($fetch);
-@@ -193,7 +207,7 @@ public function fetchAllAssoc($key, $fetch = NULL) {
-    * {@inheritdoc}
-    */
-   public function fetchAllKeyed($key_index = 0, $value_index = 1) {
+-      }
+-      else {
+-        $this->setFetchMode($fetch);
+-      }
+-    }
+-
+-    // Return early if the statement was already fully traversed.
+-    if (!$this->isResultsetIterable) {
+-      return [];
+-    }
+-
+-    // Once the while loop is completed, the resultset is marked so not to
+-    // allow more fetching.
+-    $return = [];
+-    while ($record = $this->fetch()) {
+-      $recordKey = is_object($record) ? $record->$key : $record[$key];
+-      $return[$recordKey] = $record;
+-    }
+-
+-    return $return;
+-  }
+-
+-  /**
+-   * {@inheritdoc}
+-   */
+-  public function fetchAllKeyed($key_index = 0, $value_index = 1) {
 -    $this->setFetchMode(\PDO::FETCH_NUM);
-+    $this->setFetchMode(FetchAs::List);
- 
-     // Return early if the statement was already fully traversed.
-     if (!$this->isResultsetIterable) {
-@@ -213,8 +227,7 @@ public function fetchAllKeyed($key_index = 0, $value_index = 1) {
-    * {@inheritdoc}
-    */
-   public function fetchField($index = 0) {
--    // Call \PDOStatement::fetchColumn to fetch the field.
--    $column = $this->clientStatement->fetchColumn($index);
-+    $column = $this->clientFetchColumn($index);
- 
-     if ($column === FALSE) {
-       $this->markResultsetFetchingComplete();
-@@ -229,19 +242,14 @@ public function fetchField($index = 0) {
-    * {@inheritdoc}
-    */
-   public function fetchAssoc() {
--    return $this->fetch(\PDO::FETCH_ASSOC);
-+    return $this->fetch(FetchAs::Associative);
+-
+-    // Return early if the statement was already fully traversed.
+-    if (!$this->isResultsetIterable) {
+-      return [];
+-    }
+-
+-    // Once the while loop is completed, the resultset is marked so not to
+-    // allow more fetching.
+-    $return = [];
+-    while ($record = $this->fetch()) {
+-      $return[$record[$key_index]] = $record[$value_index];
++    if (is_int($fetch)) {
++      @trigger_error("Passing the \$fetch argument as an integer to fetchAllAssoc() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/3488338", E_USER_DEPRECATED);
++      $fetch = $this->pdoToFetchAs($fetch);
+     }
+-    return $return;
++    return parent::fetchAllAssoc($key, $fetch);
    }
  
    /**
     * {@inheritdoc}
     */
-   public function fetchObject(?string $class_name = NULL, array $constructor_arguments = []) {
+-  public function fetchField($index = 0) {
+-    // Call \PDOStatement::fetchColumn to fetch the field.
+-    $column = $this->clientStatement->fetchColumn($index);
+-
+-    if ($column === FALSE) {
+-      $this->markResultsetFetchingComplete();
+-      return FALSE;
+-    }
+-
+-    $this->setResultsetCurrentRow($column);
+-    return $column;
+-  }
+-
+-  /**
+-   * {@inheritdoc}
+-   */
+-  public function fetchAssoc() {
+-    return $this->fetch(\PDO::FETCH_ASSOC);
+-  }
+-
+-  /**
+-   * {@inheritdoc}
+-   */
+-  public function fetchObject(?string $class_name = NULL, array $constructor_arguments = []) {
 -    if ($class_name) {
 -      $row = $this->clientStatement->fetchObject($class_name, $constructor_arguments);
 -    }
 -    else {
 -      $row = $this->clientStatement->fetchObject();
 -    }
-+    $row = $this->clientFetchObject($class_name, $constructor_arguments);
- 
-     if ($row === FALSE) {
-       $this->markResultsetFetchingComplete();
-@@ -258,7 +266,7 @@ public function fetchObject(?string $class_name = NULL, array $constructor_argum
-   public function rowCount() {
-     // SELECT query should not use the method.
-     if ($this->rowCountEnabled) {
--      return $this->clientStatement->rowCount();
-+      return $this->clientRowCount();
-     }
-     else {
-       throw new RowCountException();
-@@ -269,33 +277,39 @@ public function rowCount() {
-    * {@inheritdoc}
-    */
-   public function setFetchMode($mode, $a1 = NULL, $a2 = []) {
--    assert(in_array($mode, $this->supportedFetchModes), 'Fetch mode ' . ($this->fetchModeLiterals[$mode] ?? $mode) . ' is not supported. Use supported modes only.');
 -
--    // Call \PDOStatement::setFetchMode to set fetch mode.
--    // \PDOStatement is picky about the number of arguments in some cases so we
--    // need to be pass the exact number of arguments we where given.
--    return match(func_num_args()) {
--      1 => $this->clientStatement->setFetchMode($mode),
--      2 => $this->clientStatement->setFetchMode($mode, $a1),
--      default => $this->clientStatement->setFetchMode($mode, $a1, $a2),
--    };
+-    if ($row === FALSE) {
+-      $this->markResultsetFetchingComplete();
+-      return FALSE;
++  public function setFetchMode($mode, $a1 = NULL, $a2 = []) {
 +    if (is_int($mode)) {
-+      @trigger_error("Passing the \$mode argument as an integer to setFetchMode() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321", E_USER_DEPRECATED);
++      @trigger_error("Passing the \$mode argument as an integer to setFetchMode() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/3488338", E_USER_DEPRECATED);
 +      $mode = $this->pdoToFetchAs($mode);
-+    }
-+
-+    $this->defaultFetchMode = $mode;
-+    switch ($mode) {
-+      case FetchAs::ClassObject:
-+        $this->fetchOptions['class'] = $a1;
-+        if ($a2) {
-+          $this->fetchOptions['constructor_args'] = $a2;
-+        }
-+        break;
-+
-+      case FetchAs::Column:
-+        $this->fetchOptions['column'] = $a1;
-+        break;
-+
-+    }
-+
-+    return $this->clientSetFetchMode($mode, $a1, $a2);
+     }
+-
+-    $this->setResultsetCurrentRow($row);
+-    return $row;
++    return parent::setFetchMode($mode, $a1, $a2);
    }
  
    /**
     * {@inheritdoc}
     */
-   public function fetch($mode = NULL, $cursor_orientation = NULL, $cursor_offset = NULL) {
+-  public function rowCount() {
+-    // SELECT query should not use the method.
+-    if ($this->rowCountEnabled) {
+-      return $this->clientStatement->rowCount();
+-    }
+-    else {
+-      throw new RowCountException();
++  public function fetch($mode = NULL, $cursor_orientation = NULL, $cursor_offset = NULL) {
++    if (is_int($mode)) {
++      @trigger_error("Passing the \$mode argument as an integer to fetch() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/3488338", E_USER_DEPRECATED);
++      $mode = $this->pdoToFetchAs($mode);
+     }
+-  }
+-
+-  /**
+-   * {@inheritdoc}
+-   */
+-  public function setFetchMode($mode, $a1 = NULL, $a2 = []) {
+-    assert(in_array($mode, $this->supportedFetchModes), 'Fetch mode ' . ($this->fetchModeLiterals[$mode] ?? $mode) . ' is not supported. Use supported modes only.');
+-
+-    // Call \PDOStatement::setFetchMode to set fetch mode.
+-    // \PDOStatement is picky about the number of arguments in some cases so we
+-    // need to be pass the exact number of arguments we where given.
+     return match(func_num_args()) {
+-      1 => $this->clientStatement->setFetchMode($mode),
+-      2 => $this->clientStatement->setFetchMode($mode, $a1),
+-      default => $this->clientStatement->setFetchMode($mode, $a1, $a2),
++      0 => parent::fetch(),
++      1 => parent::fetch($mode),
++      2 => parent::fetch($mode, $cursor_orientation),
++      default => parent::fetch($mode, $cursor_orientation, $cursor_offset),
+     };
+   }
+ 
+-  /**
+-   * {@inheritdoc}
+-   */
+-  public function fetch($mode = NULL, $cursor_orientation = NULL, $cursor_offset = NULL) {
 -    assert(!isset($mode) || in_array($mode, $this->supportedFetchModes), 'Fetch mode ' . ($this->fetchModeLiterals[$mode] ?? $mode) . ' is not supported. Use supported modes only.');
 -
 -    // Call \PDOStatement::fetchAll to fetch all rows.
@@ -905,16 +1403,17 @@ index 980ef74ed2e..60261269a9d 100644
 -      2 => $this->clientStatement->fetch($mode, $cursor_orientation),
 -      default => $this->clientStatement->fetch($mode, $cursor_orientation, $cursor_offset),
 -    };
-+    if (is_int($mode)) {
-+      @trigger_error("Passing the \$mode argument as an integer to fetch() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321", E_USER_DEPRECATED);
-+      $mode = $this->pdoToFetchAs($mode);
-+    }
-+
-+    $row = $this->clientFetch($mode, $cursor_orientation, $cursor_offset);
- 
-     if ($row === FALSE) {
-       $this->markResultsetFetchingComplete();
-@@ -310,17 +324,20 @@ public function fetch($mode = NULL, $cursor_orientation = NULL, $cursor_offset =
+-
+-    if ($row === FALSE) {
+-      $this->markResultsetFetchingComplete();
+-      return FALSE;
+-    }
+-
+-    $this->setResultsetCurrentRow($row);
+-    return $row;
+-  }
+-
+   /**
     * {@inheritdoc}
     */
    public function fetchAll($mode = NULL, $column_index = NULL, $constructor_arguments = NULL) {
@@ -929,23 +1428,18 @@ index 980ef74ed2e..60261269a9d 100644
 -      2 => $this->clientStatement->fetchAll($mode, $column_index),
 -      default => $this->clientStatement->fetchAll($mode, $column_index, $constructor_arguments),
 -    };
+-
+-    $this->markResultsetFetchingComplete();
+-
+-    return $return;
 +    if (is_int($mode)) {
-+      @trigger_error("Passing the \$mode argument as an integer to fetchAll() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321", E_USER_DEPRECATED);
++      @trigger_error("Passing the \$mode argument as an integer to fetchAll() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/3488338", E_USER_DEPRECATED);
 +      $mode = $this->pdoToFetchAs($mode);
 +    }
-+
-+    $fetchMode = $mode ?? $this->defaultFetchMode;
-+    if (isset($column_index)) {
-+      $this->fetchOptions['column'] = $column_index;
-+    }
-+    if (isset($constructor_arguments)) {
-+      $this->fetchOptions['constructor_args'] = $constructor_arguments;
-+    }
-+
-+    $return = $this->clientFetchAll($fetchMode, $column_index, $constructor_arguments);
++    return parent::fetchAll($mode, $column_index, $constructor_arguments);
+   }
  
-     $this->markResultsetFetchingComplete();
- 
+ }
 diff --git a/core/lib/Drupal/Core/Entity/Sql/SqlContentEntityStorage.php b/core/lib/Drupal/Core/Entity/Sql/SqlContentEntityStorage.php
 index 93029c399df..ae8a23f3350 100644
 --- a/core/lib/Drupal/Core/Entity/Sql/SqlContentEntityStorage.php
@@ -986,7 +1480,7 @@ index 93029c399df..ae8a23f3350 100644
          ->condition('entity_id', $row['entity_id'])
          ->condition('deleted', 1)
 diff --git a/core/lib/Drupal/Core/Menu/MenuTreeStorage.php b/core/lib/Drupal/Core/Menu/MenuTreeStorage.php
-index 78f1d3de5d2..394621c0a4b 100644
+index cc25a399152..df89d202c1f 100644
 --- a/core/lib/Drupal/Core/Menu/MenuTreeStorage.php
 +++ b/core/lib/Drupal/Core/Menu/MenuTreeStorage.php
 @@ -10,6 +10,7 @@
@@ -1245,7 +1739,7 @@ index 21eb3daef0d..0172b8da57b 100644
      foreach (array_reverse($results) as $result) {
        $aliases[$result['path']] = $result['alias'];
 diff --git a/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php b/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php
-index 53c2fa0c1fe..5588dd81805 100644
+index 53c2fa0c1fe..57c3bbc10e6 100644
 --- a/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php
 +++ b/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php
 @@ -400,6 +400,9 @@ public function mapConditionOperator($operator) {
@@ -1253,13 +1747,13 @@ index 53c2fa0c1fe..5588dd81805 100644
    public function prepareStatement(string $query, array $options, bool $allow_row_count = FALSE): StatementInterface {
      assert(!isset($options['return']), 'Passing "return" option to prepareStatement() has no effect. See https://www.drupal.org/node/3185520');
 +    if (isset($options['fetch']) && is_int($options['fetch'])) {
-+      @trigger_error("Passing the 'fetch' key as an integer to \$options in prepareStatement() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321", E_USER_DEPRECATED);
++      @trigger_error("Passing the 'fetch' key as an integer to \$options in prepareStatement() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/3488338", E_USER_DEPRECATED);
 +    }
  
      try {
        $query = $this->preprocessStatement($query, $options);
 diff --git a/core/modules/sqlite/src/Driver/Database/sqlite/Statement.php b/core/modules/sqlite/src/Driver/Database/sqlite/Statement.php
-index d7d8daf46ac..871aaec29f9 100644
+index d7d8daf46ac..c4b2770d5c2 100644
 --- a/core/modules/sqlite/src/Driver/Database/sqlite/Statement.php
 +++ b/core/modules/sqlite/src/Driver/Database/sqlite/Statement.php
 @@ -86,6 +86,10 @@ protected function getStatement(string $query, ?array &$args = []): object {
@@ -1267,17 +1761,17 @@ index d7d8daf46ac..871aaec29f9 100644
     */
    public function execute($args = [], $options = []) {
 +    if (isset($options['fetch']) && is_int($options['fetch'])) {
-+      @trigger_error("Passing the 'fetch' key as an integer to \$options in execute() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321", E_USER_DEPRECATED);
++      @trigger_error("Passing the 'fetch' key as an integer to \$options in execute() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/3488338", E_USER_DEPRECATED);
 +    }
 +
      try {
        $return = parent::execute($args, $options);
      }
 diff --git a/core/modules/system/tests/modules/database_test/database_test.install b/core/modules/system/tests/modules/database_test/database_test.install
-index 774d8f624c8..c480c1a7cf3 100644
+index 6f4d3b7a4f8..f152becb6cd 100644
 --- a/core/modules/system/tests/modules/database_test/database_test.install
 +++ b/core/modules/system/tests/modules/database_test/database_test.install
-@@ -57,7 +57,7 @@ function database_test_schema() {
+@@ -57,7 +57,7 @@ function database_test_schema(): array {
    ];
  
    $schema['test_classtype'] = [
@@ -1309,7 +1803,7 @@ index 9ca4b8e1279..5ce7b4817bf 100644
          $view->result = iterator_to_array($result);
 diff --git a/core/tests/Drupal/KernelTests/Core/Database/FetchLegacyTest.php b/core/tests/Drupal/KernelTests/Core/Database/FetchLegacyTest.php
 new file mode 100644
-index 00000000000..8e3b028bd3f
+index 00000000000..bc527dd170e
 --- /dev/null
 +++ b/core/tests/Drupal/KernelTests/Core/Database/FetchLegacyTest.php
 @@ -0,0 +1,123 @@
@@ -1335,9 +1829,9 @@ index 00000000000..8e3b028bd3f
 +   */
 +  #[IgnoreDeprecations]
 +  public function testQueryFetchObject(): void {
-+    $this->expectDeprecation("Passing the 'fetch' key as an integer to \$options in query() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321");
-+    $this->expectDeprecation("Passing the 'fetch' key as an integer to \$options in prepareStatement() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321");
-+    $this->expectDeprecation("Passing the 'fetch' key as an integer to \$options in execute() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321");
++    $this->expectDeprecation("Passing the 'fetch' key as an integer to \$options in query() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/3488338");
++    $this->expectDeprecation("Passing the 'fetch' key as an integer to \$options in prepareStatement() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/3488338");
++    $this->expectDeprecation("Passing the 'fetch' key as an integer to \$options in execute() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/3488338");
 +    $records = [];
 +    $result = $this->connection->query('SELECT [name] FROM {test} WHERE [age] = :age', [':age' => 25], ['fetch' => \PDO::FETCH_OBJ]);
 +    foreach ($result as $record) {
@@ -1354,9 +1848,9 @@ index 00000000000..8e3b028bd3f
 +   */
 +  #[IgnoreDeprecations]
 +  public function testQueryFetchArray(): void {
-+    $this->expectDeprecation("Passing the 'fetch' key as an integer to \$options in query() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321");
-+    $this->expectDeprecation("Passing the 'fetch' key as an integer to \$options in prepareStatement() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321");
-+    $this->expectDeprecation("Passing the 'fetch' key as an integer to \$options in execute() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321");
++    $this->expectDeprecation("Passing the 'fetch' key as an integer to \$options in query() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/3488338");
++    $this->expectDeprecation("Passing the 'fetch' key as an integer to \$options in prepareStatement() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/3488338");
++    $this->expectDeprecation("Passing the 'fetch' key as an integer to \$options in execute() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/3488338");
 +    $records = [];
 +    $result = $this->connection->query('SELECT [name] FROM {test} WHERE [age] = :age', [':age' => 25], ['fetch' => \PDO::FETCH_ASSOC]);
 +    foreach ($result as $record) {
@@ -1374,9 +1868,9 @@ index 00000000000..8e3b028bd3f
 +   */
 +  #[IgnoreDeprecations]
 +  public function testQueryFetchNum(): void {
-+    $this->expectDeprecation("Passing the 'fetch' key as an integer to \$options in query() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321");
-+    $this->expectDeprecation("Passing the 'fetch' key as an integer to \$options in prepareStatement() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321");
-+    $this->expectDeprecation("Passing the 'fetch' key as an integer to \$options in execute() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321");
++    $this->expectDeprecation("Passing the 'fetch' key as an integer to \$options in query() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/3488338");
++    $this->expectDeprecation("Passing the 'fetch' key as an integer to \$options in prepareStatement() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/3488338");
++    $this->expectDeprecation("Passing the 'fetch' key as an integer to \$options in execute() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/3488338");
 +    $records = [];
 +    $result = $this->connection->query('SELECT [name] FROM {test} WHERE [age] = :age', [':age' => 25], ['fetch' => \PDO::FETCH_NUM]);
 +    foreach ($result as $record) {
@@ -1394,7 +1888,7 @@ index 00000000000..8e3b028bd3f
 +   */
 +  #[IgnoreDeprecations]
 +  public function testQueryFetchAllColumn(): void {
-+    $this->expectDeprecation("Passing the \$mode argument as an integer to fetchAll() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321");
++    $this->expectDeprecation("Passing the \$mode argument as an integer to fetchAll() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/3488338");
 +    $query = $this->connection->select('test');
 +    $query->addField('test', 'name');
 +    $query->orderBy('name');
@@ -1409,7 +1903,7 @@ index 00000000000..8e3b028bd3f
 +   */
 +  #[IgnoreDeprecations]
 +  public function testQueryFetchAllAssoc(): void {
-+    $this->expectDeprecation("Passing the \$fetch argument as an integer to fetchAllAssoc() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321");
++    $this->expectDeprecation("Passing the \$fetch argument as an integer to fetchAllAssoc() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/3488338");
 +    $expected_result = [
 +      "Singer" => [
 +        "id" => "2",
@@ -1641,7 +2135,7 @@ index baa01d730b2..cf26cb9b3c1 100644
      $raw = reset($all);
  
 diff --git a/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php b/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
-index 7e9ae828063..d94082b44f6 100644
+index 7e9ae828063..788386c5aac 100644
 --- a/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
 +++ b/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
 @@ -6,10 +6,13 @@
@@ -1677,7 +2171,7 @@ index 7e9ae828063..d94082b44f6 100644
 +  #[IgnoreDeprecations]
 +  #[DataProvider('providerSupportedLegacyFetchModes')]
 +  public function testSupportedLegacyFetchModes(int $mode): void {
-+    $this->expectDeprecation("Passing the \$mode argument as an integer to setFetchMode() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321");
++    $this->expectDeprecation("Passing the \$mode argument as an integer to setFetchMode() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/3488338");
 +    $mockPdo = $this->createMock(StubPDO::class);
 +    $mockConnection = new StubConnection($mockPdo, []);
 +    $statement = new StatementPrefetchIterator($mockPdo, $mockConnection, '');
@@ -1724,7 +2218,7 @@ index 7e9ae828063..d94082b44f6 100644
 +  #[DataProvider('providerUnsupportedFetchModes')]
    public function testUnsupportedFetchModes(int $mode): void {
 -    $this->expectException(\AssertionError::class);
-+    $this->expectDeprecation("Passing the \$mode argument as an integer to setFetchMode() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/7654321");
++    $this->expectDeprecation("Passing the \$mode argument as an integer to setFetchMode() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/3488338");
 +    $this->expectException(\RuntimeException::class);
      $this->expectExceptionMessageMatches("/^Fetch mode FETCH_.* is not supported\\. Use supported modes only/");
      $mockPdo = $this->createMock(StubPDO::class);
