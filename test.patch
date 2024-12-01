@@ -73,7 +73,7 @@ index acf3bd3b270..07632f4c591 100644
  	// identifier: missingType.return
  	'message' => '#^Method Drupal\\\\Core\\\\Flood\\\\DatabaseBackend\\:\\:garbageCollection\\(\\) has no return type specified\\.$#',
 diff --git a/core/core.services.yml b/core/core.services.yml
-index 5ffa0d96f4d..c6c3e8ce27a 100644
+index 5ffa0d96f4d..88c3eac735e 100644
 --- a/core/core.services.yml
 +++ b/core/core.services.yml
 @@ -467,6 +467,8 @@ services:
@@ -85,15 +85,6 @@ index 5ffa0d96f4d..c6c3e8ce27a 100644
    Drupal\Core\Database\EventSubscriber\StatementExecutionSubscriber: ~
    datetime.time:
      class: Drupal\Component\Datetime\Time
-@@ -876,8 +878,6 @@ services:
-     class: Drupal\Core\Routing\CurrentRouteMatch
-     arguments: ['@request_stack']
-   Drupal\Core\Routing\RouteMatchInterface: '@current_route_match'
--  event_dispatcher:
--    class: Symfony\Component\EventDispatcher\EventDispatcher
-   Psr\EventDispatcher\EventDispatcherInterface: '@event_dispatcher'
-   Symfony\Contracts\EventDispatcher\EventDispatcherInterface: '@event_dispatcher'
-   controller_resolver:
 diff --git a/core/lib/Drupal/Core/Batch/BatchStorage.php b/core/lib/Drupal/Core/Batch/BatchStorage.php
 index 46f9fb97c0d..15f4af6eb47 100644
 --- a/core/lib/Drupal/Core/Batch/BatchStorage.php
@@ -583,7 +574,7 @@ index aa41952128c..bda9ef69285 100644
  
    /**
 diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
-index 7a9de46a7d4..24d90f7e337 100644
+index 7a9de46a7d4..60e7be157e6 100644
 --- a/core/lib/Drupal/Core/Database/Connection.php
 +++ b/core/lib/Drupal/Core/Database/Connection.php
 @@ -4,6 +4,7 @@
@@ -594,7 +585,7 @@ index 7a9de46a7d4..24d90f7e337 100644
  use Drupal\Core\Database\Exception\EventException;
  use Drupal\Core\Database\Query\Condition;
  use Drupal\Core\Database\Query\Delete;
-@@ -1612,4 +1613,15 @@ protected function getDebugBacktrace(): array {
+@@ -1612,4 +1613,24 @@ protected function getDebugBacktrace(): array {
      return debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS);
    }
  
@@ -604,9 +595,18 @@ index 7a9de46a7d4..24d90f7e337 100644
 +    mixed &$returnValue = NULL,
 +    bool $retryAfterSchemaEnsured = FALSE,
 +  ): bool {
-+    $event = new ExecuteMethodEnsuringSchemaEvent($execute, $schema, $returnValue, $retryAfterSchemaEnsured);
-+    $this->dispatchEvent($event);
-+    return $event->getResult();
++    if (\Drupal::hasService('event_dispatcher')) {
++      $event = new ExecuteMethodEnsuringSchemaEvent($execute, $schema, $returnValue, $retryAfterSchemaEnsured);
++      \Drupal::service('event_dispatcher')->dispatch($event);
++      return $event->getResult();
++    }
++
++    // When rebuilding the container, there's a stage where the
++    // event_dispatcher service has not been reactivated yet. In that case,
++    // execute the closure and return its result, without performing the schema
++    // enforcement.
++    $returnValue = ($execute)();
++    return TRUE;
 +  }
 +
  }
@@ -723,81 +723,6 @@ index 00000000000..e8c3b300408
 +  }
 +
 +}
-diff --git a/core/lib/Drupal/Core/DrupalKernel.php b/core/lib/Drupal/Core/DrupalKernel.php
-index 14ac6baf694..652a6d3fe22 100644
---- a/core/lib/Drupal/Core/DrupalKernel.php
-+++ b/core/lib/Drupal/Core/DrupalKernel.php
-@@ -27,6 +27,7 @@
- use Drupal\Core\Test\TestDatabase;
- use Symfony\Component\DependencyInjection\ContainerInterface;
- use Symfony\Component\DependencyInjection\ParameterBag\ParameterBag;
-+use Symfony\Component\EventDispatcher\EventDispatcher;
- use Symfony\Component\HttpFoundation\RedirectResponse;
- use Symfony\Component\HttpFoundation\Request;
- use Symfony\Component\HttpFoundation\Response;
-@@ -474,6 +475,8 @@ public function getAppRoot() {
-    * {@inheritdoc}
-    */
-   public function boot() {
-+global $xxx;
-+$xxx = FALSE;
-     if ($this->booted) {
-       return $this;
-     }
-@@ -502,8 +505,10 @@ public function boot() {
-     $this->bootstrapContainer = new $this->bootstrapContainerClass(Settings::get('bootstrap_container_definition', $this->defaultBootstrapContainerDefinition));
- 
-     // Initialize the container.
-+if (Settings::get('rebuild_access', FALSE)) {$xxx = true; dump('boot.3');}
-     $this->initializeContainer();
- 
-+if ($xxx) dump('boot.4');
-     // Add the APCu prefix to use to cache found/not-found classes.
-     if (Settings::get('class_loader_auto_detect', TRUE) && method_exists($this->classLoader, 'setApcuPrefix')) {
-       // Vary the APCu key by which modules are installed to allow
-@@ -1281,6 +1286,7 @@ protected function attachSynthetic(ContainerInterface $container) {
-    * @return \Drupal\Core\DependencyInjection\ContainerBuilder The compiled service container
-    */
-   protected function compileContainer() {
-+global $xxx;
-     // We are forcing a container build so it is reasonable to assume that the
-     // calling method knows something about the system has changed requiring the
-     // container to be dumped to the filesystem.
-@@ -1288,6 +1294,7 @@ protected function compileContainer() {
-       $this->containerNeedsDumping = TRUE;
-     }
- 
-+if ($xxx) dump('compileContainer.1');
-     $this->initializeServiceProviders();
-     $container = $this->getContainerBuilder();
-     $container->set('kernel', $this);
-@@ -1335,6 +1342,8 @@ protected function compileContainer() {
-     $container->register('class_loader')->setSynthetic(TRUE);
-     $container->register('kernel', 'Symfony\Component\HttpKernel\KernelInterface')->setSynthetic(TRUE);
-     $container->register('service_container', 'Symfony\Component\DependencyInjection\ContainerInterface')->setSynthetic(TRUE);
-+    $container->register('event_dispatcher', EventDispatcher::class)->setSynthetic(TRUE);
-+if ($xxx) dump('compileContainer.2');
- 
-     // Register aliases of synthetic services for autowiring.
-     $container->setAlias(DrupalKernelInterface::class, 'kernel');
-@@ -1359,6 +1368,7 @@ protected function compileContainer() {
-         $provider->register($container);
-       }
-     }
-+if ($xxx) dump('compileContainer.3');
- 
-     // Identify all services whose instances should be persisted when rebuilding
-     // the container during the lifetime of the kernel (e.g., during a kernel
-@@ -1377,7 +1387,9 @@ protected function compileContainer() {
-     $container->setParameter('app.root', $this->getAppRoot());
-     $container->setParameter('site.path', $this->getSitePath());
- 
-+if ($xxx) dump('compileContainer.4', get_class($container));
-     $container->compile();
-+if ($xxx) dump('compileContainer.5');
-     return $container;
-   }
- 
 diff --git a/core/lib/Drupal/Core/Flood/DatabaseBackend.php b/core/lib/Drupal/Core/Flood/DatabaseBackend.php
 index ec6bd4c01de..5453d8c809d 100644
 --- a/core/lib/Drupal/Core/Flood/DatabaseBackend.php
@@ -1027,23 +952,6 @@ index ec6bd4c01de..5453d8c809d 100644
    }
  
    /**
-diff --git a/core/modules/system/tests/src/Functional/UpdateSystem/RebuildScriptTest.php b/core/modules/system/tests/src/Functional/UpdateSystem/RebuildScriptTest.php
-index 484f520da0b..56ff390329e 100644
---- a/core/modules/system/tests/src/Functional/UpdateSystem/RebuildScriptTest.php
-+++ b/core/modules/system/tests/src/Functional/UpdateSystem/RebuildScriptTest.php
-@@ -32,9 +32,9 @@ public function testRebuild(): void {
-     $cache = $this->container->get('cache.default');
- 
-     $cache->set('rebuild_test', TRUE);
--    $this->drupalGet(Url::fromUri('base:core/rebuild.php'));
--    $this->assertSession()->addressEquals(new Url('<front>'));
--    $this->assertInstanceOf(\stdClass::class, $cache->get('rebuild_test'));
-+//    $this->drupalGet(Url::fromUri('base:core/rebuild.php'));
-+//    $this->assertSession()->addressEquals(new Url('<front>'));
-+//    $this->assertInstanceOf(\stdClass::class, $cache->get('rebuild_test'));
- 
-     $settings['settings']['rebuild_access'] = (object) [
-       'value' => TRUE,
 diff --git a/core/tests/Drupal/KernelTests/Core/Batch/BatchKernelTest.php b/core/tests/Drupal/KernelTests/Core/Batch/BatchKernelTest.php
 index a8c8af5fe7b..f4e94214316 100644
 --- a/core/tests/Drupal/KernelTests/Core/Batch/BatchKernelTest.php
