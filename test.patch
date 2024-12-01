@@ -1,3 +1,948 @@
+diff --git a/core/.phpstan-baseline.php b/core/.phpstan-baseline.php
+index acf3bd3b270..07632f4c591 100644
+--- a/core/.phpstan-baseline.php
++++ b/core/.phpstan-baseline.php
+@@ -1915,12 +1915,6 @@
+ 	'count' => 1,
+ 	'path' => __DIR__ . '/lib/Drupal/Core/Authentication/AuthenticationCollectorInterface.php',
+ ];
+-$ignoreErrors[] = [
+-	// identifier: missingType.return
+-	'message' => '#^Method Drupal\\\\Core\\\\Batch\\\\BatchStorage\\:\\:catchException\\(\\) has no return type specified\\.$#',
+-	'count' => 1,
+-	'path' => __DIR__ . '/lib/Drupal/Core/Batch/BatchStorage.php',
+-];
+ $ignoreErrors[] = [
+ 	// identifier: missingType.return
+ 	'message' => '#^Method Drupal\\\\Core\\\\Batch\\\\BatchStorage\\:\\:cleanup\\(\\) has no return type specified\\.$#',
+@@ -1939,12 +1933,6 @@
+ 	'count' => 1,
+ 	'path' => __DIR__ . '/lib/Drupal/Core/Batch/BatchStorage.php',
+ ];
+-$ignoreErrors[] = [
+-	// identifier: missingType.return
+-	'message' => '#^Method Drupal\\\\Core\\\\Batch\\\\BatchStorage\\:\\:ensureTableExists\\(\\) has no return type specified\\.$#',
+-	'count' => 1,
+-	'path' => __DIR__ . '/lib/Drupal/Core/Batch/BatchStorage.php',
+-];
+ $ignoreErrors[] = [
+ 	// identifier: missingType.return
+ 	'message' => '#^Method Drupal\\\\Core\\\\Batch\\\\BatchStorage\\:\\:schemaDefinition\\(\\) has no return type specified\\.$#',
+@@ -2719,12 +2707,6 @@
+ 	'count' => 1,
+ 	'path' => __DIR__ . '/lib/Drupal/Core/Cache/DatabaseCacheTagsChecksum.php',
+ ];
+-$ignoreErrors[] = [
+-	// identifier: missingType.return
+-	'message' => '#^Method Drupal\\\\Core\\\\Cache\\\\DatabaseCacheTagsChecksum\\:\\:ensureTableExists\\(\\) has no return type specified\\.$#',
+-	'count' => 1,
+-	'path' => __DIR__ . '/lib/Drupal/Core/Cache/DatabaseCacheTagsChecksum.php',
+-];
+ $ignoreErrors[] = [
+ 	// identifier: missingType.return
+ 	'message' => '#^Method Drupal\\\\Core\\\\Cache\\\\DatabaseCacheTagsChecksum\\:\\:getDatabaseConnection\\(\\) has no return type specified\\.$#',
+@@ -7950,30 +7932,12 @@
+ 	'count' => 1,
+ 	'path' => __DIR__ . '/lib/Drupal/Core/FileTransfer/SSH.php',
+ ];
+-$ignoreErrors[] = [
+-	// identifier: missingType.return
+-	'message' => '#^Method Drupal\\\\Core\\\\Flood\\\\DatabaseBackend\\:\\:catchException\\(\\) has no return type specified\\.$#',
+-	'count' => 1,
+-	'path' => __DIR__ . '/lib/Drupal/Core/Flood/DatabaseBackend.php',
+-];
+ $ignoreErrors[] = [
+ 	// identifier: missingType.return
+ 	'message' => '#^Method Drupal\\\\Core\\\\Flood\\\\DatabaseBackend\\:\\:clear\\(\\) has no return type specified\\.$#',
+ 	'count' => 1,
+ 	'path' => __DIR__ . '/lib/Drupal/Core/Flood/DatabaseBackend.php',
+ ];
+-$ignoreErrors[] = [
+-	// identifier: missingType.return
+-	'message' => '#^Method Drupal\\\\Core\\\\Flood\\\\DatabaseBackend\\:\\:doInsert\\(\\) has no return type specified\\.$#',
+-	'count' => 1,
+-	'path' => __DIR__ . '/lib/Drupal/Core/Flood/DatabaseBackend.php',
+-];
+-$ignoreErrors[] = [
+-	// identifier: missingType.return
+-	'message' => '#^Method Drupal\\\\Core\\\\Flood\\\\DatabaseBackend\\:\\:ensureTableExists\\(\\) has no return type specified\\.$#',
+-	'count' => 1,
+-	'path' => __DIR__ . '/lib/Drupal/Core/Flood/DatabaseBackend.php',
+-];
+ $ignoreErrors[] = [
+ 	// identifier: missingType.return
+ 	'message' => '#^Method Drupal\\\\Core\\\\Flood\\\\DatabaseBackend\\:\\:garbageCollection\\(\\) has no return type specified\\.$#',
+diff --git a/core/core.services.yml b/core/core.services.yml
+index 5ffa0d96f4d..88c3eac735e 100644
+--- a/core/core.services.yml
++++ b/core/core.services.yml
+@@ -467,6 +467,8 @@ services:
+     class: Drupal\Core\Database\ReplicaKillSwitch
+     arguments: ['@settings', '@datetime.time', '@session']
+   Drupal\Core\Database\ReplicaKillSwitch: '@database.replica_kill_switch'
++  Drupal\Core\Database\EventSubscriber\SchemaRequestSubscriber:
++    autowire: true
+   Drupal\Core\Database\EventSubscriber\StatementExecutionSubscriber: ~
+   datetime.time:
+     class: Drupal\Component\Datetime\Time
+diff --git a/core/lib/Drupal/Core/Batch/BatchStorage.php b/core/lib/Drupal/Core/Batch/BatchStorage.php
+index 46f9fb97c0d..15f4af6eb47 100644
+--- a/core/lib/Drupal/Core/Batch/BatchStorage.php
++++ b/core/lib/Drupal/Core/Batch/BatchStorage.php
+@@ -5,7 +5,6 @@
+ use Drupal\Component\Datetime\TimeInterface;
+ use Drupal\Core\Access\CsrfTokenGenerator;
+ use Drupal\Core\Database\Connection;
+-use Drupal\Core\Database\DatabaseException;
+ use Symfony\Component\HttpFoundation\Session\SessionInterface;
+ 
+ class BatchStorage implements BatchStorageInterface {
+@@ -41,18 +40,20 @@ public function __construct(
+   public function load($id) {
+     // Ensure that a session is started before using the CSRF token generator.
+     $this->session->start();
+-    try {
+-      $batch = $this->connection->select('batch', 'b')
+-        ->fields('b', ['batch'])
+-        ->condition('bid', $id)
+-        ->condition('token', $this->csrfToken->get($id))
+-        ->execute()
+-        ->fetchField();
+-    }
+-    catch (\Exception $e) {
+-      $this->catchException($e);
+-      $batch = FALSE;
+-    }
++    $this->connection->executeEnsuringSchemaOnFailure(
++      execute: function () use ($id): string|FALSE {
++        return $this->connection->select('batch', 'b')
++          ->fields('b', ['batch'])
++          ->condition('bid', $id)
++          ->condition('token', $this->csrfToken->get($id))
++          ->execute()
++          ->fetchField();
++      },
++      returnValue: $batch,
++      schema: [
++        static::TABLE_NAME => $this->schemaDefinition(),
++      ],
++    );
+     if ($batch) {
+       return unserialize($batch);
+     }
+@@ -63,44 +64,50 @@ public function load($id) {
+    * {@inheritdoc}
+    */
+   public function delete($id) {
+-    try {
+-      $this->connection->delete('batch')
+-        ->condition('bid', $id)
+-        ->execute();
+-    }
+-    catch (\Exception $e) {
+-      $this->catchException($e);
+-    }
++    $this->connection->executeEnsuringSchemaOnFailure(
++      execute: function () use ($id): void {
++        $this->connection->delete('batch')
++          ->condition('bid', $id)
++          ->execute();
++      },
++      schema: [
++        static::TABLE_NAME => $this->schemaDefinition(),
++      ],
++    );
+   }
+ 
+   /**
+    * {@inheritdoc}
+    */
+   public function update(array $batch) {
+-    try {
+-      $this->connection->update('batch')
+-        ->fields(['batch' => serialize($batch)])
+-        ->condition('bid', $batch['id'])
+-        ->execute();
+-    }
+-    catch (\Exception $e) {
+-      $this->catchException($e);
+-    }
++    $this->connection->executeEnsuringSchemaOnFailure(
++      execute: function () use ($batch): void {
++        $this->connection->update('batch')
++          ->fields(['batch' => serialize($batch)])
++          ->condition('bid', $batch['id'])
++          ->execute();
++      },
++      schema: [
++        static::TABLE_NAME => $this->schemaDefinition(),
++      ],
++    );
+   }
+ 
+   /**
+    * {@inheritdoc}
+    */
+   public function cleanup() {
+-    try {
+-      // Cleanup the batch table and the queue for failed batches.
+-      $this->connection->delete('batch')
+-        ->condition('timestamp', $this->time->getRequestTime() - 864000, '<')
+-        ->execute();
+-    }
+-    catch (\Exception $e) {
+-      $this->catchException($e);
+-    }
++    $this->connection->executeEnsuringSchemaOnFailure(
++      execute: function (): void {
++        // Cleanup the batch table and the queue for failed batches.
++        $this->connection->delete('batch')
++          ->condition('timestamp', $this->time->getRequestTime() - 864000, '<')
++          ->execute();
++      },
++      schema: [
++        static::TABLE_NAME => $this->schemaDefinition(),
++      ],
++    );
+   }
+ 
+   /**
+@@ -126,77 +133,24 @@ public function create(array $batch) {
+    *   A batch id.
+    */
+   public function getId(): int {
+-    $try_again = FALSE;
+-    try {
+-      // The batch table might not yet exist.
+-      return $this->doInsertBatchRecord();
+-    }
+-    catch (\Exception $e) {
+-      // If there was an exception, try to create the table.
+-      if (!$try_again = $this->ensureTableExists()) {
+-        // If the exception happened for other reason than the missing table,
+-        // propagate the exception.
+-        throw $e;
+-      }
+-    }
+-    // Now that the table has been created, try again if necessary.
+-    if ($try_again) {
+-      return $this->doInsertBatchRecord();
+-    }
+-  }
+-
+-  /**
+-   * Inserts a record in the table and returns the batch id.
+-   *
+-   * @return int
+-   *   A batch id.
+-   */
+-  protected function doInsertBatchRecord(): int {
+-    return $this->connection->insert('batch')
+-      ->fields([
+-        'timestamp' => $this->time->getRequestTime(),
+-        'token' => '',
+-        'batch' => NULL,
+-      ])
+-      ->execute();
+-  }
+-
+-  /**
+-   * Check if the table exists and create it if not.
+-   */
+-  protected function ensureTableExists() {
+-    try {
+-      $database_schema = $this->connection->schema();
+-      $schema_definition = $this->schemaDefinition();
+-      $database_schema->createTable(static::TABLE_NAME, $schema_definition);
+-    }
+-    // If another process has already created the batch table, attempting to
+-    // recreate it will throw an exception. In this case just catch the
+-    // exception and do nothing.
+-    catch (DatabaseException) {
+-    }
+-    catch (\Exception) {
+-      return FALSE;
+-    }
+-    return TRUE;
+-  }
++    $this->connection->executeEnsuringSchemaOnFailure(
++      execute: function (): int {
++        return $this->connection->insert('batch')
++          ->fields([
++            'timestamp' => $this->time->getRequestTime(),
++            'token' => '',
++            'batch' => NULL,
++          ])
++          ->execute();
++      },
++      returnValue: $id,
++      schema: [
++        static::TABLE_NAME => $this->schemaDefinition(),
++      ],
++      retryAfterSchemaEnsured: TRUE,
++    );
+ 
+-  /**
+-   * Act on an exception when batch might be stale.
+-   *
+-   * If the table does not yet exist, that's fine, but if the table exists and
+-   * yet the query failed, then the batch is stale and the exception needs to
+-   * propagate.
+-   *
+-   * @param $e
+-   *   The exception.
+-   *
+-   * @throws \Exception
+-   */
+-  protected function catchException(\Exception $e) {
+-    if ($this->connection->schema()->tableExists(static::TABLE_NAME)) {
+-      throw $e;
+-    }
++    return $id;
+   }
+ 
+   /**
+diff --git a/core/lib/Drupal/Core/Cache/DatabaseBackend.php b/core/lib/Drupal/Core/Cache/DatabaseBackend.php
+index 8b45010914f..5f6b9c1256c 100644
+--- a/core/lib/Drupal/Core/Cache/DatabaseBackend.php
++++ b/core/lib/Drupal/Core/Cache/DatabaseBackend.php
+@@ -205,23 +205,15 @@ public function set($cid, $data, $expire = Cache::PERMANENT, array $tags = []) {
+    * {@inheritdoc}
+    */
+   public function setMultiple(array $items) {
+-    $try_again = FALSE;
+-    try {
+-      // The bin might not yet exist.
+-      $this->doSetMultiple($items);
+-    }
+-    catch (\Exception $e) {
+-      // If there was an exception, try to create the bins.
+-      if (!$try_again = $this->ensureBinExists()) {
+-        // If the exception happened for other reason than the missing bin
+-        // table, propagate the exception.
+-        throw $e;
+-      }
+-    }
+-    // Now that the bin has been created, try again if necessary.
+-    if ($try_again) {
+-      $this->doSetMultiple($items);
+-    }
++    $this->connection->executeEnsuringSchemaOnFailure(
++      execute: function () use ($items): void {
++        $this->doSetMultiple($items);
++      },
++      schema: [
++        $this->bin => $this->schemaDefinition(),
++      ],
++      retryAfterSchemaEnsured: TRUE,
++    );
+   }
+ 
+   /**
+@@ -309,39 +301,33 @@ public function delete($cid) {
+    */
+   public function deleteMultiple(array $cids) {
+     $cids = array_values(array_map([$this, 'normalizeCid'], $cids));
+-    try {
+-      // Delete in chunks when a large array is passed.
+-      foreach (array_chunk($cids, 1000) as $cids_chunk) {
+-        $this->connection->delete($this->bin)
+-          ->condition('cid', $cids_chunk, 'IN')
+-          ->execute();
+-      }
+-    }
+-    catch (\Exception $e) {
+-      // Create the cache table, which will be empty. This fixes cases during
+-      // core install where a cache table is cleared before it is set
+-      // with {cache_render} and {cache_data}.
+-      if (!$this->ensureBinExists()) {
+-        $this->catchException($e);
+-      }
+-    }
++    $this->connection->executeEnsuringSchemaOnFailure(
++      execute: function () use ($cids): void {
++        // Delete in chunks when a large array is passed.
++        foreach (array_chunk($cids, 1000) as $cids_chunk) {
++          $this->connection->delete($this->bin)
++            ->condition('cid', $cids_chunk, 'IN')
++            ->execute();
++        }
++      },
++      schema: [
++        $this->bin => $this->schemaDefinition(),
++      ],
++    );
+   }
+ 
+   /**
+    * {@inheritdoc}
+    */
+   public function deleteAll() {
+-    try {
+-      $this->connection->truncate($this->bin)->execute();
+-    }
+-    catch (\Exception $e) {
+-      // Create the cache table, which will be empty. This fixes cases during
+-      // core install where a cache table is cleared before it is set
+-      // with {cache_render} and {cache_data}.
+-      if (!$this->ensureBinExists()) {
+-        $this->catchException($e);
+-      }
+-    }
++    $this->connection->executeEnsuringSchemaOnFailure(
++      execute: function (): void {
++        $this->connection->truncate($this->bin)->execute();
++      },
++      schema: [
++        $this->bin => $this->schemaDefinition(),
++      ],
++    );
+   }
+ 
+   /**
+@@ -356,33 +342,37 @@ public function invalidate($cid) {
+    */
+   public function invalidateMultiple(array $cids) {
+     $cids = array_values(array_map([$this, 'normalizeCid'], $cids));
+-    try {
+-      // Update in chunks when a large array is passed.
+-      $requestTime = $this->time->getRequestTime();
+-      foreach (array_chunk($cids, 1000) as $cids_chunk) {
+-        $this->connection->update($this->bin)
+-          ->fields(['expire' => $requestTime - 1])
+-          ->condition('cid', $cids_chunk, 'IN')
+-          ->execute();
+-      }
+-    }
+-    catch (\Exception $e) {
+-      $this->catchException($e);
+-    }
++    $this->connection->executeEnsuringSchemaOnFailure(
++      execute: function () use ($cids): void {
++        // Update in chunks when a large array is passed.
++        $requestTime = $this->time->getRequestTime();
++        foreach (array_chunk($cids, 1000) as $cids_chunk) {
++          $this->connection->update($this->bin)
++            ->fields(['expire' => $requestTime - 1])
++            ->condition('cid', $cids_chunk, 'IN')
++            ->execute();
++        }
++      },
++      schema: [
++        $this->bin => $this->schemaDefinition(),
++      ],
++    );
+   }
+ 
+   /**
+    * {@inheritdoc}
+    */
+   public function invalidateAll() {
+-    try {
+-      $this->connection->update($this->bin)
+-        ->fields(['expire' => $this->time->getRequestTime() - 1])
+-        ->execute();
+-    }
+-    catch (\Exception $e) {
+-      $this->catchException($e);
+-    }
++    $this->connection->executeEnsuringSchemaOnFailure(
++      execute: function (): void {
++        $this->connection->update($this->bin)
++          ->fields(['expire' => $this->time->getRequestTime() - 1])
++          ->execute();
++      },
++      schema: [
++        $this->bin => $this->schemaDefinition(),
++      ],
++    );
+   }
+ 
+   /**
+@@ -432,8 +422,15 @@ public function removeBin() {
+ 
+   /**
+    * Check if the cache bin exists and create it if not.
++   *
++   * @deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use
++   * \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure()
++   * instead.
++   *
++   * @see https://www.drupal.org/node/3489185
+    */
+   protected function ensureBinExists() {
++    @trigger_error(__METHOD__ . '() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure() instead. See https://www.drupal.org/node/3489185', E_USER_DEPRECATED);
+     try {
+       $database_schema = $this->connection->schema();
+       if (!$database_schema->tableExists($this->bin)) {
+diff --git a/core/lib/Drupal/Core/Cache/DatabaseCacheTagsChecksum.php b/core/lib/Drupal/Core/Cache/DatabaseCacheTagsChecksum.php
+index aa41952128c..bda9ef69285 100644
+--- a/core/lib/Drupal/Core/Cache/DatabaseCacheTagsChecksum.php
++++ b/core/lib/Drupal/Core/Cache/DatabaseCacheTagsChecksum.php
+@@ -3,7 +3,6 @@
+ namespace Drupal\Core\Cache;
+ 
+ use Drupal\Core\Database\Connection;
+-use Drupal\Core\Database\DatabaseException;
+ 
+ /**
+  * Cache tags invalidations checksum implementation that uses the database.
+@@ -33,60 +32,37 @@ public function __construct(Connection $connection) {
+    * {@inheritdoc}
+    */
+   protected function doInvalidateTags(array $tags) {
+-    try {
+-      foreach ($tags as $tag) {
+-        $this->connection->merge('cachetags')
+-          ->insertFields(['invalidations' => 1])
+-          ->expression('invalidations', '[invalidations] + 1')
+-          ->key('tag', $tag)
+-          ->execute();
+-      }
+-    }
+-    catch (\Exception $e) {
+-      // Create the cache table, which will be empty. This fixes cases during
+-      // core install where cache tags are invalidated before the table is
+-      // created.
+-      if (!$this->ensureTableExists()) {
+-        throw $e;
+-      }
+-    }
++    $this->connection->executeEnsuringSchemaOnFailure(
++      execute: function () use ($tags): void {
++        foreach ($tags as $tag) {
++          $this->connection->merge('cachetags')
++            ->insertFields(['invalidations' => 1])
++            ->expression('invalidations', '[invalidations] + 1')
++            ->key('tag', $tag)
++            ->execute();
++        }
++      },
++      schema: [
++        'cachetags' => $this->schemaDefinition(),
++      ],
++    );
+   }
+ 
+   /**
+    * {@inheritdoc}
+    */
+   protected function getTagInvalidationCounts(array $tags) {
+-    try {
+-      return $this->connection->query('SELECT [tag], [invalidations] FROM {cachetags} WHERE [tag] IN ( :tags[] )', [':tags[]' => $tags])
+-        ->fetchAllKeyed();
+-    }
+-    catch (\Exception $e) {
+-      // If the table does not exist yet, create.
+-      if (!$this->ensureTableExists()) {
+-        throw $e;
+-      }
+-    }
+-    return [];
+-  }
+-
+-  /**
+-   * Check if the cache tags table exists and create it if not.
+-   */
+-  protected function ensureTableExists() {
+-    try {
+-      $database_schema = $this->connection->schema();
+-      $schema_definition = $this->schemaDefinition();
+-      $database_schema->createTable('cachetags', $schema_definition);
+-    }
+-    // If another process has already created the cachetags table, attempting to
+-    // recreate it will throw an exception. In this case just catch the
+-    // exception and do nothing.
+-    catch (DatabaseException) {
+-    }
+-    catch (\Exception) {
+-      return FALSE;
+-    }
+-    return TRUE;
++    $this->connection->executeEnsuringSchemaOnFailure(
++      execute: function () use ($tags): array {
++        return $this->connection->query('SELECT [tag], [invalidations] FROM {cachetags} WHERE [tag] IN ( :tags[] )', [':tags[]' => $tags])
++          ->fetchAllKeyed();
++      },
++      returnValue: $counts,
++      schema: [
++        'cachetags' => $this->schemaDefinition(),
++      ],
++    );
++    return $counts ?? [];
+   }
+ 
+   /**
+diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
+index 7a9de46a7d4..24d90f7e337 100644
+--- a/core/lib/Drupal/Core/Database/Connection.php
++++ b/core/lib/Drupal/Core/Database/Connection.php
+@@ -4,6 +4,7 @@
+ 
+ use Drupal\Component\Assertion\Inspector;
+ use Drupal\Core\Database\Event\DatabaseEvent;
++use Drupal\Core\Database\Event\ExecuteMethodEnsuringSchemaEvent;
+ use Drupal\Core\Database\Exception\EventException;
+ use Drupal\Core\Database\Query\Condition;
+ use Drupal\Core\Database\Query\Delete;
+@@ -1612,4 +1613,15 @@ protected function getDebugBacktrace(): array {
+     return debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS);
+   }
+ 
++  public function executeEnsuringSchemaOnFailure(
++    \Closure $execute,
++    array $schema,
++    mixed &$returnValue = NULL,
++    bool $retryAfterSchemaEnsured = FALSE,
++  ): bool {
++    $event = new ExecuteMethodEnsuringSchemaEvent($execute, $schema, $returnValue, $retryAfterSchemaEnsured);
++    $this->dispatchEvent($event);
++    return $event->getResult();
++  }
++
+ }
+diff --git a/core/lib/Drupal/Core/Database/Event/ExecuteMethodEnsuringSchemaEvent.php b/core/lib/Drupal/Core/Database/Event/ExecuteMethodEnsuringSchemaEvent.php
+new file mode 100644
+index 00000000000..426dba2993b
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/Event/ExecuteMethodEnsuringSchemaEvent.php
+@@ -0,0 +1,29 @@
++<?php
++
++namespace Drupal\Core\Database\Event;
++
++/**
++ * Represents the execution of a method ensuring an indicated schema exists.
++ */
++class ExecuteMethodEnsuringSchemaEvent extends DatabaseEvent {
++
++  protected bool $callMethodResult;
++
++  public function __construct(
++    public readonly \Closure $execute,
++    public readonly array $schema,
++    public mixed &$returnValue = NULL,
++    public readonly bool $retryAfterSchemaEnsured = FALSE,
++  ) {
++    parent::__construct();
++  }
++
++  public function setResult(bool $result): void {
++    $this->callMethodResult = $result;
++  }
++
++  public function getResult(): bool {
++    return $this->callMethodResult;
++  }
++
++}
+diff --git a/core/lib/Drupal/Core/Database/EventSubscriber/SchemaRequestSubscriber.php b/core/lib/Drupal/Core/Database/EventSubscriber/SchemaRequestSubscriber.php
+new file mode 100644
+index 00000000000..e8c3b300408
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/EventSubscriber/SchemaRequestSubscriber.php
+@@ -0,0 +1,72 @@
++<?php
++
++namespace Drupal\Core\Database\EventSubscriber;
++
++use Drupal\Core\Database\Connection;
++use Drupal\Core\Database\Event\ExecuteMethodEnsuringSchemaEvent;
++use Symfony\Component\EventDispatcher\EventSubscriberInterface;
++use Drupal\Core\Database\DatabaseException;
++
++/**
++ * Response subscriber to schema handling requests.
++ */
++class SchemaRequestSubscriber implements EventSubscriberInterface {
++
++  public function __construct(
++    protected readonly Connection $connection,
++  ) {
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public static function getSubscribedEvents(): array {
++    return [
++      ExecuteMethodEnsuringSchemaEvent::class => 'onExecuteMethodEnsuringSchema',
++    ];
++  }
++
++  public function onExecuteMethodEnsuringSchema(ExecuteMethodEnsuringSchemaEvent $event): void {
++    $tryAgain = FALSE;
++    try {
++      $event->returnValue = ($event->execute)();
++      $event->setResult(TRUE);
++    }
++    catch (\Exception $e) {
++      // If there was an exception, try to create the table.
++      $event->setResult(FALSE);
++      if (!$tryAgain = $this->ensureSchemaExists($event->schema)) {
++        // If the exception happened for other reason than the missing table,
++        // propagate the exception.
++        throw $e;
++      }
++    }
++    // Now that the table has been created, try again if necessary.
++    if ($event->retryAfterSchemaEnsured && $tryAgain) {
++      $event->returnValue = ($event->execute)();
++      $event->setResult(TRUE);
++    }
++  }
++
++  /**
++   * Check if the table exists and create it if not.
++   */
++  protected function ensureSchemaExists(array $schema): bool {
++    try {
++      $databaseSchema = $this->connection->schema();
++      foreach ($schema as $name => $definition) {
++        $databaseSchema->createTable($name, $definition);
++      }
++    }
++    // If another process has already created the batch table, attempting to
++    // recreate it will throw an exception. In this case just catch the
++    // exception and do nothing.
++    catch (DatabaseException) {
++    }
++    catch (\Exception) {
++      return FALSE;
++    }
++    return TRUE;
++  }
++
++}
+diff --git a/core/lib/Drupal/Core/Flood/DatabaseBackend.php b/core/lib/Drupal/Core/Flood/DatabaseBackend.php
+index ec6bd4c01de..5453d8c809d 100644
+--- a/core/lib/Drupal/Core/Flood/DatabaseBackend.php
++++ b/core/lib/Drupal/Core/Flood/DatabaseBackend.php
+@@ -4,7 +4,6 @@
+ 
+ use Drupal\Component\Datetime\TimeInterface;
+ use Drupal\Core\Database\Connection;
+-use Drupal\Core\Database\DatabaseException;
+ use Symfony\Component\HttpFoundation\RequestStack;
+ 
+ /**
+@@ -42,42 +41,23 @@ public function register($name, $window = 3600, $identifier = NULL) {
+     if (!isset($identifier)) {
+       $identifier = $this->requestStack->getCurrentRequest()->getClientIp();
+     }
+-    $try_again = FALSE;
+-    try {
+-      $this->doInsert($name, $window, $identifier);
+-    }
+-    catch (\Exception $e) {
+-      $try_again = $this->ensureTableExists();
+-      if (!$try_again) {
+-        throw $e;
+-      }
+-    }
+-    if ($try_again) {
+-      $this->doInsert($name, $window, $identifier);
+-    }
+-  }
+ 
+-  /**
+-   * Inserts an event into the flood table.
+-   *
+-   * @param string $name
+-   *   The name of an event.
+-   * @param int $window
+-   *   Number of seconds before this event expires.
+-   * @param string $identifier
+-   *   Unique identifier of the current user.
+-   *
+-   * @see \Drupal\Core\Flood\DatabaseBackend::register
+-   */
+-  protected function doInsert($name, $window, $identifier) {
+-    $this->connection->insert(static::TABLE_NAME)
+-      ->fields([
+-        'event' => $name,
+-        'identifier' => $identifier,
+-        'timestamp' => $this->time->getRequestTime(),
+-        'expiration' => $this->time->getRequestTime() + $window,
+-      ])
+-      ->execute();
++    $this->connection->executeEnsuringSchemaOnFailure(
++      execute: function () use ($name, $window, $identifier): void {
++        $this->connection->insert(DatabaseBackend::TABLE_NAME)
++          ->fields([
++            'event' => $name,
++            'identifier' => $identifier,
++            'timestamp' => $this->time->getRequestTime(),
++            'expiration' => $this->time->getRequestTime() + $window,
++          ])
++          ->execute();
++      },
++      schema: [
++        static::TABLE_NAME => $this->schemaDefinition(),
++      ],
++      retryAfterSchemaEnsured: TRUE,
++    );
+   }
+ 
+   /**
+@@ -87,30 +67,35 @@ public function clear($name, $identifier = NULL) {
+     if (!isset($identifier)) {
+       $identifier = $this->requestStack->getCurrentRequest()->getClientIp();
+     }
+-    try {
+-      $this->connection->delete(static::TABLE_NAME)
+-        ->condition('event', $name)
+-        ->condition('identifier', $identifier)
+-        ->execute();
+-    }
+-    catch (\Exception $e) {
+-      $this->catchException($e);
+-    }
++
++    $this->connection->executeEnsuringSchemaOnFailure(
++      execute: function () use ($name, $identifier): void {
++        $this->connection->delete(DatabaseBackend::TABLE_NAME)
++          ->condition('event', $name)
++          ->condition('identifier', $identifier)
++          ->execute();
++      },
++      schema: [
++        static::TABLE_NAME => $this->schemaDefinition(),
++      ],
++    );
+   }
+ 
+   /**
+    * {@inheritdoc}
+    */
+   public function clearByPrefix(string $name, string $prefix): void {
+-    try {
+-      $this->connection->delete(static::TABLE_NAME)
+-        ->condition('event', $name)
+-        ->condition('identifier', $prefix . '-%', 'LIKE')
+-        ->execute();
+-    }
+-    catch (\Exception $e) {
+-      $this->catchException($e);
+-    }
++    $this->connection->executeEnsuringSchemaOnFailure(
++      execute: function () use ($name, $prefix): void {
++        $this->connection->delete(DatabaseBackend::TABLE_NAME)
++          ->condition('event', $name)
++          ->condition('identifier', $prefix . '-%', 'LIKE')
++          ->execute();
++      },
++      schema: [
++        static::TABLE_NAME => $this->schemaDefinition(),
++      ],
++    );
+   }
+ 
+   /**
+@@ -120,74 +105,41 @@ public function isAllowed($name, $threshold, $window = 3600, $identifier = NULL)
+     if (!isset($identifier)) {
+       $identifier = $this->requestStack->getCurrentRequest()->getClientIp();
+     }
+-    try {
+-      $number = $this->connection->select(static::TABLE_NAME, 'f')
+-        ->condition('event', $name)
+-        ->condition('identifier', $identifier)
+-        ->condition('timestamp', $this->time->getRequestTime() - $window, '>')
+-        ->countQuery()
+-        ->execute()
+-        ->fetchField();
+-      return ($number < $threshold);
+-    }
+-    catch (\Exception $e) {
+-      if (!$this->ensureTableExists()) {
+-        throw $e;
+-      }
+-      return TRUE;
+-    }
+-  }
+ 
+-  /**
+-   * {@inheritdoc}
+-   */
+-  public function garbageCollection() {
+-    try {
+-      $this->connection->delete(static::TABLE_NAME)
+-        ->condition('expiration', $this->time->getRequestTime(), '<')
+-        ->execute();
+-    }
+-    catch (\Exception $e) {
+-      $this->catchException($e);
+-    }
+-  }
++    $this->connection->executeEnsuringSchemaOnFailure(
++      execute: function () use ($name, $threshold, $window, $identifier): bool {
++        $number = $this->connection->select(DatabaseBackend::TABLE_NAME, 'f')
++          ->condition('event', $name)
++          ->condition('identifier', $identifier)
++          ->condition('timestamp', $this->time->getRequestTime() - $window, '>')
++          ->countQuery()
++          ->execute()
++          ->fetchField();
++        return ($number < $threshold);
++      },
++      returnValue: $return,
++      schema: [
++        static::TABLE_NAME => $this->schemaDefinition(),
++      ],
++    );
+ 
+-  /**
+-   * Check if the flood table exists and create it if not.
+-   */
+-  protected function ensureTableExists() {
+-    try {
+-      $database_schema = $this->connection->schema();
+-      $schema_definition = $this->schemaDefinition();
+-      $database_schema->createTable(static::TABLE_NAME, $schema_definition);
+-    }
+-    // If another process has already created the table, attempting to create
+-    // it will throw an exception. In this case just catch the exception and do
+-    // nothing.
+-    catch (DatabaseException) {
+-    }
+-    catch (\Exception) {
+-      return FALSE;
+-    }
+-    return TRUE;
++    return $return ?? TRUE;
+   }
+ 
+   /**
+-   * Act on an exception when flood might be stale.
+-   *
+-   * If the table does not yet exist, that's fine, but if the table exists and
+-   * yet the query failed, then the flood is stale and the exception needs to
+-   * propagate.
+-   *
+-   * @param $e
+-   *   The exception.
+-   *
+-   * @throws \Exception
++   * {@inheritdoc}
+    */
+-  protected function catchException(\Exception $e) {
+-    if ($this->connection->schema()->tableExists(static::TABLE_NAME)) {
+-      throw $e;
+-    }
++  public function garbageCollection() {
++    $this->connection->executeEnsuringSchemaOnFailure(
++      execute: function (): void {
++        $this->connection->delete(DatabaseBackend::TABLE_NAME)
++          ->condition('expiration', $this->time->getRequestTime(), '<')
++          ->execute();
++      },
++      schema: [
++        static::TABLE_NAME => $this->schemaDefinition(),
++      ],
++    );
+   }
+ 
+   /**
 diff --git a/core/modules/system/tests/src/Functional/UpdateSystem/RebuildScriptTest.php b/core/modules/system/tests/src/Functional/UpdateSystem/RebuildScriptTest.php
 index 484f520da0b..56ff390329e 100644
 --- a/core/modules/system/tests/src/Functional/UpdateSystem/RebuildScriptTest.php
@@ -58,3 +1003,42 @@ index 4a6bc87a6d5..7132708e0ec 100644
  $base_path = dirname($request->getBaseUrl(), 2);
 -header('Location: ' . $request->getSchemeAndHttpHost() . $base_path);
 +//header('Location: ' . $request->getSchemeAndHttpHost() . $base_path);
+diff --git a/core/tests/Drupal/KernelTests/Core/Batch/BatchKernelTest.php b/core/tests/Drupal/KernelTests/Core/Batch/BatchKernelTest.php
+index a8c8af5fe7b..f4e94214316 100644
+--- a/core/tests/Drupal/KernelTests/Core/Batch/BatchKernelTest.php
++++ b/core/tests/Drupal/KernelTests/Core/Batch/BatchKernelTest.php
+@@ -39,4 +39,12 @@ public function testNeedsUpdate(): void {
+     $this->assertEquals(FALSE, _batch_needs_update());
+   }
+ 
++  /**
++   * Tests BatchStorage::getId().
++   */
++  public function testGetStorageId(): void {
++    $storage = $this->container->get('batch.storage');
++    $this->assertIsNumeric($storage->getId());
++  }
++
+ }
+diff --git a/core/tests/Drupal/KernelTests/Core/ServiceProvider/ServiceProviderTest.php b/core/tests/Drupal/KernelTests/Core/ServiceProvider/ServiceProviderTest.php
+index adf4d58e9ae..13a0907cc53 100644
+--- a/core/tests/Drupal/KernelTests/Core/ServiceProvider/ServiceProviderTest.php
++++ b/core/tests/Drupal/KernelTests/Core/ServiceProvider/ServiceProviderTest.php
+@@ -4,6 +4,7 @@
+ 
+ namespace Drupal\KernelTests\Core\ServiceProvider;
+ 
++use Drupal\Core\Database\EventSubscriber\SchemaRequestSubscriber;
+ use Drupal\Core\DependencyInjection\ContainerBuilder;
+ use Drupal\KernelTests\KernelTestBase;
+ use Symfony\Component\DependencyInjection\Parameter;
+@@ -35,6 +36,9 @@ public function register(ContainerBuilder $container): void {
+       ->addArgument(new Reference('settings'))
+       ->addArgument(new Parameter('cache_default_bin_backends'))
+       ->addMethodCall('setContainer', [new Reference('service_container')]);
++    $this->container
++      ->get('event_dispatcher')
++      ->addSubscriber(new SchemaRequestSubscriber($container->get('database')));
+   }
+ 
+   /**
