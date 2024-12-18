@@ -1,3594 +1,1518 @@
-diff --git a/core/.phpstan-baseline.php b/core/.phpstan-baseline.php
-index b70afb2b499..c6266edac25 100644
---- a/core/.phpstan-baseline.php
-+++ b/core/.phpstan-baseline.php
-@@ -59457,18 +59457,6 @@
- 	'count' => 1,
- 	'path' => __DIR__ . '/tests/Drupal/TestSite/TestSiteOliveroInstallTestScript.php',
- ];
--$ignoreErrors[] = [
--	// identifier: missingType.return
--	'message' => '#^Method Drupal\\\\TestTools\\\\TestVarDumper\\:\\:cliHandler\\(\\) has no return type specified\\.$#',
--	'count' => 1,
--	'path' => __DIR__ . '/tests/Drupal/TestTools/TestVarDumper.php',
--];
--$ignoreErrors[] = [
--	// identifier: missingType.return
--	'message' => '#^Method Drupal\\\\TestTools\\\\TestVarDumper\\:\\:htmlHandler\\(\\) has no return type specified\\.$#',
--	'count' => 1,
--	'path' => __DIR__ . '/tests/Drupal/TestTools/TestVarDumper.php',
--];
- $ignoreErrors[] = [
- 	// identifier: method.deprecated
- 	'message' => '#^Call to deprecated method getConfig\\(\\) of class GuzzleHttp\\\\Client\\:
-diff --git a/core/core.services.yml b/core/core.services.yml
-index 5ffa0d96f4d..88c3eac735e 100644
---- a/core/core.services.yml
-+++ b/core/core.services.yml
-@@ -467,6 +467,8 @@ services:
-     class: Drupal\Core\Database\ReplicaKillSwitch
-     arguments: ['@settings', '@datetime.time', '@session']
-   Drupal\Core\Database\ReplicaKillSwitch: '@database.replica_kill_switch'
-+  Drupal\Core\Database\EventSubscriber\SchemaRequestSubscriber:
-+    autowire: true
-   Drupal\Core\Database\EventSubscriber\StatementExecutionSubscriber: ~
-   datetime.time:
-     class: Drupal\Component\Datetime\Time
-diff --git a/core/lib/Drupal/Core/Batch/BatchStorage.php b/core/lib/Drupal/Core/Batch/BatchStorage.php
-index 46f9fb97c0d..2b9b4c80036 100644
---- a/core/lib/Drupal/Core/Batch/BatchStorage.php
-+++ b/core/lib/Drupal/Core/Batch/BatchStorage.php
-@@ -41,66 +41,72 @@ public function __construct(
-   public function load($id) {
-     // Ensure that a session is started before using the CSRF token generator.
-     $this->session->start();
--    try {
--      $batch = $this->connection->select('batch', 'b')
--        ->fields('b', ['batch'])
--        ->condition('bid', $id)
--        ->condition('token', $this->csrfToken->get($id))
--        ->execute()
--        ->fetchField();
--    }
--    catch (\Exception $e) {
--      $this->catchException($e);
--      $batch = FALSE;
--    }
--    if ($batch) {
--      return unserialize($batch);
--    }
--    return FALSE;
-+
-+    $execution = $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function () use ($id): string|FALSE {
-+        return $this->connection->select('batch', 'b')
-+          ->fields('b', ['batch'])
-+          ->condition('bid', $id)
-+          ->condition('token', $this->csrfToken->get($id))
-+          ->execute()
-+          ->fetchField();
-+      },
-+      schema: [
-+        static::TABLE_NAME => $this->schemaDefinition(),
-+      ],
-+    );
-+
-+    return $execution->isSuccessful() ? unserialize($execution->getResult()) : FALSE;
-   }
- 
+diff --git a/core/lib/Drupal/Core/Database/Transaction.php b/core/lib/Drupal/Core/Database/Transaction.php
+index dcecc44e17c..f6fa3b73620 100644
+--- a/core/lib/Drupal/Core/Database/Transaction.php
++++ b/core/lib/Drupal/Core/Database/Transaction.php
+@@ -30,12 +30,12 @@ public function __construct(
    /**
-    * {@inheritdoc}
-    */
-   public function delete($id) {
--    try {
--      $this->connection->delete('batch')
--        ->condition('bid', $id)
--        ->execute();
--    }
--    catch (\Exception $e) {
--      $this->catchException($e);
--    }
-+    $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function () use ($id): void {
-+        $this->connection->delete('batch')
-+          ->condition('bid', $id)
-+          ->execute();
-+      },
-+      schema: [
-+        static::TABLE_NAME => $this->schemaDefinition(),
-+      ],
-+    );
-   }
- 
-   /**
-    * {@inheritdoc}
-    */
-   public function update(array $batch) {
--    try {
--      $this->connection->update('batch')
--        ->fields(['batch' => serialize($batch)])
--        ->condition('bid', $batch['id'])
--        ->execute();
--    }
--    catch (\Exception $e) {
--      $this->catchException($e);
--    }
-+    $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function () use ($batch): void {
-+        $this->connection->update('batch')
-+          ->fields(['batch' => serialize($batch)])
-+          ->condition('bid', $batch['id'])
-+          ->execute();
-+      },
-+      schema: [
-+        static::TABLE_NAME => $this->schemaDefinition(),
-+      ],
-+    );
-   }
- 
-   /**
-    * {@inheritdoc}
-    */
-   public function cleanup() {
--    try {
--      // Cleanup the batch table and the queue for failed batches.
--      $this->connection->delete('batch')
--        ->condition('timestamp', $this->time->getRequestTime() - 864000, '<')
--        ->execute();
--    }
--    catch (\Exception $e) {
--      $this->catchException($e);
--    }
-+    $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function (): void {
-+        // Cleanup the batch table and the queue for failed batches.
-+        $this->connection->delete('batch')
-+          ->condition('timestamp', $this->time->getRequestTime() - 864000, '<')
-+          ->execute();
-+      },
-+      schema: [
-+        static::TABLE_NAME => $this->schemaDefinition(),
-+      ],
-+    );
-   }
- 
-   /**
-@@ -126,23 +132,23 @@ public function create(array $batch) {
-    *   A batch id.
-    */
-   public function getId(): int {
--    $try_again = FALSE;
--    try {
--      // The batch table might not yet exist.
--      return $this->doInsertBatchRecord();
--    }
--    catch (\Exception $e) {
--      // If there was an exception, try to create the table.
--      if (!$try_again = $this->ensureTableExists()) {
--        // If the exception happened for other reason than the missing table,
--        // propagate the exception.
--        throw $e;
--      }
--    }
--    // Now that the table has been created, try again if necessary.
--    if ($try_again) {
--      return $this->doInsertBatchRecord();
--    }
-+    $execution = $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function (): int {
-+        return $this->connection->insert('batch')
-+          ->fields([
-+            'timestamp' => $this->time->getRequestTime(),
-+            'token' => '',
-+            'batch' => NULL,
-+          ])
-+          ->execute();
-+      },
-+      schema: [
-+        static::TABLE_NAME => $this->schemaDefinition(),
-+      ],
-+      retryAfterSchemaEnsured: TRUE,
-+    );
-+
-+    return $execution->getResult();
-   }
- 
-   /**
-@@ -150,8 +156,15 @@ public function getId(): int {
+    * Destructs the object.
     *
-    * @return int
-    *   A batch id.
-+   *
-+   * @deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use
-+   * \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure()
-+   * instead.
-+   *
-+   * @see https://www.drupal.org/node/3489185
+-   * Depending on the nesting level of the object, this leads to a COMMIT (for
+-   * a root item) or to a RELEASE SAVEPOINT (for a savepoint item) executed on
+-   * the database.
++   * If the transaction is still active at this stage, and depending on the
++   * state of the transaction stack, this leads to a COMMIT (for a root item)
++   * or to a RELEASE SAVEPOINT (for a savepoint item) executed on the database.
     */
-   protected function doInsertBatchRecord(): int {
-+    @trigger_error(__METHOD__ . '() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure() instead. See https://www.drupal.org/node/3489185', E_USER_DEPRECATED);
-     return $this->connection->insert('batch')
-       ->fields([
-         'timestamp' => $this->time->getRequestTime(),
-@@ -163,8 +176,15 @@ protected function doInsertBatchRecord(): int {
+   public function __destruct() {
+-    $this->connection->transactionManager()->unpile($this->name, $this->id);
++    $this->connection->transactionManager()->purge($this->name, $this->id);
+   }
  
    /**
-    * Check if the table exists and create it if not.
-+   *
-+   * @deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use
-+   * \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure()
-+   * instead.
-+   *
-+   * @see https://www.drupal.org/node/3489185
-    */
-   protected function ensureTableExists() {
-+    @trigger_error(__METHOD__ . '() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure() instead. See https://www.drupal.org/node/3489185', E_USER_DEPRECATED);
-     try {
-       $database_schema = $this->connection->schema();
-       $schema_definition = $this->schemaDefinition();
-@@ -192,8 +212,15 @@ protected function ensureTableExists() {
-    *   The exception.
+@@ -46,16 +46,22 @@ public function name() {
+   }
+ 
+   /**
+-   * Rolls back the current transaction.
++   * Yields the transaction to the parent level.
     *
-    * @throws \Exception
-+   *
-+   * @deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use
-+   * \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure()
-+   * instead.
-+   *
-+   * @see https://www.drupal.org/node/3489185
-    */
-   protected function catchException(\Exception $e) {
-+    @trigger_error(__METHOD__ . '() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure() instead. See https://www.drupal.org/node/3489185', E_USER_DEPRECATED);
-     if ($this->connection->schema()->tableExists(static::TABLE_NAME)) {
-       throw $e;
-     }
-diff --git a/core/lib/Drupal/Core/Cache/DatabaseBackend.php b/core/lib/Drupal/Core/Cache/DatabaseBackend.php
-index 8b45010914f..d7e0d4cfdb1 100644
---- a/core/lib/Drupal/Core/Cache/DatabaseBackend.php
-+++ b/core/lib/Drupal/Core/Cache/DatabaseBackend.php
-@@ -205,23 +205,15 @@ public function set($cid, $data, $expire = Cache::PERMANENT, array $tags = []) {
-    * {@inheritdoc}
-    */
-   public function setMultiple(array $items) {
--    $try_again = FALSE;
--    try {
--      // The bin might not yet exist.
--      $this->doSetMultiple($items);
--    }
--    catch (\Exception $e) {
--      // If there was an exception, try to create the bins.
--      if (!$try_again = $this->ensureBinExists()) {
--        // If the exception happened for other reason than the missing bin
--        // table, propagate the exception.
--        throw $e;
--      }
--    }
--    // Now that the bin has been created, try again if necessary.
--    if ($try_again) {
--      $this->doSetMultiple($items);
--    }
-+    $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function () use ($items): void {
-+        $this->doSetMultiple($items);
-+      },
-+      schema: [
-+        $this->bin => $this->schemaDefinition(),
-+      ],
-+      retryAfterSchemaEnsured: TRUE,
-+    );
-   }
- 
-   /**
-@@ -309,39 +301,33 @@ public function delete($cid) {
-    */
-   public function deleteMultiple(array $cids) {
-     $cids = array_values(array_map([$this, 'normalizeCid'], $cids));
--    try {
--      // Delete in chunks when a large array is passed.
--      foreach (array_chunk($cids, 1000) as $cids_chunk) {
--        $this->connection->delete($this->bin)
--          ->condition('cid', $cids_chunk, 'IN')
--          ->execute();
--      }
--    }
--    catch (\Exception $e) {
--      // Create the cache table, which will be empty. This fixes cases during
--      // core install where a cache table is cleared before it is set
--      // with {cache_render} and {cache_data}.
--      if (!$this->ensureBinExists()) {
--        $this->catchException($e);
--      }
--    }
-+    $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function () use ($cids): void {
-+        // Delete in chunks when a large array is passed.
-+        foreach (array_chunk($cids, 1000) as $cids_chunk) {
-+          $this->connection->delete($this->bin)
-+            ->condition('cid', $cids_chunk, 'IN')
-+            ->execute();
-+        }
-+      },
-+      schema: [
-+        $this->bin => $this->schemaDefinition(),
-+      ],
-+    );
-   }
- 
-   /**
-    * {@inheritdoc}
-    */
-   public function deleteAll() {
--    try {
--      $this->connection->truncate($this->bin)->execute();
--    }
--    catch (\Exception $e) {
--      // Create the cache table, which will be empty. This fixes cases during
--      // core install where a cache table is cleared before it is set
--      // with {cache_render} and {cache_data}.
--      if (!$this->ensureBinExists()) {
--        $this->catchException($e);
--      }
--    }
-+    $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function (): void {
-+        $this->connection->truncate($this->bin)->execute();
-+      },
-+      schema: [
-+        $this->bin => $this->schemaDefinition(),
-+      ],
-+    );
-   }
- 
-   /**
-@@ -356,33 +342,37 @@ public function invalidate($cid) {
-    */
-   public function invalidateMultiple(array $cids) {
-     $cids = array_values(array_map([$this, 'normalizeCid'], $cids));
--    try {
--      // Update in chunks when a large array is passed.
--      $requestTime = $this->time->getRequestTime();
--      foreach (array_chunk($cids, 1000) as $cids_chunk) {
--        $this->connection->update($this->bin)
--          ->fields(['expire' => $requestTime - 1])
--          ->condition('cid', $cids_chunk, 'IN')
--          ->execute();
--      }
--    }
--    catch (\Exception $e) {
--      $this->catchException($e);
--    }
-+    $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function () use ($cids): void {
-+        // Update in chunks when a large array is passed.
-+        $requestTime = $this->time->getRequestTime();
-+        foreach (array_chunk($cids, 1000) as $cids_chunk) {
-+          $this->connection->update($this->bin)
-+            ->fields(['expire' => $requestTime - 1])
-+            ->condition('cid', $cids_chunk, 'IN')
-+            ->execute();
-+        }
-+      },
-+      schema: [
-+        $this->bin => $this->schemaDefinition(),
-+      ],
-+    );
-   }
- 
-   /**
-    * {@inheritdoc}
-    */
-   public function invalidateAll() {
--    try {
--      $this->connection->update($this->bin)
--        ->fields(['expire' => $this->time->getRequestTime() - 1])
--        ->execute();
--    }
--    catch (\Exception $e) {
--      $this->catchException($e);
--    }
-+    $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function (): void {
-+        $this->connection->update($this->bin)
-+          ->fields(['expire' => $this->time->getRequestTime() - 1])
-+          ->execute();
-+      },
-+      schema: [
-+        $this->bin => $this->schemaDefinition(),
-+      ],
-+    );
-   }
- 
-   /**
-@@ -426,14 +416,23 @@ public function removeBin() {
-       $this->connection->schema()->dropTable($this->bin);
-     }
-     catch (\Exception $e) {
--      $this->catchException($e);
-+      if ($this->connection->schema()->tableExists($this->bin)) {
-+        throw $e;
-+      }
-     }
-   }
- 
-   /**
-    * Check if the cache bin exists and create it if not.
-+   *
-+   * @deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use
-+   * \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure()
-+   * instead.
-+   *
-+   * @see https://www.drupal.org/node/3489185
-    */
-   protected function ensureBinExists() {
-+    @trigger_error(__METHOD__ . '() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure() instead. See https://www.drupal.org/node/3489185', E_USER_DEPRECATED);
-     try {
-       $database_schema = $this->connection->schema();
-       if (!$database_schema->tableExists($this->bin)) {
-@@ -464,8 +463,14 @@ protected function ensureBinExists() {
-    *   The table name. Defaults to $this->bin.
-    *
-    * @throws \Exception
-+   *
-+   * @deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Catch
-+   *   exceptions directly instead.
-+   *
-+   * @see https://www.drupal.org/node/3489185
-    */
-   protected function catchException(\Exception $e, $table_name = NULL) {
-+    @trigger_error(__METHOD__ . '() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Catch exceptions directly instead. See https://www.drupal.org/node/3489185', E_USER_DEPRECATED);
-     if ($this->connection->schema()->tableExists($table_name ?: $this->bin)) {
-       throw $e;
-     }
-diff --git a/core/lib/Drupal/Core/Cache/DatabaseCacheTagsChecksum.php b/core/lib/Drupal/Core/Cache/DatabaseCacheTagsChecksum.php
-index aa41952128c..126ab0d76e9 100644
---- a/core/lib/Drupal/Core/Cache/DatabaseCacheTagsChecksum.php
-+++ b/core/lib/Drupal/Core/Cache/DatabaseCacheTagsChecksum.php
-@@ -33,46 +33,49 @@ public function __construct(Connection $connection) {
-    * {@inheritdoc}
-    */
-   protected function doInvalidateTags(array $tags) {
--    try {
--      foreach ($tags as $tag) {
--        $this->connection->merge('cachetags')
--          ->insertFields(['invalidations' => 1])
--          ->expression('invalidations', '[invalidations] + 1')
--          ->key('tag', $tag)
--          ->execute();
--      }
--    }
--    catch (\Exception $e) {
--      // Create the cache table, which will be empty. This fixes cases during
--      // core install where cache tags are invalidated before the table is
--      // created.
--      if (!$this->ensureTableExists()) {
--        throw $e;
--      }
--    }
-+    $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function () use ($tags): void {
-+        foreach ($tags as $tag) {
-+          $this->connection->merge('cachetags')
-+            ->insertFields(['invalidations' => 1])
-+            ->expression('invalidations', '[invalidations] + 1')
-+            ->key('tag', $tag)
-+            ->execute();
-+        }
-+      },
-+      schema: [
-+        'cachetags' => $this->schemaDefinition(),
-+      ],
-+    );
-   }
- 
-   /**
-    * {@inheritdoc}
-    */
-   protected function getTagInvalidationCounts(array $tags) {
--    try {
--      return $this->connection->query('SELECT [tag], [invalidations] FROM {cachetags} WHERE [tag] IN ( :tags[] )', [':tags[]' => $tags])
--        ->fetchAllKeyed();
--    }
--    catch (\Exception $e) {
--      // If the table does not exist yet, create.
--      if (!$this->ensureTableExists()) {
--        throw $e;
--      }
--    }
--    return [];
-+    $execution = $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function () use ($tags): array {
-+        return $this->connection->query('SELECT [tag], [invalidations] FROM {cachetags} WHERE [tag] IN ( :tags[] )', [':tags[]' => $tags])
-+          ->fetchAllKeyed();
-+      },
-+      schema: [
-+        'cachetags' => $this->schemaDefinition(),
-+      ],
-+    );
-+    return $execution->isSuccessful() ? $execution->getResult() : [];
-   }
- 
-   /**
-    * Check if the cache tags table exists and create it if not.
-+   *
-+   * @deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use
-+   * \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure()
-+   * instead.
-+   *
-+   * @see https://www.drupal.org/node/3489185
-    */
-   protected function ensureTableExists() {
-+    @trigger_error(__METHOD__ . '() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure() instead. See https://www.drupal.org/node/3489185', E_USER_DEPRECATED);
-     try {
-       $database_schema = $this->connection->schema();
-       $schema_definition = $this->schemaDefinition();
-diff --git a/core/lib/Drupal/Core/Config/DatabaseStorage.php b/core/lib/Drupal/Core/Config/DatabaseStorage.php
-index c9a25bd19a1..8f2dc296f90 100644
---- a/core/lib/Drupal/Core/Config/DatabaseStorage.php
-+++ b/core/lib/Drupal/Core/Config/DatabaseStorage.php
-@@ -64,41 +64,44 @@ public function __construct(Connection $connection, $table, array $options = [],
-    * {@inheritdoc}
-    */
-   public function exists($name) {
--    try {
--      return (bool) $this->connection->queryRange('SELECT 1 FROM {' . $this->connection->escapeTable($this->table) . '} WHERE [collection] = :collection AND [name] = :name', 0, 1, [
--        ':collection' => $this->collection,
--        ':name' => $name,
--      ], $this->options)->fetchField();
--    }
--    catch (\Exception $e) {
--      if ($this->connection->schema()->tableExists($this->table)) {
--        throw $e;
--      }
--      // If we attempt a read without actually having the table available,
--      // return false so the caller can handle it.
--      return FALSE;
--    }
-+    $execution = $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function () use ($name): bool {
-+        return (bool) $this->connection->queryRange('SELECT 1 FROM {' . $this->connection->escapeTable($this->table) . '} WHERE [collection] = :collection AND [name] = :name', 0, 1, [
-+          ':collection' => $this->collection,
-+          ':name' => $name,
-+        ], $this->options)->fetchField();
-+      },
-+      schema: [
-+        $this->table => static::schemaDefinition(),
-+      ],
-+    );
-+
-+    return $execution->isSuccessful() ? $execution->getResult() : FALSE;
-   }
- 
-   /**
-    * {@inheritdoc}
-    */
-   public function read($name) {
--    $data = FALSE;
-     try {
--      $raw = $this->connection->query('SELECT [data] FROM {' . $this->connection->escapeTable($this->table) . '} WHERE [collection] = :collection AND [name] = :name', [':collection' => $this->collection, ':name' => $name], $this->options)->fetchField();
--      if ($raw !== FALSE) {
--        $data = $this->decode($raw);
--      }
-+      $execution = $this->connection->executeEnsuringSchemaOnFailure(
-+        execute: function () use ($name): array|FALSE {
-+          $data = FALSE;
-+          $raw = $this->connection->query('SELECT [data] FROM {' . $this->connection->escapeTable($this->table) . '} WHERE [collection] = :collection AND [name] = :name', [':collection' => $this->collection, ':name' => $name], $this->options)->fetchField();
-+          if ($raw !== FALSE) {
-+            $data = $this->decode($raw);
-+          }
-+          return $data;
-+        },
-+        schema: [
-+          $this->table => static::schemaDefinition(),
-+        ],
-+      );
-+      return $execution->isSuccessful() ? $execution->getResult() : FALSE;
-     }
--    catch (\Exception $e) {
--      if ($this->connection->schema()->tableExists($this->table)) {
--        throw $e;
--      }
--      // If we attempt a read without actually having the table available,
--      // return false so the caller can handle it.
-+    catch (DatabaseException) {
-+      return FALSE;
-     }
--    return $data;
-   }
- 
-   /**
-@@ -109,21 +112,24 @@ public function readMultiple(array $names) {
-       return [];
-     }
- 
--    $list = [];
--    try {
--      $list = $this->connection->query('SELECT [name], [data] FROM {' . $this->connection->escapeTable($this->table) . '} WHERE [collection] = :collection AND [name] IN ( :names[] )', [':collection' => $this->collection, ':names[]' => $names], $this->options)->fetchAllKeyed();
--      foreach ($list as &$data) {
--        $data = $this->decode($data);
--      }
--    }
--    catch (\Exception $e) {
--      if ($this->connection->schema()->tableExists($this->table)) {
--        throw $e;
--      }
--      // If we attempt a read without actually having the table available,
--      // return an empty array so the caller can handle it.
--    }
--    return $list;
-+    $execution = $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function () use ($names): array {
-+        $list = $this->connection
-+          ->query('SELECT [name], [data] FROM {' . $this->connection->escapeTable($this->table) . '} WHERE [collection] = :collection AND [name] IN ( :names[] )', [':collection' => $this->collection, ':names[]' => $names], $this->options)
-+          ->fetchAllKeyed();
-+
-+        foreach ($list as &$data) {
-+          $data = $this->decode($data);
-+        }
-+
-+        return $list;
-+      },
-+      schema: [
-+        $this->table => static::schemaDefinition(),
-+      ],
-+    );
-+
-+    return $execution->isSuccessful() ? $execution->getResult() : [];
-   }
- 
-   /**
-@@ -131,17 +137,31 @@ public function readMultiple(array $names) {
-    */
-   public function write($name, array $data) {
-     $data = $this->encode($data);
-+
-     try {
--      return $this->doWrite($name, $data);
-+      $execution = $this->connection->executeEnsuringSchemaOnFailure(
-+        execute: function () use ($name, $data): bool {
-+          return (bool) $this->connection->merge($this->table, $this->options)
-+            ->keys(['collection', 'name'], [$this->collection, $name])
-+            ->fields(['data' => $data])
-+            ->execute();
-+        },
-+        schema: [
-+          $this->table => static::schemaDefinition(),
-+        ],
-+        retryAfterSchemaEnsured: TRUE,
-+      );
-+      return $execution->isSuccessful() ? $execution->getResult() : FALSE;
-     }
-     catch (\Exception $e) {
--      // If there was an exception, try to create the table.
--      if ($this->ensureTableExists()) {
--        return $this->doWrite($name, $data);
-+      if ($e instanceof DatabaseException) {
-+        throw $e;
-       }
-       // Some other failure that we can not recover from.
-       throw new StorageException($e->getMessage(), 0, $e);
-     }
-+
-+    return FALSE;
-   }
- 
-   /**
-@@ -153,8 +173,15 @@ public function write($name, array $data) {
-    *   The config data, already dumped to a string.
-    *
-    * @return bool
-+   *
-+   * @deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use
-+   * \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure()
-+   * instead.
-+   *
-+   * @see https://www.drupal.org/node/3489185
-    */
-   protected function doWrite($name, $data) {
-+    @trigger_error(__METHOD__ . '() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure() instead. See https://www.drupal.org/node/3489185', E_USER_DEPRECATED);
-     return (bool) $this->connection->merge($this->table, $this->options)
-       ->keys(['collection', 'name'], [$this->collection, $name])
-       ->fields(['data' => $data])
-@@ -169,8 +196,15 @@ protected function doWrite($name, $data) {
-    *
-    * @throws \Drupal\Core\Config\StorageException
-    *   If a database error occurs.
-+   *
-+   * @deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use
-+   *   \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure()
-+   *   instead.
-+   *
-+   * @see https://www.drupal.org/node/3489185
-    */
-   protected function ensureTableExists() {
-+    @trigger_error(__METHOD__ . '() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure() instead. See https://www.drupal.org/node/3489185', E_USER_DEPRECATED);
-     try {
-       $this->connection->schema()->createTable($this->table, static::schemaDefinition());
-     }
-@@ -272,19 +306,22 @@ public function decode($raw) {
-    */
-   public function listAll($prefix = '') {
-     try {
--      $query = $this->connection->select($this->table);
--      $query->fields($this->table, ['name']);
--      $query->condition('collection', $this->collection, '=');
--      $query->condition('name', $prefix . '%', 'LIKE');
--      $query->orderBy('collection')->orderBy('name');
--      return $query->execute()->fetchCol();
-+      $execution = $this->connection->executeEnsuringSchemaOnFailure(
-+        execute: function () use ($prefix): array {
-+          $query = $this->connection->select($this->table);
-+          $query->fields($this->table, ['name']);
-+          $query->condition('collection', $this->collection, '=');
-+          $query->condition('name', $prefix . '%', 'LIKE');
-+          $query->orderBy('collection')->orderBy('name');
-+          return $query->execute()->fetchCol();
-+        },
-+        schema: [
-+          $this->table => static::schemaDefinition(),
-+        ],
-+      );
-+      return $execution->isSuccessful() ? $execution->getResult() : [];
-     }
--    catch (\Exception $e) {
--      if ($this->connection->schema()->tableExists($this->table)) {
--        throw $e;
--      }
--      // If we attempt a read without actually having the table available,
--      // return an empty array so the caller can handle it.
-+    catch (DatabaseException) {
-       return [];
-     }
-   }
-@@ -293,20 +330,19 @@ public function listAll($prefix = '') {
-    * {@inheritdoc}
-    */
-   public function deleteAll($prefix = '') {
--    try {
--      return (bool) $this->connection->delete($this->table, $this->options)
--        ->condition('name', $prefix . '%', 'LIKE')
--        ->condition('collection', $this->collection)
--        ->execute();
--    }
--    catch (\Exception $e) {
--      if ($this->connection->schema()->tableExists($this->table)) {
--        throw $e;
--      }
--      // If we attempt a delete without actually having the table available,
--      // return false so the caller can handle it.
--      return FALSE;
--    }
-+    $execution = $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function () use ($prefix): bool {
-+        return (bool) $this->connection->delete($this->table, $this->options)
-+          ->condition('name', $prefix . '%', 'LIKE')
-+          ->condition('collection', $this->collection)
-+          ->execute();
-+      },
-+      schema: [
-+        $this->table => static::schemaDefinition(),
-+      ],
-+    );
-+
-+    return $execution->isSuccessful() ? $execution->getResult() : FALSE;
-   }
- 
-   /**
-@@ -332,19 +368,18 @@ public function getCollectionName() {
-    * {@inheritdoc}
-    */
-   public function getAllCollectionNames() {
--    try {
--      return $this->connection->query('SELECT DISTINCT [collection] FROM {' . $this->connection->escapeTable($this->table) . '} WHERE [collection] <> :collection ORDER by [collection]', [
--        ':collection' => StorageInterface::DEFAULT_COLLECTION,
--      ])->fetchCol();
--    }
--    catch (\Exception $e) {
--      if ($this->connection->schema()->tableExists($this->table)) {
--        throw $e;
--      }
--      // If we attempt a read without actually having the table available,
--      // return an empty array so the caller can handle it.
--      return [];
--    }
-+    $execution = $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function (): array {
-+        return $this->connection->query('SELECT DISTINCT [collection] FROM {' . $this->connection->escapeTable($this->table) . '} WHERE [collection] <> :collection ORDER by [collection]', [
-+          ':collection' => StorageInterface::DEFAULT_COLLECTION,
-+        ])->fetchCol();
-+      },
-+      schema: [
-+        $this->table => static::schemaDefinition(),
-+      ],
-+    );
-+
-+    return $execution->isSuccessful() ? $execution->getResult() : [];
-   }
- 
- }
-diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
-index 7a9de46a7d4..7df117464e6 100644
---- a/core/lib/Drupal/Core/Database/Connection.php
-+++ b/core/lib/Drupal/Core/Database/Connection.php
-@@ -4,6 +4,8 @@
- 
- use Drupal\Component\Assertion\Inspector;
- use Drupal\Core\Database\Event\DatabaseEvent;
-+use Drupal\Core\Database\Event\ExecuteMethodEnsuringSchemaEvent;
-+use Drupal\Core\Database\EventSubscriber\SchemaRequestSubscriber;
- use Drupal\Core\Database\Exception\EventException;
- use Drupal\Core\Database\Query\Condition;
- use Drupal\Core\Database\Query\Delete;
-@@ -1612,4 +1614,77 @@ protected function getDebugBacktrace(): array {
-     return debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS);
-   }
- 
-+  /**
-+   * Executes a callback, and enforces a database schema in case of failure.
-+   *
-+   * Any exception thrown by the callback that is not related to a missing
-+   * schema object is propagated to the caller.
-+   *
-+   * @param \Closure $execute
-+   *   The callback to be executed.
-+   * @param array<string,array<string,mixed>> $schema
-+   *   A database schema specification, with table name as key and schema
-+   *   array as value.
-+   * @param bool $retryAfterSchemaEnsured
-+   *   (Optional) If TRUE, the callback is executed again after the first
-+   *   execution failed, and the schema enforcement was successful. Defaults to
-+   *   FALSE.
-+   *
-+   * @return \Drupal\Core\Database\Event\ExecuteMethodEnsuringSchemaEvent
-+   *   The event that has collected data about the execution.
-+   *
-+   * @throws \Exception
-+   *   When the failure of the callback execution was not related to missing
-+   *   tables in the database schema.
+-   * This is just a wrapper method to rollback whatever transaction stack we are
+-   * currently in, which is managed by the TransactionManager. Note that logging
+-   * needs to happen after a transaction has been rolled back or the log
+-   * messages will be rolled back too.
++   * Depending on the state of the transaction stack, this leads to a COMMIT
++   * operation (for a root item), or to a RELEASE SAVEPOINT operation (for a
++   * savepoint item) executed on the database.
 +   */
-+  public function executeEnsuringSchemaOnFailure(
-+    \Closure $execute,
-+    array $schema,
-+    bool $retryAfterSchemaEnsured = FALSE,
-+  ): ExecuteMethodEnsuringSchemaEvent {
++  public function yield(): void {
++    $this->connection->transactionManager()->unpile($this->name, $this->id);
++  }
 +
-+    $event = new ExecuteMethodEnsuringSchemaEvent($execute, $schema, $retryAfterSchemaEnsured);
-+
-+    // When rebuilding the container, or very early during a test, there's a
-+    // stage when the event_dispatcher service has not been activated yet. In
-+    // that case, execute the closure, and set its returned value; if the
-+    // callback throws an exception, it will just propagate to the caller.
-+    if (!\Drupal::hasService('event_dispatcher')) {
-+      $event->setResult($execute());
-+      $event->setCallbackExecutionState(TRUE);
-+      return $event;
++  /**
++   * Rolls back the transaction.
+    *
+-   * Depending on the nesting level of the object, this leads to a ROLLBACK (for
+-   * a root item) or to a ROLLBACK TO SAVEPOINT (for a savepoint item) executed
+-   * on the database.
++   * Depending on the state of the transaction stack, this leads to a ROLLBACK
++   * operation (for a root item), or to a ROLLBACK TO SAVEPOINT + a RELEASE
++   * SAVEPOINT operations (for a savepoint item) executed on the database.
+    */
+   public function rollBack() {
+     $this->connection->transactionManager()->rollback($this->name, $this->id);
+diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
+index df91f670d52..9c275a6999d 100644
+--- a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
++++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
+@@ -202,7 +202,9 @@ protected function removeStackItem(string $id): void {
+   protected function voidStackItem(string $id): void {
+     // The item should be removed from $stack and added to $voidedItems for
+     // later processing.
+-    $this->voidedItems[$id] = $this->stack[$id];
++    if (isset($this->stack[$id])) {
++      $this->voidedItems[$id] = $this->stack[$id];
 +    }
-+
-+    $dispatcher = \Drupal::service('event_dispatcher');
-+
-+    // @todo Temporary, Drush does not add the subscriber on cache rebuild.
-+    if (!$dispatcher->hasListeners(ExecuteMethodEnsuringSchemaEvent::class)) {
-+      $dispatcher->addSubscriber(new SchemaRequestSubscriber($this));
+     $this->removeStackItem($id);
+   }
+ 
+@@ -285,13 +287,28 @@ public function push(string $name = ''): Transaction {
+   }
+ 
+   /**
+-   * {@inheritdoc}
++   * Purges a Drupal transaction from the manager.
++   *
++   * This is only called by a Transaction object's ::__destruct() method and
++   * should only be called internally by a database driver.
++   *
++   * @param string $name
++   *   The name of the transaction.
++   * @param string $id
++   *   The id of the transaction.
++   *
++   * @throws \Drupal\Core\Database\TransactionOutOfOrderException
++   *   If a Drupal Transaction with the specified name does not exist.
++   * @throws \Drupal\Core\Database\TransactionCommitFailedException
++   *   If the commit of the root transaction failed.
++   *
++   * @internal
+    */
+-  public function unpile(string $name, string $id): void {
++  public function purge(string $name, string $id): void {
+     // If this is a 'root' transaction, and it is voided (that is, no longer in
+     // the stack), then the transaction on the database is no longer active. An
+-    // action such as a rollback, or a DDL statement, was executed that
+-    // terminated the database transaction. So, we can process the post
++    // action such as a yield, a rollback, or a DDL statement, was executed
++    // that terminated the database transaction. So, we can process the post
+     // transaction callbacks.
+     if (!isset($this->stack()[$id]) && isset($this->voidedItems[$id]) && $this->rootId === $id) {
+       $this->processPostTransactionCallbacks();
+@@ -309,6 +326,60 @@ public function unpile(string $name, string $id): void {
+       return;
+     }
+ 
++    // When we get here, the transaction (or savepoint) is still active on the
++    // database. We can unpile it, and if we are left with no more items in the
++    // stack, we can also process the post transaction callbacks.
++    $this->commit($name, $id);
++    $this->removeStackItem($id);
++    if ($this->rootId === $id) {
++      $this->processPostTransactionCallbacks();
++      $this->rootId = NULL;
 +    }
-+
-+    $dispatcher->dispatch($event);
-+
-+    if (!$event->isSuccessful()) {
-+      // Callback calls were not successful and schema creation failed, throw
-+      // the schema creation failure.
-+      if ($event->getSchemaCreationState() instanceof \Exception) {
-+        throw $event->getSchemaCreationState();
-+      }
-+
-+      // Otherwise throw the latest callback execution exception.
-+      if ($event->getCallbackRetryExecutionState() instanceof \Exception) {
-+        throw $event->getCallbackRetryExecutionState();
-+      }
-+      elseif ($event->getCallbackExecutionState() instanceof \Exception) {
-+        // No retry requested, but a change to schema happened; do not throw.
-+        if ($event->getSchemaCreationState() === TRUE && !$retryAfterSchemaEnsured) {
-+          return $event;
-+        }
-+        throw $event->getCallbackExecutionState();
-+      }
-+    }
-+
-+    return $event;
-+  }
-+
- }
-diff --git a/core/lib/Drupal/Core/Database/Event/ExecuteMethodEnsuringSchemaEvent.php b/core/lib/Drupal/Core/Database/Event/ExecuteMethodEnsuringSchemaEvent.php
-new file mode 100644
-index 00000000000..2d29e374f7f
---- /dev/null
-+++ b/core/lib/Drupal/Core/Database/Event/ExecuteMethodEnsuringSchemaEvent.php
-@@ -0,0 +1,146 @@
-+<?php
-+
-+declare(strict_types=1);
-+
-+namespace Drupal\Core\Database\Event;
-+
-+use Drupal\Core\Database\SchemaException;
-+
-+/**
-+ * Represents the execution of a method enforcing an indicated schema exists.
-+ */
-+final class ExecuteMethodEnsuringSchemaEvent extends DatabaseEvent {
-+
-+  /**
-+   * Value returned by the execution of the callback.
-+   */
-+  private mixed $callbackExecutionResult;
-+
-+  /**
-+   * Indicates the initial callback execution state.
-+   */
-+  private bool|\Exception $callbackExecutionState = FALSE;
-+
-+  /**
-+   * Indicates the retried callback execution state.
-+   */
-+  private bool|\Exception $callbackRetryExecutionState = FALSE;
-+
-+  /**
-+   * Indicates the schema creation state.
-+   */
-+  private bool|SchemaException $schemaCreationState = FALSE;
-+
-+  /**
-+   * Constructor.
-+   *
-+   * @param \Closure $execute
-+   *   The callback to be executed.
-+   * @param array<string,array<string,mixed>> $schema
-+   *   A database schema specification, with table name as key and schema
-+   *   array as value.
-+   * @param bool $retryAfterSchemaEnsured
-+   *   (Optional) If TRUE, the callback is executed again after the first
-+   *   execution failed, and the schema enforcement was successful. Defaults to
-+   *   FALSE.
-+   */
-+  public function __construct(
-+    public readonly \Closure $execute,
-+    public readonly array $schema,
-+    public readonly bool $retryAfterSchemaEnsured = FALSE,
-+  ) {
-+    parent::__construct();
-+  }
-+
-+  /**
-+   * Stores the value returned by the execution of the callback.
-+   *
-+   * @param mixed $result
-+   *   The value returned by the execution of the callback.
-+   */
-+  public function setResult(mixed $result): void {
-+    $this->callbackExecutionResult = $result;
-+  }
-+
-+  /**
-+   * Gets the value returned by the execution of the callback.
-+   *
-+   * @return mixed
-+   *   The value returned by the execution of the callback.
-+   */
-+  public function getResult(): mixed {
-+    assert(isset($this->callbackExecutionResult), __METHOD__ . '() was called before successful execution of the callback');
-+    return $this->callbackExecutionResult;
-+  }
-+
-+  /**
-+   * Stores the outcome of the initial execution of the callback.
-+   *
-+   * @param true|\Exception $outcome
-+   *   The outcome of the execution of the callback.
-+   */
-+  public function setCallbackExecutionState(TRUE|\Exception $outcome): void {
-+    $this->callbackExecutionState = $outcome;
-+  }
-+
-+  /**
-+   * Stores the outcome of the retried execution of the callback.
-+   *
-+   * @param true|\Exception $outcome
-+   *   The outcome of the execution of the callback.
-+   */
-+  public function setCallbackRetryExecutionState(TRUE|\Exception $outcome): void {
-+    $this->callbackRetryExecutionState = $outcome;
-+  }
-+
-+  /**
-+   * Stores the outcome of the schema creation.
-+   *
-+   * @param true|\Drupal\Core\Database\SchemaException $outcome
-+   *   The outcome of the schema creation.
-+   */
-+  public function setSchemaCreationState(TRUE|SchemaException $outcome): void {
-+    $this->schemaCreationState = $outcome;
-+  }
-+
-+  /**
-+   * Get the overall success of the execution of the callback.
-+   *
-+   * @return bool
-+   *   The success of the execution of the callback.
-+   */
-+  public function isSuccessful(): bool {
-+    return $this->callbackExecutionState === TRUE || $this->callbackRetryExecutionState === TRUE;
-+  }
-+
-+  /**
-+   * Gets the outcome of the initial execution of the callback.
-+   *
-+   * @return bool|\Exception
-+   *   The outcome of the execution of the callback.
-+   */
-+  public function getCallbackExecutionState(): bool|\Exception {
-+    return $this->callbackExecutionState;
-+  }
-+
-+  /**
-+   * Gets the outcome of the retried execution of the callback.
-+   *
-+   * @return bool|\Exception
-+   *   The outcome of the execution of the callback.
-+   */
-+  public function getCallbackRetryExecutionState(): bool|\Exception {
-+    return $this->callbackRetryExecutionState;
-+  }
-+
-+  /**
-+   * Gets the outcome of the schema creation.
-+   *
-+   * @return bool|\Drupal\Core\Database\SchemaException
-+   *   The outcome of the schema creation.
-+   */
-+  public function getSchemaCreationState(): bool|SchemaException {
-+    return $this->schemaCreationState;
-+  }
-+
-+}
-diff --git a/core/lib/Drupal/Core/Database/EventSubscriber/SchemaRequestSubscriber.php b/core/lib/Drupal/Core/Database/EventSubscriber/SchemaRequestSubscriber.php
-new file mode 100644
-index 00000000000..51ebd2ba958
---- /dev/null
-+++ b/core/lib/Drupal/Core/Database/EventSubscriber/SchemaRequestSubscriber.php
-@@ -0,0 +1,102 @@
-+<?php
-+
-+declare(strict_types=1);
-+
-+namespace Drupal\Core\Database\EventSubscriber;
-+
-+use Drupal\Core\Database\Connection;
-+use Drupal\Core\Database\Event\ExecuteMethodEnsuringSchemaEvent;
-+use Drupal\Core\Database\Exception\SchemaObjectCreationFailureException;
-+use Symfony\Component\EventDispatcher\EventSubscriberInterface;
-+use Drupal\Core\Database\DatabaseException;
-+
-+/**
-+ * Response subscriber to schema handling requests.
-+ *
-+ * @internal
-+ */
-+class SchemaRequestSubscriber implements EventSubscriberInterface {
-+
-+  public function __construct(
-+    protected readonly Connection $connection,
-+  ) {
 +  }
 +
 +  /**
 +   * {@inheritdoc}
 +   */
-+  public static function getSubscribedEvents(): array {
-+    return [
-+      ExecuteMethodEnsuringSchemaEvent::class => 'onExecuteMethodEnsuringSchema',
-+    ];
-+  }
-+
-+  /**
-+   * Processes a request to execute a callback with schema enforcement.
-+   *
-+   * @param \Drupal\Core\Database\Event\ExecuteMethodEnsuringSchemaEvent $event
-+   *   The event to process.
-+   */
-+  public function onExecuteMethodEnsuringSchema(ExecuteMethodEnsuringSchemaEvent $event): void {
-+    try {
-+      $event->setResult(($event->execute)());
-+      $event->setCallbackExecutionState(TRUE);
++  public function unpile(string $name, string $id): void {
++    // If the transaction was voided, we cannot unpile. Skip but trigger a user
++    // warning.
++    if ($this->getConnectionTransactionState() === ClientConnectionTransactionState::Voided) {
++      trigger_error('Transaction::yield() was not processed because a prior execution of a DDL statement already committed the transaction.', E_USER_WARNING);
 +      return;
 +    }
-+    catch (\Exception $e) {
-+dump($e);
-+      // If there was an exception, try to create the schema.
-+      $event->setCallbackExecutionState($e);
-+      $schemaChanged = $this->processSchema($event);
-+dump([$event, $schemaChanged]);
-+      // Now that the schema has been created, try again if requested.
-+      if ($event->retryAfterSchemaEnsured && $schemaChanged) {
-+        try {
-+          $event->setResult(($event->execute)());
-+          $event->setCallbackRetryExecutionState(TRUE);
-+        }
-+        catch (\Exception $e) {
-+          $event->setCallbackRetryExecutionState($e);
-+          return;
-+        }
-+      }
++
++    // If there is no $id to commit, or if $id does not correspond to the one
++    // in the stack for that $name, the commit is out of order.
++    if (!isset($this->stack()[$id]) || $this->stack()[$id]->name !== $name) {
++      throw new TransactionOutOfOrderException("Error attempting commit of {$id}\\{$name}. Active stack: " . $this->dumpStackItemsAsString());
 +    }
++
++    // Commit the transaction.
++    $this->commit($name, $id);
++
++    // Void the transaction stack item.
++    $this->voidStackItem($id);
 +  }
 +
 +  /**
-+   * Processes the schema creating the missing tables.
++   * Commits a Drupal transaction.
 +   *
-+   * @param \Drupal\Core\Database\Event\ExecuteMethodEnsuringSchemaEvent $event
-+   *   The event to process.
++   * @param string $name
++   *   The name of the transaction.
++   * @param string $id
++   *   The id of the transaction.
 +   *
-+   * @return bool
-+   *   TRUE if a schema change happened, FALSE otherwise.
++   * @throws \Drupal\Core\Database\TransactionOutOfOrderException
++   *   If a Drupal Transaction with the specified name does not exist.
++   * @throws \Drupal\Core\Database\TransactionCommitFailedException
++   *   If the commit of the root transaction failed.
 +   */
-+  private function processSchema(ExecuteMethodEnsuringSchemaEvent $event): bool {
-+    $schemaChanged = FALSE;
-+    foreach ($event->schema as $name => $definition) {
-+      if ($this->connection->schema()->tableExists($name)) {
-+        continue;
-+      }
-+      try {
-+        $this->connection->schema()->createTable($name, $definition);
-+        $event->setSchemaCreationState(TRUE);
-+        $schemaChanged = TRUE;
-+      }
-+      // In a race condition, if another process has already created the
-+      // table, attempting to create it will throw an exception. In this
-+      // case just assume the schema was changed here.
-+      catch (DatabaseException $e) {
-+        if (!$this->connection->schema()->tableExists($name)) {
-+          $exception = new SchemaObjectCreationFailureException(sprintf('Failed creation of table {%s}', $name), 0, $e);
-+          $event->setSchemaCreationState($exception);
-+          return FALSE;
-+        }
-+        $event->setSchemaCreationState(TRUE);
-+        $schemaChanged = TRUE;
-+      }
++  protected function commit(string $name, string $id): void {
++    if ($this->getConnectionTransactionState() !== ClientConnectionTransactionState::Active) {
++      // The stack got corrupted.
++      throw new TransactionOutOfOrderException("Transaction {$id}\\{$name} is out of order. Active stack: " . $this->dumpStackItemsAsString());
 +    }
-+    return $schemaChanged;
-+  }
 +
-+}
-diff --git a/core/lib/Drupal/Core/Database/Exception/SchemaObjectCreationFailureException.php b/core/lib/Drupal/Core/Database/Exception/SchemaObjectCreationFailureException.php
+     // If we are not releasing the last savepoint but an earlier one, or
+     // committing a root transaction while savepoints are active, all
+     // subsequent savepoints will be released as well. The stack must be
+@@ -317,33 +388,20 @@ public function unpile(string $name, string $id): void {
+       $this->voidStackItem((string) $i);
+     }
+ 
+-    if ($this->getConnectionTransactionState() === ClientConnectionTransactionState::Active) {
+-      if ($this->stackDepth() > 1 && $this->stack()[$id]->type === StackItemType::Savepoint) {
+-        // Release the client transaction savepoint in case the Drupal
+-        // transaction is not a root one.
+-        $this->releaseClientSavepoint($name);
+-      }
+-      elseif ($this->stackDepth() === 1 && $this->stack()[$id]->type === StackItemType::Root) {
+-        // If this was the root Drupal transaction, we can commit the client
+-        // transaction.
+-        $this->processRootCommit();
+-        if ($this->rootId === $id) {
+-          $this->processPostTransactionCallbacks();
+-          $this->rootId = NULL;
+-        }
+-      }
+-      else {
+-        // The stack got corrupted.
+-        throw new TransactionOutOfOrderException("Transaction {$id}/{$name} is out of order. Active stack: " . $this->dumpStackItemsAsString());
+-      }
+-
+-      // Remove the transaction from the stack.
+-      $this->removeStackItem($id);
+-      return;
++    if ($this->stackDepth() > 1 && $this->stack()[$id]->type === StackItemType::Savepoint) {
++      // Release the client transaction savepoint in case the Drupal
++      // transaction is not a root one.
++      $this->releaseClientSavepoint($name);
++    }
++    elseif ($this->stackDepth() === 1 && $this->stack()[$id]->type === StackItemType::Root) {
++      // If this was the root Drupal transaction, we can commit the client
++      // transaction.
++      $this->processRootCommit();
++    }
++    else {
++      // The stack got corrupted.
++      throw new TransactionOutOfOrderException("Transaction {$id}/{$name} is out of order. Active stack: " . $this->dumpStackItemsAsString());
+     }
+-
+-    // The stack got corrupted.
+-    throw new TransactionOutOfOrderException("Transaction {$id}/{$name} is out of order. Active stack: " . $this->dumpStackItemsAsString());
+   }
+ 
+   /**
+diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php
+index 11af511f14b..b23774c06dd 100644
+--- a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php
++++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php
+@@ -53,8 +53,8 @@ public function push(string $name = ''): Transaction;
+    * Removes a Drupal transaction from the stack.
+    *
+    * The unpiled item does not necessarily need to be the last on the stack.
+-   * This method should only be called by a Transaction object going out of
+-   * scope.
++   * This method should only be called by a Transaction object's ::yield()
++   * method.
+    *
+    * This method should only be called internally by a database driver.
+    *
+diff --git a/core/lib/Drupal/Core/Test/SimpletestTestRunResultsStorage.php b/core/lib/Drupal/Core/Test/SimpletestTestRunResultsStorage.php
+index 6addc207a77..2d48b2be410 100644
+--- a/core/lib/Drupal/Core/Test/SimpletestTestRunResultsStorage.php
++++ b/core/lib/Drupal/Core/Test/SimpletestTestRunResultsStorage.php
+@@ -95,13 +95,14 @@ public function insertLogEntry(TestRun $test_run, array $entry): bool {
+    * {@inheritdoc}
+    */
+   public function removeResults(TestRun $test_run): int {
+-    $this->connection->startTransaction('delete_test_run');
++    $transaction = $this->connection->startTransaction('delete_test_run');
+     $this->connection->delete('simpletest')
+       ->condition('test_id', $test_run->id())
+       ->execute();
+     $count = $this->connection->delete('simpletest_test_id')
+       ->condition('test_id', $test_run->id())
+       ->execute();
++    $transaction->yield();
+     return $count;
+   }
+ 
+@@ -169,9 +170,10 @@ public function validateTestingResultsEnvironment(): bool {
+    */
+   public function cleanUp(): int {
+     // Clear test results.
+-    $this->connection->startTransaction('delete_simpletest');
++    $transaction = $this->connection->startTransaction('delete_simpletest');
+     $this->connection->delete('simpletest')->execute();
+     $count = $this->connection->delete('simpletest_test_id')->execute();
++    $transaction->yield();
+     return $count;
+   }
+ 
+diff --git a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
+index 50a62374099..c2fbd512e1d 100644
+--- a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
++++ b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
+@@ -428,9 +428,6 @@ public function testTransactionWithDdlStatement(): void {
+ 
+   /**
+    * Tests rollback after a DDL statement when no transactional DDL supported.
+-   *
+-   * @todo In drupal:12.0.0, rollBack will throw a
+-   *   TransactionOutOfOrderException. Adjust the test accordingly.
+    */
+   public function testRollbackAfterDdlStatementForNonTransactionalDdlDatabase(): void {
+     if ($this->connection->supportsTransactionalDDL()) {
+@@ -912,9 +909,6 @@ public function testRootTransactionEndCallbackCalledAfterDdlAndRollbackForTransa
+    * transaction including DDL statements is not possible, since a commit
+    * happened already. We cannot decide what should be the status of the
+    * callback, an exception is thrown.
+-   *
+-   * @todo In drupal:12.0.0, rollBack will throw a
+-   *   TransactionOutOfOrderException. Adjust the test accordingly.
+    */
+   public function testRootTransactionEndCallbackFailureUponDdlAndRollbackForNonTransactionalDdlDatabase(): void {
+     if ($this->connection->supportsTransactionalDDL()) {
+diff --git a/core/tests/Drupal/KernelTests/Core/Database/TransactionYieldTest.php b/core/tests/Drupal/KernelTests/Core/Database/TransactionYieldTest.php
 new file mode 100644
-index 00000000000..1a30452dcd0
+index 00000000000..d81639101a3
 --- /dev/null
-+++ b/core/lib/Drupal/Core/Database/Exception/SchemaObjectCreationFailureException.php
-@@ -0,0 +1,12 @@
-+<?php
-+
-+namespace Drupal\Core\Database\Exception;
-+
-+use Drupal\Core\Database\DatabaseException;
-+use Drupal\Core\Database\SchemaException;
-+
-+/**
-+ * Exception thrown when a database schema object failed to be created.
-+ */
-+class SchemaObjectCreationFailureException extends SchemaException implements DatabaseException {
-+}
-diff --git a/core/lib/Drupal/Core/Flood/DatabaseBackend.php b/core/lib/Drupal/Core/Flood/DatabaseBackend.php
-index ec6bd4c01de..feaa11ca9d6 100644
---- a/core/lib/Drupal/Core/Flood/DatabaseBackend.php
-+++ b/core/lib/Drupal/Core/Flood/DatabaseBackend.php
-@@ -42,19 +42,23 @@ public function register($name, $window = 3600, $identifier = NULL) {
-     if (!isset($identifier)) {
-       $identifier = $this->requestStack->getCurrentRequest()->getClientIp();
-     }
--    $try_again = FALSE;
--    try {
--      $this->doInsert($name, $window, $identifier);
--    }
--    catch (\Exception $e) {
--      $try_again = $this->ensureTableExists();
--      if (!$try_again) {
--        throw $e;
--      }
--    }
--    if ($try_again) {
--      $this->doInsert($name, $window, $identifier);
--    }
-+
-+    $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function () use ($name, $window, $identifier): void {
-+        $this->connection->insert(DatabaseBackend::TABLE_NAME)
-+          ->fields([
-+            'event' => $name,
-+            'identifier' => $identifier,
-+            'timestamp' => $this->time->getRequestTime(),
-+            'expiration' => $this->time->getRequestTime() + $window,
-+          ])
-+          ->execute();
-+      },
-+      schema: [
-+        static::TABLE_NAME => $this->schemaDefinition(),
-+      ],
-+      retryAfterSchemaEnsured: TRUE,
-+    );
-   }
- 
-   /**
-@@ -68,8 +72,15 @@ public function register($name, $window = 3600, $identifier = NULL) {
-    *   Unique identifier of the current user.
-    *
-    * @see \Drupal\Core\Flood\DatabaseBackend::register
-+   *
-+   * @deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use
-+   * \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure()
-+   * instead.
-+   *
-+   * @see https://www.drupal.org/node/3489185
-    */
-   protected function doInsert($name, $window, $identifier) {
-+    @trigger_error(__METHOD__ . '() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure() instead. See https://www.drupal.org/node/3489185', E_USER_DEPRECATED);
-     $this->connection->insert(static::TABLE_NAME)
-       ->fields([
-         'event' => $name,
-@@ -87,30 +98,35 @@ public function clear($name, $identifier = NULL) {
-     if (!isset($identifier)) {
-       $identifier = $this->requestStack->getCurrentRequest()->getClientIp();
-     }
--    try {
--      $this->connection->delete(static::TABLE_NAME)
--        ->condition('event', $name)
--        ->condition('identifier', $identifier)
--        ->execute();
--    }
--    catch (\Exception $e) {
--      $this->catchException($e);
--    }
-+
-+    $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function () use ($name, $identifier): void {
-+        $this->connection->delete(DatabaseBackend::TABLE_NAME)
-+          ->condition('event', $name)
-+          ->condition('identifier', $identifier)
-+          ->execute();
-+      },
-+      schema: [
-+        static::TABLE_NAME => $this->schemaDefinition(),
-+      ],
-+    );
-   }
- 
-   /**
-    * {@inheritdoc}
-    */
-   public function clearByPrefix(string $name, string $prefix): void {
--    try {
--      $this->connection->delete(static::TABLE_NAME)
--        ->condition('event', $name)
--        ->condition('identifier', $prefix . '-%', 'LIKE')
--        ->execute();
--    }
--    catch (\Exception $e) {
--      $this->catchException($e);
--    }
-+    $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function () use ($name, $prefix): void {
-+        $this->connection->delete(DatabaseBackend::TABLE_NAME)
-+          ->condition('event', $name)
-+          ->condition('identifier', $prefix . '-%', 'LIKE')
-+          ->execute();
-+      },
-+      schema: [
-+        static::TABLE_NAME => $this->schemaDefinition(),
-+      ],
-+    );
-   }
- 
-   /**
-@@ -120,42 +136,53 @@ public function isAllowed($name, $threshold, $window = 3600, $identifier = NULL)
-     if (!isset($identifier)) {
-       $identifier = $this->requestStack->getCurrentRequest()->getClientIp();
-     }
--    try {
--      $number = $this->connection->select(static::TABLE_NAME, 'f')
--        ->condition('event', $name)
--        ->condition('identifier', $identifier)
--        ->condition('timestamp', $this->time->getRequestTime() - $window, '>')
--        ->countQuery()
--        ->execute()
--        ->fetchField();
--      return ($number < $threshold);
--    }
--    catch (\Exception $e) {
--      if (!$this->ensureTableExists()) {
--        throw $e;
--      }
--      return TRUE;
--    }
-+
-+    $execution = $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function () use ($name, $threshold, $window, $identifier): bool {
-+        $number = (int) $this->connection->select(DatabaseBackend::TABLE_NAME, 'f')
-+          ->condition('event', $name)
-+          ->condition('identifier', $identifier)
-+          ->condition('timestamp', $this->time->getRequestTime() - $window, '>')
-+          ->countQuery()
-+          ->execute()
-+          ->fetchField();
-+        return ($number < $threshold);
-+      },
-+      schema: [
-+        static::TABLE_NAME => $this->schemaDefinition(),
-+      ],
-+    );
-+
-+    return $execution->isSuccessful() ? $execution->getResult() : TRUE;
-   }
- 
-   /**
-    * {@inheritdoc}
-    */
-   public function garbageCollection() {
--    try {
--      $this->connection->delete(static::TABLE_NAME)
--        ->condition('expiration', $this->time->getRequestTime(), '<')
--        ->execute();
--    }
--    catch (\Exception $e) {
--      $this->catchException($e);
--    }
-+    $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function (): void {
-+        $this->connection->delete(DatabaseBackend::TABLE_NAME)
-+          ->condition('expiration', $this->time->getRequestTime(), '<')
-+          ->execute();
-+      },
-+      schema: [
-+        static::TABLE_NAME => $this->schemaDefinition(),
-+      ],
-+    );
-   }
- 
-   /**
-    * Check if the flood table exists and create it if not.
-+   *
-+   * @deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use
-+   * \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure()
-+   * instead.
-+   *
-+   * @see https://www.drupal.org/node/3489185
-    */
-   protected function ensureTableExists() {
-+    @trigger_error(__METHOD__ . '() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure() instead. See https://www.drupal.org/node/3489185', E_USER_DEPRECATED);
-     try {
-       $database_schema = $this->connection->schema();
-       $schema_definition = $this->schemaDefinition();
-@@ -183,8 +210,15 @@ protected function ensureTableExists() {
-    *   The exception.
-    *
-    * @throws \Exception
-+   *
-+   * @deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use
-+   * \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure()
-+   * instead.
-+   *
-+   * @see https://www.drupal.org/node/3489185
-    */
-   protected function catchException(\Exception $e) {
-+    @trigger_error(__METHOD__ . '() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure() instead. See https://www.drupal.org/node/3489185', E_USER_DEPRECATED);
-     if ($this->connection->schema()->tableExists(static::TABLE_NAME)) {
-       throw $e;
-     }
-diff --git a/core/lib/Drupal/Core/KeyValueStore/DatabaseStorage.php b/core/lib/Drupal/Core/KeyValueStore/DatabaseStorage.php
-index 44d5d9df13f..45700ca8422 100644
---- a/core/lib/Drupal/Core/KeyValueStore/DatabaseStorage.php
-+++ b/core/lib/Drupal/Core/KeyValueStore/DatabaseStorage.php
-@@ -3,9 +3,10 @@
- namespace Drupal\Core\KeyValueStore;
- 
- use Drupal\Component\Serialization\SerializationInterface;
--use Drupal\Core\Database\Query\Merge;
- use Drupal\Core\Database\Connection;
- use Drupal\Core\Database\DatabaseException;
-+use Drupal\Core\Database\Query\Merge;
-+use Drupal\Core\Database\StatementInterface;
- use Drupal\Core\DependencyInjection\DependencySerializationTrait;
- 
- /**
-@@ -62,16 +63,18 @@ public function __construct($collection, SerializationInterface $serializer, Con
-    * {@inheritdoc}
-    */
-   public function has($key) {
--    try {
--      return (bool) $this->connection->query('SELECT 1 FROM {' . $this->connection->escapeTable($this->table) . '} WHERE [collection] = :collection AND [name] = :key', [
--        ':collection' => $this->collection,
--        ':key' => $key,
--      ])->fetchField();
--    }
--    catch (\Exception $e) {
--      $this->catchException($e);
--      return FALSE;
--    }
-+    $execution = $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function () use ($key): bool {
-+        return (bool) $this->connection->query('SELECT 1 FROM {' . $this->connection->escapeTable($this->table) . '} WHERE [collection] = :collection AND [name] = :key', [
-+          ':collection' => $this->collection,
-+          ':key' => $key,
-+        ])->fetchField();
-+      },
-+      schema: [
-+        $this->table => static::schemaDefinition(),
-+      ],
-+    );
-+    return $execution->isSuccessful() ? $execution->getResult() : FALSE;
-   }
- 
-   /**
-@@ -99,13 +102,15 @@ public function getMultiple(array $keys) {
-    * {@inheritdoc}
-    */
-   public function getAll() {
--    try {
--      $result = $this->connection->query('SELECT [name], [value] FROM {' . $this->connection->escapeTable($this->table) . '} WHERE [collection] = :collection', [':collection' => $this->collection]);
--    }
--    catch (\Exception $e) {
--      $this->catchException($e);
--      $result = [];
--    }
-+    $execution = $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function (): ?StatementInterface {
-+        return $this->connection->query('SELECT [name], [value] FROM {' . $this->connection->escapeTable($this->table) . '} WHERE [collection] = :collection', [':collection' => $this->collection]);
-+      },
-+      schema: [
-+        $this->table => static::schemaDefinition(),
-+      ],
-+    );
-+    $result = $execution->isSuccessful() ? $execution->getResult() : [];
- 
-     $values = [];
-     foreach ($result as $item) {
-@@ -125,8 +130,15 @@ public function getAll() {
-    *   The key of the data to store.
-    * @param mixed $value
-    *   The data to store.
-+   *
-+   * @deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use
-+   *   \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure()
-+   *   instead.
-+   *
-+   * @see https://www.drupal.org/node/3489185
-    */
-   protected function doSet($key, $value) {
-+    @trigger_error(__METHOD__ . '() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure() instead. See https://www.drupal.org/node/3489185', E_USER_DEPRECATED);
-     $this->connection->merge($this->table)
-       ->keys([
-         'name' => $key,
-@@ -140,18 +152,21 @@ protected function doSet($key, $value) {
-    * {@inheritdoc}
-    */
-   public function set($key, $value) {
--    try {
--      $this->doSet($key, $value);
--    }
--    catch (\Exception $e) {
--      // If there was an exception, try to create the table.
--      if ($this->ensureTableExists()) {
--        $this->doSet($key, $value);
--      }
--      else {
--        throw $e;
--      }
--    }
-+    $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function () use ($key, $value): void {
-+        $this->connection->merge($this->table)
-+          ->keys([
-+            'name' => $key,
-+            'collection' => $this->collection,
-+          ])
-+          ->fields(['value' => $this->serializer->encode($value)])
-+          ->execute();
-+      },
-+      schema: [
-+        $this->table => static::schemaDefinition(),
-+      ],
-+      retryAfterSchemaEnsured: TRUE,
-+    );
-   }
- 
-   /**
-@@ -166,8 +181,15 @@ public function set($key, $value) {
-    *
-    * @return bool
-    *   TRUE if the data was set, FALSE if it already existed.
-+   *
-+   * @deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use
-+   *   \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure()
-+   *   instead.
-+   *
-+   * @see https://www.drupal.org/node/3489185
-    */
-   public function doSetIfNotExists($key, $value) {
-+    @trigger_error(__METHOD__ . '() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure() instead. See https://www.drupal.org/node/3489185', E_USER_DEPRECATED);
-     $result = $this->connection->merge($this->table)
-       ->insertFields([
-         'collection' => $this->collection,
-@@ -184,66 +206,79 @@ public function doSetIfNotExists($key, $value) {
-    * {@inheritdoc}
-    */
-   public function setIfNotExists($key, $value) {
--    try {
--      return $this->doSetIfNotExists($key, $value);
--    }
--    catch (\Exception $e) {
--      // If there was an exception, try to create the table.
--      if ($this->ensureTableExists()) {
--        return $this->doSetIfNotExists($key, $value);
--      }
--      else {
--        throw $e;
--      }
--    }
-+    $execution = $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function () use ($key, $value): bool {
-+        $result = $this->connection->merge($this->table)
-+          ->insertFields([
-+            'collection' => $this->collection,
-+            'name' => $key,
-+            'value' => $this->serializer->encode($value),
-+          ])
-+          ->condition('collection', $this->collection)
-+          ->condition('name', $key)
-+          ->execute();
-+        return $result == Merge::STATUS_INSERT;
-+      },
-+      schema: [
-+        $this->table => static::schemaDefinition(),
-+      ],
-+      retryAfterSchemaEnsured: TRUE,
-+    );
-+    return $execution->isSuccessful() ? $execution->getResult() : FALSE;
-   }
- 
-   /**
-    * {@inheritdoc}
-    */
-   public function rename($key, $new_key) {
--    try {
--      $this->connection->update($this->table)
--        ->fields(['name' => $new_key])
--        ->condition('collection', $this->collection)
--        ->condition('name', $key)
--        ->execute();
--    }
--    catch (\Exception $e) {
--      $this->catchException($e);
--    }
-+    $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function () use ($key, $new_key): void {
-+        $this->connection->update($this->table)
-+          ->fields(['name' => $new_key])
-+          ->condition('collection', $this->collection)
-+          ->condition('name', $key)
-+          ->execute();
-+      },
-+      schema: [
-+        $this->table => static::schemaDefinition(),
-+      ],
-+    );
-   }
- 
-   /**
-    * {@inheritdoc}
-    */
-   public function deleteMultiple(array $keys) {
--    // Delete in chunks when a large array is passed.
--    while ($keys) {
--      try {
--        $this->connection->delete($this->table)
--          ->condition('name', array_splice($keys, 0, 1000), 'IN')
--          ->condition('collection', $this->collection)
--          ->execute();
--      }
--      catch (\Exception $e) {
--        $this->catchException($e);
--      }
--    }
-+    $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function () use ($keys): void {
-+        // Delete in chunks when a large array is passed.
-+        while ($keys) {
-+          $this->connection->delete($this->table)
-+            ->condition('name', array_splice($keys, 0, 1000), 'IN')
-+            ->condition('collection', $this->collection)
-+            ->execute();
-+        }
-+      },
-+      schema: [
-+        $this->table => static::schemaDefinition(),
-+      ],
-+    );
-   }
- 
-   /**
-    * {@inheritdoc}
-    */
-   public function deleteAll() {
--    try {
--      $this->connection->delete($this->table)
--        ->condition('collection', $this->collection)
--        ->execute();
--    }
--    catch (\Exception $e) {
--      $this->catchException($e);
--    }
-+    $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function (): void {
-+        $this->connection->delete($this->table)
-+          ->condition('collection', $this->collection)
-+          ->execute();
-+      },
-+      schema: [
-+        $this->table => static::schemaDefinition(),
-+      ],
-+    );
-   }
- 
-   /**
-@@ -251,8 +286,15 @@ public function deleteAll() {
-    *
-    * @return bool
-    *   TRUE if the table exists, FALSE if it does not exists.
-+   *
-+   * @deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use
-+   *   \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure()
-+   *   instead.
-+   *
-+   * @see https://www.drupal.org/node/3489185
-    */
-   protected function ensureTableExists() {
-+    @trigger_error(__METHOD__ . '() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure() instead. See https://www.drupal.org/node/3489185', E_USER_DEPRECATED);
-     try {
-       $database_schema = $this->connection->schema();
-       $database_schema->createTable($this->table, $this->schemaDefinition());
-@@ -280,8 +322,15 @@ protected function ensureTableExists() {
-    *   The exception.
-    *
-    * @throws \Exception
-+   *
-+   * @deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use
-+   *   \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure()
-+   *   instead.
-+   *
-+   * @see https://www.drupal.org/node/3489185
-    */
-   protected function catchException(\Exception $e) {
-+    @trigger_error(__METHOD__ . '() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure() instead. See https://www.drupal.org/node/3489185', E_USER_DEPRECATED);
-     if (!($e instanceof DatabaseException) && $this->connection->schema()->tableExists($this->table)) {
-       throw $e;
-     }
-diff --git a/core/lib/Drupal/Core/KeyValueStore/DatabaseStorageExpirable.php b/core/lib/Drupal/Core/KeyValueStore/DatabaseStorageExpirable.php
-index 34f94c0abff..4ccdddcf4ac 100644
---- a/core/lib/Drupal/Core/KeyValueStore/DatabaseStorageExpirable.php
-+++ b/core/lib/Drupal/Core/KeyValueStore/DatabaseStorageExpirable.php
-@@ -42,60 +42,62 @@ public function __construct(
-    * {@inheritdoc}
-    */
-   public function has($key) {
--    try {
--      return (bool) $this->connection->query('SELECT 1 FROM {' . $this->connection->escapeTable($this->table) . '} WHERE [collection] = :collection AND [name] = :key AND [expire] > :now', [
--        ':collection' => $this->collection,
--        ':key' => $key,
--        ':now' => $this->time->getRequestTime(),
--      ])->fetchField();
--    }
--    catch (\Exception $e) {
--      $this->catchException($e);
--      return FALSE;
--    }
-+    $execution = $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function () use ($key): bool {
-+        return (bool) $this->connection->query('SELECT 1 FROM {' . $this->connection->escapeTable($this->table) . '} WHERE [collection] = :collection AND [name] = :key AND [expire] > :now', [
-+          ':collection' => $this->collection,
-+          ':key' => $key,
-+          ':now' => $this->time->getRequestTime(),
-+        ])->fetchField();
-+      },
-+      schema: [
-+        $this->table => static::schemaDefinition(),
-+      ],
-+    );
-+    return $execution->isSuccessful() ? $execution->getResult() : [];
-   }
- 
-   /**
-    * {@inheritdoc}
-    */
-   public function getMultiple(array $keys) {
--    try {
--      $values = $this->connection->query(
--        'SELECT [name], [value] FROM {' . $this->connection->escapeTable($this->table) . '} WHERE [expire] > :now AND [name] IN ( :keys[] ) AND [collection] = :collection',
--        [
--          ':now' => $this->time->getRequestTime(),
--          ':keys[]' => $keys,
--          ':collection' => $this->collection,
--        ])->fetchAllKeyed();
--      return array_map([$this->serializer, 'decode'], $values);
--    }
--    catch (\Exception $e) {
--      // @todo Perhaps if the database is never going to be available,
--      // key/value requests should return FALSE in order to allow exception
--      // handling to occur but for now, keep it an array, always.
--      // https://www.drupal.org/node/2787737
--      $this->catchException($e);
--    }
--    return [];
-+    $execution = $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function () use ($keys): array {
-+        $values = $this->connection->query(
-+          'SELECT [name], [value] FROM {' . $this->connection->escapeTable($this->table) . '} WHERE [expire] > :now AND [name] IN ( :keys[] ) AND [collection] = :collection',
-+          [
-+            ':now' => $this->time->getRequestTime(),
-+            ':keys[]' => $keys,
-+            ':collection' => $this->collection,
-+          ])->fetchAllKeyed();
-+        return array_map([$this->serializer, 'decode'], $values);
-+      },
-+      schema: [
-+        $this->table => static::schemaDefinition(),
-+      ],
-+    );
-+    return $execution->isSuccessful() ? $execution->getResult() : [];
-   }
- 
-   /**
-    * {@inheritdoc}
-    */
-   public function getAll() {
--    try {
--      $values = $this->connection->query(
--        'SELECT [name], [value] FROM {' . $this->connection->escapeTable($this->table) . '} WHERE [collection] = :collection AND [expire] > :now',
--        [
--          ':collection' => $this->collection,
--          ':now' => $this->time->getRequestTime(),
--        ])->fetchAllKeyed();
--      return array_map([$this->serializer, 'decode'], $values);
--    }
--    catch (\Exception $e) {
--      $this->catchException($e);
--    }
--    return [];
-+    $execution = $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function (): array {
-+        $values = $this->connection->query(
-+          'SELECT [name], [value] FROM {' . $this->connection->escapeTable($this->table) . '} WHERE [collection] = :collection AND [expire] > :now',
-+          [
-+            ':collection' => $this->collection,
-+            ':now' => $this->time->getRequestTime(),
-+          ])->fetchAllKeyed();
-+        return array_map([$this->serializer, 'decode'], $values);
-+      },
-+      schema: [
-+        $this->table => static::schemaDefinition(),
-+      ],
-+    );
-+    return $execution->isSuccessful() ? $execution->getResult() : [];
-   }
- 
-   /**
-@@ -109,8 +111,15 @@ public function getAll() {
-    *   The data to store.
-    * @param int $expire
-    *   The time to live for items, in seconds.
-+   *
-+   * @deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use
-+   *   \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure()
-+   *   instead.
-+   *
-+   * @see https://www.drupal.org/node/3489185
-    */
-   protected function doSetWithExpire($key, $value, $expire) {
-+    @trigger_error(__METHOD__ . '() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure() instead. See https://www.drupal.org/node/3489185', E_USER_DEPRECATED);
-     $this->connection->merge($this->table)
-       ->keys([
-         'name' => $key,
-@@ -127,18 +136,24 @@ protected function doSetWithExpire($key, $value, $expire) {
-    * {@inheritdoc}
-    */
-   public function setWithExpire($key, $value, $expire) {
--    try {
--      $this->doSetWithExpire($key, $value, $expire);
--    }
--    catch (\Exception $e) {
--      // If there was an exception, then try to create the table.
--      if ($this->ensureTableExists()) {
--        $this->doSetWithExpire($key, $value, $expire);
--      }
--      else {
--        throw $e;
--      }
--    }
-+    $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function () use ($key, $value, $expire): void {
-+        $this->connection->merge($this->table)
-+          ->keys([
-+            'name' => $key,
-+            'collection' => $this->collection,
-+          ])
-+          ->fields([
-+            'value' => $this->serializer->encode($value),
-+            'expire' => $this->time->getRequestTime() + $expire,
-+          ])
-+          ->execute();
-+      },
-+      schema: [
-+        $this->table => static::schemaDefinition(),
-+      ],
-+      retryAfterSchemaEnsured: TRUE,
-+    );
-   }
- 
-   /**
-@@ -155,8 +170,15 @@ public function setWithExpire($key, $value, $expire) {
-    *
-    * @return bool
-    *   TRUE if the data was set, or FALSE if it already existed.
-+   *
-+   * @deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use
-+   *   \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure()
-+   *   instead.
-+   *
-+   * @see https://www.drupal.org/node/3489185
-    */
-   protected function doSetWithExpireIfNotExists($key, $value, $expire) {
-+    @trigger_error(__METHOD__ . '() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure() instead. See https://www.drupal.org/node/3489185', E_USER_DEPRECATED);
-     if (!$this->has($key)) {
-       $this->setWithExpire($key, $value, $expire);
-       return TRUE;
-@@ -168,18 +190,11 @@ protected function doSetWithExpireIfNotExists($key, $value, $expire) {
-    * {@inheritdoc}
-    */
-   public function setWithExpireIfNotExists($key, $value, $expire) {
--    try {
--      return $this->doSetWithExpireIfNotExists($key, $value, $expire);
--    }
--    catch (\Exception $e) {
--      // If there was an exception, try to create the table.
--      if ($this->ensureTableExists()) {
--        return $this->doSetWithExpireIfNotExists($key, $value, $expire);
--      }
--      else {
--        throw $e;
--      }
-+    if (!$this->has($key)) {
-+      $this->setWithExpire($key, $value, $expire);
-+      return TRUE;
-     }
-+    return FALSE;
-   }
- 
-   /**
-diff --git a/core/lib/Drupal/Core/KeyValueStore/KeyValueDatabaseExpirableFactory.php b/core/lib/Drupal/Core/KeyValueStore/KeyValueDatabaseExpirableFactory.php
-index 4215a9b5d93..ba4a92981b4 100644
---- a/core/lib/Drupal/Core/KeyValueStore/KeyValueDatabaseExpirableFactory.php
-+++ b/core/lib/Drupal/Core/KeyValueStore/KeyValueDatabaseExpirableFactory.php
-@@ -49,14 +49,16 @@ public function get($collection) {
-    * Deletes expired items.
-    */
-   public function garbageCollection() {
--    try {
--      $this->connection->delete('key_value_expire')
--        ->condition('expire', $this->time->getRequestTime(), '<')
--        ->execute();
--    }
--    catch (\Exception $e) {
--      $this->catchException($e);
--    }
-+    $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function (): void {
-+        $this->connection->delete('key_value_expire')
-+          ->condition('expire', $this->time->getRequestTime(), '<')
-+          ->execute();
-+      },
-+      schema: [
-+        'key_value_expire' => DatabaseStorageExpirable::schemaDefinition(),
-+      ],
-+    );
-   }
- 
-   /**
-@@ -69,8 +71,15 @@ public function garbageCollection() {
-    *   The exception.
-    *
-    * @throws \Exception
-+   *
-+   * @deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use
-+   *   \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure()
-+   *   instead.
-+   *
-+   * @see https://www.drupal.org/node/3489185
-    */
-   protected function catchException(\Exception $e) {
-+    @trigger_error(__METHOD__ . '() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure() instead. See https://www.drupal.org/node/3489185', E_USER_DEPRECATED);
-     if ($this->connection->schema()->tableExists('key_value_expire')) {
-       throw $e;
-     }
-diff --git a/core/lib/Drupal/Core/Lock/DatabaseLockBackend.php b/core/lib/Drupal/Core/Lock/DatabaseLockBackend.php
-index 73fd501267e..f6d07da6a65 100644
---- a/core/lib/Drupal/Core/Lock/DatabaseLockBackend.php
-+++ b/core/lib/Drupal/Core/Lock/DatabaseLockBackend.php
-@@ -67,37 +67,36 @@ public function acquire($name, $timeout = 30.0) {
-       $retry = FALSE;
-       // We always want to do this code at least once.
-       do {
--        try {
--          $this->database->insert('semaphore')
--            ->fields([
--              'name' => $name,
--              'value' => $this->getLockId(),
--              'expire' => $expire,
--            ])
--            ->execute();
--          // We track all acquired locks in the global variable.
--          $this->locks[$name] = TRUE;
--          // We never need to try again.
--          $retry = FALSE;
--        }
--        catch (IntegrityConstraintViolationException) {
--          // Suppress the error. If this is our first pass through the loop,
--          // then $retry is FALSE. In this case, the insert failed because some
--          // other request acquired the lock but did not release it. We decide
--          // whether to retry by checking lockMayBeAvailable(). This will clear
--          // the offending row from the database table in case it has expired.
--          $retry = $retry ? FALSE : $this->lockMayBeAvailable($name);
--        }
--        catch (\Exception $e) {
--          // Create the semaphore table if it does not exist and retry.
--          if ($this->ensureTableExists()) {
--            // Retry only once.
--            $retry = !$retry;
--          }
--          else {
--            throw $e;
--          }
--        }
-+        $this->database->executeEnsuringSchemaOnFailure(
-+          execute: function () use ($name, $expire, &$retry): void {
-+            try {
-+              $this->database->insert('semaphore')
-+                ->fields([
-+                  'name' => $name,
-+                  'value' => $this->getLockId(),
-+                  'expire' => $expire,
-+                ])
-+                ->execute();
-+              // We track all acquired locks in the global variable.
-+              $this->locks[$name] = TRUE;
-+              // We never need to try again.
-+              $retry = FALSE;
-+            }
-+            catch (IntegrityConstraintViolationException) {
-+              // Suppress the error. If this is our first pass through the loop,
-+              // then $retry is FALSE. In this case, the insert failed because some
-+              // other request acquired the lock but did not release it. We decide
-+              // whether to retry by checking lockMayBeAvailable(). This will clear
-+              // the offending row from the database table in case it has expired.
-+              $retry = $retry ? FALSE : $this->lockMayBeAvailable($name);
-+            }
-+          },
-+          schema: [
-+            static::TABLE_NAME => $this->schemaDefinition(),
-+          ],
-+          retryAfterSchemaEnsured: TRUE,
-+        );
-+
-         // We only retry in case the first attempt failed, but we then broke
-         // an expired lock.
-       } while ($retry);
-@@ -111,14 +110,17 @@ public function acquire($name, $timeout = 30.0) {
-   public function lockMayBeAvailable($name) {
-     $name = $this->normalizeName($name);
- 
--    try {
--      $lock = $this->database->query('SELECT [expire], [value] FROM {semaphore} WHERE [name] = :name', [':name' => $name])->fetchAssoc();
--    }
--    catch (\Exception $e) {
--      $this->catchException($e);
--      // If the table does not exist yet then the lock may be available.
--      $lock = FALSE;
--    }
-+    $execution = $this->database->executeEnsuringSchemaOnFailure(
-+      execute: function () use ($name): array|FALSE {
-+        return $this->database
-+          ->query('SELECT [expire], [value] FROM {semaphore} WHERE [name] = :name', [':name' => $name])
-+          ->fetchAssoc();
-+      },
-+      schema: [
-+        static::TABLE_NAME => $this->schemaDefinition(),
-+      ],
-+    );
-+    $lock = $execution->isSuccessful() ? $execution->getResult() : FALSE;
-     if (!$lock) {
-       return TRUE;
-     }
-@@ -144,15 +146,17 @@ public function release($name) {
-     $name = $this->normalizeName($name);
- 
-     unset($this->locks[$name]);
--    try {
--      $this->database->delete('semaphore')
--        ->condition('name', $name)
--        ->condition('value', $this->getLockId())
--        ->execute();
--    }
--    catch (\Exception $e) {
--      $this->catchException($e);
--    }
-+    $this->database->executeEnsuringSchemaOnFailure(
-+      execute: function () use ($name): void {
-+        $this->database->delete('semaphore')
-+          ->condition('name', $name)
-+          ->condition('value', $this->getLockId())
-+          ->execute();
-+      },
-+      schema: [
-+        static::TABLE_NAME => $this->schemaDefinition(),
-+      ],
-+    );
-   }
- 
-   /**
-@@ -173,8 +177,15 @@ public function releaseAll($lock_id = NULL) {
- 
-   /**
-    * Check if the semaphore table exists and create it if not.
-+   *
-+   * @deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use
-+   *   \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure()
-+   *   instead.
-+   *
-+   * @see https://www.drupal.org/node/3489185
-    */
-   protected function ensureTableExists() {
-+    @trigger_error(__METHOD__ . '() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure() instead. See https://www.drupal.org/node/3489185', E_USER_DEPRECATED);
-     try {
-       $database_schema = $this->database->schema();
-       $schema_definition = $this->schemaDefinition();
-@@ -202,8 +213,15 @@ protected function ensureTableExists() {
-    *   The exception.
-    *
-    * @throws \Exception
-+   *
-+   * @deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use
-+   *   \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure()
-+   *   instead.
-+   *
-+   * @see https://www.drupal.org/node/3489185
-    */
-   protected function catchException(\Exception $e) {
-+    @trigger_error(__METHOD__ . '() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure() instead. See https://www.drupal.org/node/3489185', E_USER_DEPRECATED);
-     if ($this->database->schema()->tableExists(static::TABLE_NAME)) {
-       throw $e;
-     }
-diff --git a/core/lib/Drupal/Core/Menu/MenuTreeStorage.php b/core/lib/Drupal/Core/Menu/MenuTreeStorage.php
-index cc25a399152..d37cea8aa05 100644
---- a/core/lib/Drupal/Core/Menu/MenuTreeStorage.php
-+++ b/core/lib/Drupal/Core/Menu/MenuTreeStorage.php
-@@ -213,13 +213,18 @@ protected function purgeMultiple(array $ids) {
-    */
-   protected function safeExecuteSelect(SelectInterface $query) {
-     try {
--      return $query->execute();
-+      $execution = $this->connection->executeEnsuringSchemaOnFailure(
-+        execute: function () use ($query): mixed {
-+          return $query->execute();
-+        },
-+        schema: [
-+          $this->table => static::schemaDefinition(),
-+        ],
-+        retryAfterSchemaEnsured: TRUE,
-+      );
-+      return $execution->getResult();
-     }
-     catch (\Exception $e) {
--      // If there was an exception, try to create the table.
--      if ($this->ensureTableExists()) {
--        return $query->execute();
--      }
-       // Some other failure that we can not recover from.
-       throw new PluginException($e->getMessage(), 0, $e);
-     }
-@@ -1132,8 +1137,15 @@ protected function treeDataRecursive(array &$links, array $parents, $depth) {
-    *
-    * @return bool
-    *   TRUE if the table was created, FALSE otherwise.
-+   *
-+   * @deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use
-+   *   \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure()
-+   *   instead.
-+   *
-+   * @see https://www.drupal.org/node/3489185
-    */
-   protected function ensureTableExists() {
-+    @trigger_error(__METHOD__ . '() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure() instead. See https://www.drupal.org/node/3489185', E_USER_DEPRECATED);
-     try {
-       $this->connection->schema()->createTable($this->table, static::schemaDefinition());
-     }
-diff --git a/core/lib/Drupal/Core/Queue/Batch.php b/core/lib/Drupal/Core/Queue/Batch.php
-index 1b71959ba20..2e7913193dc 100644
---- a/core/lib/Drupal/Core/Queue/Batch.php
-+++ b/core/lib/Drupal/Core/Queue/Batch.php
-@@ -25,17 +25,20 @@ class Batch extends DatabaseQueue {
-    * item to be claimed repeatedly until it is deleted.
-    */
-   public function claimItem($lease_time = 0) {
--    try {
--      $item = $this->connection->queryRange('SELECT [data], [item_id] FROM {queue} q WHERE [name] = :name ORDER BY [item_id] ASC', 0, 1, [':name' => $this->name])->fetchObject();
--      if ($item) {
--        $item->data = unserialize($item->data);
--        return $item;
--      }
--    }
--    catch (\Exception $e) {
--      $this->catchException($e);
--    }
--    return FALSE;
-+    $execution = $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function (): bool|object {
-+        $item = $this->connection->queryRange('SELECT [data], [item_id] FROM {queue} q WHERE [name] = :name ORDER BY [item_id] ASC', 0, 1, [':name' => $this->name])->fetchObject();
-+        if ($item) {
-+          $item->data = unserialize($item->data);
-+          return $item;
-+        }
-+        return FALSE;
-+      },
-+      schema: [
-+        DatabaseQueue::TABLE_NAME => $this->schemaDefinition(),
-+      ],
-+    );
-+    return $execution->isSuccessful() ? $execution->getResult() : FALSE;
-   }
- 
-   /**
-@@ -48,23 +51,26 @@ public function claimItem($lease_time = 0) {
-    *   An array of queue items.
-    */
-   public function getAllItems() {
--    $result = [];
--    try {
--      $items = $this->connection->select('queue', 'q')
--        ->fields('q', ['data'])
--        ->condition('name', $this->name)
--        ->orderBy('item_id', 'ASC')
--        ->execute()
--        ->fetchAll();
-+    $execution = $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function (): array {
-+        $items = $this->connection->select('queue', 'q')
-+          ->fields('q', ['data'])
-+          ->condition('name', $this->name)
-+          ->orderBy('item_id', 'ASC')
-+          ->execute()
-+          ->fetchAll();
- 
--      foreach ($items as $item) {
--        $result[] = unserialize($item->data);
--      }
--    }
--    catch (\Exception $e) {
--      $this->catchException($e);
--    }
--    return $result;
-+        $result = [];
-+        foreach ($items as $item) {
-+          $result[] = unserialize($item->data);
-+        }
-+        return $result;
-+      },
-+      schema: [
-+        DatabaseQueue::TABLE_NAME => $this->schemaDefinition(),
-+      ],
-+    );
-+    return $execution->isSuccessful() ? $execution->getResult() : [];
-   }
- 
- }
-diff --git a/core/lib/Drupal/Core/Queue/DatabaseQueue.php b/core/lib/Drupal/Core/Queue/DatabaseQueue.php
-index ca2b8339d5c..98eb38a9a01 100644
---- a/core/lib/Drupal/Core/Queue/DatabaseQueue.php
-+++ b/core/lib/Drupal/Core/Queue/DatabaseQueue.php
-@@ -51,23 +51,26 @@ public function __construct($name, Connection $connection) {
-    * {@inheritdoc}
-    */
-   public function createItem($data) {
--    $try_again = FALSE;
--    try {
--      $id = $this->doCreateItem($data);
--    }
--    catch (\Exception $e) {
--      // If there was an exception, try to create the table.
--      if (!$try_again = $this->ensureTableExists()) {
--        // If the exception happened for other reason than the missing table,
--        // propagate the exception.
--        throw $e;
--      }
--    }
--    // Now that the table has been created, try again if necessary.
--    if ($try_again) {
--      $id = $this->doCreateItem($data);
--    }
--    return $id;
-+    $execution = $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function () use ($data): int|string {
-+        $query = $this->connection->insert(static::TABLE_NAME)
-+          ->fields([
-+            'name' => $this->name,
-+            'data' => serialize($data),
-+            // We cannot rely on \Drupal::time()->getRequestTime() because many
-+            // items might be created by a single request which takes longer than
-+            // 1 second.
-+            'created' => \Drupal::time()->getCurrentTime(),
-+          ]);
-+        // Return the new serial ID, or FALSE on failure.
-+        return $query->execute();
-+      },
-+      schema: [
-+        static::TABLE_NAME => $this->schemaDefinition(),
-+      ],
-+      retryAfterSchemaEnsured: TRUE,
-+    );
-+    return $execution->getResult();
-   }
- 
-   /**
-@@ -81,8 +84,15 @@ public function createItem($data) {
-    *   added to the queue, otherwise FALSE. We don't guarantee the item was
-    *   committed to disk etc, but as far as we know, the item is now in the
-    *   queue.
-+   *
-+   * @deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use
-+   *   \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure()
-+   *   instead.
-+   *
-+   * @see https://www.drupal.org/node/3489185
-    */
-   protected function doCreateItem($data) {
-+    @trigger_error(__METHOD__ . '() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure() instead. See https://www.drupal.org/node/3489185', E_USER_DEPRECATED);
-     $query = $this->connection->insert(static::TABLE_NAME)
-       ->fields([
-         'name' => $this->name,
-@@ -100,15 +110,16 @@ protected function doCreateItem($data) {
-    * {@inheritdoc}
-    */
-   public function numberOfItems() {
--    try {
--      return (int) $this->connection->query('SELECT COUNT([item_id]) FROM {' . static::TABLE_NAME . '} WHERE [name] = :name', [':name' => $this->name])
--        ->fetchField();
--    }
--    catch (\Exception $e) {
--      $this->catchException($e);
--      // If there is no table there cannot be any items.
--      return 0;
--    }
-+    $execution = $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function (): int {
-+        return (int) $this->connection->query('SELECT COUNT([item_id]) FROM {' . static::TABLE_NAME . '} WHERE [name] = :name', [':name' => $this->name])
-+          ->fetchField();
-+      },
-+      schema: [
-+        static::TABLE_NAME => $this->schemaDefinition(),
-+      ],
-+    );
-+    return $execution->isSuccessful() ? $execution->getResult() : 0;
-   }
- 
-   /**
-@@ -120,12 +131,17 @@ public function claimItem($lease_time = 30) {
-     // until an item is successfully claimed or we are reasonably sure there
-     // are no unclaimed items left.
-     while (TRUE) {
--      try {
--        $item = $this->connection->queryRange('SELECT [data], [created], [item_id] FROM {' . static::TABLE_NAME . '} q WHERE [expire] = 0 AND [name] = :name ORDER BY [created], [item_id] ASC', 0, 1, [':name' => $this->name])->fetchObject();
--      }
--      catch (\Exception $e) {
--        $this->catchException($e);
--      }
-+      $execution = $this->connection->executeEnsuringSchemaOnFailure(
-+        execute: function (): object|FALSE {
-+          return $this->connection
-+            ->queryRange('SELECT [data], [created], [item_id] FROM {' . static::TABLE_NAME . '} q WHERE [expire] = 0 AND [name] = :name ORDER BY [created], [item_id] ASC', 0, 1, [':name' => $this->name])
-+            ->fetchObject();
-+        },
-+        schema: [
-+          static::TABLE_NAME => $this->schemaDefinition(),
-+        ],
-+      );
-+      $item = $execution->isSuccessful() ? $execution->getResult() : [];
- 
-       // If the table does not exist there are no items currently available to
-       // claim.
-@@ -157,19 +173,20 @@ public function claimItem($lease_time = 30) {
-    * {@inheritdoc}
-    */
-   public function releaseItem($item) {
--    try {
--      $update = $this->connection->update(static::TABLE_NAME)
--        ->fields([
--          'expire' => 0,
--        ])
--        ->condition('item_id', $item->item_id);
--      return (bool) $update->execute();
--    }
--    catch (\Exception $e) {
--      $this->catchException($e);
--      // If the table doesn't exist we should consider the item released.
--      return TRUE;
--    }
-+    $execution = $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function () use ($item): bool {
-+        $update = $this->connection->update(static::TABLE_NAME)
-+          ->fields([
-+            'expire' => 0,
-+          ])
-+          ->condition('item_id', $item->item_id);
-+        return (bool) $update->execute();
-+      },
-+      schema: [
-+        static::TABLE_NAME => $this->schemaDefinition(),
-+      ],
-+    );
-+    return $execution->isSuccessful() ? $execution->getResult() : TRUE;
-   }
- 
-   /**
-@@ -181,36 +198,39 @@ public function delayItem($item, int $delay) {
-       throw new \InvalidArgumentException('$delay must be non-negative');
-     }
- 
--    try {
--      // Add the delay relative to the current time.
--      $expire = \Drupal::time()->getCurrentTime() + $delay;
--      // Update the expiry time of this item.
--      $update = $this->connection->update(static::TABLE_NAME)
--        ->fields([
--          'expire' => $expire,
--        ])
--        ->condition('item_id', $item->item_id);
--      return (bool) $update->execute();
--    }
--    catch (\Exception $e) {
--      $this->catchException($e);
--      // If the table doesn't exist we should consider the item nonexistent.
--      return TRUE;
--    }
-+    $execution = $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function () use ($item, $delay): bool {
-+        // Add the delay relative to the current time.
-+        $expire = \Drupal::time()->getCurrentTime() + $delay;
-+        // Update the expiry time of this item.
-+        $update = $this->connection->update(static::TABLE_NAME)
-+          ->fields([
-+            'expire' => $expire,
-+          ])
-+          ->condition('item_id', $item->item_id);
-+        return (bool) $update->execute();
-+      },
-+      schema: [
-+        static::TABLE_NAME => $this->schemaDefinition(),
-+      ],
-+    );
-+    return $execution->isSuccessful() ? $execution->getResult() : TRUE;
-   }
- 
-   /**
-    * {@inheritdoc}
-    */
-   public function deleteItem($item) {
--    try {
--      $this->connection->delete(static::TABLE_NAME)
--        ->condition('item_id', $item->item_id)
--        ->execute();
--    }
--    catch (\Exception $e) {
--      $this->catchException($e);
--    }
-+    $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function () use ($item): void {
-+        $this->connection->delete(static::TABLE_NAME)
-+          ->condition('item_id', $item->item_id)
-+          ->execute();
-+      },
-+      schema: [
-+        static::TABLE_NAME => $this->schemaDefinition(),
-+      ],
-+    );
-   }
- 
-   /**
-@@ -225,46 +245,57 @@ public function createQueue() {
-    * {@inheritdoc}
-    */
-   public function deleteQueue() {
--    try {
--      $this->connection->delete(static::TABLE_NAME)
--        ->condition('name', $this->name)
--        ->execute();
--    }
--    catch (\Exception $e) {
--      $this->catchException($e);
--    }
-+    $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function (): void {
-+        $this->connection->delete(static::TABLE_NAME)
-+          ->condition('name', $this->name)
-+          ->execute();
-+      },
-+      schema: [
-+        static::TABLE_NAME => $this->schemaDefinition(),
-+      ],
-+    );
-   }
- 
-   /**
-    * {@inheritdoc}
-    */
-   public function garbageCollection() {
--    try {
--      // Clean up the queue for failed batches.
--      $this->connection->delete(static::TABLE_NAME)
--        ->condition('created', \Drupal::time()->getRequestTime() - 864000, '<')
--        ->condition('name', 'drupal_batch:%', 'LIKE')
--        ->execute();
-+    $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function (): void {
-+        // Clean up the queue for failed batches.
-+        $this->connection->delete(static::TABLE_NAME)
-+          ->condition('created', \Drupal::time()->getRequestTime() - 864000, '<')
-+          ->condition('name', 'drupal_batch:%', 'LIKE')
-+          ->execute();
- 
--      // Reset expired items in the default queue implementation table. If that's
--      // not used, this will simply be a no-op.
--      $this->connection->update(static::TABLE_NAME)
--        ->fields([
--          'expire' => 0,
--        ])
--        ->condition('expire', 0, '<>')
--        ->condition('expire', \Drupal::time()->getRequestTime(), '<')
--        ->execute();
--    }
--    catch (\Exception $e) {
--      $this->catchException($e);
--    }
-+        // Reset expired items in the default queue implementation table. If that's
-+        // not used, this will simply be a no-op.
-+        $this->connection->update(static::TABLE_NAME)
-+          ->fields([
-+            'expire' => 0,
-+          ])
-+          ->condition('expire', 0, '<>')
-+          ->condition('expire', \Drupal::time()->getRequestTime(), '<')
-+          ->execute();
-+      },
-+      schema: [
-+        static::TABLE_NAME => $this->schemaDefinition(),
-+      ],
-+    );
-   }
- 
-   /**
-    * Check if the table exists and create it if not.
-+   *
-+   * @deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use
-+   *   \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure()
-+   *   instead.
-+   *
-+   * @see https://www.drupal.org/node/3489185
-    */
-   protected function ensureTableExists() {
-+    @trigger_error(__METHOD__ . '() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure() instead. See https://www.drupal.org/node/3489185', E_USER_DEPRECATED);
-     try {
-       $database_schema = $this->connection->schema();
-       $schema_definition = $this->schemaDefinition();
-@@ -293,8 +324,15 @@ protected function ensureTableExists() {
-    *
-    * @throws \Exception
-    *   If the table exists the exception passed in is rethrown.
-+   *
-+   * @deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use
-+   *   \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure()
-+   *   instead.
-+   *
-+   * @see https://www.drupal.org/node/3489185
-    */
-   protected function catchException(\Exception $e) {
-+    @trigger_error(__METHOD__ . '() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure() instead. See https://www.drupal.org/node/3489185', E_USER_DEPRECATED);
-     if ($this->connection->schema()->tableExists(static::TABLE_NAME)) {
-       throw $e;
-     }
-diff --git a/core/lib/Drupal/Core/Routing/MatcherDumper.php b/core/lib/Drupal/Core/Routing/MatcherDumper.php
-index 78619fdd721..9e2334c4598 100644
---- a/core/lib/Drupal/Core/Routing/MatcherDumper.php
-+++ b/core/lib/Drupal/Core/Routing/MatcherDumper.php
-@@ -92,17 +92,19 @@ public function dump(array $options = []): string {
-     // states due to random failures.
-     try {
-       $transaction = $this->connection->startTransaction();
--      // We don't use truncate, because it is not guaranteed to be transaction
--      // safe.
--      try {
--        $this->connection->delete($this->tableName)
--          ->execute();
--      }
--      catch (\Exception $e) {
--        if (!$this->ensureTableExists()) {
--          throw $e;
--        }
--      }
-+
-+      $this->connection->executeEnsuringSchemaOnFailure(
-+        execute: function (): void {
-+          // We don't use truncate, because it is not guaranteed to be
-+          // transaction safe.
-+          $this->connection->delete($this->tableName)
-+            ->execute();
-+        },
-+        schema: [
-+          $this->tableName => $this->schemaDefinition(),
-+        ],
-+        retryAfterSchemaEnsured: TRUE,
-+      );
- 
-       // Split the routes into chunks to avoid big INSERT queries.
-       $route_chunks = array_chunk($this->routes->all(), 50, TRUE);
-@@ -176,8 +178,15 @@ public function getRoutes(): RouteCollection {
-    *
-    * @return bool
-    *   TRUE if the table was created, FALSE otherwise.
-+   *
-+   * @deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use
-+   *   \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure()
-+   *   instead.
-+   *
-+   * @see https://www.drupal.org/node/3489185
-    */
-   protected function ensureTableExists() {
-+    @trigger_error(__METHOD__ . '() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure() instead. See https://www.drupal.org/node/3489185', E_USER_DEPRECATED);
-     try {
-       $this->connection->schema()->createTable($this->tableName, $this->schemaDefinition());
-     }
-diff --git a/core/lib/Drupal/Core/Session/SessionHandler.php b/core/lib/Drupal/Core/Session/SessionHandler.php
-index fe1247158cd..10848caea28 100644
---- a/core/lib/Drupal/Core/Session/SessionHandler.php
-+++ b/core/lib/Drupal/Core/Session/SessionHandler.php
-@@ -64,7 +64,6 @@ public function read(#[\SensitiveParameter] string $sid): string|false {
-    * {@inheritdoc}
-    */
-   public function write(#[\SensitiveParameter] string $sid, string $value): bool {
--    $try_again = FALSE;
-     $request = $this->requestStack->getCurrentRequest();
-     $fields = [
-       'uid' => $request->getSession()->get('uid', 0),
-@@ -72,26 +71,19 @@ public function write(#[\SensitiveParameter] string $sid, string $value): bool {
-       'session' => $value,
-       'timestamp' => $this->time->getRequestTime(),
-     ];
--    $doWrite = fn() =>
--      $this->connection->merge('sessions')
--        ->keys(['sid' => Crypt::hashBase64($sid)])
--        ->fields($fields)
--        ->execute();
--    try {
--      $doWrite();
--    }
--    catch (\Exception $e) {
--      // If there was an exception, try to create the table.
--      if (!$try_again = $this->ensureTableExists()) {
--        // If the exception happened for other reason than the missing
--        // table, propagate the exception.
--        throw $e;
--      }
--    }
--    // Now that the bin has been created, try again if necessary.
--    if ($try_again) {
--      $doWrite();
--    }
-+
-+    $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function () use ($sid, $fields): void {
-+        $this->connection->merge('sessions')
-+          ->keys(['sid' => Crypt::hashBase64($sid)])
-+          ->fields($fields)
-+          ->execute();
-+      },
-+      schema: [
-+        'sessions' => $this->schemaDefinition(),
-+      ],
-+      retryAfterSchemaEnsured: TRUE,
-+    );
- 
-     return TRUE;
-   }
-@@ -205,8 +197,15 @@ protected function schemaDefinition(): array {
-    *
-    * @return bool
-    *   TRUE if the table already exists or was created, FALSE if creation fails.
-+   *
-+   * @deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use
-+   *   \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure()
-+   *   instead.
-+   *
-+   * @see https://www.drupal.org/node/3489185
-    */
-   protected function ensureTableExists(): bool {
-+    @trigger_error(__METHOD__ . '() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use \Drupal\Core\Database\Connection::executeEnsuringSchemaOnFailure() instead. See https://www.drupal.org/node/3489185', E_USER_DEPRECATED);
-     try {
-       $database_schema = $this->connection->schema();
-       $schema_definition = $this->schemaDefinition();
-diff --git a/core/phpunit.xml.dist b/core/phpunit.xml.dist
-index 8ba3241ec2b..6fe4c5fac55 100644
---- a/core/phpunit.xml.dist
-+++ b/core/phpunit.xml.dist
-@@ -75,6 +75,11 @@
-       -->
-       <parameter name="verbose" value="true"/>
-     </bootstrap>
-+    <!-- Debug dump() printer. -->
-+    <bootstrap class="Drupal\TestTools\Extension\Dump\DebugDump">
-+      <parameter name="colors" value="true"/>
-+      <parameter name="printCaller" value="true"/>
-+    </bootstrap>
-   </extensions>
-   <testsuites>
-     <testsuite name="unit">
-diff --git a/core/tests/Drupal/FunctionalTests/BrowserTestBaseTest.php b/core/tests/Drupal/FunctionalTests/BrowserTestBaseTest.php
-index a9b1c2ae67c..933ea1be9a2 100644
---- a/core/tests/Drupal/FunctionalTests/BrowserTestBaseTest.php
-+++ b/core/tests/Drupal/FunctionalTests/BrowserTestBaseTest.php
-@@ -9,10 +9,9 @@
- use Drupal\Component\Serialization\Json;
- use Drupal\Core\Url;
- use Drupal\Tests\BrowserTestBase;
--use Drupal\Tests\StreamCapturer;
- use Drupal\Tests\Traits\Core\CronRunTrait;
- use Drupal\Tests\Traits\Core\PathAliasTestTrait;
--use Drupal\user\Entity\Role;
-+use Drupal\TestTools\Extension\Dump\DebugDump;
- use PHPUnit\Framework\ExpectationFailedException;
- 
- // cspell:ignore htkey
-@@ -601,20 +600,19 @@ public function testDeprecationHeaders(): void {
-    * Tests the dump() function provided by the var-dumper Symfony component.
-    */
-   public function testVarDump(): void {
--    // Append the stream capturer to the STDERR stream, so that we can test the
--    // dump() output and also prevent it from actually outputting in this
--    // particular test.
--    stream_filter_register("capture", StreamCapturer::class);
--    stream_filter_append(STDERR, "capture");
-+    // Dump some variables.
-+    $object = (object) [
-+      'Aldebaran' => 'Betelgeuse',
-+    ];
-+    dump($object);
-+    dump('Alpheratz');
- 
--    // Dump some variables to check that dump() in test code produces output
--    // on the command line that is running the test.
--    $role = Role::load('authenticated');
--    dump($role);
--    dump($role->id());
-+    $dumpString = json_encode(DebugDump::getDumps());
- 
--    $this->assertStringContainsString('Drupal\user\Entity\Role', StreamCapturer::$cache);
--    $this->assertStringContainsString('authenticated', StreamCapturer::$cache);
-+    $this->assertStringContainsString('BrowserTestBaseTest::testVarDump', $dumpString);
-+    $this->assertStringContainsString('Aldebaran', $dumpString);
-+    $this->assertStringContainsString('Betelgeuse', $dumpString);
-+    $this->assertStringContainsString('Alpheratz', $dumpString);
- 
-     // Visit a Drupal page with call to the dump() function to check that dump()
-     // in site code produces output in the requested web page's HTML.
-@@ -630,6 +628,9 @@ public function testVarDump(): void {
-     $this->assertStringContainsString('  #<span class=sf-dump-protected title="Protected property">permissions</span>: []', $body);
-     $this->assertStringContainsString('  #<span class=sf-dump-protected title="Protected property">uuid</span>: "', $body);
-     $this->assertStringContainsString('</samp>}', $body);
-+
-+    // Check that dump() in SUT did not leak into the test's dumps.
-+    $this->assertSame($dumpString, json_encode(DebugDump::getDumps()));
-   }
- 
-   /**
-diff --git a/core/tests/Drupal/FunctionalTests/Installer/InstallerExistingSettingsTest.php b/core/tests/Drupal/FunctionalTests/Installer/InstallerExistingSettingsTest.php
-index 3958b82396a..b41c65cc6a0 100644
---- a/core/tests/Drupal/FunctionalTests/Installer/InstallerExistingSettingsTest.php
-+++ b/core/tests/Drupal/FunctionalTests/Installer/InstallerExistingSettingsTest.php
-@@ -62,8 +62,10 @@ protected function prepareEnvironment(): void {
-   protected function visitInstaller(): void {
-     // Should redirect to the installer.
-     $this->drupalGet($GLOBALS['base_url']);
--    // Ensure no database tables have been created yet.
--    $this->assertSame([], Database::getConnection()->schema()->findTables('%'));
-+    // Ensure only the config table has been created yet.
-+    $this->assertSame([
-+      'config' => 'config',
-+    ], Database::getConnection()->schema()->findTables('%'));
-     $this->assertSession()->addressEquals($GLOBALS['base_url'] . '/core/install.php');
-   }
- 
-diff --git a/core/tests/Drupal/KernelTests/Core/Config/Storage/DatabaseStorageTest.php b/core/tests/Drupal/KernelTests/Core/Config/Storage/DatabaseStorageTest.php
-index 7521d5d713b..e3b29baf3dd 100644
---- a/core/tests/Drupal/KernelTests/Core/Config/Storage/DatabaseStorageTest.php
-+++ b/core/tests/Drupal/KernelTests/Core/Config/Storage/DatabaseStorageTest.php
-@@ -74,13 +74,7 @@ public function testExceptionIsThrownIfQueryFails(): void {
-       // Exception was expected
-     }
- 
--    try {
--      $this->storage->read('config.settings');
--      $this->fail('Expected exception not thrown from read()');
--    }
--    catch (DatabaseExceptionWrapper) {
--      // Exception was expected
--    }
-+    $this->assertFalse($this->storage->read('config.settings'));
- 
-     try {
-       $this->storage->readMultiple(['config.settings', 'config.settings2']);
-@@ -98,13 +92,7 @@ public function testExceptionIsThrownIfQueryFails(): void {
-       // Exception was expected
-     }
- 
--    try {
--      $this->storage->listAll();
--      $this->fail('Expected exception not thrown from listAll()');
--    }
--    catch (DatabaseExceptionWrapper) {
--      // Exception was expected
--    }
-+    $this->assertSame([], $this->storage->listAll());
- 
-     try {
-       $this->storage->deleteAll();
-diff --git a/core/tests/Drupal/KernelTests/Core/Database/ExecuteEnsuringSchemaOnFailureTest.php b/core/tests/Drupal/KernelTests/Core/Database/ExecuteEnsuringSchemaOnFailureTest.php
-new file mode 100644
-index 00000000000..0b6a2fb1a7d
---- /dev/null
-+++ b/core/tests/Drupal/KernelTests/Core/Database/ExecuteEnsuringSchemaOnFailureTest.php
-@@ -0,0 +1,257 @@
++++ b/core/tests/Drupal/KernelTests/Core/Database/TransactionYieldTest.php
+@@ -0,0 +1,1233 @@
 +<?php
 +
 +declare(strict_types=1);
 +
 +namespace Drupal\KernelTests\Core\Database;
 +
-+use Drupal\Core\Database\DatabaseException;
-+use Drupal\Core\Database\DatabaseExceptionWrapper;
-+use Drupal\Core\Database\Exception\SchemaObjectCreationFailureException;
++use Drupal\Core\Database\Database;
++use Drupal\Core\Database\Transaction;
++use Drupal\Core\Database\Transaction\ClientConnectionTransactionState;
++use Drupal\Core\Database\Transaction\StackItem;
++use Drupal\Core\Database\Transaction\StackItemType;
++use Drupal\Core\Database\Transaction\TransactionManagerBase;
++use Drupal\Core\Database\TransactionNameNonUniqueException;
++use Drupal\Core\Database\TransactionOutOfOrderException;
 +
 +/**
-+ * Tests Connection::executeEnsuringSchemaOnFailure().
++ * Tests the transactions, using the explicit Transaction::yield() method.
++ *
++ * We test nesting by having two transaction layers, an outer and inner. The
++ * outer layer encapsulates the inner layer. Our transaction nesting abstraction
++ * should allow the outer layer function to call any function it wants,
++ * especially the inner layer that starts its own transaction, and be
++ * confident that, when the function it calls returns, its own transaction
++ * is still "alive."
++ *
++ * Call structure:
++ *   transactionOuterLayer()
++ *     Start transaction
++ *     transactionInnerLayer()
++ *       Start transaction (does nothing in database)
++ *       [Maybe decide to roll back]
++ *     Do more stuff
++ *     Should still be in transaction A
++ *
++ * These method can be overridden by non-core database driver if their
++ * transaction behavior is different from core. For example, both oci8 (Oracle)
++ * and mysqli (MySql) clients do not have a solution to check if a transaction
++ * is active, and mysqli does not fail when rolling back and no transaction
++ * active.
 + *
 + * @group Database
 + */
-+class ExecuteEnsuringSchemaOnFailureTest extends DatabaseTestBase {
++class TransactionYieldTest extends DatabaseTestBase {
 +
-+/*  public function testValidCallbackOnExistingSchema(): void {
-+    // Create the tables before executing the test.
-+    $this->connection->schema()->createTable('fixture_header', $this->validMultiTableFixtureSchema()['fixture_header']);
-+    $this->connection->schema()->createTable('fixture_detail', $this->validMultiTableFixtureSchema()['fixture_detail']);
++  /**
++   * Keeps track of the post-transaction callback action executed.
++   */
++  protected ?string $postTransactionCallbackAction = NULL;
 +
-+    $execution = $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function (): int {
-+        return $this->insertIntoFixtureTables();
-+      },
-+      schema: $this->validMultiTableFixtureSchema(),
-+      retryAfterSchemaEnsured: TRUE,
-+    );
++  /**
++   * Create a root Drupal transaction.
++   */
++  protected function createRootTransaction(string $name = '', bool $insertRow = TRUE): Transaction {
++    $this->assertFalse($this->connection->inTransaction());
++    $this->assertSame(0, $this->connection->transactionManager()->stackDepth());
 +
-+    // The schema was there so first callback execution was successful.
-+    $this->assertTrue($execution->isSuccessful());
-+    $this->assertTrue($execution->getCallbackExecutionState());
-+    $this->assertFalse($execution->getSchemaCreationState());
-+    $this->assertFalse($execution->getCallbackRetryExecutionState());
-+    $this->assertSame(1, $execution->getResult());
++    // Start root transaction. Corresponds to 'BEGIN TRANSACTION' on the
++    // database.
++    $transaction = $this->connection->startTransaction($name);
++    $this->assertTrue($this->connection->inTransaction());
++    $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
 +
-+    $this->assertEquals(1, $this->connection->select('fixture_header', 'h')->countQuery()->execute()->fetchField());
-+    $this->assertEquals(1, $this->connection->select('fixture_detail', 'h')->countQuery()->execute()->fetchField());
++    // Insert a single row into the testing table.
++    if ($insertRow) {
++      $this->insertRow('David');
++      $this->assertRowPresent('David');
++    }
++
++    return $transaction;
 +  }
 +
-+  public function testValidCallbackOnMissingMultiTableSchemaAndRetry(): void {
-+    $execution = $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function (): int {
-+        return $this->insertIntoFixtureTables();
-+      },
-+      schema: $this->validMultiTableFixtureSchema(),
-+      retryAfterSchemaEnsured: TRUE,
-+    );
++  /**
++   * Create a Drupal savepoint transaction after root.
++   */
++  protected function createFirstSavepointTransaction(string $name = '', bool $insertRow = TRUE): Transaction {
++    $this->assertTrue($this->connection->inTransaction());
++    $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
 +
-+    // The initial callback execution failed, but the schema creation was
-+    // successful and the callback retry was successful too.
-+    $this->assertTrue($execution->isSuccessful());
-+    $this->assertInstanceOf(\Exception::class, $execution->getCallbackExecutionState());
-+    $this->assertTrue($execution->getSchemaCreationState());
-+    $this->assertTrue($execution->getCallbackRetryExecutionState());
-+    $this->assertSame(1, $execution->getResult());
++    // Starts a savepoint transaction. Corresponds to 'SAVEPOINT savepoint_1'
++    // on the database. The name can be changed by the $name argument.
++    $savepoint = $this->connection->startTransaction($name);
++    $this->assertTrue($this->connection->inTransaction());
++    $this->assertSame(2, $this->connection->transactionManager()->stackDepth());
 +
-+    $this->assertEquals(1, $this->connection->select('fixture_header', 'h')->countQuery()->execute()->fetchField());
-+    $this->assertEquals(1, $this->connection->select('fixture_detail', 'h')->countQuery()->execute()->fetchField());
++    // Insert a single row into the testing table.
++    if ($insertRow) {
++      $this->insertRow('Roger');
++      $this->assertRowPresent('Roger');
++    }
++
++    return $savepoint;
 +  }
 +
-+  public function testValidCallbackOnMissingMultiTableSchemaNoRetry(): void {
-+    $execution = $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function (): int {
-+        return $this->insertIntoFixtureTables();
-+      },
-+      schema: $this->validMultiTableFixtureSchema(),
-+    );
++  /**
++   * Encapsulates a transaction's "inner layer" with an "outer layer".
++   *
++   * This "outer layer" transaction starts and then encapsulates the "inner
++   * layer" transaction. This nesting is used to evaluate whether the database
++   * transaction API properly supports nesting. By "properly supports," we mean
++   * the outer transaction continues to exist regardless of what functions are
++   * called and whether those functions start their own transactions.
++   *
++   * In contrast, a typical database would commit the outer transaction, start
++   * a new transaction for the inner layer, commit the inner layer transaction,
++   * and then be confused when the outer layer transaction tries to commit its
++   * transaction (which was already committed when the inner transaction
++   * started).
++   *
++   * @param string $suffix
++   *   Suffix to add to field values to differentiate tests.
++   * @param bool $rollback
++   *   Whether or not to try rolling back the transaction when we're done.
++   * @param bool $ddl_statement
++   *   Whether to execute a DDL statement during the inner transaction.
++   */
++  protected function transactionOuterLayer(string $suffix, bool $rollback = FALSE, bool $ddl_statement = FALSE): void {
++    $depth = $this->connection->transactionManager()->stackDepth();
++    $txn = $this->connection->startTransaction();
 +
-+    // The initial callback execution failed, but the schema creation was
-+    // successful and the callback was not retried.
-+    $this->assertFalse($execution->isSuccessful());
-+    $this->assertInstanceOf(\Exception::class, $execution->getCallbackExecutionState());
-+    $this->assertTrue($execution->getSchemaCreationState());
-+    $this->assertFalse($execution->getCallbackRetryExecutionState());
++    // Insert a single row into the testing table.
++    $this->connection->insert('test')
++      ->fields([
++        'name' => 'David' . $suffix,
++        'age' => '24',
++      ])
++      ->execute();
 +
-+    $this->assertEquals(0, $this->connection->select('fixture_header', 'h')->countQuery()->execute()->fetchField());
-+    $this->assertEquals(0, $this->connection->select('fixture_detail', 'h')->countQuery()->execute()->fetchField());
++    $this->assertTrue($this->connection->inTransaction(), 'In transaction before calling nested transaction.');
 +
-+    $this->expectException(\AssertionError::class);
-+    $this->expectExceptionMessage("Drupal\Core\Database\Event\ExecuteMethodEnsuringSchemaEvent::getResult() was called before successful execution of the callback");
-+    $execution->getResult();
++    // We're already in a transaction, but we call ->transactionInnerLayer
++    // to nest another transaction inside the current one.
++    $this->transactionInnerLayer($suffix, $rollback, $ddl_statement);
++
++    $this->assertTrue($this->connection->inTransaction(), 'In transaction after calling nested transaction.');
++
++    if ($rollback) {
++      // Roll back the transaction, if requested.
++      // This rollback should propagate to the last savepoint.
++      $txn->rollBack();
++      $this->assertSame($depth, $this->connection->transactionManager()->stackDepth(), 'Transaction has rolled back to the last savepoint after calling rollBack().');
++      return;
++    }
++
++    $txn->yield();
 +  }
 +
-+  public function testBrokenCallbackOnExistingSchema(): void {
-+    $this->connection->schema()->createTable('fixture_header', $this->validMultiTableFixtureSchema()['fixture_header']);
-+    $this->connection->schema()->createTable('fixture_detail', $this->validMultiTableFixtureSchema()['fixture_detail']);
++  /**
++   * Creates an "inner layer" transaction.
++   *
++   * This "inner layer" transaction is either used alone or nested inside of the
++   * "outer layer" transaction.
++   *
++   * @param string $suffix
++   *   Suffix to add to field values to differentiate tests.
++   * @param bool $rollback
++   *   Whether or not to try rolling back the transaction when we're done.
++   * @param bool $ddl_statement
++   *   Whether to execute a DDL statement during the transaction.
++   */
++  protected function transactionInnerLayer(string $suffix, bool $rollback = FALSE, bool $ddl_statement = FALSE): void {
++    $depth = $this->connection->transactionManager()->stackDepth();
++    // Start a transaction. If we're being called from ->transactionOuterLayer,
++    // then we're already in a transaction. Normally, that would make starting
++    // a transaction here dangerous, but the database API handles this problem
++    // for us by tracking the nesting and avoiding the danger.
++    $txn = $this->connection->startTransaction();
 +
-+    // The schema is there already, so callback execution just throws an
-+    // exception, which is propagated through to the caller of
-+    // ::executeEnsuringSchemaOnFailure().
-+    $this->expectException(DatabaseExceptionWrapper::class);
++    $depth2 = $this->connection->transactionManager()->stackDepth();
++    $this->assertGreaterThan($depth, $depth2, 'Transaction depth has increased with new transaction.');
 +
-+    $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function (): int {
-+        return $this->connection->query('bananas')->execute()->fetchField();
-+      },
-+      schema: $this->validMultiTableFixtureSchema(),
-+    );
++    // Insert a single row into the testing table.
++    $this->connection->insert('test')
++      ->fields([
++        'name' => 'Daniel' . $suffix,
++        'age' => '19',
++      ])
++      ->execute();
++
++    $this->assertTrue($this->connection->inTransaction(), 'In transaction inside nested transaction.');
++
++    if ($ddl_statement) {
++      $table = [
++        'fields' => [
++          'id' => [
++            'type' => 'serial',
++            'unsigned' => TRUE,
++            'not null' => TRUE,
++          ],
++        ],
++        'primary key' => ['id'],
++      ];
++      $this->connection->schema()->createTable('database_test_1', $table);
++
++      $this->assertTrue($this->connection->inTransaction(), 'In transaction inside nested transaction.');
++    }
++
++    if ($rollback) {
++      // Roll back the transaction, if requested.
++      // This rollback should propagate to the last savepoint.
++      $txn->rollBack();
++      $this->assertSame($depth, $this->connection->transactionManager()->stackDepth(), 'Transaction has rolled back to the last savepoint after calling rollBack().');
++      return;
++    }
++
++    $txn->yield();
 +  }
 +
-+  public function testBrokenCallbackOnMissingMultiTableSchemaAndRetry(): void {
-+    $this->assertFalse($this->connection->schema()->tableExists('fixture_header'));
-+    $this->assertFalse($this->connection->schema()->tableExists('fixture_detail'));
++  /**
++   * Tests root transaction rollback.
++   */
++  public function testRollbackRoot(): void {
++    $transaction = $this->createRootTransaction();
 +
++    // Rollback. Since we are at the root, the transaction is closed.
++    // Corresponds to 'ROLLBACK' on the database.
++    $transaction->rollBack();
++    $this->assertRowAbsent('David');
++    $this->assertFalse($this->connection->inTransaction());
++    $this->assertSame(0, $this->connection->transactionManager()->stackDepth());
++  }
++
++  /**
++   * Tests root transaction rollback after savepoint rollback.
++   */
++  public function testRollbackRootAfterSavepointRollback(): void {
++    $transaction = $this->createRootTransaction();
++    $savepoint = $this->createFirstSavepointTransaction();
++
++    // Rollback savepoint. It should get released too. Corresponds to 'ROLLBACK
++    // TO savepoint_1' plus 'RELEASE savepoint_1' on the database.
++    $savepoint->rollBack();
++    $this->assertRowPresent('David');
++    $this->assertRowAbsent('Roger');
++    $this->assertTrue($this->connection->inTransaction());
++    $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
++
++    // Try to rollback root. No savepoint is active, this should succeed.
++    $transaction->rollBack();
++    $this->assertRowAbsent('David');
++    $this->assertRowAbsent('Roger');
++    $this->assertFalse($this->connection->inTransaction());
++    $this->assertSame(0, $this->connection->transactionManager()->stackDepth());
++  }
++
++  /**
++   * Tests root transaction rollback failure when savepoint is open.
++   */
++  public function testRollbackRootWithActiveSavepoint(): void {
++    $transaction = $this->createRootTransaction();
++    $savepoint = $this->createFirstSavepointTransaction();
++
++    // Try to rollback root. Since a savepoint is active, this should fail.
++    $this->expectException(TransactionOutOfOrderException::class);
++    $this->expectExceptionMessageMatches("/^Error attempting rollback of .*\\\\drupal_transaction\\. Active stack: .*\\\\drupal_transaction > .*\\\\savepoint_1/");
++    $transaction->rollBack();
++  }
++
++  /**
++   * Tests savepoint transaction rollback.
++   */
++  public function testRollbackSavepoint(): void {
++    $transaction = $this->createRootTransaction();
++    $savepoint = $this->createFirstSavepointTransaction();
++
++    // Rollback savepoint. It should get released too. Corresponds to 'ROLLBACK
++    // TO savepoint_1' plus 'RELEASE savepoint_1' on the database.
++    $savepoint->rollBack();
++    $this->assertRowPresent('David');
++    $this->assertRowAbsent('Roger');
++    $this->assertTrue($this->connection->inTransaction());
++    $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
++
++    // Insert a row.
++    $this->insertRow('Syd');
++
++    // Yield root. Corresponds to 'COMMIT' on the database.
++    $transaction->yield();
++    $this->assertRowPresent('David');
++    $this->assertRowAbsent('Roger');
++    $this->assertRowPresent('Syd');
++    $this->assertFalse($this->connection->inTransaction());
++    $this->assertSame(0, $this->connection->transactionManager()->stackDepth());
++  }
++
++  /**
++   * Tests savepoint transaction commit after rollback.
++   */
++  public function testCommitAfterRollbackSameSavepoint(): void {
++    $transaction = $this->createRootTransaction();
++    $savepoint = $this->createFirstSavepointTransaction();
++
++    // Rollback savepoint. It should get released too. Corresponds to 'ROLLBACK
++    // TO savepoint_1' plus 'RELEASE savepoint_1' on the database.
++    $savepoint->rollBack();
++    $this->assertRowPresent('David');
++    $this->assertRowAbsent('Roger');
++    $this->assertTrue($this->connection->inTransaction());
++    $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
++
++    // Insert a row.
++    $this->insertRow('Syd');
++
++    // Try yielding savepoint. Should fail since it was released already.
 +    try {
-+      $execution = $this->connection->executeEnsuringSchemaOnFailure(
-+        execute: function (): int {
-+          return $this->connection->query('bananas')->execute()->fetchField();
-+        },
-+        schema: $this->validMultiTableFixtureSchema(),
-+        retryAfterSchemaEnsured: TRUE,
-+      );
-+      $this->fail('Exception was expected.');
++      $savepoint->yield();
++      $this->fail('Expected TransactionOutOfOrderException was not thrown');
 +    }
 +    catch (\Exception $e) {
-+      $this->assertInstanceOf(DatabaseException::class, $e);
++      $this->assertInstanceOf(TransactionOutOfOrderException::class, $e);
++      $this->assertMatchesRegularExpression("/^Error attempting commit of .*\\\\savepoint_1\\. Active stack: .*\\\\drupal_transaction/", $e->getMessage());
++    }
++    $this->assertRowPresent('David');
++    $this->assertRowAbsent('Roger');
++    $this->assertRowPresent('Syd');
++    $this->assertTrue($this->connection->inTransaction());
++    $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
++
++    // Yield root. Corresponds to 'COMMIT' on the database.
++    $transaction->yield();
++    $this->assertRowPresent('David');
++    $this->assertRowAbsent('Roger');
++    $this->assertRowPresent('Syd');
++    $this->assertFalse($this->connection->inTransaction());
++    $this->assertSame(0, $this->connection->transactionManager()->stackDepth());
++  }
++
++  /**
++   * Tests savepoint transaction rollback after commit.
++   */
++  public function testRollbackAfterCommitSameSavepoint(): void {
++    $transaction = $this->createRootTransaction();
++    $savepoint = $this->createFirstSavepointTransaction();
++
++    // Yield savepoint. It should get released too. Corresponds to 'RELEASE
++    // savepoint_1' on the database.
++    $savepoint->yield();
++    $this->assertRowPresent('David');
++    $this->assertRowPresent('Roger');
++    $this->assertTrue($this->connection->inTransaction());
++    $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
++
++    // Insert a row.
++    $this->insertRow('Syd');
++
++    // Try rolling back savepoint. Should fail since it was released already.
++    try {
++      $savepoint->rollback();
++      $this->fail('Expected TransactionOutOfOrderException was not thrown');
++    }
++    catch (\Exception $e) {
++      $this->assertInstanceOf(TransactionOutOfOrderException::class, $e);
++      $this->assertMatchesRegularExpression("/^Error attempting rollback of .*\\\\savepoint_1\\. Active stack: .*\\\\drupal_transaction/", $e->getMessage());
++    }
++    $this->assertRowPresent('David');
++    $this->assertRowPresent('Roger');
++    $this->assertRowPresent('Syd');
++    $this->assertTrue($this->connection->inTransaction());
++    $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
++
++    // Yield root. Corresponds to 'COMMIT' on the database.
++    $transaction->yield();
++    $this->assertRowPresent('David');
++    $this->assertRowPresent('Roger');
++    $this->assertRowPresent('Syd');
++    $this->assertFalse($this->connection->inTransaction());
++    $this->assertSame(0, $this->connection->transactionManager()->stackDepth());
++  }
++
++  /**
++   * Tests savepoint transaction duplicated rollback.
++   */
++  public function testRollbackTwiceSameSavepoint(): void {
++    $transaction = $this->createRootTransaction();
++    $savepoint = $this->createFirstSavepointTransaction();
++
++    // Rollback savepoint. It should get released too. Corresponds to 'ROLLBACK
++    // TO savepoint_1' plus 'RELEASE savepoint_1' on the database.
++    $savepoint->rollBack();
++    $this->assertRowPresent('David');
++    $this->assertRowAbsent('Roger');
++    $this->assertTrue($this->connection->inTransaction());
++    $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
++
++    // Insert a row.
++    $this->insertRow('Syd');
++
++    // Rollback savepoint again. Should fail since it was released already.
++    try {
++      $savepoint->rollBack();
++      $this->fail('Expected TransactionOutOfOrderException was not thrown');
++    }
++    catch (\Exception $e) {
++      $this->assertInstanceOf(TransactionOutOfOrderException::class, $e);
++      $this->assertMatchesRegularExpression("/^Error attempting rollback of .*\\\\savepoint_1\\. Active stack: .*\\\\drupal_transaction/", $e->getMessage());
++    }
++    $this->assertRowPresent('David');
++    $this->assertRowAbsent('Roger');
++    $this->assertRowPresent('Syd');
++    $this->assertTrue($this->connection->inTransaction());
++    $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
++  }
++
++  /**
++   * Tests savepoint transaction rollback failure when later savepoints exist.
++   */
++  public function testRollbackSavepointWithLaterSavepoint(): void {
++    $transaction = $this->createRootTransaction();
++    $savepoint1 = $this->createFirstSavepointTransaction();
++
++    // Starts another savepoint transaction. Corresponds to 'SAVEPOINT
++    // savepoint_2' on the database.
++    $savepoint2 = $this->connection->startTransaction();
++    $this->assertTrue($this->connection->inTransaction());
++    $this->assertSame(3, $this->connection->transactionManager()->stackDepth());
++
++    // Insert a row.
++    $this->insertRow('Syd');
++    $this->assertRowPresent('David');
++    $this->assertRowPresent('Roger');
++    $this->assertRowPresent('Syd');
++
++    // Try to rollback to savepoint 1. Out of order.
++    $this->expectException(TransactionOutOfOrderException::class);
++    $this->expectExceptionMessageMatches("/^Error attempting rollback of .*\\\\savepoint_1\\. Active stack: .*\\\\drupal_transaction > .*\\\\savepoint_1 > .*\\\\savepoint_2/");
++    $savepoint1->rollBack();
++  }
++
++  /**
++   * Tests commit does not fail when committing after DDL.
++   */
++  public function testCommitAfterDdl(): void {
++    $transaction = $this->createRootTransaction();
++    $savepoint = $this->createFirstSavepointTransaction();
++
++    $this->executeDDLStatement();
++
++    $this->assertRowPresent('David');
++    $this->assertRowPresent('Roger');
++    if ($this->connection->supportsTransactionalDDL()) {
++      $this->assertTrue($this->connection->inTransaction());
++      $this->assertSame(2, $this->connection->transactionManager()->stackDepth());
++    }
++    else {
++      $this->assertFalse($this->connection->inTransaction());
 +    }
 +
-+    // Both callback executions failed, but the schema creation was successful.
-+    $this->assertTrue($this->connection->schema()->tableExists('fixture_header'));
-+    $this->assertTrue($this->connection->schema()->tableExists('fixture_detail'));
++    $this->assertRowPresent('David');
++    $this->assertRowPresent('Roger');
++    if ($this->connection->supportsTransactionalDDL()) {
++      $savepoint->yield();
++      $this->assertTrue($this->connection->inTransaction());
++      $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
++    }
++    else {
++      set_error_handler(static function (int $errno, string $errstr): bool {
++        throw new \ErrorException($errstr);
++      });
++      try {
++        $savepoint->yield();
++      }
++      catch (\ErrorException $e) {
++        $this->assertSame('Transaction::yield() was not processed because a prior execution of a DDL statement already committed the transaction.', $e->getMessage());
++      }
++      finally {
++        restore_error_handler();
++      }
++      $this->assertFalse($this->connection->inTransaction());
++    }
++
++    if ($this->connection->supportsTransactionalDDL()) {
++      $transaction->yield();
++    }
++    else {
++      set_error_handler(static function (int $errno, string $errstr): bool {
++        throw new \ErrorException($errstr);
++      });
++      try {
++        $transaction->yield();
++      }
++      catch (\ErrorException $e) {
++        $this->assertSame('Transaction::yield() was not processed because a prior execution of a DDL statement already committed the transaction.', $e->getMessage());
++      }
++      finally {
++        restore_error_handler();
++      }
++    }
++    $this->assertRowPresent('David');
++    $this->assertRowPresent('Roger');
++    $this->assertFalse($this->connection->inTransaction());
 +  }
 +
-+  public function testBrokenCallbackOnMissingMultiTableSchemaNoRetry(): void {
-+    $this->assertFalse($this->connection->schema()->tableExists('fixture_header'));
-+    $this->assertFalse($this->connection->schema()->tableExists('fixture_detail'));
++  /**
++   * Tests a committed transaction.
++   *
++   * The behavior of this test should be identical for connections that support
++   * transactions and those that do not.
++   */
++  public function testCommittedTransaction(): void {
++    try {
++      // Create two nested transactions. The changes should be committed.
++      $this->transactionOuterLayer('A');
 +
-+    $execution = $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function (): int {
-+        return $this->connection->query('bananas')->execute()->fetchField();
-+      },
-+      schema: $this->validMultiTableFixtureSchema(),
-+    );
-+
-+    // The initial callback execution failed, but the schema creation was
-+    // successful and the callback was not retried.
-+    $this->assertFalse($execution->isSuccessful());
-+    $this->assertInstanceOf(\Exception::class, $execution->getCallbackExecutionState());
-+    $this->assertTrue($execution->getSchemaCreationState());
-+    $this->assertFalse($execution->getCallbackRetryExecutionState());
-+
-+    $this->assertTrue($this->connection->schema()->tableExists('fixture_header'));
-+    $this->assertTrue($this->connection->schema()->tableExists('fixture_detail'));
-+
-+    $this->expectException(\AssertionError::class);
-+    $this->expectExceptionMessage("Drupal\Core\Database\Event\ExecuteMethodEnsuringSchemaEvent::getResult() was called before successful execution of the callback");
-+    $execution->getResult();
++      // Because we committed, both of the inserted rows should be present.
++      $saved_age = $this->connection->query('SELECT [age] FROM {test} WHERE [name] = :name', [':name' => 'DavidA'])->fetchField();
++      $this->assertSame('24', $saved_age, 'Can retrieve DavidA row after commit.');
++      $saved_age = $this->connection->query('SELECT [age] FROM {test} WHERE [name] = :name', [':name' => 'DanielA'])->fetchField();
++      $this->assertSame('19', $saved_age, 'Can retrieve DanielA row after commit.');
++    }
++    catch (\Exception $e) {
++      $this->fail($e->getMessage());
++    }
 +  }
 +
-+  public function testCallbackFetchingMissingFieldOnExistingSchema(): void {
-+    // Create the tables before executing the test.
-+    $this->connection->schema()->createTable('fixture_header', $this->validMultiTableFixtureSchema()['fixture_header']);
-+    $this->connection->schema()->createTable('fixture_detail', $this->validMultiTableFixtureSchema()['fixture_detail']);
++  /**
++   * Tests the compatibility of transactions with DDL statements.
++   */
++  public function testTransactionWithDdlStatement(): void {
++    // First, test that a commit works normally, even with DDL statements.
++    $transaction = $this->createRootTransaction('', FALSE);
++    $this->insertRow('row');
++    $this->executeDDLStatement();
++    if ($this->connection->supportsTransactionalDDL()) {
++      $transaction->yield();
++    }
++    else {
++      set_error_handler(static function (int $errno, string $errstr): bool {
++        throw new \ErrorException($errstr);
++      });
++      try {
++        $transaction->yield();
++      }
++      catch (\ErrorException $e) {
++        $this->assertSame('Transaction::yield() was not processed because a prior execution of a DDL statement already committed the transaction.', $e->getMessage());
++      }
++      finally {
++        restore_error_handler();
++      }
++    }
++    $this->assertRowPresent('row');
 +
-+    // The schema is there already, so callback execution just throws an
-+    // exception, which is propagated through to the caller of
-+    // ::executeEnsuringSchemaOnFailure().
-+    $this->expectException(DatabaseExceptionWrapper::class);
++    // Even in different order.
++    $this->cleanUp();
++    $transaction = $this->createRootTransaction('', FALSE);
++    $this->executeDDLStatement();
++    $this->insertRow('row');
++    if ($this->connection->supportsTransactionalDDL()) {
++      $transaction->yield();
++    }
++    else {
++      set_error_handler(static function (int $errno, string $errstr): bool {
++        throw new \ErrorException($errstr);
++      });
++      try {
++        $transaction->yield();
++      }
++      catch (\ErrorException $e) {
++        $this->assertSame('Transaction::yield() was not processed because a prior execution of a DDL statement already committed the transaction.', $e->getMessage());
++      }
++      finally {
++        restore_error_handler();
++      }
++    }
++    $this->assertRowPresent('row');
 +
-+    $execution = $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function (): int {
-+        $query = $this->connection->select('fixture_header', 'h');
-+        $query->fields('h', ['qux']);
-+        return (int) $query->execute()->fetchField();
-+      },
-+      schema: $this->validMultiTableFixtureSchema(),
-+    );
++    // Even with stacking.
++    $this->cleanUp();
++    $transaction = $this->createRootTransaction('', FALSE);
++    $transaction2 = $this->createFirstSavepointTransaction('', FALSE);
++    $this->executeDDLStatement();
++    if ($this->connection->supportsTransactionalDDL()) {
++      $transaction->yield();
++    }
++    else {
++      set_error_handler(static function (int $errno, string $errstr): bool {
++        throw new \ErrorException($errstr);
++      });
++      try {
++        $transaction2->yield();
++      }
++      catch (\ErrorException $e) {
++        $this->assertSame('Transaction::yield() was not processed because a prior execution of a DDL statement already committed the transaction.', $e->getMessage());
++      }
++      finally {
++        restore_error_handler();
++      }
++    }
++    $transaction3 = $this->connection->startTransaction();
++    $this->insertRow('row');
++    $transaction3->yield();
++    $transaction->yield();
++    $this->assertRowPresent('row');
++
++    // A transaction after a DDL statement should still work the same.
++    $this->cleanUp();
++    $transaction = $this->createRootTransaction('', FALSE);
++    $transaction2 = $this->createFirstSavepointTransaction('', FALSE);
++    $this->executeDDLStatement();
++    $transaction2->yield();
++    $transaction3 = $this->connection->startTransaction();
++    $this->insertRow('row');
++    $transaction3->rollBack();
++    $transaction->yield();
++    $this->assertRowAbsent('row');
++
++    // The behavior of a rollback depends on the type of database server.
++    if ($this->connection->supportsTransactionalDDL()) {
++      // For database servers that support transactional DDL, a rollback
++      // of a transaction including DDL statements should be possible.
++      $this->cleanUp();
++      $transaction = $this->createRootTransaction('', FALSE);
++      $this->insertRow('row');
++      $this->executeDDLStatement();
++      $transaction->rollBack();
++      $this->assertRowAbsent('row');
++
++      // Including with stacking.
++      $this->cleanUp();
++      $transaction = $this->createRootTransaction('', FALSE);
++      $transaction2 = $this->createFirstSavepointTransaction('', FALSE);
++      $this->executeDDLStatement();
++      $transaction2->yield();
++      $transaction3 = $this->connection->startTransaction();
++      $this->insertRow('row');
++      $transaction3->yield();
++      $transaction->rollBack();
++      $this->assertRowAbsent('row');
++    }
 +  }
-+*/
-+  public function testValidCallbackOnMissingInvalidSchema(): void {
-+    // The initial callback execution failed, and the schema creation was
-+    // unsuccessful too. We expect an exception reporting the failed schema
-+    // operation.
-+    $this->expectException(SchemaObjectCreationFailureException::class);
-+    $this->expectExceptionMessage("Failed creation of table {pineapple}");
 +
-+    $this->connection->executeEnsuringSchemaOnFailure(
-+      execute: function (): int {
-+        return $this->insertIntoFixtureTables();
-+      },
-+      schema: $this->invalidFixtureSchema(),
-+      retryAfterSchemaEnsured: TRUE,
-+    );
++  /**
++   * Tests rollback after a DDL statement when no transactional DDL supported.
++   */
++  public function testRollbackAfterDdlStatementForNonTransactionalDdlDatabase(): void {
++    if ($this->connection->supportsTransactionalDDL()) {
++      $this->markTestSkipped('This test only works for database that do not support transactional DDL.');
++    }
++
++    // For database servers that do not support transactional DDL,
++    // the DDL statement should commit the transaction stack.
++    $this->cleanUp();
++    $transaction = $this->createRootTransaction('', FALSE);
++    $reflectionMethod = new \ReflectionMethod(get_class($this->connection->transactionManager()), 'getConnectionTransactionState');
++    $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
++    $this->assertEquals(ClientConnectionTransactionState::Active, $reflectionMethod->invoke($this->connection->transactionManager()));
++    $this->insertRow('row');
++    $this->executeDDLStatement();
++
++    // Try to rollback the root transaction. Since the DDL already committed
++    // it, it should fail.
++    set_error_handler(static function (int $errno, string $errstr): bool {
++      throw new \ErrorException($errstr);
++    });
++    try {
++      $transaction->rollBack();
++    }
++    catch (\ErrorException $e) {
++      $this->assertSame('Transaction::rollBack() failed because of a prior execution of a DDL statement.', $e->getMessage());
++    }
++    finally {
++      restore_error_handler();
++    }
++
++    $transaction->yield();
++    $manager = $this->connection->transactionManager();
++    $this->assertSame(0, $manager->stackDepth());
++    $reflectedTransactionState = new \ReflectionMethod($manager, 'getConnectionTransactionState');
++    $this->assertSame(ClientConnectionTransactionState::RollbackFailed, $reflectedTransactionState->invoke($manager));
++    $this->assertRowPresent('row');
 +  }
 +
-+  protected function validMultiTableFixtureSchema(): array {
-+    return [
-+      'fixture_header' => [
-+        'fields' => [
-+          'hid' => [
-+            'type' => 'serial',
-+            'not null' => TRUE,
-+            'description' => 'Primary Key: An ID.',
-+          ],
-+          'message' => [
-+            'type' => 'text',
-+            'not null' => TRUE,
-+            'description' => 'A message for the header.',
-+          ],
-+        ],
-+        'primary key' => ['hid'],
-+      ],
-+      'fixture_detail' => [
-+        'fields' => [
-+          'hid' => [
-+            'type' => 'int',
-+            'not null' => TRUE,
-+            'description' => 'The header ID.',
-+          ],
-+          'did' => [
-+            'type' => 'serial',
-+            'not null' => TRUE,
-+            'description' => 'Primary Key: An ID.',
-+          ],
-+          'message' => [
-+            'type' => 'text',
-+            'not null' => TRUE,
-+            'description' => 'A message for the detail.',
-+          ],
-+        ],
-+        'primary key' => ['did'],
-+        'indexes' => [
-+          'hid_did' => ['hid', 'did'],
-+        ],
-+      ],
-+    ];
-+  }
-+
-+  protected function insertIntoFixtureTables(): int {
-+    $hid = (int) $this->connection->insert('fixture_header')
++  /**
++   * Inserts a single row into the testing table.
++   */
++  protected function insertRow(string $name): void {
++    $this->connection->insert('test')
 +      ->fields([
-+        'message' => 'foo',
++        'name' => $name,
++      ])
++      ->execute();
++  }
++
++  /**
++   * Executes a DDL statement.
++   */
++  protected function executeDDLStatement(): void {
++    static $count = 0;
++    $table = [
++      'fields' => [
++        'id' => [
++          'type' => 'serial',
++          'unsigned' => TRUE,
++          'not null' => TRUE,
++        ],
++      ],
++      'primary key' => ['id'],
++    ];
++    $this->connection->schema()->createTable('database_test_' . ++$count, $table);
++  }
++
++  /**
++   * Starts over for a new test.
++   */
++  protected function cleanUp(): void {
++    $this->connection->truncate('test')
++      ->execute();
++    $this->postTransactionCallbackAction = NULL;
++  }
++
++  /**
++   * Asserts that a given row is present in the test table.
++   *
++   * @param string $name
++   *   The name of the row.
++   * @param string $message
++   *   The message to log for the assertion.
++   *
++   * @internal
++   */
++  public function assertRowPresent(string $name, ?string $message = NULL): void {
++    $present = (boolean) $this->connection->query('SELECT 1 FROM {test} WHERE [name] = :name', [':name' => $name])->fetchField();
++    $this->assertTrue($present, $message ?? "Row '{$name}' should be present, but it actually does not exist.");
++  }
++
++  /**
++   * Asserts that a given row is absent from the test table.
++   *
++   * @param string $name
++   *   The name of the row.
++   * @param string $message
++   *   The message to log for the assertion.
++   *
++   * @internal
++   */
++  public function assertRowAbsent(string $name, ?string $message = NULL): void {
++    $present = (boolean) $this->connection->query('SELECT 1 FROM {test} WHERE [name] = :name', [':name' => $name])->fetchField();
++    $this->assertFalse($present, $message ?? "Row '{$name}' should be absent, but it actually exists.");
++  }
++
++  /**
++   * Tests transaction stacking, commit, and rollback.
++   */
++  public function testTransactionStacking(): void {
++    // Standard case: pop the inner transaction before the outer transaction.
++    $transaction = $this->createRootTransaction('', FALSE);
++    $this->insertRow('outer');
++    $transaction2 = $this->createFirstSavepointTransaction('', FALSE);
++    $this->insertRow('inner');
++    // Pop the inner transaction.
++    $transaction2->yield();
++    $this->assertTrue($this->connection->inTransaction(), 'Still in a transaction after popping the inner transaction');
++    // Pop the outer transaction.
++    $transaction->yield();
++    $this->assertFalse($this->connection->inTransaction(), 'Transaction closed after popping the outer transaction');
++    $this->assertRowPresent('outer');
++    $this->assertRowPresent('inner');
++
++    // Rollback the inner transaction.
++    $this->cleanUp();
++    $transaction = $this->createRootTransaction('', FALSE);
++    $this->insertRow('outer');
++    $transaction2 = $this->createFirstSavepointTransaction('', FALSE);
++    $this->insertRow('inner');
++    // Now rollback the inner transaction.
++    $transaction2->rollBack();
++    $this->assertTrue($this->connection->inTransaction(), 'Still in a transaction after popping the outer transaction');
++    // Pop the outer transaction, it should commit.
++    $this->insertRow('outer-after-inner-rollback');
++    $transaction->yield();
++    $this->assertFalse($this->connection->inTransaction(), 'Transaction closed after popping the inner transaction');
++    $this->assertRowPresent('outer');
++    $this->assertRowAbsent('inner');
++    $this->assertRowPresent('outer-after-inner-rollback');
++  }
++
++  /**
++   * Tests that transactions can continue to be used if a query fails.
++   */
++  public function testQueryFailureInTransaction(): void {
++    $transaction = $this->createRootTransaction('test_transaction', FALSE);
++    $this->connection->schema()->dropTable('test');
++
++    // Test a failed query using the query() method.
++    try {
++      $this->connection->query('SELECT [age] FROM {test} WHERE [name] = :name', [':name' => 'David'])->fetchField();
++      $this->fail('Using the query method should have failed.');
++    }
++    catch (\Exception) {
++      // Just continue testing.
++    }
++
++    // Test a failed select query.
++    try {
++      $this->connection->select('test')
++        ->fields('test', ['name'])
++        ->execute();
++
++      $this->fail('Select query should have failed.');
++    }
++    catch (\Exception) {
++      // Just continue testing.
++    }
++
++    // Test a failed insert query.
++    try {
++      $this->connection->insert('test')
++        ->fields([
++          'name' => 'David',
++          'age' => '24',
++        ])
++        ->execute();
++
++      $this->fail('Insert query should have failed.');
++    }
++    catch (\Exception) {
++      // Just continue testing.
++    }
++
++    // Test a failed update query.
++    try {
++      $this->connection->update('test')
++        ->fields(['name' => 'Tiffany'])
++        ->condition('id', 1)
++        ->execute();
++
++      $this->fail('Update query should have failed.');
++    }
++    catch (\Exception) {
++      // Just continue testing.
++    }
++
++    // Test a failed delete query.
++    try {
++      $this->connection->delete('test')
++        ->condition('id', 1)
++        ->execute();
++
++      $this->fail('Delete query should have failed.');
++    }
++    catch (\Exception) {
++      // Just continue testing.
++    }
++
++    // Test a failed merge query.
++    try {
++      $this->connection->merge('test')
++        ->key('job', 'Presenter')
++        ->fields([
++          'age' => '31',
++          'name' => 'Tiffany',
++        ])
++        ->execute();
++
++      $this->fail('Merge query should have failed.');
++    }
++    catch (\Exception) {
++      // Just continue testing.
++    }
++
++    // Test a failed upsert query.
++    try {
++      $this->connection->upsert('test')
++        ->key('job')
++        ->fields(['job', 'age', 'name'])
++        ->values([
++          'job' => 'Presenter',
++          'age' => 31,
++          'name' => 'Tiffany',
++        ])
++        ->execute();
++
++      $this->fail('Upsert query should have failed.');
++    }
++    catch (\Exception) {
++      // Just continue testing.
++    }
++
++    // Create the missing schema and insert a row.
++    $this->installSchema('database_test', ['test']);
++    $this->connection->insert('test')
++      ->fields([
++        'name' => 'David',
++        'age' => '24',
 +      ])
 +      ->execute();
 +
-+    $this->connection->insert('fixture_detail')
-+      ->fields([
-+        'hid' => $hid,
-+        'message' => 'bar',
-+      ])
-+      ->execute();
++    // Commit the transaction.
++    if ($this->connection->supportsTransactionalDDL()) {
++      $transaction->yield();
++    }
++    else {
++      set_error_handler(static function (int $errno, string $errstr): bool {
++        throw new \ErrorException($errstr);
++      });
++      try {
++        $transaction->yield();
++      }
++      catch (\ErrorException $e) {
++        $this->assertSame('Transaction::yield() was not processed because a prior execution of a DDL statement already committed the transaction.', $e->getMessage());
++      }
++      finally {
++        restore_error_handler();
++      }
++    }
 +
-+    return $hid;
++    $saved_age = $this->connection->query('SELECT [age] FROM {test} WHERE [name] = :name', [':name' => 'David'])->fetchField();
++    $this->assertEquals('24', $saved_age);
 +  }
 +
-+  protected function invalidFixtureSchema(): array {
-+    return [
-+      'pineapple' => [
-+        'description' => 'under the sea',
-+        'fields' => [],
-+      ],
-+    ];
++  /**
++   * Tests releasing a savepoint before last is safe.
++   */
++  public function testReleaseIntermediateSavepoint(): void {
++    $transaction = $this->createRootTransaction();
++    $savepoint1 = $this->createFirstSavepointTransaction('', FALSE);
++
++    // Starts a savepoint transaction. Corresponds to 'SAVEPOINT savepoint_2'
++    // on the database.
++    $savepoint2 = $this->connection->startTransaction();
++    $this->assertSame(3, $this->connection->transactionManager()->stackDepth());
++    // Starts a savepoint transaction. Corresponds to 'SAVEPOINT savepoint_3'
++    // on the database.
++    $savepoint3 = $this->connection->startTransaction();
++    $this->assertSame(4, $this->connection->transactionManager()->stackDepth());
++    // Starts a savepoint transaction. Corresponds to 'SAVEPOINT savepoint_4'
++    // on the database.
++    $savepoint4 = $this->connection->startTransaction();
++    $this->assertSame(5, $this->connection->transactionManager()->stackDepth());
++
++    $this->insertRow('row');
++
++    // Yield a savepoint transaction. Corresponds to 'RELEASE SAVEPOINT
++    // savepoint_2' on the database.
++    $savepoint2->yield();
++    // Since we have committed an intermediate savepoint Transaction object,
++    // the savepoints created later have been dropped by the database already.
++    $this->assertSame(2, $this->connection->transactionManager()->stackDepth());
++    $this->assertRowPresent('row');
++
++    // Yield the remaining Transaction objects. The client transaction is
++    // eventually committed.
++    $savepoint1->yield();
++    $transaction->yield();
++    $this->assertFalse($this->connection->inTransaction());
++    $this->assertRowPresent('row');
++  }
++
++  /**
++   * Tests committing a transaction while savepoints are active.
++   */
++  public function testCommitWithActiveSavepoint(): void {
++    $transaction = $this->createRootTransaction();
++    $savepoint1 = $this->createFirstSavepointTransaction('', FALSE);
++
++    // Starts a savepoint transaction. Corresponds to 'SAVEPOINT savepoint_2'
++    // on the database.
++    $savepoint2 = $this->connection->startTransaction();
++    $this->assertSame(3, $this->connection->transactionManager()->stackDepth());
++
++    $this->insertRow('row');
++
++    // Yield the root transaction. Corresponds to 'COMMIT' on the database.
++    $transaction->yield();
++    // Since we have committed the outer (root) Transaction object, the inner
++    // (savepoint) ones have been dropped by the database already, and we are
++    // no longer in an active transaction state.
++    $this->assertSame(0, $this->connection->transactionManager()->stackDepth());
++    $this->assertFalse($this->connection->inTransaction());
++    $this->assertRowPresent('row');
++    // Trying to yield the inner (savepoint) Transaction object, throws an
++    // exception since it was dropped by the database already, and removed from
++    // our transaction stack.
++    $this->expectException(TransactionOutOfOrderException::class);
++    $this->expectExceptionMessageMatches("/^Error attempting commit of .*\\\\savepoint_2\\. Active stack: .* empty/");
++    $savepoint2->yield();
++  }
++
++  /**
++   * Tests for transaction names.
++   */
++  public function testTransactionName(): void {
++    $transaction = $this->createRootTransaction('', FALSE);
++    $this->assertSame('drupal_transaction', $transaction->name());
++
++    $savepoint1 = $this->createFirstSavepointTransaction('', FALSE);
++    $this->assertSame('savepoint_1', $savepoint1->name());
++
++    $this->expectException(TransactionNameNonUniqueException::class);
++    $this->expectExceptionMessage("savepoint_1 is already in use.");
++    $savepointFailure = $this->connection->startTransaction('savepoint_1');
++  }
++
++  /**
++   * Tests that adding a post-transaction callback fails with no transaction.
++   */
++  public function testRootTransactionEndCallbackAddedWithoutTransaction(): void {
++    $this->expectException(\LogicException::class);
++    $this->connection->transactionManager()->addPostTransactionCallback([$this, 'rootTransactionCallback']);
++  }
++
++  /**
++   * Tests post-transaction callback executes after transaction commit.
++   */
++  public function testRootTransactionEndCallbackCalledOnCommit(): void {
++    $transaction = $this->createRootTransaction('', FALSE);
++    $this->connection->transactionManager()->addPostTransactionCallback([$this, 'rootTransactionCallback']);
++    $this->insertRow('row');
++    $this->assertNull($this->postTransactionCallbackAction);
++    $this->assertRowAbsent('rtcCommit');
++
++    // Callbacks are processed only when destructing the transaction.
++    // Executing a commit is not sufficient by itself.
++    $transaction->yield();
++    $this->assertNull($this->postTransactionCallbackAction);
++    $this->assertRowPresent('row');
++    $this->assertRowAbsent('rtcCommit');
++
++    // Destruct the transaction.
++    unset($transaction);
++
++    // The post-transaction callback should now have inserted a 'rtcCommit'
++    // row.
++    $this->assertSame('rtcCommit', $this->postTransactionCallbackAction);
++    $this->assertRowPresent('row');
++    $this->assertRowPresent('rtcCommit');
++  }
++
++  /**
++   * Tests post-transaction callback executes after transaction rollback.
++   */
++  public function testRootTransactionEndCallbackCalledAfterRollbackAndDestruction(): void {
++    $transaction = $this->createRootTransaction('', FALSE);
++    $this->connection->transactionManager()->addPostTransactionCallback([$this, 'rootTransactionCallback']);
++    $this->insertRow('row');
++    $this->assertNull($this->postTransactionCallbackAction);
++
++    // Callbacks are processed only when destructing the transaction.
++    // Executing a rollback is not sufficient by itself.
++    $transaction->rollBack();
++    $this->assertNull($this->postTransactionCallbackAction);
++    $this->assertRowAbsent('rtcCommit');
++    $this->assertRowAbsent('rtcRollback');
++    $this->assertRowAbsent('row');
++
++    // Destruct the transaction.
++    unset($transaction);
++
++    // The post-transaction callback should now have inserted a 'rtcRollback'
++    // row.
++    $this->assertSame('rtcRollback', $this->postTransactionCallbackAction);
++    $this->assertRowAbsent('rtcCommit');
++    $this->assertRowPresent('rtcRollback');
++    $this->assertRowAbsent('row');
++  }
++
++  /**
++   * Tests post-transaction callback executes after a DDL statement.
++   */
++  public function testRootTransactionEndCallbackCalledAfterDdlAndDestruction(): void {
++    $transaction = $this->createRootTransaction('', FALSE);
++    $this->connection->transactionManager()->addPostTransactionCallback([$this, 'rootTransactionCallback']);
++    $this->insertRow('row');
++    $this->assertNull($this->postTransactionCallbackAction);
++
++    // Callbacks are processed only when destructing the transaction.
++    // Executing a DDL statement is not sufficient itself.
++    // We cannot use truncate here, since it has protective code to fall back
++    // to a transactional delete when in transaction. We drop an unrelated
++    // table instead.
++    $this->connection->schema()->dropTable('test_people');
++    $this->assertNull($this->postTransactionCallbackAction);
++    $this->assertRowAbsent('rtcCommit');
++    $this->assertRowAbsent('rtcRollback');
++    $this->assertRowPresent('row');
++
++    // Destruct the transaction.
++    unset($transaction);
++
++    // The post-transaction callback should now have inserted a 'rtcCommit'
++    // row.
++    $this->assertSame('rtcCommit', $this->postTransactionCallbackAction);
++    $this->assertRowPresent('rtcCommit');
++    $this->assertRowAbsent('rtcRollback');
++    $this->assertRowPresent('row');
++  }
++
++  /**
++   * Tests post-transaction rollback executes after a DDL statement.
++   *
++   * For database servers that support transactional DDL, a rollback of a
++   * transaction including DDL statements is possible.
++   */
++  public function testRootTransactionEndCallbackCalledAfterDdlAndRollbackForTransactionalDdlDatabase(): void {
++    if (!$this->connection->supportsTransactionalDDL()) {
++      $this->markTestSkipped('This test only works for database supporting transactional DDL.');
++    }
++
++    $transaction = $this->createRootTransaction('', FALSE);
++    $this->connection->transactionManager()->addPostTransactionCallback([$this, 'rootTransactionCallback']);
++    $this->insertRow('row');
++    $this->assertNull($this->postTransactionCallbackAction);
++
++    // Callbacks are processed only when destructing the transaction.
++    // Executing a DDL statement is not sufficient itself.
++    // We cannot use truncate here, since it has protective code to fall back
++    // to a transactional delete when in transaction. We drop an unrelated
++    // table instead.
++    $this->connection->schema()->dropTable('test_people');
++    $this->assertNull($this->postTransactionCallbackAction);
++    $this->assertRowAbsent('rtcCommit');
++    $this->assertRowAbsent('rtcRollback');
++    $this->assertRowPresent('row');
++
++    // Callbacks are processed only when destructing the transaction.
++    // Executing the rollback is not sufficient by itself.
++    $transaction->rollBack();
++    $this->assertNull($this->postTransactionCallbackAction);
++    $this->assertRowAbsent('rtcCommit');
++    $this->assertRowAbsent('rtcRollback');
++    $this->assertRowAbsent('row');
++
++    // Destruct the transaction.
++    unset($transaction);
++
++    // The post-transaction callback should now have inserted a 'rtcRollback'
++    // row.
++    $this->assertSame('rtcRollback', $this->postTransactionCallbackAction);
++    $this->assertRowAbsent('rtcCommit');
++    $this->assertRowPresent('rtcRollback');
++    $this->assertRowAbsent('row');
++  }
++
++  /**
++   * Tests post-transaction rollback failure after a DDL statement.
++   *
++   * For database servers that support transactional DDL, a rollback of a
++   * transaction including DDL statements is not possible, since a commit
++   * happened already. We cannot decide what should be the status of the
++   * callback, an exception is thrown.
++   */
++  public function testRootTransactionEndCallbackFailureUponDdlAndRollbackForNonTransactionalDdlDatabase(): void {
++    if ($this->connection->supportsTransactionalDDL()) {
++      $this->markTestSkipped('This test only works for database that do not support transactional DDL.');
++    }
++
++    $transaction = $this->createRootTransaction('', FALSE);
++    $this->connection->transactionManager()->addPostTransactionCallback([$this, 'rootTransactionCallback']);
++    $this->insertRow('row');
++    $this->assertNull($this->postTransactionCallbackAction);
++
++    // Callbacks are processed only when destructing the transaction.
++    // Executing a DDL statement is not sufficient itself.
++    // We cannot use truncate here, since it has protective code to fall back
++    // to a transactional delete when in transaction. We drop an unrelated
++    // table instead.
++    $this->connection->schema()->dropTable('test_people');
++    $this->assertNull($this->postTransactionCallbackAction);
++    $this->assertRowAbsent('rtcCommit');
++    $this->assertRowAbsent('rtcRollback');
++    $this->assertRowPresent('row');
++
++    set_error_handler(static function (int $errno, string $errstr): bool {
++      throw new \ErrorException($errstr);
++    });
++    try {
++      $transaction->rollBack();
++    }
++    catch (\ErrorException $e) {
++      $this->assertSame('Transaction::rollBack() failed because of a prior execution of a DDL statement.', $e->getMessage());
++    }
++    finally {
++      restore_error_handler();
++    }
++
++    unset($transaction);
++
++    // The post-transaction callback should now have inserted a 'rtcRollback'
++    // row.
++    $this->assertSame('rtcRollback', $this->postTransactionCallbackAction);
++    $this->assertRowAbsent('rtcCommit');
++    $this->assertRowPresent('rtcRollback');
++    $manager = $this->connection->transactionManager();
++    $this->assertSame(0, $manager->stackDepth());
++    $reflectedTransactionState = new \ReflectionMethod($manager, 'getConnectionTransactionState');
++    $this->assertSame(ClientConnectionTransactionState::RollbackFailed, $reflectedTransactionState->invoke($manager));
++    $this->assertRowPresent('row');
++  }
++
++  /**
++   * A post-transaction callback for testing purposes.
++   */
++  public function rootTransactionCallback(bool $success): void {
++    $this->postTransactionCallbackAction = $success ? 'rtcCommit' : 'rtcRollback';
++    $this->insertRow($this->postTransactionCallbackAction);
++  }
++
++  /**
++   * Tests TransactionManager failure.
++   */
++  public function testTransactionManagerFailureOnPendingStackItems(): void {
++    $connectionInfo = Database::getConnectionInfo();
++    Database::addConnectionInfo('default', 'test_fail', $connectionInfo['default']);
++    $testConnection = Database::getConnection('test_fail');
++
++    // Add a fake item to the stack.
++    $manager = $testConnection->transactionManager();
++    $reflectionMethod = new \ReflectionMethod($manager, 'addStackItem');
++    $reflectionMethod->invoke($manager, 'bar', new StackItem('qux', StackItemType::Root));
++    // Ensure transaction state can be determined during object destruction.
++    // This is necessary for the test to pass when xdebug.mode has the 'develop'
++    // option enabled.
++    $reflectionProperty = new \ReflectionProperty(TransactionManagerBase::class, 'connectionTransactionState');
++    $reflectionProperty->setValue($manager, ClientConnectionTransactionState::Active);
++
++    // Ensure that __destruct() results in an assertion error. Note that this
++    // will normally be called by PHP during the object's destruction but Drupal
++    // will commit all transactions when a database is closed thereby making
++    // this impossible to test unless it is called directly.
++    try {
++      $manager->__destruct();
++      $this->fail("Expected AssertionError error not thrown");
++    }
++    catch (\AssertionError $e) {
++      $this->assertStringStartsWith('Transaction $stack was not empty. Active stack: bar\\qux', $e->getMessage());
++    }
++
++    // Clean up.
++    $reflectionProperty = new \ReflectionProperty(TransactionManagerBase::class, 'stack');
++    $reflectionProperty->setValue($manager, []);
++    unset($testConnection);
++    Database::closeConnection('test_fail');
 +  }
 +
 +}
-diff --git a/core/tests/Drupal/KernelTests/Core/ServiceProvider/ServiceProviderTest.php b/core/tests/Drupal/KernelTests/Core/ServiceProvider/ServiceProviderTest.php
-index adf4d58e9ae..13a0907cc53 100644
---- a/core/tests/Drupal/KernelTests/Core/ServiceProvider/ServiceProviderTest.php
-+++ b/core/tests/Drupal/KernelTests/Core/ServiceProvider/ServiceProviderTest.php
-@@ -4,6 +4,7 @@
- 
- namespace Drupal\KernelTests\Core\ServiceProvider;
- 
-+use Drupal\Core\Database\EventSubscriber\SchemaRequestSubscriber;
- use Drupal\Core\DependencyInjection\ContainerBuilder;
- use Drupal\KernelTests\KernelTestBase;
- use Symfony\Component\DependencyInjection\Parameter;
-@@ -35,6 +36,9 @@ public function register(ContainerBuilder $container): void {
-       ->addArgument(new Reference('settings'))
-       ->addArgument(new Parameter('cache_default_bin_backends'))
-       ->addMethodCall('setContainer', [new Reference('service_container')]);
-+    $this->container
-+      ->get('event_dispatcher')
-+      ->addSubscriber(new SchemaRequestSubscriber($container->get('database')));
-   }
- 
-   /**
-diff --git a/core/tests/Drupal/KernelTests/KernelTestBase.php b/core/tests/Drupal/KernelTests/KernelTestBase.php
-index 94be1c7ddf7..73279a159cc 100644
---- a/core/tests/Drupal/KernelTests/KernelTestBase.php
-+++ b/core/tests/Drupal/KernelTests/KernelTestBase.php
-@@ -25,9 +25,10 @@
- use Drupal\Tests\TestRequirementsTrait;
- use Drupal\TestTools\Comparator\MarkupInterfaceComparator;
- use Drupal\TestTools\Extension\DeprecationBridge\ExpectDeprecationTrait;
-+use Drupal\TestTools\Extension\Dump\DebugDump;
- use Drupal\TestTools\Extension\SchemaInspector;
--use Drupal\TestTools\TestVarDumper;
- use PHPUnit\Framework\Attributes\After;
-+use PHPUnit\Framework\Attributes\BeforeClass;
- use PHPUnit\Framework\Exception;
- use PHPUnit\Framework\TestCase;
- use Prophecy\PhpUnit\ProphecyTrait;
-@@ -234,11 +235,13 @@ public function __construct(string $name) {
-   protected bool $usesSuperUserAccessPolicy;
- 
-   /**
--   * {@inheritdoc}
-+   * Registers the dumper CLI handler when the DebugDump extension is enabled.
-    */
--  public static function setUpBeforeClass(): void {
--    parent::setUpBeforeClass();
--    VarDumper::setHandler(TestVarDumper::class . '::cliHandler');
-+  #[BeforeClass]
-+  public static function setDebugDumpHandler(): void {
-+    if (DebugDump::isEnabled()) {
-+      VarDumper::setHandler(DebugDump::class . '::cliHandler');
-+    }
-   }
- 
-   /**
-diff --git a/core/tests/Drupal/KernelTests/KernelTestBaseTest.php b/core/tests/Drupal/KernelTests/KernelTestBaseTest.php
-index 155a0bee2a8..db658255c82 100644
---- a/core/tests/Drupal/KernelTests/KernelTestBaseTest.php
-+++ b/core/tests/Drupal/KernelTests/KernelTestBaseTest.php
-@@ -6,8 +6,7 @@
- 
- use Drupal\Component\FileCache\FileCacheFactory;
- use Drupal\Core\Database\Database;
--use Drupal\Tests\StreamCapturer;
--use Drupal\user\Entity\Role;
-+use Drupal\TestTools\Extension\Dump\DebugDump;
- use org\bovigo\vfs\vfsStream;
- use org\bovigo\vfs\visitor\vfsStreamStructureVisitor;
- use PHPUnit\Framework\Attributes\DoesNotPerformAssertions;
-@@ -305,20 +304,19 @@ public function testProfileModules(): void {
-    * Tests the dump() function provided by the var-dumper Symfony component.
-    */
-   public function testVarDump(): void {
--    // Append the stream capturer to the STDERR stream, so that we can test the
--    // dump() output and also prevent it from actually outputting in this
--    // particular test.
--    stream_filter_register("capture", StreamCapturer::class);
--    stream_filter_append(STDERR, "capture");
--
-     // Dump some variables.
--    $this->enableModules(['system', 'user']);
--    $role = Role::create(['id' => 'test_role', 'label' => 'Test role']);
--    dump($role);
--    dump($role->id());
-+    $object = (object) [
-+      'Aldebaran' => 'Betelgeuse',
-+    ];
-+    dump($object);
-+    dump('Alpheratz');
-+
-+    $dumpString = json_encode(DebugDump::getDumps());
- 
--    $this->assertStringContainsString('Drupal\user\Entity\Role', StreamCapturer::$cache);
--    $this->assertStringContainsString('test_role', StreamCapturer::$cache);
-+    $this->assertStringContainsString('KernelTestBaseTest::testVarDump', $dumpString);
-+    $this->assertStringContainsString('Aldebaran', $dumpString);
-+    $this->assertStringContainsString('Betelgeuse', $dumpString);
-+    $this->assertStringContainsString('Alpheratz', $dumpString);
-   }
- 
-   /**
-diff --git a/core/tests/Drupal/TestTools/Extension/Dump/DebugDump.php b/core/tests/Drupal/TestTools/Extension/Dump/DebugDump.php
-new file mode 100644
-index 00000000000..2289c4f54d4
---- /dev/null
-+++ b/core/tests/Drupal/TestTools/Extension/Dump/DebugDump.php
-@@ -0,0 +1,244 @@
-+<?php
-+
-+declare(strict_types=1);
-+
-+namespace Drupal\TestTools\Extension\Dump;
-+
-+use PHPUnit\Event\TestRunner\Finished as TestRunnerFinished;
-+use PHPUnit\Framework\TestCase;
-+use PHPUnit\Runner\Extension\Extension;
-+use PHPUnit\Runner\Extension\Facade;
-+use PHPUnit\Runner\Extension\ParameterCollection;
-+use PHPUnit\TextUI\Configuration\Configuration;
-+use Symfony\Component\VarDumper\Cloner\VarCloner;
-+use Symfony\Component\VarDumper\Dumper\CliDumper;
-+
-+/**
-+ * Drupal's extension for printing dump() output results.
-+ *
-+ * @internal
-+ */
-+final class DebugDump implements Extension {
-+
-+  /**
-+   * The path to the dump staging file.
-+   */
-+  private static string $stagingFilePath;
-+
-+  /**
-+   * Whether colors should be used for printing.
-+   */
-+  private static bool $colors = FALSE;
-+
-+  /**
-+   * Whether the caller of dump should be included in the report.
-+   */
-+  private static bool $printCaller = FALSE;
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function bootstrap(
-+    Configuration $configuration,
-+    Facade $facade,
-+    ParameterCollection $parameters,
-+  ): void {
-+    // Determine staging file path.
-+    self::$stagingFilePath = tempnam(sys_get_temp_dir(), 'dpd');
-+
-+    // Determine color output.
-+    $colors = $parameters->has('colors') ? $parameters->get('colors') : FALSE;
-+    self::$colors = filter_var($colors, \FILTER_VALIDATE_BOOLEAN);
-+
-+    // Print caller.
-+    $printCaller = $parameters->has('printCaller') ? $parameters->get('printCaller') : FALSE;
-+    self::$printCaller = filter_var($printCaller, \FILTER_VALIDATE_BOOLEAN);
-+
-+    // Set the environment variable with the configuration.
-+    $config = json_encode([
-+      'stagingFilePath' => self::$stagingFilePath,
-+      'colors' => self::$colors,
-+      'printCaller' => self::$printCaller,
-+    ]);
-+    putenv('DRUPAL_PHPUNIT_DUMPER_CONFIG=' . $config);
-+
-+    $facade->registerSubscriber(new TestRunnerFinishedSubscriber($this));
-+  }
-+
-+  /**
-+   * Determines if the extension is enabled.
-+   *
-+   * @return bool
-+   *   TRUE if enabled, FALSE if disabled.
-+   */
-+  public static function isEnabled(): bool {
-+    return getenv('DRUPAL_PHPUNIT_DUMPER_CONFIG') !== FALSE;
-+  }
-+
-+  /**
-+   * A CLI handler for \Symfony\Component\VarDumper\VarDumper.
-+   *
-+   * @param mixed $var
-+   *   The variable to be dumped.
-+   */
-+  public static function cliHandler(mixed $var): void {
-+    if (!self::isEnabled()) {
-+      return;
-+    }
-+    $config = (array) json_decode(getenv('DRUPAL_PHPUNIT_DUMPER_CONFIG'));
-+
-+    $caller = self::getCaller();
-+
-+    $cloner = new VarCloner();
-+    $dumper = new CliDumper();
-+    $dumper->setColors($config['colors']);
-+    $dump = [];
-+    $dumper->dump(
-+      $cloner->cloneVar($var),
-+      function ($line, $depth, $indent_pad) use (&$dump) {
-+        // A negative depth means "end of dump".
-+        if ($depth >= 0) {
-+          // Adds a two spaces indentation to the line.
-+          $dump[] = str_repeat($indent_pad, $depth) . $line;
-+        }
-+      }
-+    );
-+
-+    file_put_contents(
-+      $config['stagingFilePath'],
-+      self::encodeDump($caller['test']->id(), $caller['file'], $caller['line'], $dump) . "\n",
-+      FILE_APPEND,
-+    );
-+  }
-+
-+  /**
-+   * Encodes the dump for storing.
-+   *
-+   * @param string $testId
-+   *   The id of the test from where the dump was called.
-+   * @param string|null $file
-+   *   The path of the file from where the dump was called.
-+   * @param int|null $line
-+   *   The line number from where the dump was called.
-+   * @param array $dump
-+   *   The dump as an array of lines.
-+   *
-+   * @return string
-+   *   An encoded string.
-+   */
-+  private static function encodeDump(string $testId, ?string $file, ?int $line, array $dump): string {
-+    $data = [
-+      'test' => $testId,
-+      'file' => $file,
-+      'line' => $line,
-+      'dump' => $dump,
-+    ];
-+    $jsonData = json_encode($data);
-+    return base64_encode($jsonData);
-+  }
-+
-+  /**
-+   * Decodes a dump retrieved from storage.
-+   *
-+   * @param string $encodedData
-+   *   An encoded string.
-+   *
-+   * @return array{test: string, file: string|null, line: int|null, dump: string[]}
-+   *   An encoded string.
-+   */
-+  private static function decodeDump(string $encodedData): array {
-+    $jsonData = base64_decode($encodedData);
-+    return (array) json_decode($jsonData);
-+  }
-+
-+  /**
-+   * Returns information about the caller of dump().
-+   *
-+   * @return array{test: \PHPUnit\Framework\Event\Code\TestMethod, file: string|null, line: int|null}
-+   *   Caller information.
-+   */
-+  private static function getCaller(): array {
-+    $backtrace = debug_backtrace();
-+
-+    while (!isset($backtrace[0]['function']) || $backtrace[0]['function'] !== 'dump') {
-+      array_shift($backtrace);
-+    }
-+    $call['file'] = $backtrace[1]['file'] ?? NULL;
-+    $call['line'] = $backtrace[1]['line'] ?? NULL;
-+
-+    while (!isset($backtrace[0]['object']) || !($backtrace[0]['object'] instanceof TestCase)) {
-+      array_shift($backtrace);
-+    }
-+    $call['test'] = $backtrace[0]['object']->valueObjectForEvents();
-+
-+    return $call;
-+  }
-+
-+  /**
-+   * Retrieves dumps from storage.
-+   *
-+   * @return array{string, array{file: string|null, line: int|null, dump: string[]}}
-+   *   Caller information.
-+   */
-+  public static function getDumps(): array {
-+    if (!self::isEnabled()) {
-+      return [];
-+    }
-+    $config = (array) json_decode(getenv('DRUPAL_PHPUNIT_DUMPER_CONFIG'));
-+    $contents = rtrim(file_get_contents($config['stagingFilePath']));
-+    if (empty($contents)) {
-+      return [];
-+    }
-+    $encodedDumps = explode("\n", $contents);
-+    $dumps = [];
-+    foreach ($encodedDumps as $encodedDump) {
-+      $dump = self::decodeDump($encodedDump);
-+      $test = $dump['test'];
-+      unset($dump['test']);
-+      $dumps[$test][] = $dump;
-+    }
-+    return $dumps;
-+  }
-+
-+  /**
-+   * Prints the dumps generated during the test.
-+   */
-+  public function testRunnerFinished(TestRunnerFinished $event): void {
-+    $dumps = self::getDumps();
-+
-+    // Cleanup.
-+    unlink(self::$stagingFilePath);
-+    putenv('DRUPAL_PHPUNIT_DUMPER_CONFIG');
-+
-+    if ($dumps === []) {
-+      return;
-+    }
-+
-+    print "\n\n";
-+
-+    print "dump() output\n";
-+    print "-------------\n\n";
-+
-+    foreach ($dumps as $testId => $testDumps) {
-+      if (self::$printCaller) {
-+        print $testId . "\n";
-+      }
-+      foreach ($testDumps as $dump) {
-+        if (self::$printCaller) {
-+          print "in " . $dump['file'] . ", line " . $dump['line'] . ":\n";
-+        }
-+        foreach ($dump['dump'] as $line) {
-+          print $line . "\n";
-+        }
-+        if (self::$printCaller) {
-+          print "\n";
-+        }
-+      }
-+      if (self::$printCaller) {
-+        print "\n";
-+      }
-+    }
-+
-+  }
-+
-+}
-diff --git a/core/tests/Drupal/TestTools/Extension/Dump/TestRunnerFinishedSubscriber.php b/core/tests/Drupal/TestTools/Extension/Dump/TestRunnerFinishedSubscriber.php
-new file mode 100644
-index 00000000000..141e33555a0
---- /dev/null
-+++ b/core/tests/Drupal/TestTools/Extension/Dump/TestRunnerFinishedSubscriber.php
-@@ -0,0 +1,26 @@
-+<?php
-+
-+declare(strict_types=1);
-+
-+namespace Drupal\TestTools\Extension\Dump;
-+
-+use PHPUnit\Event\TestRunner\Finished;
-+use PHPUnit\Event\TestRunner\FinishedSubscriber;
-+
-+/**
-+ * Event subscriber notifying end of test runner execution to HTML logging.
-+ *
-+ * @internal
-+ */
-+final class TestRunnerFinishedSubscriber implements FinishedSubscriber {
-+
-+  public function __construct(
-+    private readonly DebugDump $dump,
-+  ) {
-+  }
-+
-+  public function notify(Finished $event): void {
-+    $this->dump->testRunnerFinished($event);
-+  }
-+
-+}
-diff --git a/core/tests/Drupal/TestTools/TestVarDumper.php b/core/tests/Drupal/TestTools/TestVarDumper.php
-deleted file mode 100644
-index dbf5af90f97..00000000000
---- a/core/tests/Drupal/TestTools/TestVarDumper.php
-+++ /dev/null
-@@ -1,48 +0,0 @@
--<?php
--
--declare(strict_types=1);
--
--namespace Drupal\TestTools;
--
--use Symfony\Component\VarDumper\Cloner\VarCloner;
--use Symfony\Component\VarDumper\Dumper\CliDumper;
--use Symfony\Component\VarDumper\Dumper\HtmlDumper;
--
--/**
-- * Provides handlers for the Symfony VarDumper to work within tests.
-- *
-- * This allows the dump() function to produce output on the terminal without
-- * causing PHPUnit to complain.
-- */
--class TestVarDumper {
--
--  /**
--   * A CLI handler for \Symfony\Component\VarDumper\VarDumper.
--   */
--  public static function cliHandler($var) {
--    $cloner = new VarCloner();
--    $dumper = new CliDumper();
--    fwrite(STDERR, "\n");
--    $dumper->setColors(TRUE);
--    $dumper->dump(
--      $cloner->cloneVar($var),
--      function ($line, $depth, $indent_pad) {
--        // A negative depth means "end of dump".
--        if ($depth >= 0) {
--          // Adds a two spaces indentation to the line.
--          fwrite(STDERR, str_repeat($indent_pad, $depth) . $line . "\n");
--        }
--      }
--    );
--  }
--
--  /**
--   * A HTML handler for \Symfony\Component\VarDumper\VarDumper.
--   */
--  public static function htmlHandler($var) {
--    $cloner = new VarCloner();
--    $dumper = new HtmlDumper();
--    $dumper->dump($cloner->cloneVar($var));
--  }
--
--}
-diff --git a/core/tests/Drupal/Tests/BrowserTestBase.php b/core/tests/Drupal/Tests/BrowserTestBase.php
-index bb504266871..1032781f6b0 100644
---- a/core/tests/Drupal/Tests/BrowserTestBase.php
-+++ b/core/tests/Drupal/Tests/BrowserTestBase.php
-@@ -22,8 +22,9 @@
- use Drupal\Tests\user\Traits\UserCreationTrait;
- use Drupal\TestTools\Comparator\MarkupInterfaceComparator;
- use Drupal\TestTools\Extension\DeprecationBridge\ExpectDeprecationTrait;
--use Drupal\TestTools\TestVarDumper;
-+use Drupal\TestTools\Extension\Dump\DebugDump;
- use GuzzleHttp\Cookie\CookieJar;
-+use PHPUnit\Framework\Attributes\BeforeClass;
- use PHPUnit\Framework\TestCase;
- use Symfony\Component\VarDumper\VarDumper;
- 
-@@ -207,11 +208,13 @@ public function __construct(string $name) {
-   }
- 
-   /**
--   * {@inheritdoc}
-+   * Registers the dumper CLI handler when the DebugDump extension is enabled.
-    */
--  public static function setUpBeforeClass(): void {
--    parent::setUpBeforeClass();
--    VarDumper::setHandler(TestVarDumper::class . '::cliHandler');
-+  #[BeforeClass]
-+  public static function setDebugDumpHandler(): void {
-+    if (DebugDump::isEnabled()) {
-+      VarDumper::setHandler(DebugDump::class . '::cliHandler');
-+    }
-   }
- 
-   /**
-diff --git a/core/tests/Drupal/Tests/UnitTestCase.php b/core/tests/Drupal/Tests/UnitTestCase.php
-index 63371281bfe..685a3ed6d87 100644
---- a/core/tests/Drupal/Tests/UnitTestCase.php
-+++ b/core/tests/Drupal/Tests/UnitTestCase.php
-@@ -11,7 +11,8 @@
- use Drupal\Core\StringTranslation\TranslatableMarkup;
- use Drupal\Core\StringTranslation\PluralTranslatableMarkup;
- use Drupal\TestTools\Extension\DeprecationBridge\ExpectDeprecationTrait;
--use Drupal\TestTools\TestVarDumper;
-+use Drupal\TestTools\Extension\Dump\DebugDump;
-+use PHPUnit\Framework\Attributes\BeforeClass;
- use PHPUnit\Framework\TestCase;
- use Prophecy\PhpUnit\ProphecyTrait;
- use Symfony\Component\VarDumper\VarDumper;
-@@ -47,11 +48,13 @@ abstract class UnitTestCase extends TestCase {
-   protected $root;
- 
-   /**
--   * {@inheritdoc}
-+   * Registers the dumper CLI handler when the DebugDump extension is enabled.
-    */
--  public static function setUpBeforeClass(): void {
--    parent::setUpBeforeClass();
--    VarDumper::setHandler(TestVarDumper::class . '::cliHandler');
-+  #[BeforeClass]
-+  public static function setDebugDumpHandler(): void {
-+    if (DebugDump::isEnabled()) {
-+      VarDumper::setHandler(DebugDump::class . '::cliHandler');
-+    }
-   }
- 
-   /**
-diff --git a/core/tests/Drupal/Tests/UnitTestCaseTest.php b/core/tests/Drupal/Tests/UnitTestCaseTest.php
-index 0ceeea843c5..dc653a6bcbf 100644
---- a/core/tests/Drupal/Tests/UnitTestCaseTest.php
-+++ b/core/tests/Drupal/Tests/UnitTestCaseTest.php
-@@ -4,6 +4,8 @@
- 
- namespace Drupal\Tests;
- 
-+use Drupal\TestTools\Extension\Dump\DebugDump;
-+
- /**
-  * Tests for the UnitTestCase class.
-  *
-@@ -15,21 +17,18 @@ class UnitTestCaseTest extends UnitTestCase {
-    * Tests the dump() function in a test run in the same process.
-    */
-   public function testVarDumpSameProcess(): void {
--    // Append the stream capturer to the STDERR stream, so that we can test the
--    // dump() output and also prevent it from actually outputting in this
--    // particular test.
--    stream_filter_register("capture", StreamCapturer::class);
--    stream_filter_append(STDERR, "capture");
--
-     // Dump some variables.
-     $object = (object) [
--      'foo' => 'bar',
-+      'Aldebaran' => 'Betelgeuse',
-     ];
-     dump($object);
--    dump('banana');
-+    dump('Alpheratz');
-+
-+    $dumpString = json_encode(DebugDump::getDumps());
- 
--    $this->assertStringContainsString('bar', StreamCapturer::$cache);
--    $this->assertStringContainsString('banana', StreamCapturer::$cache);
-+    $this->assertStringContainsString('Aldebaran', $dumpString);
-+    $this->assertStringContainsString('Betelgeuse', $dumpString);
-+    $this->assertStringContainsString('Alpheratz', $dumpString);
-   }
- 
-   /**
-@@ -38,21 +37,23 @@ public function testVarDumpSameProcess(): void {
-    * @runInSeparateProcess
-    */
-   public function testVarDumpSeparateProcess(): void {
--    // Append the stream capturer to the STDERR stream, so that we can test the
--    // dump() output and also prevent it from actually outputting in this
--    // particular test.
--    stream_filter_register("capture", StreamCapturer::class);
--    stream_filter_append(STDERR, "capture");
--
-     // Dump some variables.
-     $object = (object) [
--      'foo' => 'bar',
-+      'Denebola' => 'Aspidiske',
-     ];
-     dump($object);
--    dump('banana');
-+    dump('Schedar');
-+
-+    $dumpString = json_encode(DebugDump::getDumps());
-+
-+    $this->assertStringContainsString('Denebola', $dumpString);
-+    $this->assertStringContainsString('Aspidiske', $dumpString);
-+    $this->assertStringContainsString('Schedar', $dumpString);
- 
--    $this->assertStringContainsString('bar', StreamCapturer::$cache);
--    $this->assertStringContainsString('banana', StreamCapturer::$cache);
-+    // We should also find the dump of the previous test.
-+    $this->assertStringContainsString('Aldebaran', $dumpString);
-+    $this->assertStringContainsString('Betelgeuse', $dumpString);
-+    $this->assertStringContainsString('Alpheratz', $dumpString);
-   }
- 
- }
