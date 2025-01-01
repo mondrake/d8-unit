@@ -143,10 +143,10 @@ index 00000000000..051ed412a2b
 +}
 diff --git a/core/lib/Drupal/Core/Database/Statement/PdoResult.php b/core/lib/Drupal/Core/Database/Statement/PdoResult.php
 new file mode 100644
-index 00000000000..75535544dc9
+index 00000000000..8e8426d97ed
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/Statement/PdoResult.php
-@@ -0,0 +1,73 @@
+@@ -0,0 +1,69 @@
 +<?php
 +
 +declare(strict_types=1);
@@ -179,11 +179,7 @@ index 00000000000..75535544dc9
 +  }
 +
 +  public function fetchAll(FetchAs $mode, array $fetchOptions): array {
-+    $result = [];
-+    while ($rowAssoc = $this->fetch(FetchAs::Associative, $fetchOptions)) {
-+      $result[] = $this->assocToFetchMode($rowAssoc, $mode, $fetchOptions);
-+    }
-+    return $result;
++    return $this->getClientStatement()->fetchAll($mode, $fetchOptions['column'] ?? $fetchOptions['class'] ?? NULL, $fetchOptions['constructor_args'] ?? NULL);
 +  }
 +
 +  public function fetchAllKeyed(int $keyIndex = 0, int $valueIndex = 1): array {
@@ -222,7 +218,7 @@ index 00000000000..75535544dc9
 +}
 diff --git a/core/lib/Drupal/Core/Database/Statement/PdoTrait.php b/core/lib/Drupal/Core/Database/Statement/PdoTrait.php
 new file mode 100644
-index 00000000000..06276039261
+index 00000000000..72492494994
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/Statement/PdoTrait.php
 @@ -0,0 +1,211 @@
@@ -355,7 +351,7 @@ index 00000000000..06276039261
 +   *   0-indexed number of the column to retrieve from the row. If no value is
 +   *   supplied, the first column is fetched.
 +   *
-+   * @return scalar|null|false
++   * @return string|int|float|bool|false
 +   *   A single column from the next row of a result set or false if there are
 +   *   no more rows.
 +   */
@@ -395,7 +391,7 @@ index 00000000000..06276039261
 +   *   If $mode is FetchAs::ClassObject, the arguments to pass to the
 +   *   constructor.
 +   *
-+   * @return array<array<scalar|null>|object|scalar|null>
++   * @return array
 +   *   An array of results.
 +   */
 +  // phpcs:ignore Drupal.Commenting.FunctionComment.InvalidReturn
@@ -536,10 +532,10 @@ index 00000000000..78d5ccbd001
 +}
 diff --git a/core/lib/Drupal/Core/Database/Statement/StatementBase.php b/core/lib/Drupal/Core/Database/Statement/StatementBase.php
 new file mode 100644
-index 00000000000..ea90cf9b6d5
+index 00000000000..28e7a8e9a4d
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/Statement/StatementBase.php
-@@ -0,0 +1,354 @@
+@@ -0,0 +1,233 @@
 +<?php
 +
 +declare(strict_types=1);
@@ -771,127 +767,6 @@ index 00000000000..ea90cf9b6d5
 +
 +    return $return;
 +  }
-+
-+  /**
-+   * Returns the client-level database PDO statement object.
-+   *
-+   * This method should normally be used only within database driver code.
-+   *
-+   * @return \PDOStatement
-+   *   The client-level database PDO statement.
-+   *
-+   * @throws \RuntimeException
-+   *   If the client-level statement is not set.
-+   */
-+  abstract public function getClientStatement(): object;
-+
-+  /**
-+   * Sets the default fetch mode for the PDO statement.
-+   *
-+   * @param \Drupal\Core\Database\FetchAs $mode
-+   *   One of the cases of the FetchAs enum.
-+   * @param int|class-string|null $columnOrClass
-+   *   If $mode is FetchAs::Column, the index of the column to fetch.
-+   *   If $mode is FetchAs::ClassObject, the FQCN of the object.
-+   * @param list<mixed>|null $constructorArguments
-+   *   If $mode is FetchAs::ClassObject, the arguments to pass to the
-+   *   constructor.
-+   *
-+   * @return bool
-+   *   Returns true on success or false on failure.
-+   */
-+  abstract protected function clientSetFetchMode(FetchAs $mode, int|string|null $columnOrClass = NULL, array|null $constructorArguments = NULL): bool;
-+
-+  /**
-+   * Executes the prepared PDO statement.
-+   *
-+   * @param array|null $arguments
-+   *   An array of values with as many elements as there are bound parameters in
-+   *   the SQL statement being executed. This can be NULL.
-+   * @param array $options
-+   *   An array of options for this query.
-+   *
-+   * @return bool
-+   *   TRUE on success, or FALSE on failure.
-+   */
-+  abstract protected function clientExecute(?array $arguments = [], array $options = []): bool;
-+
-+  /**
-+   * Fetches the next row from the PDO statement.
-+   *
-+   * @param \Drupal\Core\Database\FetchAs|null $mode
-+   *   (Optional) one of the cases of the FetchAs enum. If not specified,
-+   *   defaults to what is specified by setFetchMode().
-+   * @param int|null $cursorOrientation
-+   *   Not implemented in all database drivers, don't use.
-+   * @param int|null $cursorOffset
-+   *   Not implemented in all database drivers, don't use.
-+   *
-+   * @return array<scalar|null>|object|scalar|null|false
-+   *   A result, formatted according to $mode, or FALSE on failure.
-+   */
-+  abstract protected function clientFetch(?FetchAs $mode = NULL, ?int $cursorOrientation = NULL, ?int $cursorOffset = NULL): array|object|int|float|string|bool|NULL;
-+
-+  /**
-+   * Returns a single column from the next row of a result set.
-+   *
-+   * @param int $column
-+   *   0-indexed number of the column to retrieve from the row. If no value is
-+   *   supplied, the first column is fetched.
-+   *
-+   * @return string|int|float|bool|false
-+   *   A single column from the next row of a result set or false if there are
-+   *   no more rows.
-+   */
-+  abstract protected function clientFetchColumn(int $column = 0): mixed;
-+
-+  /**
-+   * Fetches the next row and returns it as an object.
-+   *
-+   * @param class-string|null $class
-+   *   FQCN of the class to be instantiated.
-+   * @param list<mixed>|null $constructorArguments
-+   *   The arguments to be passed to the constructor.
-+   *
-+   * @return object|false
-+   *   An instance of the required class with property names that correspond
-+   *   to the column names, or FALSE on failure.
-+   */
-+  abstract protected function clientFetchObject(?string $class = NULL, array $constructorArguments = []): object|FALSE;
-+
-+  /**
-+   * Returns an array containing all of the result set rows.
-+   *
-+   * @param \Drupal\Core\Database\FetchAs|null $mode
-+   *   (Optional) one of the cases of the FetchAs enum. If not specified,
-+   *   defaults to what is specified by setFetchMode().
-+   * @param int|class-string|null $columnOrClass
-+   *   If $mode is FetchAs::Column, the index of the column to fetch.
-+   *   If $mode is FetchAs::ClassObject, the FQCN of the object.
-+   * @param list<mixed>|null $constructorArguments
-+   *   If $mode is FetchAs::ClassObject, the arguments to pass to the
-+   *   constructor.
-+   *
-+   * @return array
-+   *   An array of results.
-+   */
-+  abstract protected function clientFetchAll(?FetchAs $mode = NULL, int|string|null $columnOrClass = NULL, array|null $constructorArguments = NULL): array;
-+
-+  /**
-+   * Returns the number of rows affected by the last SQL statement.
-+   *
-+   * @return int
-+   *   The number of rows.
-+   */
-+  abstract protected function clientRowCount(): int;
-+
-+  /**
-+   * Returns the query string used to prepare the statement.
-+   *
-+   * @return string
-+   *   The query string.
-+   */
-+  abstract protected function clientQueryString(): string;
 +
 +}
 diff --git a/core/lib/Drupal/Core/Database/StatementInterface.php b/core/lib/Drupal/Core/Database/StatementInterface.php
