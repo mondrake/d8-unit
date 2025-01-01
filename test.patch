@@ -1,5 +1,5 @@
 diff --git a/core/.phpstan-baseline.php b/core/.phpstan-baseline.php
-index 1b3583fcddf..caa393503d0 100644
+index aa2be3f4acc..85a222affa0 100644
 --- a/core/.phpstan-baseline.php
 +++ b/core/.phpstan-baseline.php
 @@ -4123,30 +4123,12 @@
@@ -90,12 +90,40 @@ index 789725b00f5..da15025f962 100644
  
      // Use default values if not already set.
      $options += $this->defaultOptions();
+diff --git a/core/lib/Drupal/Core/Database/FetchModeTrait.php b/core/lib/Drupal/Core/Database/FetchModeTrait.php
+index 71a496497f7..c73d4a6e5ca 100644
+--- a/core/lib/Drupal/Core/Database/FetchModeTrait.php
++++ b/core/lib/Drupal/Core/Database/FetchModeTrait.php
+@@ -2,6 +2,8 @@
+ 
+ namespace Drupal\Core\Database;
+ 
++use Drupal\Core\Database\Statement\FetchAs;
++
+ /**
+  * Provide helper methods for statement fetching.
+  */
+@@ -112,4 +114,14 @@ protected function assocToColumn(array $rowAssoc, array $columnNames, int $colum
+     return $rowAssoc[$columnNames[$columnIndex]];
+   }
+ 
++  protected function assocToFetchMode(array $rowAssoc, FetchAs $mode, array $fetchOptions): array|object|int|float|string|bool|NULL {
++    return match($mode) {
++      FetchAs::Associative => $rowAssoc,
++      FetchAs::ClassObject => $this->assocToClass($rowAssoc, $fetchOptions['class'], $fetchOptions['constructor_args']),
++      FetchAs::Column => $this->assocToColumn($rowAssoc, array_keys($rowAssoc), $fetchOptions['column']),
++      FetchAs::List => $this->assocToNum($rowAssoc),
++      FetchAs::Object => $this->assocToObj($rowAssoc),
++    };
++  }
++
+ }
 diff --git a/core/lib/Drupal/Core/Database/Statement/DqlResultBase.php b/core/lib/Drupal/Core/Database/Statement/DqlResultBase.php
 new file mode 100644
-index 00000000000..df2b3e9be4c
+index 00000000000..8aa7270a679
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/Statement/DqlResultBase.php
-@@ -0,0 +1,8 @@
+@@ -0,0 +1,25 @@
 +<?php
 +
 +declare(strict_types=1);
@@ -103,6 +131,23 @@ index 00000000000..df2b3e9be4c
 +namespace Drupal\Core\Database\Statement;
 +
 +abstract class DqlResultBase {
++
++  /**
++   * Holds the default fetch mode.
++   */
++  protected FetchAs $defaultFetchMode = FetchAs::Object;
++
++  /**
++   * Holds the fetch options.
++   *
++   * @var array{'class': class-string, 'constructor_args': array<mixed>, 'column': int}
++   */
++  protected array $fetchOptions = [
++    'class' => 'stdClass',
++    'constructor_args' => [],
++    'column' => 0,
++  ];
++
 +}
 diff --git a/core/lib/Drupal/Core/Database/Statement/FetchAs.php b/core/lib/Drupal/Core/Database/Statement/FetchAs.php
 new file mode 100644
@@ -143,10 +188,10 @@ index 00000000000..051ed412a2b
 +}
 diff --git a/core/lib/Drupal/Core/Database/Statement/PdoResult.php b/core/lib/Drupal/Core/Database/Statement/PdoResult.php
 new file mode 100644
-index 00000000000..c254776731d
+index 00000000000..897e3b399bf
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/Statement/PdoResult.php
-@@ -0,0 +1,69 @@
+@@ -0,0 +1,50 @@
 +<?php
 +
 +declare(strict_types=1);
@@ -154,23 +199,21 @@ index 00000000000..c254776731d
 +namespace Drupal\Core\Database\Statement;
 +
 +use Drupal\Core\Database\FetchModeTrait;
-+use Drupal\Core\Database\StatementInterface;
 +
 +class PdoResult extends DqlResultBase {
 +
 +  use FetchModeTrait;
 +  use PdoTrait;
 +
-+  /**
-+   * The current row index in the result set.
-+   */
-+  protected ?int $currentRowIndex = NULL;
-+
 +  public function __construct(
 +    protected readonly \PDOStatement $clientStatement,
 +    protected readonly bool $rowCountEnabled = FALSE,
 +  ) {
-+    $this->currentRowIndex = -1;
++  }
++
++  public function setFetchMode(FetchAs $mode, array $fetchOptions = []): bool {
++    // @todo fix this.
++    return $this->clientSetFetchMode($mode);
 +  }
 +
 +  public function fetch(FetchAs $mode, array $fetchOptions = []): array|object|int|float|string|bool|NULL {
@@ -183,16 +226,9 @@ index 00000000000..c254776731d
 +  }
 +
 +  public function fetchAllKeyed(int $keyIndex = 0, int $valueIndex = 1): array {
-+    if (!isset($this->columnNames[$keyIndex]) || !isset($this->columnNames[$valueIndex])) {
-+      return [];
-+    }
-+
-+    $key = $this->columnNames[$keyIndex];
-+    $value = $this->columnNames[$valueIndex];
-+
 +    $result = [];
-+    while ($row = $this->fetch(FetchAs::Associative)) {
-+      $result[$row[$key]] = $row[$value];
++    while ($record = $this->fetch(FetchAs::List, [])) {
++      $result[$record[$keyIndex]] = $record[$valueIndex];
 +    }
 +    return $result;
 +  }
@@ -203,16 +239,6 @@ index 00000000000..c254776731d
 +      $result[$rowAssoc[$column]] = $this->assocToFetchMode($rowAssoc, $mode, $fetchOptions);
 +    }
 +    return $result;
-+  }
-+
-+  protected function assocToFetchMode(array $rowAssoc, FetchAs $mode, array $fetchOptions): array|object|int|float|string|bool|NULL {
-+    return match($mode) {
-+      FetchAs::Associative => $rowAssoc,
-+      FetchAs::ClassObject => $this->assocToClass($rowAssoc, $fetchOptions['class'], $fetchOptions['constructor_args']),
-+      FetchAs::Column => $this->assocToColumn($rowAssoc, $this->columnNames, $fetchOptions['column']),
-+      FetchAs::List => $this->assocToNum($rowAssoc),
-+      FetchAs::Object => $this->assocToObj($rowAssoc),
-+    };
 +  }
 +
 +}
@@ -435,10 +461,10 @@ index 00000000000..06276039261
 +}
 diff --git a/core/lib/Drupal/Core/Database/Statement/PrefetchedResult.php b/core/lib/Drupal/Core/Database/Statement/PrefetchedResult.php
 new file mode 100644
-index 00000000000..78d5ccbd001
+index 00000000000..216d48c902e
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/Statement/PrefetchedResult.php
-@@ -0,0 +1,91 @@
+@@ -0,0 +1,86 @@
 +<?php
 +
 +declare(strict_types=1);
@@ -475,6 +501,11 @@ index 00000000000..78d5ccbd001
 +  ) {
 +    $this->columnNames = isset($this->data[0]) ? array_keys($this->data[0]) : [];
 +    $this->currentRowIndex = -1;
++  }
++
++  public function setFetchMode(FetchAs $mode, array $fetchOptions = []): bool {
++    // @todo fix this.
++    return TRUE;
 +  }
 +
 +  public function fetch(FetchAs $mode, array $fetchOptions = []): array|object|int|float|string|bool|NULL {
@@ -519,32 +550,19 @@ index 00000000000..78d5ccbd001
 +    return $result;
 +  }
 +
-+  protected function assocToFetchMode(array $rowAssoc, FetchAs $mode, array $fetchOptions): array|object|int|float|string|bool|NULL {
-+    return match($mode) {
-+      FetchAs::Associative => $rowAssoc,
-+      FetchAs::ClassObject => $this->assocToClass($rowAssoc, $fetchOptions['class'], $fetchOptions['constructor_args']),
-+      FetchAs::Column => $this->assocToColumn($rowAssoc, $this->columnNames, $fetchOptions['column']),
-+      FetchAs::List => $this->assocToNum($rowAssoc),
-+      FetchAs::Object => $this->assocToObj($rowAssoc),
-+    };
-+  }
-+
 +}
 diff --git a/core/lib/Drupal/Core/Database/Statement/StatementBase.php b/core/lib/Drupal/Core/Database/Statement/StatementBase.php
 new file mode 100644
-index 00000000000..28e7a8e9a4d
+index 00000000000..d676c48c987
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/Statement/StatementBase.php
-@@ -0,0 +1,233 @@
+@@ -0,0 +1,240 @@
 +<?php
 +
 +declare(strict_types=1);
 +
 +namespace Drupal\Core\Database\Statement;
 +
-+use Drupal\Core\Database\Event\StatementExecutionEndEvent;
-+use Drupal\Core\Database\Event\StatementExecutionFailureEvent;
-+use Drupal\Core\Database\Event\StatementExecutionStartEvent;
 +use Drupal\Core\Database\Connection;
 +use Drupal\Core\Database\FetchModeTrait;
 +use Drupal\Core\Database\RowCountException;
@@ -602,12 +620,15 @@ index 00000000000..28e7a8e9a4d
 +   *   Drupal database connection object.
 +   * @param object $clientConnection
 +   *   Client database connection object, for example \PDO.
++   * @param string $queryString
++   *   The query string.
 +   * @param bool $rowCountEnabled
 +   *   (optional) Enables counting the rows matched. Defaults to FALSE.
 +   */
 +  public function __construct(
 +    protected readonly Connection $connection,
 +    protected readonly object $clientConnection,
++    protected readonly string $queryString,
 +    protected readonly bool $rowCountEnabled = FALSE,
 +  ) {
 +  }
@@ -628,7 +649,7 @@ index 00000000000..28e7a8e9a4d
 +   * {@inheritdoc}
 +   */
 +  public function getQueryString() {
-+    return $this->clientQueryString();
++    return $this->queryString;
 +  }
 +
 +  /**
@@ -642,6 +663,7 @@ index 00000000000..28e7a8e9a4d
 +   * {@inheritdoc}
 +   */
 +  public function fetchAllAssoc($key, $fetch = NULL) {
++    assert($fetch === NULL || $fetch instanceof FetchAs);
 +    return $this->result->fetchAllAssoc($key, $fetch ?? $this->defaultFetchMode, $this->fetchOptions);
 +  }
 +
@@ -711,6 +733,7 @@ index 00000000000..28e7a8e9a4d
 +   * {@inheritdoc}
 +   */
 +  public function setFetchMode($mode, $a1 = NULL, $a2 = []) {
++    assert($mode instanceof FetchAs);
 +    $this->defaultFetchMode = $mode;
 +    switch ($mode) {
 +      case FetchAs::ClassObject:
@@ -725,11 +748,14 @@ index 00000000000..28e7a8e9a4d
 +        break;
 +
 +    }
++    // If the result is missing, just do with the properties setting.
 +    try {
-+      return $this->clientSetFetchMode($mode, $a1, $a2);
++      if ($this->result) {
++        return $this->result->setFetchMode($mode, $this->fetchOptions);
++      }
++      return TRUE;
 +    }
 +    catch (\LogicException) {
-+      // The client statement is missing, just do with the properties setting.
 +      return TRUE;
 +    }
 +  }
@@ -738,6 +764,7 @@ index 00000000000..28e7a8e9a4d
 +   * {@inheritdoc}
 +   */
 +  public function fetch($mode = NULL, $cursorOrientation = NULL, $cursorOffset = NULL) {
++    assert($mode === NULL || $mode instanceof FetchAs);
 +    $row = $this->result->fetch($mode ?? $this->defaultFetchMode, $this->fetchOptions);
 +
 +    if ($row === FALSE) {
@@ -753,6 +780,7 @@ index 00000000000..28e7a8e9a4d
 +   * {@inheritdoc}
 +   */
 +  public function fetchAll($mode = NULL, $columnIndex = NULL, $constructorArguments = NULL) {
++    assert($mode === NULL || $mode instanceof FetchAs);
 +    $fetchMode = $mode ?? $this->defaultFetchMode;
 +    if (isset($columnIndex)) {
 +      $this->fetchOptions['column'] = $columnIndex;
@@ -858,7 +886,7 @@ index 9b8150734d5..5e12aa9e82a 100644
     * @return array
     *   An associative array, or an empty array if there is no result set.
 diff --git a/core/lib/Drupal/Core/Database/StatementPrefetchIterator.php b/core/lib/Drupal/Core/Database/StatementPrefetchIterator.php
-index ccf1f06ed5b..3388743aa0c 100644
+index ccf1f06ed5b..0062b78e07b 100644
 --- a/core/lib/Drupal/Core/Database/StatementPrefetchIterator.php
 +++ b/core/lib/Drupal/Core/Database/StatementPrefetchIterator.php
 @@ -5,6 +5,10 @@
@@ -935,9 +963,10 @@ index ccf1f06ed5b..3388743aa0c 100644
    public function __construct(
 -    protected readonly object $clientConnection,
 -    protected readonly Connection $connection,
+-    protected string $queryString,
 +    object $clientConnection,
 +    Connection $connection,
-     protected string $queryString,
++    string $queryString,
      protected array $driverOptions = [],
 -    protected readonly bool $rowCountEnabled = FALSE,
 +    bool $rowCountEnabled = FALSE,
@@ -949,7 +978,7 @@ index ccf1f06ed5b..3388743aa0c 100644
 -   */
 -  public function getConnectionTarget(): string {
 -    return $this->connection->getTarget();
-+    parent::__construct($connection, $clientConnection, $rowCountEnabled);
++    parent::__construct($connection, $clientConnection, $queryString, $rowCountEnabled);
    }
  
    /**
@@ -1021,16 +1050,18 @@ index ccf1f06ed5b..3388743aa0c 100644
  
      if (isset($startEvent) && $this->connection->isEventEnabled(StatementExecutionEndEvent::class)) {
        $this->connection->dispatchEvent(new StatementExecutionEndEvent(
-@@ -182,7 +167,7 @@ protected function getStatement(string $query, ?array &$args = []): object {
-   /**
-    * {@inheritdoc}
-    */
--  public function getQueryString() {
-+  public function getQueryString(): string {
-     return $this->queryString;
+@@ -179,185 +164,60 @@ protected function getStatement(string $query, ?array &$args = []): object {
+     return $this->connection->prepare($query, $this->driverOptions);
    }
  
-@@ -190,174 +175,56 @@ public function getQueryString() {
+-  /**
+-   * {@inheritdoc}
+-   */
+-  public function getQueryString() {
+-    return $this->queryString;
+-  }
+-
+   /**
     * {@inheritdoc}
     */
    public function setFetchMode($mode, $a1 = NULL, $a2 = []) {
@@ -1170,13 +1201,17 @@ index ccf1f06ed5b..3388743aa0c 100644
 -    $result = [];
 -    while ($row = $this->fetch($fetchStyle)) {
 -      $result[] = $row;
--    }
++    if (is_int($mode)) {
++      @trigger_error("Passing the \$mode argument as an integer to fetchAll() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/3488338", E_USER_DEPRECATED);
++      $mode = $this->pdoToFetchAs($mode);
+     }
 -    return $result;
--  }
--
--  /**
--   * {@inheritdoc}
--   */
++    return parent::fetchAll($mode, $column_index, $constructor_arguments);
+   }
+ 
+   /**
+    * {@inheritdoc}
+    */
 -  public function fetchCol($index = 0) {
 -    if (isset($this->columnNames[$index])) {
 -      $result = [];
@@ -1184,17 +1219,13 @@ index ccf1f06ed5b..3388743aa0c 100644
 -        $result[] = $row[$this->columnNames[$index]];
 -      }
 -      return $result;
-+    if (is_int($mode)) {
-+      @trigger_error("Passing the \$mode argument as an integer to fetchAll() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/3488338", E_USER_DEPRECATED);
-+      $mode = $this->pdoToFetchAs($mode);
-     }
+-    }
 -    return [];
-+    return parent::fetchAll($mode, $column_index, $constructor_arguments);
-   }
- 
-   /**
-    * {@inheritdoc}
-    */
+-  }
+-
+-  /**
+-   * {@inheritdoc}
+-   */
 -  public function fetchAllKeyed($key_index = 0, $value_index = 1) {
 -    if (!isset($this->columnNames[$key_index]) || !isset($this->columnNames[$value_index])) {
 -      return [];
@@ -1230,16 +1261,13 @@ index ccf1f06ed5b..3388743aa0c 100644
  
  }
 diff --git a/core/lib/Drupal/Core/Database/StatementWrapperIterator.php b/core/lib/Drupal/Core/Database/StatementWrapperIterator.php
-index 980ef74ed2e..5bd4401b854 100644
+index 980ef74ed2e..eec10b18614 100644
 --- a/core/lib/Drupal/Core/Database/StatementWrapperIterator.php
 +++ b/core/lib/Drupal/Core/Database/StatementWrapperIterator.php
-@@ -2,34 +2,17 @@
- 
- namespace Drupal\Core\Database;
- 
--use Drupal\Core\Database\Event\StatementExecutionEndEvent;
--use Drupal\Core\Database\Event\StatementExecutionFailureEvent;
--use Drupal\Core\Database\Event\StatementExecutionStartEvent;
+@@ -5,31 +5,17 @@
+ use Drupal\Core\Database\Event\StatementExecutionEndEvent;
+ use Drupal\Core\Database\Event\StatementExecutionFailureEvent;
+ use Drupal\Core\Database\Event\StatementExecutionStartEvent;
 -
 -// cSpell:ignore maxlen driverdata INOUT
 +use Drupal\Core\Database\Statement\FetchAs;
@@ -1274,7 +1302,7 @@ index 980ef74ed2e..5bd4401b854 100644
  
    /**
     * The client database Statement object.
-@@ -53,44 +36,28 @@ class StatementWrapperIterator implements \Iterator, StatementInterface {
+@@ -53,44 +39,28 @@ class StatementWrapperIterator implements \Iterator, StatementInterface {
     *   (optional) Enables counting the rows matched. Defaults to FALSE.
     */
    public function __construct(
@@ -1307,7 +1335,7 @@ index 980ef74ed2e..5bd4401b854 100644
 -   */
 -  public function getConnectionTarget(): string {
 -    return $this->connection->getTarget();
-+    parent::__construct($connection, $clientConnection, $rowCountEnabled);
++    parent::__construct($connection, $clientConnection, $query, $rowCountEnabled);
 +    $this->clientStatement = $this->clientConnection->prepare($query, $options);
 +    $this->setFetchMode(FetchAs::Object);
    }
@@ -1329,7 +1357,7 @@ index 980ef74ed2e..5bd4401b854 100644
        }
        else {
          $this->setFetchMode($options['fetch']);
-@@ -110,7 +77,11 @@ public function execute($args = [], $options = []) {
+@@ -110,7 +80,11 @@ public function execute($args = [], $options = []) {
      }
  
      try {
@@ -1342,7 +1370,7 @@ index 980ef74ed2e..5bd4401b854 100644
        $this->markResultsetIterable($return);
      }
      catch (\Exception $e) {
-@@ -146,185 +117,48 @@ public function execute($args = [], $options = []) {
+@@ -146,185 +120,48 @@ public function execute($args = [], $options = []) {
      return $return;
    }
  
