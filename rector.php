@@ -437,7 +437,7 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
 
         // prevent duplicates
         $existsAlready = false;
-        foreach (self::$currentClassNode->attrGroups as $attrGroup) {
+/*        foreach (self::$currentClassNode->attrGroups as $attrGroup) {
             foreach ($attrGroup->attrs as $attr) {
                 if ($attr->name->toString() === UsesClass::class && $attr->args[0]->value->value->class->toString() === $classLikeName) {
                     $existsAlready = true;
@@ -445,7 +445,7 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
                 }
 #                dump(['*********', $attr->name->toString(), $attr->args[0]->value->value->class->toString()]);
             }
-        }
+        }*/
 
         // Attach the attribute to the class.
         if (! $existsAlready) {
