@@ -515,6 +515,7 @@ return RectorConfig::configure()
     ->withPaths([
 #        __DIR__ . '/core/tests/Drupal/Tests/Component/Plugin/Discovery/DiscoveryTraitTest.php',
         __DIR__ . '/core/tests/Drupal/Tests/Component',
+        __DIR__ . '/core/tests/Drupal/KernelTests/Core/Database',
 #        __DIR__ . '/core/tests/Drupal/FunctionalJavascriptTests',
 #        __DIR__ . '/core',
 #        __DIR__ . '/composer',
