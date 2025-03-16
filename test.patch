@@ -397,10 +397,10 @@ index 00000000000..29d79565860
 +}
 diff --git a/core/lib/Drupal/Core/Database/Identifier/IdentifierHandlerBase.php b/core/lib/Drupal/Core/Database/Identifier/IdentifierHandlerBase.php
 new file mode 100644
-index 00000000000..5330f86394d
+index 00000000000..44f3e0ce899
 --- /dev/null
 +++ b/core/lib/Drupal/Core/Database/Identifier/IdentifierHandlerBase.php
-@@ -0,0 +1,240 @@
+@@ -0,0 +1,243 @@
 +<?php
 +
 +declare(strict_types=1);
@@ -627,7 +627,10 @@ index 00000000000..5330f86394d
 +      )),
 +    };
 +    if ($this->tablePrefix !== '') {
-+      $needsPrefix = count($parts) === 1;
++      $needsPrefix = match (count($parts)) {
++        1 => TRUE,
++        default => FALSE,
++      };
 +    }
 +    else {
 +      $needsPrefix = FALSE;
@@ -852,7 +855,7 @@ index 651bb674e75..82e33988b70 100644
      if (count($this->condition)) {
        $this->condition->compile($this->connection, $this);
 diff --git a/core/lib/Drupal/Core/Database/Schema.php b/core/lib/Drupal/Core/Database/Schema.php
-index 190f8816fa3..808510bf917 100644
+index 190f8816fa3..6504b70619c 100644
 --- a/core/lib/Drupal/Core/Database/Schema.php
 +++ b/core/lib/Drupal/Core/Database/Schema.php
 @@ -84,7 +84,7 @@ public function nextPlaceholder() {
@@ -864,15 +867,7 @@ index 190f8816fa3..808510bf917 100644
      ];
      if ($add_prefix) {
        $table = $info['prefix'] . $table;
-@@ -134,6 +134,7 @@ public function prefixNonTable($table) {
-    *   run. The given options will be merged with self::defaultOptions().
-    */
-   protected function executeDdlStatement(string $sql, array $arguments = [], array $options = []): void {
-+dump([__METHOD__, $sql, $this->connection->prefixTables($sql), $arguments, $options]);
-     $this->connection->query($sql, $arguments, $options);
-     // DDL statements when in a transaction force a commit in some databases.
-     // Void the transaction in that case.
-@@ -223,7 +224,7 @@ public function findTables($table_expression) {
+@@ -223,7 +223,7 @@ public function findTables($table_expression) {
      $condition = $this->buildTableNameCondition('%', 'LIKE');
      $condition->compile($this->connection, $this);
  
@@ -1423,7 +1418,7 @@ index 00000000000..75ddb933986
 +
 +}
 diff --git a/core/modules/pgsql/src/Driver/Database/pgsql/Connection.php b/core/modules/pgsql/src/Driver/Database/pgsql/Connection.php
-index 40b2de75cf0..d59dd98bc47 100644
+index 40b2de75cf0..fa88b9d0a92 100644
 --- a/core/modules/pgsql/src/Driver/Database/pgsql/Connection.php
 +++ b/core/modules/pgsql/src/Driver/Database/pgsql/Connection.php
 @@ -68,11 +68,6 @@ class Connection extends DatabaseConnection implements SupportsTemporaryTablesIn
@@ -1438,33 +1433,31 @@ index 40b2de75cf0..d59dd98bc47 100644
    /**
     * An array of transaction savepoints.
     *
-@@ -92,17 +87,17 @@ class Connection extends DatabaseConnection implements SupportsTemporaryTablesIn
+@@ -92,17 +87,14 @@ class Connection extends DatabaseConnection implements SupportsTemporaryTablesIn
     * Constructs a connection object.
     */
    public function __construct(\PDO $connection, array $connection_options) {
 -    // Sanitize the schema name here, so we do not have to do it in other
 -    // functions.
-+    // Get the IdentifierHandler early to process the schema if needed.
-+    $identifierHandler = new IdentifierHandler($connection_options['prefix'] ?? '');
-+
-+    // Sanitize the schema name here.
-     if (isset($connection_options['schema']) && ($connection_options['schema'] !== 'public')) {
+-    if (isset($connection_options['schema']) && ($connection_options['schema'] !== 'public')) {
 -      $connection_options['schema'] = preg_replace('/[^A-Za-z0-9_]+/', '', $connection_options['schema']);
-+      $schema = $identifierHandler->schema($connection_options['schema']);
-+      $identifierHandler->setConnectionSchema($schema);
-+      $connection_options['schema'] = $schema->canonical();
-     }
+-    }
++    // Manage the table prefix.
++    $prefix = $connection_options['prefix'] ?? '';
++    assert(is_string($prefix), 'The \'prefix\' connection option to ' . __METHOD__ . '() must be a string.');
  
 -    // We need to set the connectionOptions before the parent, because setPrefix
 -    // needs this.
 -    $this->connectionOptions = $connection_options;
--
++    // Manage the schema name.
++    $defaultSchema = $connection_options['schema'] ?? '';
+ 
 -    parent::__construct($connection, $connection_options);
-+    parent::__construct($connection, $connection_options, $identifierHandler);
++    parent::__construct($connection, $connection_options, new IdentifierHandler($prefix, $defaultSchema));
  
      // Force PostgreSQL to use the UTF-8 character set by default.
      $this->connection->exec("SET NAMES 'UTF8'");
-@@ -113,26 +108,6 @@ public function __construct(\PDO $connection, array $connection_options) {
+@@ -113,26 +105,6 @@ public function __construct(\PDO $connection, array $connection_options) {
      }
    }
  
@@ -1491,7 +1484,7 @@ index 40b2de75cf0..d59dd98bc47 100644
    /**
     * {@inheritdoc}
     */
-@@ -287,16 +262,11 @@ public function databaseType() {
+@@ -287,16 +259,11 @@ public function databaseType() {
    }
  
    /**
@@ -1510,7 +1503,7 @@ index 40b2de75cf0..d59dd98bc47 100644
      $db_created = FALSE;
  
      // Try to determine the proper locales for character classification and
-@@ -354,19 +324,25 @@ public function makeSequenceName($table, $field) {
+@@ -354,19 +321,25 @@ public function makeSequenceName($table, $field) {
      $sequence_name = $this->prefixTables('{' . $table . '}_' . $field . '_seq');
      // Remove identifier quotes as we are constructing a new name from a
      // prefixed and quoted table name.
@@ -1543,10 +1536,10 @@ index 40b2de75cf0..d59dd98bc47 100644
    /**
 diff --git a/core/modules/pgsql/src/Driver/Database/pgsql/IdentifierHandler.php b/core/modules/pgsql/src/Driver/Database/pgsql/IdentifierHandler.php
 new file mode 100644
-index 00000000000..42b6fd54157
+index 00000000000..6b6edf9a578
 --- /dev/null
 +++ b/core/modules/pgsql/src/Driver/Database/pgsql/IdentifierHandler.php
-@@ -0,0 +1,98 @@
+@@ -0,0 +1,112 @@
 +<?php
 +
 +declare(strict_types=1);
@@ -1566,16 +1559,31 @@ index 00000000000..42b6fd54157
 +  /**
 +   * The default schema identifier, if specified.
 +   */
-+  protected ?Schema $schema;
++  public readonly ?Schema $defaultSchema;
 +
 +  /**
-+   * @todo fill in.
++   * Constructor.
++   *
++   * @param string $tablePrefix
++   *   The table prefix to be used by the database connection.
++   * @param string $defaultSchema
++   *   The default schema to use for database operations. If not specified,
++   *   it's assumed to use the 'public' schema.
++   * @param array{0:string, 1:string} $identifierQuotes
++   *   The identifier quote characters for the database type. An array
++   *   containing the start and end identifier quote characters for the
++   *   database type. The ANSI SQL standard identifier quote character is a
++   *   double quotation mark.
 +   */
-+  public function setConnectionSchema(Schema $identifier): void {
-+    if (isset($this->schema)) {
-+      throw new \LogicException("A default schema identifier {$this->schema} is already set for this connection");
++  public function __construct(
++    string $tablePrefix,
++    string $defaultSchema = '',
++    array $identifierQuotes = ['"', '"'],
++  ) {
++    parent::_construct($tablePrefix, $identifierQuotes);
++    if ($defaultSchema !== '' && $defaultSchema !== 'public') {
++      $this->defaultSchema = $this->schema($defaultSchema);
 +    }
-+    $this->schema = $identifier;
 +  }
 +
 +  /**
@@ -1600,7 +1608,6 @@ index 00000000000..42b6fd54157
 +   * {@inheritdoc}
 +   */
 +  protected function resolveTableForMachine(string $canonicalName, array $info): string {
-+dump([__METHOD__,$canonicalName, $info]);
 +    if ($info['schema'] && ($info['schema_default_added'] ?? FALSE) === FALSE) {
 +      // We are processing a fully qualified table identifier, canonical name
 +      // should not be processed, just checked it does not exceed max length.
@@ -1637,7 +1644,7 @@ index 00000000000..42b6fd54157
 +   */
 +  public function parseTableIdentifier(string $identifier): array {
 +    $parts = parent::parseTableIdentifier($identifier);
-+    if (isset($this->schema) && $parts['schema'] === NULL) {
++    if (isset($this->defaultSchema) && $parts['schema'] === NULL) {
 +      $parts['schema'] = $this->schema;
 +      $parts['schema_default_added'] = TRUE;
 +    }
@@ -2469,6 +2476,22 @@ index e0baf9193c0..ae2e8cdbe14 100644
  
      // Test that the statistics and query are rendered above the preview.
      $this->assertLessThan(strpos($this->getSession()->getPage()->getContent(), 'js-view-dom-id'), strpos($this->getSession()->getPage()->getContent(), 'views-query-info'));
+diff --git a/core/profiles/demo_umami/tests/src/FunctionalJavascript/OpenTelemetryNodePagePerformanceTest.php b/core/profiles/demo_umami/tests/src/FunctionalJavascript/OpenTelemetryNodePagePerformanceTest.php
+index 7204388bbb3..be3031b0e28 100644
+--- a/core/profiles/demo_umami/tests/src/FunctionalJavascript/OpenTelemetryNodePagePerformanceTest.php
++++ b/core/profiles/demo_umami/tests/src/FunctionalJavascript/OpenTelemetryNodePagePerformanceTest.php
+@@ -279,9 +279,9 @@ protected function testNodePageWarmCache(): void {
+       'SELECT "base_table"."id" AS "id", "base_table"."path" AS "path", "base_table"."alias" AS "alias", "base_table"."langcode" AS "langcode" FROM "path_alias" "base_table" WHERE ("base_table"."status" = 1) AND ("base_table"."alias" LIKE "/node" ESCAPE \'\\\\\') AND ("base_table"."langcode" IN ("en", "und")) ORDER BY "base_table"."langcode" ASC, "base_table"."id" DESC',
+       'SELECT "menu_tree"."menu_name" AS "menu_name", "menu_tree"."route_name" AS "route_name", "menu_tree"."route_parameters" AS "route_parameters", "menu_tree"."url" AS "url", "menu_tree"."title" AS "title", "menu_tree"."description" AS "description", "menu_tree"."parent" AS "parent", "menu_tree"."weight" AS "weight", "menu_tree"."options" AS "options", "menu_tree"."expanded" AS "expanded", "menu_tree"."enabled" AS "enabled", "menu_tree"."provider" AS "provider", "menu_tree"."metadata" AS "metadata", "menu_tree"."class" AS "class", "menu_tree"."form_class" AS "form_class", "menu_tree"."id" AS "id" FROM "menu_tree" "menu_tree" WHERE ("route_name" = "entity.node.canonical") AND ("route_param_key" = "node=1") AND ("menu_name" = "footer") ORDER BY "depth" ASC, "weight" ASC, "id" ASC',
+       'INSERT INTO "semaphore" ("name", "value", "expire") VALUES ("theme_registry:runtime:umami:Drupal\Core\Utility\ThemeRegistry", "LOCK_ID", "EXPIRE")',
+-      'DELETE FROM "semaphore"  WHERE ("name" = "theme_registry:runtime:umami:Drupal\Core\Utility\ThemeRegistry") AND ("value" = "LOCK_ID")',
++      'DELETE FROM "semaphore" WHERE ("name" = "theme_registry:runtime:umami:Drupal\Core\Utility\ThemeRegistry") AND ("value" = "LOCK_ID")',
+       'INSERT INTO "semaphore" ("name", "value", "expire") VALUES ("active-trail:route:entity.node.canonical:route_parameters:a:1:{s:4:"node";s:1:"1";}:Drupal\Core\Cache\CacheCollector", "LOCK_ID", "EXPIRE")',
+-      'DELETE FROM "semaphore"  WHERE ("name" = "active-trail:route:entity.node.canonical:route_parameters:a:1:{s:4:"node";s:1:"1";}:Drupal\Core\Cache\CacheCollector") AND ("value" = "LOCK_ID")',
++      'DELETE FROM "semaphore" WHERE ("name" = "active-trail:route:entity.node.canonical:route_parameters:a:1:{s:4:"node";s:1:"1";}:Drupal\Core\Cache\CacheCollector") AND ("value" = "LOCK_ID")',
+     ];
+     $recorded_queries = $performance_data->getQueries();
+     $this->assertSame($expected_queries, $recorded_queries);
 diff --git a/core/profiles/standard/tests/src/FunctionalJavascript/StandardPerformanceTest.php b/core/profiles/standard/tests/src/FunctionalJavascript/StandardPerformanceTest.php
 index 0c3d7300ea3..f2dfa66bb07 100644
 --- a/core/profiles/standard/tests/src/FunctionalJavascript/StandardPerformanceTest.php
