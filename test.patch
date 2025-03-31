@@ -1,12 +1,124 @@
+diff --git a/core/modules/mysql/src/Driver/Database/mysql/ExceptionHandler.php b/core/modules/mysql/src/Driver/Database/mysql/ExceptionHandler.php
+index 7926175e0dc..71d81eedef2 100644
+--- a/core/modules/mysql/src/Driver/Database/mysql/ExceptionHandler.php
++++ b/core/modules/mysql/src/Driver/Database/mysql/ExceptionHandler.php
+@@ -5,6 +5,7 @@
+ use Drupal\Component\Utility\Unicode;
+ use Drupal\Core\Database\DatabaseExceptionWrapper;
+ use Drupal\Core\Database\ExceptionHandler as BaseExceptionHandler;
++use Drupal\Core\Database\Exception\SchemaPrimaryKeyMustBeDroppedException;
+ use Drupal\Core\Database\Exception\SchemaTableColumnSizeTooLargeException;
+ use Drupal\Core\Database\Exception\SchemaTableKeyTooLargeException;
+ use Drupal\Core\Database\IntegrityConstraintViolationException;
+@@ -19,44 +20,48 @@ class ExceptionHandler extends BaseExceptionHandler {
+    * {@inheritdoc}
+    */
+   public function handleExecutionException(\Exception $exception, StatementInterface $statement, array $arguments = [], array $options = []): void {
+-    if ($exception instanceof \PDOException) {
+-      // Wrap the exception in another exception, because PHP does not allow
+-      // overriding Exception::getMessage(). Its message is the extra database
+-      // debug information.
+-      $code = is_int($exception->getCode()) ? $exception->getCode() : 0;
+-
+-      // If a max_allowed_packet error occurs the message length is truncated.
+-      // This should prevent the error from recurring if the exception is logged
+-      // to the database using dblog or the like.
+-      if (($exception->errorInfo[1] ?? NULL) === 1153) {
+-        $message = Unicode::truncateBytes($exception->getMessage(), Connection::MIN_MAX_ALLOWED_PACKET);
+-        throw new DatabaseExceptionWrapper($message, $code, $exception);
+-      }
+-
+-      $message = $exception->getMessage() . ": " . $statement->getQueryString() . "; " . print_r($arguments, TRUE);
+-
+-      // SQLSTATE 23xxx errors indicate an integrity constraint violation. Also,
+-      // in case of attempted INSERT of a record with an undefined column and no
+-      // default value indicated in schema, MySql returns a 1364 error code.
+-      if (
+-        substr($exception->getCode(), -6, -3) == '23' ||
+-        ($exception->errorInfo[1] ?? NULL) === 1364
+-      ) {
+-        throw new IntegrityConstraintViolationException($message, $code, $exception);
+-      }
+-
+-      if ($exception->getCode() === '42000') {
+-        match ($exception->errorInfo[1]) {
+-          1071 => throw new SchemaTableKeyTooLargeException($message, $code, $exception),
+-          1074 => throw new SchemaTableColumnSizeTooLargeException($message, $code, $exception),
+-          default => throw new DatabaseExceptionWrapper($message, 0, $exception),
+-        };
+-      }
+-
+-      throw new DatabaseExceptionWrapper($message, 0, $exception);
++    if (!$exception instanceof \PDOException) {
++      throw $exception;
+     }
+ 
+-    throw $exception;
++    // Wrap the exception in another exception, because PHP does not allow
++    // overriding Exception::getMessage(). Its message is the extra database
++    // debug information.
++    $code = is_int($exception->getCode()) ? $exception->getCode() : 0;
++
++    // If a max_allowed_packet error occurs the message length is truncated.
++    // This should prevent the error from recurring if the exception is logged
++    // to the database using dblog or the like.
++    if (($exception->errorInfo[1] ?? NULL) === 1153) {
++      $message = Unicode::truncateBytes($exception->getMessage(), Connection::MIN_MAX_ALLOWED_PACKET);
++      throw new DatabaseExceptionWrapper($message, $code, $exception);
++    }
++
++    $message = $exception->getMessage() . ": " . $statement->getQueryString() . "; " . print_r($arguments, TRUE);
++
++    // SQLSTATE 23xxx errors indicate an integrity constraint violation. Also,
++    // in case of attempted INSERT of a record with an undefined column and no
++    // default value indicated in schema, MySql returns a 1364 error code.
++    if (
++      substr($exception->getCode(), -6, -3) == '23' ||
++      ($exception->errorInfo[1] ?? NULL) === 1364
++    ) {
++      throw new IntegrityConstraintViolationException($message, $code, $exception);
++    }
++
++    match ($exception->getCode()) {
++      'HY000' =>  match ($exception->errorInfo[1]) {
++        4111 => throw new SchemaPrimaryKeyMustBeDroppedException($message, 0, $exception),
++        default => throw new DatabaseExceptionWrapper($message, 0, $exception),
++      },
++      '42000' =>  match ($exception->errorInfo[1]) {
++        1071 => throw new SchemaTableKeyTooLargeException($message, $code, $exception),
++        1074 => throw new SchemaTableColumnSizeTooLargeException($message, $code, $exception),
++        default => throw new DatabaseExceptionWrapper($message, 0, $exception),
++      },
++      default => throw new DatabaseExceptionWrapper($message, 0, $exception),
++    };
++
+   }
+ 
+ }
 diff --git a/core/modules/mysql/src/Driver/Database/mysql/Schema.php b/core/modules/mysql/src/Driver/Database/mysql/Schema.php
-index 85e71af18d1..30e41cf9995 100644
+index 85e71af18d1..4f590227ca1 100644
 --- a/core/modules/mysql/src/Driver/Database/mysql/Schema.php
 +++ b/core/modules/mysql/src/Driver/Database/mysql/Schema.php
-@@ -439,6 +439,7 @@ public function addField($table, $field, $spec, $keys_new = []) {
+@@ -3,6 +3,7 @@
+ namespace Drupal\mysql\Driver\Database\mysql;
+ 
+ use Drupal\Core\Database\DatabaseExceptionWrapper;
++use Drupal\Core\Database\Exception\SchemaPrimaryKeyMustBeDroppedException;
+ use Drupal\Core\Database\SchemaException;
+ use Drupal\Core\Database\SchemaObjectExistsException;
+ use Drupal\Core\Database\SchemaObjectDoesNotExistException;
+@@ -438,11 +439,12 @@ public function addField($table, $field, $spec, $keys_new = []) {
+     try {
        $this->executeDdlStatement($query);
      }
-     catch (DatabaseExceptionWrapper $e) {
+-    catch (DatabaseExceptionWrapper $e) {
++    catch (SchemaPrimaryKeyMustBeDroppedException $e) {
 +dump($e, $e->getPrevious());
        // MySQL error number 4111 (ER_DROP_PK_COLUMN_TO_DROP_GIPK) indicates that
        // when dropping and adding a primary key, the generated invisible primary
        // key (GIPK) column must also be dropped.
+-      if (isset($e->getPrevious()->errorInfo[1]) && $e->getPrevious()->errorInfo[1] === 4111 && isset($keys_new['primary key']) && $this->indexExists($table, 'PRIMARY') && $this->findPrimaryKeyColumns($table) === ['my_row_id']) {
++      if (isset($keys_new['primary key']) && $this->indexExists($table, 'PRIMARY') && $this->findPrimaryKeyColumns($table) === ['my_row_id']) {
+         $this->executeDdlStatement($query . ', DROP COLUMN [my_row_id]');
+       }
+       else {
