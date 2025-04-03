@@ -1,5 +1,5 @@
 diff --git a/.gitlab-ci.yml b/.gitlab-ci.yml
-index f9faa5bdb94..40c513bc258 100644
+index 9f5f613753b..0a884b930c1 100644
 --- a/.gitlab-ci.yml
 +++ b/.gitlab-ci.yml
 @@ -201,6 +201,8 @@ default:
@@ -391,7 +391,7 @@ index 50195354701..2a40a48f47e 100644
      $this->assertTrue(isset($modules_to_uninstall['comment']), 'The comment module will be disabled');
      $this->assertTrue(isset($modules_to_uninstall['file']), 'The File module will be disabled');
 diff --git a/core/modules/mysql/src/Driver/Database/mysql/ExceptionHandler.php b/core/modules/mysql/src/Driver/Database/mysql/ExceptionHandler.php
-index 7926175e0dc..49ead97b414 100644
+index 7926175e0dc..9f2a89ca6ea 100644
 --- a/core/modules/mysql/src/Driver/Database/mysql/ExceptionHandler.php
 +++ b/core/modules/mysql/src/Driver/Database/mysql/ExceptionHandler.php
 @@ -5,6 +5,7 @@
@@ -402,7 +402,7 @@ index 7926175e0dc..49ead97b414 100644
  use Drupal\Core\Database\Exception\SchemaTableColumnSizeTooLargeException;
  use Drupal\Core\Database\Exception\SchemaTableKeyTooLargeException;
  use Drupal\Core\Database\IntegrityConstraintViolationException;
-@@ -19,44 +20,47 @@ class ExceptionHandler extends BaseExceptionHandler {
+@@ -19,44 +20,81 @@ class ExceptionHandler extends BaseExceptionHandler {
     * {@inheritdoc}
     */
    public function handleExecutionException(\Exception $exception, StatementInterface $statement, array $arguments = [], array $options = []): void {
@@ -443,40 +443,74 @@ index 7926175e0dc..49ead97b414 100644
 -      throw new DatabaseExceptionWrapper($message, 0, $exception);
 +    if (!$exception instanceof \PDOException) {
 +      throw $exception;
-     }
- 
--    throw $exception;
-+    // Wrap the exception in another exception, because PHP does not allow
-+    // overriding Exception::getMessage(). Its message is the extra database
-+    // debug information.
-+    $code = is_int($exception->getCode()) ? $exception->getCode() : 0;
++    }
++    $this->rethrowNormalizedException($exception, $exception->getCode(), $exception->errorInfo[1] ?? NULL, $statement->getQueryString(), $arguments);
++  }
++
++  /**
++   * Rethrows exceptions thrown during execution of statement objects.
++   *
++   * Wrap the exception in another exception, because PHP does not allow
++   * overriding Exception::getMessage(). Its message is the extra database
++   * debug information.
++   *
++   * @param \Exception $exception
++   *   The exception to be handled.
++   * @param int|string $sqlState
++   *   MySql SQLState error condition.
++   * @param int|null $errorCode
++   *   MySql error code.
++   * @param string $queryString
++   *   The SQL statement string.
++   * @param array $arguments
++   *   An array of arguments for the prepared statement.
++   *
++   * @throws \Drupal\Core\Database\DatabaseExceptionWrapper
++   * @throws \Drupal\Core\Database\IntegrityConstraintViolationException
++   * @throws \Drupal\Core\Database\Exception\SchemaPrimaryKeyMustBeDroppedException
++   * @throws \Drupal\Core\Database\Exception\SchemaTableColumnSizeTooLargeException
++   * @throws \Drupal\Core\Database\Exception\SchemaTableKeyTooLargeException
++   */
++  protected function rethrowNormalizedException(
++    \Exception $exception,
++    int|string $sqlState,
++    ?int $errorCode,
++    string $queryString,
++    array $arguments,
++  ): void {
++
++    // SQLState could be 'HY000' which cannot be used as a $code argument for
++    // exceptions. PDOException is contravariant in this case, but since we are
++    // re-throwing an exception that inherits from \Exception, we need to
++    // convert the code to an integer.
++    // @see https://www.php.net/manual/en/class.exception.php
++    // @see https://www.php.net/manual/en/class.pdoexception.php
++    $code = (int) $sqlState;
 +
 +    // If a max_allowed_packet error occurs the message length is truncated.
 +    // This should prevent the error from recurring if the exception is logged
 +    // to the database using dblog or the like.
-+    if (($exception->errorInfo[1] ?? NULL) === 1153) {
++    if ($errorCode === 1153) {
 +      $message = Unicode::truncateBytes($exception->getMessage(), Connection::MIN_MAX_ALLOWED_PACKET);
 +      throw new DatabaseExceptionWrapper($message, $code, $exception);
 +    }
 +
-+    $message = $exception->getMessage() . ": " . $statement->getQueryString() . "; " . print_r($arguments, TRUE);
++    $message = $exception->getMessage() . ": " . $queryString . "; " . print_r($arguments, TRUE);
 +
 +    // SQLSTATE 23xxx errors indicate an integrity constraint violation. Also,
 +    // in case of attempted INSERT of a record with an undefined column and no
 +    // default value indicated in schema, MySql returns a 1364 error code.
-+    if (
-+      substr($exception->getCode(), -6, -3) == '23' ||
-+      ($exception->errorInfo[1] ?? NULL) === 1364
-+    ) {
++    if (substr($sqlState, -6, -3) == '23' || $errorCode === 1364) {
 +      throw new IntegrityConstraintViolationException($message, $code, $exception);
-+    }
-+
-+    match ($exception->getCode()) {
-+      'HY000' =>  match ($exception->errorInfo[1]) {
+     }
+ 
+-    throw $exception;
++    match ($sqlState) {
++      'HY000' =>  match ($errorCode) {
 +        4111 => throw new SchemaPrimaryKeyMustBeDroppedException($message, 0, $exception),
 +        default => throw new DatabaseExceptionWrapper($message, 0, $exception),
 +      },
-+      '42000' =>  match ($exception->errorInfo[1]) {
++      '42000' =>  match ($errorCode) {
 +        1071 => throw new SchemaTableKeyTooLargeException($message, $code, $exception),
 +        1074 => throw new SchemaTableColumnSizeTooLargeException($message, $code, $exception),
 +        default => throw new DatabaseExceptionWrapper($message, 0, $exception),
@@ -487,24 +521,24 @@ index 7926175e0dc..49ead97b414 100644
  
  }
 diff --git a/core/modules/mysql/src/Driver/Database/mysql/Schema.php b/core/modules/mysql/src/Driver/Database/mysql/Schema.php
-index 85e71af18d1..4f590227ca1 100644
+index 85e71af18d1..ba8ab6266fc 100644
 --- a/core/modules/mysql/src/Driver/Database/mysql/Schema.php
 +++ b/core/modules/mysql/src/Driver/Database/mysql/Schema.php
-@@ -3,6 +3,7 @@
+@@ -2,7 +2,7 @@
+ 
  namespace Drupal\mysql\Driver\Database\mysql;
  
- use Drupal\Core\Database\DatabaseExceptionWrapper;
+-use Drupal\Core\Database\DatabaseExceptionWrapper;
 +use Drupal\Core\Database\Exception\SchemaPrimaryKeyMustBeDroppedException;
  use Drupal\Core\Database\SchemaException;
  use Drupal\Core\Database\SchemaObjectExistsException;
  use Drupal\Core\Database\SchemaObjectDoesNotExistException;
-@@ -438,11 +439,12 @@ public function addField($table, $field, $spec, $keys_new = []) {
+@@ -438,11 +438,11 @@ public function addField($table, $field, $spec, $keys_new = []) {
      try {
        $this->executeDdlStatement($query);
      }
 -    catch (DatabaseExceptionWrapper $e) {
 +    catch (SchemaPrimaryKeyMustBeDroppedException $e) {
-+dump($e, $e->getPrevious());
        // MySQL error number 4111 (ER_DROP_PK_COLUMN_TO_DROP_GIPK) indicates that
        // when dropping and adding a primary key, the generated invisible primary
        // key (GIPK) column must also be dropped.
@@ -513,6 +547,19 @@ index 85e71af18d1..4f590227ca1 100644
          $this->executeDdlStatement($query . ', DROP COLUMN [my_row_id]');
        }
        else {
+diff --git a/core/modules/mysql/tests/src/Functional/RequirementsTest.php b/core/modules/mysql/tests/src/Functional/RequirementsTest.php
+index 5d054334b69..38617714bc8 100644
+--- a/core/modules/mysql/tests/src/Functional/RequirementsTest.php
++++ b/core/modules/mysql/tests/src/Functional/RequirementsTest.php
+@@ -32,7 +32,7 @@ protected function setUp(): void {
+ 
+     // The isolation_level option is only available for MySQL.
+     $connection = Database::getConnection();
+-    if ($connection->driver() !== 'mysql') {
++    if (!in_array($connection->driver(), ['mysql', 'mysqli'])) {
+       $this->markTestSkipped("This test does not support the {$connection->driver()} database driver.");
+     }
+   }
 diff --git a/core/modules/mysqli/mysqli.info.yml b/core/modules/mysqli/mysqli.info.yml
 new file mode 100644
 index 00000000000..38a9239f3e9
@@ -528,6 +575,89 @@ index 00000000000..38a9239f3e9
 +hidden: true
 +dependencies:
 +  - drupal:mysql
+diff --git a/core/modules/mysqli/mysqli.install b/core/modules/mysqli/mysqli.install
+new file mode 100644
+index 00000000000..8d40e88d909
+--- /dev/null
++++ b/core/modules/mysqli/mysqli.install
+@@ -0,0 +1,77 @@
++<?php
++
++/**
++ * @file
++ * Install, update and uninstall functions for the mysqli module.
++ */
++
++use Drupal\Core\Database\Database;
++use Drupal\Core\Render\Markup;
++
++/**
++ * Implements hook_requirements().
++ */
++function mysqli_requirements($phase): array {
++  $requirements = [];
++
++  if ($phase === 'runtime') {
++    // Test with MySql databases.
++    if (Database::isActiveConnection()) {
++      $connection = Database::getConnection();
++      // Only show requirements when MySQLi is the default database connection.
++      if (!($connection->driver() === 'mysqli' && $connection->getProvider() === 'mysqli')) {
++        return [];
++      }
++
++      $query = $connection->isMariaDb() ? 'SELECT @@SESSION.tx_isolation' : 'SELECT @@SESSION.transaction_isolation';
++
++      $isolation_level = $connection->query($query)->fetchField();
++
++      $tables_missing_primary_key = [];
++      $tables = $connection->schema()->findTables('%');
++      foreach ($tables as $table) {
++        $primary_key_column = Database::getConnection()->query("SHOW KEYS FROM {" . $table . "} WHERE Key_name = 'PRIMARY'")->fetchAllAssoc('Column_name');
++        if (empty($primary_key_column)) {
++          $tables_missing_primary_key[] = $table;
++        }
++      }
++
++      $description = [];
++      if ($isolation_level == 'READ-COMMITTED') {
++        if (empty($tables_missing_primary_key)) {
++          $severity_level = REQUIREMENT_OK;
++        }
++        else {
++          $severity_level = REQUIREMENT_ERROR;
++        }
++      }
++      else {
++        if ($isolation_level == 'REPEATABLE-READ') {
++          $severity_level = REQUIREMENT_WARNING;
++        }
++        else {
++          $severity_level = REQUIREMENT_ERROR;
++          $description[] = t('This is not supported by Drupal.');
++        }
++        $description[] = t('The recommended level for Drupal is "READ COMMITTED".');
++      }
++
++      if (!empty($tables_missing_primary_key)) {
++        $description[] = t('For this to work correctly, all tables must have a primary key. The following table(s) do not have a primary key: @tables.', ['@tables' => implode(', ', $tables_missing_primary_key)]);
++      }
++
++      $description[] = t('See the <a href=":performance_doc">setting MySQL transaction isolation level</a> page for more information.', [
++        ':performance_doc' => 'https://www.drupal.org/docs/system-requirements/setting-the-mysql-transaction-isolation-level',
++      ]);
++
++      $requirements['mysql_transaction_level'] = [
++        'title' => t('Transaction isolation level'),
++        'severity' => $severity_level,
++        'value' => $isolation_level,
++        'description' => Markup::create(implode(' ', $description)),
++      ];
++    }
++  }
++
++  return $requirements;
++}
 diff --git a/core/modules/mysqli/mysqli.services.yml b/core/modules/mysqli/mysqli.services.yml
 new file mode 100644
 index 00000000000..82a476ceb9e
@@ -540,16 +670,17 @@ index 00000000000..82a476ceb9e
 +    public: false
 diff --git a/core/modules/mysqli/src/Driver/Database/mysqli/Connection.php b/core/modules/mysqli/src/Driver/Database/mysqli/Connection.php
 new file mode 100644
-index 00000000000..8d453db869b
+index 00000000000..d414f3e285e
 --- /dev/null
 +++ b/core/modules/mysqli/src/Driver/Database/mysqli/Connection.php
-@@ -0,0 +1,199 @@
+@@ -0,0 +1,180 @@
 +<?php
 +
 +declare(strict_types=1);
 +
 +namespace Drupal\mysqli\Driver\Database\mysqli;
 +
++use Drupal\Core\Database\Connection as BaseConnection;
 +use Drupal\Core\Database\ConnectionNotDefinedException;
 +use Drupal\Core\Database\DatabaseAccessDeniedException;
 +use Drupal\Core\Database\DatabaseNotFoundException;
@@ -572,79 +703,60 @@ index 00000000000..8d453db869b
 +  private string $serverVersion;
 +
 +  public function __construct(
-+    protected $connection,
-+    protected $connectionOptions = [],
++    \mysqli $connection,
++    array $connectionOptions = [],
 +  ) {
-+    assert($this->connection instanceof \mysqli);
-+    assert(is_array($this->connectionOptions));
 +    // If the SQL mode doesn't include 'ANSI_QUOTES' (explicitly or via a
 +    // combination mode), then MySQL doesn't interpret a double quote as an
 +    // identifier quote, in which case use the non-ANSI-standard backtick.
 +    //
-+    // Because we still support MySQL 5.7, check for the deprecated combination
-+    // modes as well.
-+    //
-+    // @see https://dev.mysql.com/doc/refman/5.7/en/sql-mode.html#sqlmode_ansi_quotes
-+    $ansi_quotes_modes = ['ANSI_QUOTES', 'ANSI', 'DB2', 'MAXDB', 'MSSQL', 'ORACLE', 'POSTGRESQL'];
-+    $is_ansi_quotes_mode = FALSE;
-+    if (isset($this->connectionOptions['init_commands']['sql_mode'])) {
-+      foreach ($ansi_quotes_modes as $mode) {
-+        // None of the modes in $ansi_quotes_modes are substrings of other modes
-+        // that are not in $ansi_quotes_modes, so a simple stripos() does not
++    // @see https://dev.mysql.com/doc/refman/8.0/en/sql-mode.html#sqlmode_ansi_quotes
++    $ansiQuotesModes = ['ANSI_QUOTES', 'ANSI'];
++    $isAnsiQuotesMode = FALSE;
++    if (isset($connectionOptions['init_commands']['sql_mode'])) {
++      foreach ($ansiQuotesModes as $mode) {
++        // None of the modes in $ansiQuotesModes are substrings of other modes
++        // that are not in $ansiQuotesModes, so a simple stripos() does not
 +        // return false positives.
-+        if (stripos($this->connectionOptions['init_commands']['sql_mode'], $mode) !== FALSE) {
-+          $is_ansi_quotes_mode = TRUE;
++        if (stripos($connectionOptions['init_commands']['sql_mode'], $mode) !== FALSE) {
++          $isAnsiQuotesMode = TRUE;
 +          break;
 +        }
 +      }
 +    }
-+    if ($this->identifierQuotes === ['"', '"'] && !$is_ansi_quotes_mode) {
++
++    if ($this->identifierQuotes === ['"', '"'] && !$isAnsiQuotesMode) {
 +      $this->identifierQuotes = ['`', '`'];
 +    }
 +
-+    // Manage the table prefix.
-+    $this->connectionOptions['prefix'] ??= '';
-+    $this->setPrefix($this->connectionOptions['prefix']);
-+
-+    // Work out the database driver namespace if none is provided. This is
-+    // normally written to setting.php by installer or set by
-+    // \Drupal\Core\Database\Database::parseConnectionInfo().
-+    $this->connectionOptions['namespace'] ??= (new \ReflectionObject($this))->getNamespaceName();
++    BaseConnection::__construct($connection, $connectionOptions);
 +  }
 +
 +  /**
 +   * {@inheritdoc}
 +   */
-+  public static function open(array &$connection_options = []) {
++  public static function open(array &$connectionOptions = []) {
 +    // Sets mysqli error reporting mode to report errors from mysqli function
 +    // calls and to throw mysqli_sql_exception for errors.
 +    // @see https://www.php.net/manual/en/mysqli-driver.report-mode.php
 +    mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
 +
-+    if (isset($connection_options['_dsn_utf8_fallback']) && $connection_options['_dsn_utf8_fallback'] === TRUE) {
-+      // Only used during the installer version check, as a fallback from utf8mb4.
-+      $charset = 'utf8';
-+    }
-+    else {
-+      $charset = 'utf8mb4';
-+    }
-+
 +    // Allow PDO options to be overridden.
-+    $connection_options += [
++    $connectionOptions += [
 +      'pdo' => [],
 +    ];
 +
 +    try {
 +      $mysqli = @new \mysqli(
-+        $connection_options['host'],
-+        $connection_options['username'],
-+        $connection_options['password'],
-+        $connection_options['database'] ?? '',
-+        !empty($connection_options['port']) ? (int) $connection_options['port'] : 3306,
-+        $connection_options['unix_socket'] ?? ''
++        $connectionOptions['host'],
++        $connectionOptions['username'],
++        $connectionOptions['password'],
++        $connectionOptions['database'] ?? '',
++        !empty($connectionOptions['port']) ? (int) $connectionOptions['port'] : 3306,
++        $connectionOptions['unix_socket'] ?? ''
 +      );
-+      if (!$mysqli->set_charset($charset)) {
-+        throw new InvalidCharsetException('Invalid charset ' . $charset);
++      if (!$mysqli->set_charset('utf8mb4')) {
++        throw new InvalidCharsetException('Invalid charset utf8mb4');
 +      }
 +    }
 +    catch (\mysqli_sql_exception $e) {
@@ -662,13 +774,12 @@ index 00000000000..8d453db869b
 +
 +    // Force MySQL to use the UTF-8 character set. Also set the collation, if a
 +    // certain one has been set; otherwise, MySQL defaults to
-+    // 'utf8mb4_general_ci' (MySQL 5) or 'utf8mb4_0900_ai_ci' (MySQL 8) for
-+    // utf8mb4.
-+    if (!empty($connection_options['collation'])) {
-+      $mysqli->query('SET NAMES ' . $charset . ' COLLATE ' . $connection_options['collation']);
++    // 'utf8mb4_0900_ai_ci' for the 'utf8mb4' character set.
++    if (!empty($connectionOptions['collation'])) {
++      $mysqli->query('SET NAMES utf8mb4 COLLATE ' . $connectionOptions['collation']);
 +    }
 +    else {
-+      $mysqli->query('SET NAMES ' . $charset);
++      $mysqli->query('SET NAMES utf8mb4');
 +    }
 +
 +    // Set MySQL init_commands if not already defined.  Default Drupal's MySQL
@@ -679,21 +790,21 @@ index 00000000000..8d453db869b
 +    // https://www.drupal.org/node/344575 for further discussion. Also, as MySQL
 +    // 5.5 changed the meaning of TRADITIONAL we need to spell out the modes one
 +    // by one.
-+    $connection_options += [
++    $connectionOptions += [
 +      'init_commands' => [],
 +    ];
 +
-+    $connection_options['init_commands'] += [
++    $connectionOptions['init_commands'] += [
 +      'sql_mode' => "SET sql_mode = 'ANSI,TRADITIONAL'",
 +    ];
-+    if (!empty($connection_options['isolation_level'])) {
-+      $connection_options['init_commands'] += [
-+        'isolation_level' => 'SET SESSION TRANSACTION ISOLATION LEVEL ' . strtoupper($connection_options['isolation_level']),
++    if (!empty($connectionOptions['isolation_level'])) {
++      $connectionOptions['init_commands'] += [
++        'isolation_level' => 'SET SESSION TRANSACTION ISOLATION LEVEL ' . strtoupper($connectionOptions['isolation_level']),
 +      ];
 +    }
 +
 +    // Execute initial commands.
-+    foreach ($connection_options['init_commands'] as $sql) {
++    foreach ($connectionOptions['init_commands'] as $sql) {
 +      $mysqli->query($sql);
 +    }
 +
@@ -745,35 +856,28 @@ index 00000000000..8d453db869b
 +}
 diff --git a/core/modules/mysqli/src/Driver/Database/mysqli/ExceptionHandler.php b/core/modules/mysqli/src/Driver/Database/mysqli/ExceptionHandler.php
 new file mode 100644
-index 00000000000..71f2451ef55
+index 00000000000..78e7a331f12
 --- /dev/null
 +++ b/core/modules/mysqli/src/Driver/Database/mysqli/ExceptionHandler.php
-@@ -0,0 +1,71 @@
+@@ -0,0 +1,30 @@
 +<?php
 +
 +declare(strict_types=1);
 +
 +namespace Drupal\mysqli\Driver\Database\mysqli;
 +
-+use Drupal\Component\Utility\Unicode;
-+use Drupal\Core\Database\DatabaseExceptionWrapper;
-+use Drupal\Core\Database\ExceptionHandler as BaseExceptionHandler;
-+use Drupal\Core\Database\Exception\SchemaPrimaryKeyMustBeDroppedException;
-+use Drupal\Core\Database\Exception\SchemaTableColumnSizeTooLargeException;
-+use Drupal\Core\Database\Exception\SchemaTableKeyTooLargeException;
-+use Drupal\Core\Database\IntegrityConstraintViolationException;
 +use Drupal\Core\Database\StatementInterface;
++use Drupal\mysql\Driver\Database\mysql\ExceptionHandler as BaseMySqlExceptionHandler;
 +
 +/**
 + * MySQLi database exception handler class.
 + */
-+class ExceptionHandler extends BaseExceptionHandler {
++class ExceptionHandler extends BaseMySqlExceptionHandler {
 +
 +  /**
 +   * {@inheritdoc}
 +   */
 +  public function handleExecutionException(\Exception $exception, StatementInterface $statement, array $arguments = [], array $options = []): void {
-+
 +    // Close the client statement to release handles.
 +    if ($statement->hasClientStatement()) {
 +      $statement->getClientStatement()->close();
@@ -782,41 +886,7 @@ index 00000000000..71f2451ef55
 +    if (!($exception instanceof \mysqli_sql_exception)) {
 +      throw $exception;
 +    }
-+
-+    // Wrap the exception in another exception, because PHP does not allow
-+    // overriding Exception::getMessage(). Its message is the extra database
-+    // debug information.
-+    $code = is_int($exception->getCode()) ? $exception->getCode() : 0;
-+
-+    // If a max_allowed_packet error occurs the message length is truncated.
-+    // This should prevent the error from recurring if the exception is logged
-+    // to the database using dblog or the like.
-+    if ($code === 1153) {
-+      $message = Unicode::truncateBytes($exception->getMessage(), Connection::MIN_MAX_ALLOWED_PACKET);
-+      throw new DatabaseExceptionWrapper($message, $code, $exception);
-+    }
-+
-+    $message = $exception->getMessage() . ": " . $statement->getQueryString() . "; " . print_r($arguments, TRUE);
-+
-+    // SQLSTATE 23xxx errors indicate an integrity constraint violation. Also,
-+    // in case of attempted INSERT of a record with an undefined column and no
-+    // default value indicated in schema, MySql returns a 1364 error code.
-+    if (substr($exception->getSqlState(), -6, -3) == '23' || $code === 1364) {
-+      throw new IntegrityConstraintViolationException($message, $code, $exception);
-+    }
-+
-+    match ($exception->getSqlState()) {
-+      'HY000' =>  match ($code) {
-+        4111 => throw new SchemaPrimaryKeyMustBeDroppedException($message, $code, $exception),
-+        default => throw new DatabaseExceptionWrapper($message, $code, $exception),
-+      },
-+      '42000' =>  match ($code) {
-+        1071 => throw new SchemaTableKeyTooLargeException($message, $code, $exception),
-+        1074 => throw new SchemaTableColumnSizeTooLargeException($message, $code, $exception),
-+        default => throw new DatabaseExceptionWrapper($message, $code, $exception),
-+      },
-+      default => throw new DatabaseExceptionWrapper($message, $code, $exception),
-+    };
++    $this->rethrowNormalizedException($exception, $exception->getSqlState(), $exception->getCode(), $statement->getQueryString(), $arguments);
 +  }
 +
 +}
@@ -1612,7 +1682,7 @@ index 00000000000..8a9e33abd7c
 +}
 diff --git a/core/modules/mysqli/tests/src/Kernel/mysqli/LargeQueryTest.php b/core/modules/mysqli/tests/src/Kernel/mysqli/LargeQueryTest.php
 new file mode 100644
-index 00000000000..5986537fd1e
+index 00000000000..ff386819cce
 --- /dev/null
 +++ b/core/modules/mysqli/tests/src/Kernel/mysqli/LargeQueryTest.php
 @@ -0,0 +1,52 @@
@@ -1660,7 +1730,7 @@ index 00000000000..5986537fd1e
 +      Database::closeConnection('testMaxAllowedPacketQueryTruncating');
 +      // Got a packet bigger than 'max_allowed_packet' bytes exception thrown.
 +      $this->assertInstanceOf(DatabaseExceptionWrapper::class, $e);
-+      $this->assertEquals(1153, $e->getCode());
++      $this->assertEquals(1153, $e->getPrevious()->getCode());
 +      // 'max_allowed_packet' exception message truncated.
 +      // Use strlen() to count the bytes exactly, not the unicode chars.
 +      $this->assertLessThanOrEqual($max_allowed_packet, strlen($e->getMessage()));
@@ -2284,6 +2354,57 @@ index 7b3754bc34c..d22f433a414 100644
          // Check that the module can be uninstalled and then re-installed again.
          $this->preUnInstallSteps();
          $this->assertTrue(\Drupal::service('module_installer')->uninstall([$module]), "Failed to uninstall '$module' module");
+diff --git a/core/tests/Drupal/FunctionalTests/Bootstrap/UncaughtExceptionTest.php b/core/tests/Drupal/FunctionalTests/Bootstrap/UncaughtExceptionTest.php
+index 80fd287751c..aac21dcff87 100644
+--- a/core/tests/Drupal/FunctionalTests/Bootstrap/UncaughtExceptionTest.php
++++ b/core/tests/Drupal/FunctionalTests/Bootstrap/UncaughtExceptionTest.php
+@@ -203,6 +203,7 @@ public function testLostDatabaseConnection(): void {
+     switch ($this->container->get('database')->driver()) {
+       case 'pgsql':
+       case 'mysql':
++      case 'mysqli':
+         $this->expectedExceptionMessage = $incorrect_username;
+         break;
+ 
+diff --git a/core/tests/Drupal/FunctionalTests/Core/Recipe/StandardRecipeTest.php b/core/tests/Drupal/FunctionalTests/Core/Recipe/StandardRecipeTest.php
+index 4bf46e8d491..68a793f8771 100644
+--- a/core/tests/Drupal/FunctionalTests/Core/Recipe/StandardRecipeTest.php
++++ b/core/tests/Drupal/FunctionalTests/Core/Recipe/StandardRecipeTest.php
+@@ -4,6 +4,7 @@
+ 
+ namespace Drupal\FunctionalTests\Core\Recipe;
+ 
++use Drupal\Core\Extension\ModuleExtensionList;
+ use Drupal\shortcut\Entity\Shortcut;
+ use Drupal\Tests\standard\Functional\StandardTest;
+ use Drupal\user\RoleInterface;
+@@ -35,7 +36,12 @@ public function testStandard(): void {
+     $theme_installer->uninstall(['claro', 'olivero']);
+ 
+     // Determine which modules to uninstall.
+-    $uninstall = array_diff(array_keys(\Drupal::moduleHandler()->getModuleList()), ['user', 'system', 'path_alias', \Drupal::database()->getProvider()]);
++    // If the database module has dependencies, they are expected too.
++    $database_module_extension = \Drupal::service(ModuleExtensionList::class)->get(\Drupal::database()->getProvider());
++    $database_modules = $database_module_extension->requires ? array_keys($database_module_extension->requires) : [];
++    $database_modules[] = \Drupal::database()->getProvider();
++    $keep = array_merge(['user', 'system', 'path_alias'], $database_modules);
++    $uninstall = array_diff(array_keys(\Drupal::moduleHandler()->getModuleList()), $keep);
+     foreach (['shortcut', 'field_config', 'filter_format', 'field_storage_config'] as $entity_type) {
+       $storage = \Drupal::entityTypeManager()->getStorage($entity_type);
+       $storage->delete($storage->loadMultiple());
+diff --git a/core/tests/Drupal/FunctionalTests/ExistingDrupal8StyleDatabaseConnectionInSettingsPhpTest.php b/core/tests/Drupal/FunctionalTests/ExistingDrupal8StyleDatabaseConnectionInSettingsPhpTest.php
+index 01c694b4ef4..883e983966e 100644
+--- a/core/tests/Drupal/FunctionalTests/ExistingDrupal8StyleDatabaseConnectionInSettingsPhpTest.php
++++ b/core/tests/Drupal/FunctionalTests/ExistingDrupal8StyleDatabaseConnectionInSettingsPhpTest.php
+@@ -25,7 +25,7 @@ protected function setUp(): void {
+     parent::setUp();
+ 
+     $driver = Database::getConnection()->driver();
+-    if (!in_array($driver, ['mysql', 'pgsql', 'sqlite'])) {
++    if (!in_array($driver, ['mysql', 'mysqli', 'pgsql', 'sqlite'])) {
+       $this->markTestSkipped("This test does not support the {$driver} database driver.");
+     }
+ 
 diff --git a/core/tests/Drupal/FunctionalTests/Installer/InstallerExistingConfigTestBase.php b/core/tests/Drupal/FunctionalTests/Installer/InstallerExistingConfigTestBase.php
 index 2ac3ae778a4..f7c94963754 100644
 --- a/core/tests/Drupal/FunctionalTests/Installer/InstallerExistingConfigTestBase.php
@@ -2309,6 +2430,29 @@ index 2ac3ae778a4..f7c94963754 100644
 +      foreach ($database_modules as $module) {
          $core_extension['module'][$module] = 0;
          $core_extension['module'] = module_config_sort($core_extension['module']);
+       }
+diff --git a/core/tests/Drupal/FunctionalTests/Update/UpdatePathTestBase.php b/core/tests/Drupal/FunctionalTests/Update/UpdatePathTestBase.php
+index 8b2c4b493e4..13c5b8972ff 100644
+--- a/core/tests/Drupal/FunctionalTests/Update/UpdatePathTestBase.php
++++ b/core/tests/Drupal/FunctionalTests/Update/UpdatePathTestBase.php
+@@ -137,6 +137,18 @@ protected function doInstall() {
+ 
+     // Load the database(s).
+     foreach ($this->databaseDumpFiles as $file) {
++dump($file);
++      // Determine the version of the database dump if specified.
++      $matches = [];
++      $dumpVersion = preg_match('/drupal-(\d+.\d+.\d+)/', $file, $matches) === 1 ? $matches[1] : NULL;
++dump($dumpVersion, Database::getConnection()->getProvider());
++
++      // If the db driver is mysqli, we do not need to run the update tests for
++      // db dumps prior to 11.2 when the module was introduced.
++      if (Database::getConnection()->getProvider() === 'mysqli' && $dumpVersion && version_compare($dumpVersion, '11.2.0', '<')) {
++        $this->markTestSkipped("The mysqli driver was introduced in Drupal 11.2, skip update tests from database at version {$dumpVersion}");
++      }
++
+       if (str_ends_with($file, '.gz')) {
+         $file = "compress.zlib://$file";
        }
 diff --git a/core/tests/Drupal/KernelTests/Core/Database/BasicSyntaxTest.php b/core/tests/Drupal/KernelTests/Core/Database/BasicSyntaxTest.php
 index 079009dc7a5..8725f647e8d 100644
@@ -2388,3 +2532,25 @@ index 6e28787f764..d06d10c82c9 100644
      $this->expectDeprecation("Passing the 'fetch' key as an integer to \$options in query() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/3488338");
      $this->expectDeprecation("Passing the 'fetch' key as an integer to \$options in prepareStatement() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/3488338");
      $this->expectDeprecation("Passing the 'fetch' key as an integer to \$options in execute() is deprecated in drupal:11.2.0 and is removed from drupal:12.0.0. Use a case of \Drupal\Core\Database\FetchAs enum instead. See https://www.drupal.org/node/3488338");
+diff --git a/core/tests/Drupal/KernelTests/Core/Entity/EntityDefinitionUpdateTest.php b/core/tests/Drupal/KernelTests/Core/Entity/EntityDefinitionUpdateTest.php
+index 6437e594ee8..59dd7e44764 100644
+--- a/core/tests/Drupal/KernelTests/Core/Entity/EntityDefinitionUpdateTest.php
++++ b/core/tests/Drupal/KernelTests/Core/Entity/EntityDefinitionUpdateTest.php
+@@ -893,7 +893,7 @@ public function testCreateFieldAndIndexOnSharedTable(): void {
+     $this->assertTrue($this->database->schema()->fieldExists('entity_test_update', 'new_base_field'), "New field 'new_base_field' has been created on the 'entity_test_update' table.");
+     $this->assertTrue($this->database->schema()->indexExists('entity_test_update', 'entity_test_update_field__new_base_field'), "New index 'entity_test_update_field__new_base_field' has been created on the 'entity_test_update' table.");
+     // Check index size in for MySQL.
+-    if (Database::getConnection()->driver() == 'mysql') {
++    if (in_array(Database::getConnection()->driver(), ['mysql', 'mysqli'])) {
+       $result = Database::getConnection()->query('SHOW INDEX FROM {entity_test_update} WHERE key_name = \'entity_test_update_field__new_base_field\' and column_name = \'new_base_field\'')->fetchObject();
+       $this->assertEquals(191, $result->Sub_part, 'The index length has been restricted to 191 characters for UTF8MB4 compatibility.');
+     }
+@@ -922,7 +922,7 @@ public function testCreateIndexUsingEntityStorageSchemaWithData(): void {
+ 
+     $this->assertTrue($this->database->schema()->indexExists('entity_test_update', 'entity_test_update__type_index'), "New index 'entity_test_update__type_index' has been created on the 'entity_test_update' table.");
+     // Check index size in for MySQL.
+-    if (Database::getConnection()->driver() == 'mysql') {
++    if (in_array(Database::getConnection()->driver(), ['mysql', 'mysqli'])) {
+       $result = Database::getConnection()->query('SHOW INDEX FROM {entity_test_update} WHERE key_name = \'entity_test_update__type_index\' and column_name = \'type\'')->fetchObject();
+       $this->assertEquals(191, $result->Sub_part, 'The index length has been restricted to 191 characters for UTF8MB4 compatibility.');
+     }
