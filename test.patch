@@ -79,6 +79,35 @@ index ee6f1e0e176..528875dc427 100644
        [[ $_TARGET_DB == pgsql* ]] && export SIMPLETEST_DB=pgsql://$POSTGRES_USER:$POSTGRES_PASSWORD@database/$POSTGRES_DB?module=pgsql
      - composer install --optimize-autoloader
      - export OTEL_COLLECTOR="$OTEL_COLLECTOR"
+diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
+index 41bd043c5c8..5bdaca3eb39 100644
+--- a/core/lib/Drupal/Core/Database/Connection.php
++++ b/core/lib/Drupal/Core/Database/Connection.php
+@@ -13,6 +13,7 @@
+ use Drupal\Core\Database\Query\Truncate;
+ use Drupal\Core\Database\Query\Update;
+ use Drupal\Core\Database\Statement\FetchAs;
++use Drupal\Core\Database\Statement\PlaceholderType;
+ use Drupal\Core\Database\Transaction\TransactionManagerInterface;
+ use Drupal\Core\Pager\PagerManagerInterface;
+ 
+@@ -389,6 +390,16 @@ public function quoteIdentifiers($sql) {
+     return str_replace(['[', ']'], $this->identifierQuotes, $sql);
+   }
+ 
++  /**
++   * Returns the default placeholder type for SQL statements.
++   *
++   * @return \Drupal\Core\Database\PlaceholderType
++   *   The default placeholder type for SQL statements.
++   */
++  public function placeholderFormat(): PlaceholderType {
++    return PlaceholderType::Named;
++  }
++
+   /**
+    * Get a fully qualified table name.
+    *
 diff --git a/core/lib/Drupal/Core/Database/Database.php b/core/lib/Drupal/Core/Database/Database.php
 index 18c893d4016..f4cdb73a59b 100644
 --- a/core/lib/Drupal/Core/Database/Database.php
@@ -142,6 +171,31 @@ index 00000000000..799e9ca9560
 + */
 +class SchemaPrimaryKeyMustBeDroppedException extends SchemaException implements DatabaseException {
 +}
+diff --git a/core/lib/Drupal/Core/Database/Query/InsertTrait.php b/core/lib/Drupal/Core/Database/Query/InsertTrait.php
+index dff1d86d98c..3e0e2145b97 100644
+--- a/core/lib/Drupal/Core/Database/Query/InsertTrait.php
++++ b/core/lib/Drupal/Core/Database/Query/InsertTrait.php
+@@ -2,6 +2,8 @@
+ 
+ namespace Drupal\Core\Database\Query;
+ 
++use Drupal\Core\Database\Statement\PlaceholderType;
++
+ /**
+  * Provides common functionality for INSERT and UPSERT queries.
+  *
+@@ -161,7 +163,10 @@ protected function getInsertPlaceholderFragment(array $nested_insert_values, arr
+ 
+         $new_placeholder = $max_placeholder + count($insert_values);
+         for ($i = $max_placeholder; $i < $new_placeholder; ++$i) {
+-          $placeholders[] = ':db_insert_placeholder_' . $i;
++          $placeholders[] = match ($this->connection->placeholderFormat()) {
++            PlaceholderType::Named => ':db_insert_placeholder_' . $i,
++            PlaceholderType::Positional => '?',
++          };
+         }
+         $max_placeholder = $new_placeholder;
+         $values[] = '(' . implode(', ', $placeholders) . ')';
 diff --git a/core/lib/Drupal/Core/Database/Statement/PdoResult.php b/core/lib/Drupal/Core/Database/Statement/PdoResult.php
 index 1353ea8e8ad..f046001076a 100644
 --- a/core/lib/Drupal/Core/Database/Statement/PdoResult.php
@@ -197,6 +251,30 @@ index 3e1f104c9f4..fd92d505d1d 100644
  
    /**
     * Sets the default fetch mode for the PDO statement.
+diff --git a/core/lib/Drupal/Core/Database/Statement/PlaceholderType.php b/core/lib/Drupal/Core/Database/Statement/PlaceholderType.php
+new file mode 100644
+index 00000000000..d904600156a
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/Statement/PlaceholderType.php
+@@ -0,0 +1,18 @@
++<?php
++
++declare(strict_types=1);
++
++namespace Drupal\Core\Database\Statement;
++
++/**
++ * Enumeration of the types of possible placeholders in SQL statements.
++ */
++enum PlaceholderType {
++
++  // Placeholders in the named format ':placeholder'.
++  case Named;
++
++  // Placeholders in the positional format '?'.
++  case Positional;
++
++}
 diff --git a/core/lib/Drupal/Core/Database/Statement/StatementBase.php b/core/lib/Drupal/Core/Database/Statement/StatementBase.php
 index c193c5d3502..a52e7434c85 100644
 --- a/core/lib/Drupal/Core/Database/Statement/StatementBase.php
@@ -520,6 +598,49 @@ index 7926175e0dc..9f2a89ca6ea 100644
    }
  
  }
+diff --git a/core/modules/mysql/src/Driver/Database/mysql/Insert.php b/core/modules/mysql/src/Driver/Database/mysql/Insert.php
+index cc9029a6154..023dc2baf52 100644
+--- a/core/modules/mysql/src/Driver/Database/mysql/Insert.php
++++ b/core/modules/mysql/src/Driver/Database/mysql/Insert.php
+@@ -3,6 +3,7 @@
+ namespace Drupal\mysql\Driver\Database\mysql;
+ 
+ use Drupal\Core\Database\Query\Insert as QueryInsert;
++use Drupal\Core\Database\Statement\PlaceholderType;
+ 
+ /**
+  * MySQL implementation of \Drupal\Core\Database\Query\Insert.
+@@ -24,7 +25,11 @@ public function execute() {
+       $values = [];
+       foreach ($this->insertValues as $insert_values) {
+         foreach ($insert_values as $value) {
+-          $values[':db_insert_placeholder_' . $max_placeholder++] = $value;
++          $placeholderKey = match ($this->connection->placeholderFormat()) {
++            PlaceholderType::Named => ':db_insert_placeholder_' . $max_placeholder++,
++            PlaceholderType::Positional => $max_placeholder++,
++          };
++          $values[$placeholderKey] = $value;
+         }
+       }
+     }
+@@ -32,13 +37,14 @@ public function execute() {
+       $values = $this->fromQuery->getArguments();
+     }
+ 
+-    $stmt = $this->connection->prepareStatement((string) $this, $this->queryOptions);
++    $options = array_merge($this->queryOptions, ['placeholder_format' => $this->connection->placeholderFormat()]);
++    $statement = $this->connection->prepareStatement((string) $this, $options);
+     try {
+-      $stmt->execute($values, $this->queryOptions);
++      $statement->execute($values, $this->queryOptions);
+       $last_insert_id = $this->connection->lastInsertId();
+     }
+     catch (\Exception $e) {
+-      $this->connection->exceptionHandler()->handleExecutionException($e, $stmt, $values, $this->queryOptions);
++      $this->connection->exceptionHandler()->handleExecutionException($e, $statement, $values, $this->queryOptions);
+     }
+ 
+     // Re-initialize the values array so that we can re-use this query.
 diff --git a/core/modules/mysql/src/Driver/Database/mysql/Schema.php b/core/modules/mysql/src/Driver/Database/mysql/Schema.php
 index 85e71af18d1..ba8ab6266fc 100644
 --- a/core/modules/mysql/src/Driver/Database/mysql/Schema.php
@@ -670,10 +791,10 @@ index 00000000000..82a476ceb9e
 +    public: false
 diff --git a/core/modules/mysqli/src/Driver/Database/mysqli/Connection.php b/core/modules/mysqli/src/Driver/Database/mysqli/Connection.php
 new file mode 100644
-index 00000000000..d414f3e285e
+index 00000000000..539bfd8694b
 --- /dev/null
 +++ b/core/modules/mysqli/src/Driver/Database/mysqli/Connection.php
-@@ -0,0 +1,180 @@
+@@ -0,0 +1,203 @@
 +<?php
 +
 +declare(strict_types=1);
@@ -684,6 +805,7 @@ index 00000000000..d414f3e285e
 +use Drupal\Core\Database\ConnectionNotDefinedException;
 +use Drupal\Core\Database\DatabaseAccessDeniedException;
 +use Drupal\Core\Database\DatabaseNotFoundException;
++use Drupal\Core\Database\Statement\PlaceholderType;
 +use Drupal\Core\Database\Transaction\TransactionManagerInterface;
 +use Drupal\mysql\Driver\Database\mysql\Connection as BaseMySqlConnection;
 +
@@ -809,6 +931,28 @@ index 00000000000..d414f3e285e
 +    }
 +
 +    return $mysqli;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function placeholderFormat(): PlaceholderType {
++    return PlaceholderType::Positional;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function prepareStatement(string $query, array $options, bool $allow_row_count = FALSE): StatementInterface {
++    try {
++      $query = $this->preprocessStatement($query, $options);
++      $statement = new $this->statementWrapperClass($this, $this->connection, $query, $options, $allow_row_count);
++    }
++    catch (\Exception $e) {
++      $this->exceptionHandler()->handleStatementException($e, $query, $options);
++    }
++
++    return $statement;
 +  }
 +
 +  /**
@@ -1282,10 +1426,10 @@ index 00000000000..8abe671bb79
 +}
 diff --git a/core/modules/mysqli/src/Driver/Database/mysqli/Statement.php b/core/modules/mysqli/src/Driver/Database/mysqli/Statement.php
 new file mode 100644
-index 00000000000..24e8c83501c
+index 00000000000..03cba423087
 --- /dev/null
 +++ b/core/modules/mysqli/src/Driver/Database/mysqli/Statement.php
-@@ -0,0 +1,123 @@
+@@ -0,0 +1,129 @@
 +<?php
 +
 +declare(strict_types=1);
@@ -1294,6 +1438,7 @@ index 00000000000..24e8c83501c
 +
 +use Drupal\Core\Database\Connection;
 +use Drupal\Core\Database\Statement\FetchAs;
++use Drupal\Core\Database\Statement\PlaceholderType;
 +use Drupal\Core\Database\Statement\StatementBase;
 +
 +/**
@@ -1372,10 +1517,15 @@ index 00000000000..24e8c83501c
 +      // Prepare the lower-level statement if it's not been prepared already.
 +      if (!$this->hasClientStatement()) {
 +        // Replace named placeholders with positional ones if needed.
-+        $this->paramsPositions = array_flip(array_keys($args));
-+        $converter = new NamedPlaceholderConverter();
-+        $converter->parse($this->queryString, $args);
-+        [$convertedQueryString, $args] = [$converter->getConvertedSQL(), $converter->getConvertedParameters()];
++        if (($this->driverOpts['placeholder_format'] ?? PlaceholderType::Named) === PlaceholderType::Positional) {
++          $convertedQueryString = $this->queryString;
++        }
++        else {
++          $this->paramsPositions = array_flip(array_keys($args));
++          $converter = new NamedPlaceholderConverter();
++          $converter->parse($this->queryString, $args);
++          [$convertedQueryString, $args] = [$converter->getConvertedSQL(), $converter->getConvertedParameters()];
++        }
 +        $this->clientStatement = $this->clientConnection->prepare($convertedQueryString);
 +      }
 +      else {
@@ -2432,22 +2582,20 @@ index 2ac3ae778a4..f7c94963754 100644
          $core_extension['module'] = module_config_sort($core_extension['module']);
        }
 diff --git a/core/tests/Drupal/FunctionalTests/Update/UpdatePathTestBase.php b/core/tests/Drupal/FunctionalTests/Update/UpdatePathTestBase.php
-index 8b2c4b493e4..cb21ff51f5b 100644
+index 8b2c4b493e4..3ee78e55365 100644
 --- a/core/tests/Drupal/FunctionalTests/Update/UpdatePathTestBase.php
 +++ b/core/tests/Drupal/FunctionalTests/Update/UpdatePathTestBase.php
-@@ -137,6 +137,18 @@ protected function doInstall() {
+@@ -137,6 +137,16 @@ protected function doInstall() {
  
      // Load the database(s).
      foreach ($this->databaseDumpFiles as $file) {
-+dump($file);
 +      // Determine the version of the database dump if specified.
 +      $matches = [];
-+      $dumpVersion = preg_match('/drupal-(\d+.\d+.\d+)/', $file, $matches) === 1 ? $matches[1] : NULL;
-+dump($dumpVersion, Database::getConnection()->getProvider());
++      $dumpVersion = preg_match('/drupal-(\d+\.\d+\.\d+)\./', $file, $matches) === 1 ? $matches[1] : NULL;
 +
 +      // If the db driver is mysqli, we do not need to run the update tests for
 +      // db dumps prior to 11.2 when the module was introduced.
-+      if (Database::getConnection()->getProvider() === 'mysql' && $dumpVersion && version_compare($dumpVersion, '11.2.0', '<')) {
++      if (Database::getConnection()->getProvider() === 'mysqli' && $dumpVersion && version_compare($dumpVersion, '11.2.0', '<')) {
 +        $this->markTestSkipped("The mysqli driver was introduced in Drupal 11.2, skip update tests from database at version {$dumpVersion}");
 +      }
 +
