@@ -80,7 +80,7 @@ index ee6f1e0e176..528875dc427 100644
      - composer install --optimize-autoloader
      - export OTEL_COLLECTOR="$OTEL_COLLECTOR"
 diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
-index 41bd043c5c8..5bdaca3eb39 100644
+index 41bd043c5c8..efee499e7df 100644
 --- a/core/lib/Drupal/Core/Database/Connection.php
 +++ b/core/lib/Drupal/Core/Database/Connection.php
 @@ -13,6 +13,7 @@
@@ -108,6 +108,15 @@ index 41bd043c5c8..5bdaca3eb39 100644
    /**
     * Get a fully qualified table name.
     *
+@@ -968,7 +979,7 @@ public function condition($conjunction) {
+     // Creating an instance of the class Drupal\Core\Database\Query\Condition
+     // should only be created from the database layer. This will allow database
+     // drivers to override the default Condition class.
+-    return new Condition($conjunction);
++    return new Condition($conjunction, $this->placeholderFormat());
+   }
+ 
+   /**
 diff --git a/core/lib/Drupal/Core/Database/Database.php b/core/lib/Drupal/Core/Database/Database.php
 index 18c893d4016..f4cdb73a59b 100644
 --- a/core/lib/Drupal/Core/Database/Database.php
@@ -172,21 +181,44 @@ index 00000000000..799e9ca9560
 +class SchemaPrimaryKeyMustBeDroppedException extends SchemaException implements DatabaseException {
 +}
 diff --git a/core/lib/Drupal/Core/Database/Query/Condition.php b/core/lib/Drupal/Core/Database/Query/Condition.php
-index 89757a754f0..3548e749253 100644
+index 89757a754f0..16c4bd38054 100644
 --- a/core/lib/Drupal/Core/Database/Query/Condition.php
 +++ b/core/lib/Drupal/Core/Database/Query/Condition.php
-@@ -307,15 +307,22 @@ public function compile(Connection $connection, PlaceholderInterface $queryPlace
+@@ -4,6 +4,7 @@
+ 
+ use Drupal\Core\Database\Connection;
+ use Drupal\Core\Database\InvalidQueryException;
++use Drupal\Core\Database\Statement\PlaceholderType;
+ 
+ /**
+  * Generic class for a series of conditions in a query.
+@@ -80,8 +81,13 @@ class Condition implements ConditionInterface, \Countable {
+    *
+    * @param string $conjunction
+    *   The operator to use to combine conditions: 'AND' or 'OR'.
++   * @param \Drupal\Core\Database\Statement\PlaceholderType $placeholderType
++   *   The placeholder type, named or positional.
+    */
+-  public function __construct($conjunction) {
++  public function __construct(
++    $conjunction,
++    protected readonly PlaceholderType $placeholderType,
++  ) {
+     $this->conditions['#conjunction'] = $conjunction;
+   }
+ 
+@@ -307,9 +313,15 @@ public function compile(Connection $connection, PlaceholderInterface $queryPlace
              else {
                // Right hand part is a normal value. Replace the value with a
                // placeholder and add the value as an argument.
 -              $placeholder = ':db_condition_placeholder_' . $queryPlaceholder->nextPlaceholder();
 -              $value_fragment[] = $placeholder;
 -              $arguments[$placeholder] = $value;
-+              $placeholderKey = match ($this->connection->placeholderFormat()) {
++              $placeholderKey = match ($this->placeholderType) {
 +                PlaceholderType::Named => ':db_condition_placeholder_' . $queryPlaceholder->nextPlaceholder(),
 +                PlaceholderType::Positional => $queryPlaceholder->nextPlaceholder(),
 +              };
-+               $value_fragment[] = match ($this->connection->placeholderFormat()) {
++              $value_fragment[] = match ($this->placeholderType) {
 +                PlaceholderType::Named => $placeholderKey,
 +                PlaceholderType::Positional => '?',
 +              };
@@ -194,13 +226,6 @@ index 89757a754f0..3548e749253 100644
              }
            }
            $value_fragment = $operator['prefix'] . implode($operator['delimiter'], $value_fragment) . $operator['postfix'];
-         }
- 
-         // Concatenate the left hand part, operator and right hand part.
-+// dump([__METHOD__, $field_fragment, $operator_fragment, $value_fragment, $arguments]);
-         $condition_fragments[] = trim(implode(' ', [$field_fragment, $operator_fragment, $value_fragment]));
-       }
- 
 diff --git a/core/lib/Drupal/Core/Database/Query/InsertTrait.php b/core/lib/Drupal/Core/Database/Query/InsertTrait.php
 index dff1d86d98c..3e0e2145b97 100644
 --- a/core/lib/Drupal/Core/Database/Query/InsertTrait.php
