@@ -207,10 +207,10 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
             if (self::$currentClassNode instanceof Class_) {
                 if (self::$currentClassNode->getDocComment() === null) {
                     if (self::$testedClassName) {
-                        $newDoc = "/**\n * Tests " . self::$testedClassName . ".\n */\n";
+                        $newDoc = "/**\n * Tests " . self::$testedClassName . ".\n */";
                     }
                     else {
-                        $newDoc = "/**\n * Tests.\n */\n";
+                        $newDoc = "/**\n * Tests.\n */";
                     }
                     self::$currentClassNode->setDocComment(new Doc($newDoc));
                 }
