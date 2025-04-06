@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use PhpParser\Comment\Doc;
 use PhpParser\Node;
 use PhpParser\Node\Expr\Array_;
 use PhpParser\Node\Expr\ClassConstFetch;
@@ -102,6 +103,7 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
         ],
     ];
 
+    private static ?string $testedClassName;
     private static ?string $currentClassName;
     private static ?Node $currentClassNode;
 
@@ -147,11 +149,13 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
             }
 
             if (! $classReflection->isSubclassOf(TestCase::class)) {
+                self::$testedClassName = null;
                 self::$currentClassName = null;
                 self::$currentClassNode = null;
                 return null;
             }
 
+            self::$testedClassName = null;
             self::$currentClassName = $nodeName;
             self::$currentClassNode = $node;
         }
@@ -198,6 +202,20 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
         if ($hasChanged) {
             $this->docBlockUpdater->updateRefactoredNodeWithPhpDocInfo(self::$currentClassNode);
             $this->docBlockUpdater->updateRefactoredNodeWithPhpDocInfo($node);
+
+            // Ensure a class PhpDoc always exists.
+            if (self::$currentClassNode instanceof Class_) {
+                if (self::$currentClassNode->getDocComment() === null) {
+                    if (self::$testedClassName) {
+                        $newDoc = "/**\n * Tests " . self::$testedClassName . ".\n */\n";
+                    }
+                    else {
+                        $newDoc = "/**\n * Tests.\n */\n";
+                    }
+                    self::$currentClassNode->setDocComment(new Doc($newDoc));
+                }
+            }
+
             return $node;
         }
 
@@ -363,7 +381,7 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
         $this->phpDocTagRemover->removeTagValueFromNode($phpDocInfo, $desiredTagValueNode);
 
     }
-    
+
     private function convertCoversDefaultClass(
         Node $node,
         $phpDocInfo,
@@ -373,8 +391,9 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
         $classLikeName = $desiredTagValueNode->value->value;
         $classLikeName = \ltrim($classLikeName, '\\');
         $fullyQualified = new FullyQualified($classLikeName);
+        self::$testedClassName = $fullyQualified->name;
         $classConst = new ClassConstFetch($fullyQualified, 'class');
-        
+
         $attributeGroup = $this->phpAttributeGroupFactory->createFromClassWithItems(
             CoversClass::class,
             [$classConst],
@@ -395,7 +414,7 @@ final class DrupalAnnotationToAttributeRector extends AbstractRector implements 
 
         $legacyCoversValueNode = new PhpDocTagNode('@legacy-covers', $desiredTagValueNode->value);
         $phpDocInfo->addPhpDocTagNode($legacyCoversValueNode);
-        
+
         // cleanup
         $this->phpDocTagRemover->removeTagValueFromNode($phpDocInfo, $desiredTagValueNode);
 
@@ -515,7 +534,7 @@ return RectorConfig::configure()
     ->withPaths([
 #        __DIR__ . '/core/tests/Drupal/Tests/Component/Plugin/Discovery/DiscoveryTraitTest.php',
         __DIR__ . '/core/tests/Drupal/Tests/Component',
-        __DIR__ . '/core/tests/Drupal/KernelTests/Core/Database',
+#        __DIR__ . '/core/tests/Drupal/KernelTests/Core/Database',
 #        __DIR__ . '/core/tests/Drupal/FunctionalJavascriptTests',
 #        __DIR__ . '/core',
 #        __DIR__ . '/composer',
