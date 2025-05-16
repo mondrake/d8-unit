@@ -1,1086 +1,1281 @@
-diff --git a/core/lib/Drupal/Core/Config/ExportStorageManager.php b/core/lib/Drupal/Core/Config/ExportStorageManager.php
-index fdd34cad54c..21c386be581 100644
---- a/core/lib/Drupal/Core/Config/ExportStorageManager.php
-+++ b/core/lib/Drupal/Core/Config/ExportStorageManager.php
-@@ -68,7 +68,7 @@ public function getStorage() {
-     // Wrapping the queries in a transaction for performance gain.
-     $transaction = $this->connection->startTransaction();
-     self::replaceStorageContents($this->active, $this->storage);
--    unset($transaction);
-+    $transaction->commitOrRelease();
- 
-     $this->eventDispatcher->dispatch(new StorageTransformEvent($this->storage), ConfigEvents::STORAGE_TRANSFORM_EXPORT);
- 
-diff --git a/core/lib/Drupal/Core/Config/ImportStorageTransformer.php b/core/lib/Drupal/Core/Config/ImportStorageTransformer.php
-index df02d748794..b9765674b3b 100644
---- a/core/lib/Drupal/Core/Config/ImportStorageTransformer.php
-+++ b/core/lib/Drupal/Core/Config/ImportStorageTransformer.php
-@@ -117,7 +117,7 @@ public function transform(StorageInterface $storage) {
-     // Wrapping the queries in a transaction for performance gain.
-     $transaction = $this->connection->startTransaction();
-     self::replaceStorageContents($storage, $mutable);
--    unset($transaction);
-+    $transaction->commitOrRelease();
- 
-     // Dispatch the event so that event listeners can alter the configuration.
-     $this->eventDispatcher->dispatch(new StorageTransformEvent($mutable), ConfigEvents::STORAGE_TRANSFORM_IMPORT);
-diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
-index 489b2f5f94d..8f55a9e0469 100644
---- a/core/lib/Drupal/Core/Database/Connection.php
-+++ b/core/lib/Drupal/Core/Database/Connection.php
-@@ -223,8 +223,14 @@ public function __destruct() {
-    *   This method exists only to work around a bug caused by Drupal incorrectly
-    *   relying on object destruction order to commit transactions. Xdebug 3.3.0
-    *   changes the order of object destruction when the develop mode is enabled.
-+   *
-+   * @deprecated in drupal:11.3.0 and is removed from drupal:13.0.0. There is no
-+   *   replacement.
-+   *
-+   * @see https://www.drupal.org/node/3524461
-    */
-   public function commitAll() {
-+    @trigger_error(__METHOD__ . '() is deprecated in drupal:11.3.0 and is removed from drupal:13.0.0. There is no replacement. See https://www.drupal.org/node/3524461', E_USER_DEPRECATED);
-     $manager = $this->transactionManager();
-     if ($manager->inTransaction() && method_exists($manager, 'commitAll')) {
-       $this->transactionManager()->commitAll();
-diff --git a/core/lib/Drupal/Core/Database/Database.php b/core/lib/Drupal/Core/Database/Database.php
-index e76bc2d6991..7f09ea4e4ad 100644
---- a/core/lib/Drupal/Core/Database/Database.php
-+++ b/core/lib/Drupal/Core/Database/Database.php
-@@ -448,17 +448,9 @@ public static function closeConnection($target = NULL, $key = NULL) {
-       $key = self::$activeKey;
-     }
-     if (isset($target) && isset(self::$connections[$key][$target])) {
--      if (self::$connections[$key][$target] instanceof Connection) {
--        self::$connections[$key][$target]->commitAll();
--      }
-       unset(self::$connections[$key][$target]);
-     }
-     elseif (isset(self::$connections[$key])) {
--      foreach (self::$connections[$key] as $connection) {
--        if ($connection instanceof Connection) {
--          $connection->commitAll();
--        }
--      }
-       unset(self::$connections[$key]);
-     }
- 
-@@ -626,8 +618,14 @@ public static function getConnectionInfoAsUrl($key = 'default') {
-    *   This method exists only to work around a bug caused by Drupal incorrectly
-    *   relying on object destruction order to commit transactions. Xdebug 3.3.0
-    *   changes the order of object destruction when the develop mode is enabled.
-+   *
-+   * @deprecated in drupal:11.3.0 and is removed from drupal:13.0.0. There is no
-+   *   replacement.
-+   *
-+   * @see https://www.drupal.org/node/3524461
-    */
-   public static function commitAllOnShutdown(bool $shutdown = FALSE): void {
-+    @trigger_error(__METHOD__ . '() is deprecated in drupal:11.3.0 and is removed from drupal:13.0.0. There is no replacement. See https://www.drupal.org/node/3524461', E_USER_DEPRECATED);
-     static $registered = FALSE;
- 
-     if ($shutdown) {
-diff --git a/core/lib/Drupal/Core/Database/Query/Insert.php b/core/lib/Drupal/Core/Database/Query/Insert.php
-index 4657e5c3e5e..08829deca37 100644
---- a/core/lib/Drupal/Core/Database/Query/Insert.php
-+++ b/core/lib/Drupal/Core/Database/Query/Insert.php
-@@ -84,6 +84,7 @@ public function execute() {
-         $stmt->execute($insert_values, $this->queryOptions);
-         $last_insert_id = $this->connection->lastInsertId();
-       }
-+      $transaction->commitOrRelease();
-     }
-     catch (\Exception $e) {
-       if (isset($transaction)) {
-diff --git a/core/lib/Drupal/Core/Database/Transaction.php b/core/lib/Drupal/Core/Database/Transaction.php
-index b8693e4bb76..f0c222c4032 100644
---- a/core/lib/Drupal/Core/Database/Transaction.php
-+++ b/core/lib/Drupal/Core/Database/Transaction.php
-@@ -5,9 +5,6 @@
- /**
-  * A wrapper class for creating and managing database transactions.
-  *
-- * To begin a transaction, simply start it. When the object goes out of scope
-- * and is destroyed it will automatically commit.
-- *
-  * In the vast majority of cases, you should not instantiate this class
-  * directly. Instead, call ->startTransaction(), from the appropriate connection
-  * object.
-@@ -21,10 +18,6 @@ public function __construct(
-     protected readonly string $name,
-     protected readonly string $id,
-   ) {
--    // Transactions rely on objects being destroyed in order to be committed.
--    // PHP makes no guarantee about the order in which objects are destroyed so
--    // ensure all transactions are committed on shutdown.
--    Database::commitAllOnShutdown();
-   }
- 
-   /**
-diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
-index fa1a309a767..0a0d84a62e9 100644
---- a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
-+++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
-@@ -101,6 +101,14 @@ abstract class TransactionManagerBase implements TransactionManagerInterface {
-    */
-   private ClientConnectionTransactionState $connectionTransactionState;
- 
-+  /**
-+   * Indicates if a exception was thrown.
-+   *
-+   * This is needed to manage destruction of objects after a transaction was
-+   * thrown on an active stack.
-+   */
-+  private bool $exceptionThrown = FALSE;
-+
-   /**
-    * Whether to trigger warnings when unpiling a void transaction.
-    *
-@@ -165,8 +173,14 @@ protected function stack(): array {
-    *   This method exists only to work around a bug caused by Drupal incorrectly
-    *   relying on object destruction order to commit transactions. Xdebug 3.3.0
-    *   changes the order of object destruction when the develop mode is enabled.
-+   *
-+   * @deprecated in drupal:11.3.0 and is removed from drupal:13.0.0. There is no
-+   *   replacement.
-+   *
-+   * @see https://www.drupal.org/node/3524461
-    */
-   public function commitAll(): void {
-+    @trigger_error(__METHOD__ . '() is deprecated in drupal:11.3.0 and is removed from drupal:13.0.0. There is no replacement. See https://www.drupal.org/node/3524461', E_USER_DEPRECATED);
-     foreach (array_reverse($this->stack()) as $id => $item) {
-       $this->unpile($item->name, $id);
-     }
-@@ -264,17 +278,20 @@ public function push(string $name = ''): Transaction {
-     }
- 
-     if ($this->has($name)) {
-+      $this->exceptionThrown = TRUE;
-       throw new TransactionNameNonUniqueException("A transaction named {$name} is already in use. Active stack: " . $this->dumpStackItemsAsString());
-     }
- 
-     // Define a unique ID for the transaction.
-     $id = uniqid('', TRUE);
-+dump([__METHOD__, $this->connectionTransactionState ?? 'nah', $this->dumpStackItemsAsString(), $name, $id]);
- 
-     // Do the client-level processing.
-     if ($this->stackDepth() === 0) {
-       $this->beginClientTransaction();
-       $type = StackItemType::Root;
-       $this->setConnectionTransactionState(ClientConnectionTransactionState::Active);
-+      $this->exceptionThrown = FALSE;
-       // Only set ::rootId if there's not one set already, which may happen in
-       // case of broken transactions.
-       if ($this->rootId === NULL) {
-@@ -315,6 +332,7 @@ public function push(string $name = ''): Transaction {
-    * @internal
-    */
-   public function purge(string $name, string $id): void {
-+dump([__METHOD__, $this->getConnectionTransactionState(), $this->dumpStackItemsAsString(), $name, $id]);
-     // If this is a 'root' transaction, and it is voided (that is, no longer in
-     // the stack), then the transaction on the database is no longer active. An
-     // action such as a commit, a release savepoint, a rollback, or a DDL
-@@ -336,6 +354,15 @@ public function purge(string $name, string $id): void {
-       return;
-     }
- 
-+    // We deprecate auto-commit on destruction, but in case an exception is
-+    // thrown, we still need to destruct and cleanup objects in relation to the
-+    // underlying database transaction, so we do not trigger the error in such
-+    // circumstance.
-+    if (!$this->exceptionThrown) {
-+      @trigger_error('Database commit by letting a Transaction object go out of scope is deprecated in drupal:11.3.0 and is removed from drupal:13.0.0. Commit explicitly via Transaction::commitOrRelease() instead. See https://www.drupal.org/node/3524461', E_USER_DEPRECATED);
-+    }
-+
-+    // Commit the transaction.
-     // When we get here, the transaction (or savepoint) is still active on the
-     // database. We can unpile it, and if we are left with no more items in the
-     // stack, we can also process the post transaction callbacks.
-@@ -351,6 +378,7 @@ public function purge(string $name, string $id): void {
-    * {@inheritdoc}
-    */
-   public function unpile(string $name, string $id): void {
-+dump([__METHOD__, $this->getConnectionTransactionState(), $this->dumpStackItemsAsString(), $name, $id]);
-     // If the transaction was voided, we cannot unpile. Skip but trigger a user
-     // warning if requested.
-     if ($this->getConnectionTransactionState() === ClientConnectionTransactionState::Voided) {
-@@ -360,9 +388,14 @@ public function unpile(string $name, string $id): void {
-       return;
-     }
- 
-+    if ($this->getConnectionTransactionState() === ClientConnectionTransactionState::Committed) {
-+      return;
-+    }
-+
-     // If there is no $id to commit, or if $id does not correspond to the one
-     // in the stack for that $name, the commit is out of order.
-     if (!isset($this->stack()[$id]) || $this->stack()[$id]->name !== $name) {
-+      $this->exceptionThrown = TRUE;
-       throw new TransactionOutOfOrderException("Error attempting commit of {$id}\\{$name}. Active stack: " . $this->dumpStackItemsAsString());
-     }
- 
-@@ -387,8 +420,10 @@ public function unpile(string $name, string $id): void {
-    *   If the commit of the root transaction failed.
-    */
-   protected function commit(string $name, string $id): void {
-+#dump([__METHOD__, $this->getConnectionTransactionState(), $this->dumpStackItemsAsString(), $name, $id]);
-     if ($this->getConnectionTransactionState() !== ClientConnectionTransactionState::Active) {
-       // The stack got corrupted.
-+      $this->exceptionThrown = TRUE;
-       throw new TransactionOutOfOrderException("Transaction {$id}\\{$name} is out of order. Active stack: " . $this->dumpStackItemsAsString());
-     }
- 
-@@ -412,6 +447,7 @@ protected function commit(string $name, string $id): void {
-     }
-     else {
-       // The stack got corrupted.
-+      $this->exceptionThrown = TRUE;
-       throw new TransactionOutOfOrderException("Transaction {$id}/{$name} is out of order. Active stack: " . $this->dumpStackItemsAsString());
-     }
-   }
-@@ -420,16 +456,18 @@ protected function commit(string $name, string $id): void {
-    * {@inheritdoc}
-    */
-   public function rollback(string $name, string $id): void {
-+dump([__METHOD__, $this->getConnectionTransactionState(), $this->dumpStackItemsAsString(), $name, $id]);
-     // If the transaction was voided, we cannot rollback. Fail silently but
-     // trigger a user warning.
-     if ($this->getConnectionTransactionState() === ClientConnectionTransactionState::Voided) {
--      $this->connectionTransactionState = ClientConnectionTransactionState::RollbackFailed;
-+      $this->setConnectionTransactionState(ClientConnectionTransactionState::RollbackFailed);
-       trigger_error('Transaction::rollBack() failed because of a prior execution of a DDL statement.', E_USER_WARNING);
-       return;
-     }
- 
-     // Rolled back item should match the last one in stack.
-     if ($id != array_key_last($this->stack()) || $name !== $this->stack()[$id]->name) {
-+      $this->exceptionThrown = TRUE;
-       throw new TransactionOutOfOrderException("Error attempting rollback of {$id}\\{$name}. Active stack: " . $this->dumpStackItemsAsString());
-     }
- 
-@@ -456,12 +494,14 @@ public function rollback(string $name, string $id): void {
-       }
-       else {
-         // The stack got corrupted.
-+        $this->exceptionThrown = TRUE;
-         throw new TransactionOutOfOrderException("Error attempting rollback of {$id}\\{$name}. Active stack: " . $this->dumpStackItemsAsString());
-       }
-       return;
-     }
- 
-     // The stack got corrupted.
-+    $this->exceptionThrown = TRUE;
-     throw new TransactionOutOfOrderException("Error attempting rollback of {$id}\\{$name}. Active stack: " . $this->dumpStackItemsAsString());
-   }
- 
-@@ -470,6 +510,7 @@ public function rollback(string $name, string $id): void {
-    */
-   public function addPostTransactionCallback(callable $callback): void {
-     if (!$this->inTransaction()) {
-+      $this->exceptionThrown = TRUE;
-       throw new \LogicException('Root transaction end callbacks can only be added when there is an active transaction.');
-     }
-     $this->postTransactionCallbacks[] = $callback;
-@@ -537,6 +578,7 @@ protected function processRootRollback(): void {
-   protected function processRootCommit(): void {
-     $clientCommit = $this->commitClientTransaction();
-     if (!$clientCommit) {
-+      $this->exceptionThrown = TRUE;
-       throw new TransactionCommitFailedException();
-     }
-   }
-diff --git a/core/lib/Drupal/Core/Database/database.api.php b/core/lib/Drupal/Core/Database/database.api.php
-index 62d63d36716..a0edf0114ac 100644
---- a/core/lib/Drupal/Core/Database/database.api.php
-+++ b/core/lib/Drupal/Core/Database/database.api.php
-@@ -159,18 +159,16 @@
-  * @endcode
-  *
-  * @section sec_transaction Transactions
-- * Drupal supports transactions, including a transparent fallback for
-- * databases that do not support transactions. To start a new transaction,
-- * call startTransaction(), like this:
-+ * Drupal supports transactions. To start a new transaction, call
-+ * startTransaction(), like this:
-  * @code
-  * $transaction = \Drupal::database()->startTransaction();
-  * @endcode
-- * The transaction will remain open for as long as the variable $transaction
-- * remains in scope; when $transaction is destroyed, the transaction will be
-- * committed. If your transaction is nested inside of another then Drupal will
-- * track each transaction and only commit the outer-most transaction when the
-- * last transaction object goes out of scope (when all relevant queries have
-- * completed successfully).
-+ * The transaction needs to be explicitly committed or rolled back once you
-+ * have completed the database operations requested. If your transaction is
-+ * nested inside of another then Drupal will track each transaction and only
-+ * commit the outer-most transaction when the last transaction object is
-+ * committed (when all relevant queries have completed successfully).
-  *
-  * Example:
-  * @code
-@@ -190,6 +188,9 @@
-  *
-  *     my_other_function($id);
-  *
-+ *     // The transaction has completed, commit it here.
-+ *     $transaction->commitOrRelease();
-+ *
-  *     return $id;
-  *   }
-  *   catch (Exception $e) {
-diff --git a/core/lib/Drupal/Core/Entity/Sql/SqlContentEntityStorage.php b/core/lib/Drupal/Core/Entity/Sql/SqlContentEntityStorage.php
-index 459743cfc46..b001167d386 100644
---- a/core/lib/Drupal/Core/Entity/Sql/SqlContentEntityStorage.php
-+++ b/core/lib/Drupal/Core/Entity/Sql/SqlContentEntityStorage.php
-@@ -8,6 +8,7 @@
- use Drupal\Core\Database\DatabaseExceptionWrapper;
- use Drupal\Core\Database\SchemaException;
- use Drupal\Core\Database\Statement\FetchAs;
-+use Drupal\Core\Database\TransactionOutOfOrderException;
- use Drupal\Core\Entity\ContentEntityInterface;
- use Drupal\Core\Entity\ContentEntityStorageBase;
- use Drupal\Core\Entity\ContentEntityTypeInterface;
-@@ -751,13 +752,19 @@ public function delete(array $entities) {
-     try {
-       $transaction = $this->database->startTransaction();
-       parent::delete($entities);
-+      $transaction->commitOrRelease();
- 
-       // Ignore replica server temporarily.
-       \Drupal::service('database.replica_kill_switch')->trigger();
-     }
-     catch (\Exception $e) {
-       if (isset($transaction)) {
--        $transaction->rollBack();
-+        try {
-+          $transaction->rollBack();
-+        }
-+        catch (TransactionOutOfOrderException $rollbackException) {
-+          Error::logException(\Drupal::logger($this->entityTypeId), $rollbackException);
-+        }
-       }
-       Error::logException(\Drupal::logger($this->entityTypeId), $e);
-       throw new EntityStorageException($e->getMessage(), $e->getCode(), $e);
-@@ -802,6 +809,7 @@ public function save(EntityInterface $entity) {
-     try {
-       $transaction = $this->database->startTransaction();
-       $return = parent::save($entity);
-+      $transaction->commitOrRelease();
- 
-       // Ignore replica server temporarily.
-       \Drupal::service('database.replica_kill_switch')->trigger();
-@@ -809,7 +817,12 @@ public function save(EntityInterface $entity) {
-     }
-     catch (\Exception $e) {
-       if (isset($transaction)) {
--        $transaction->rollBack();
-+        try {
-+          $transaction->rollBack();
-+        }
-+        catch (TransactionOutOfOrderException $rollbackException) {
-+          Error::logException(\Drupal::logger($this->entityTypeId), $rollbackException);
-+        }
-       }
-       Error::logException(\Drupal::logger($this->entityTypeId), $e);
-       throw new EntityStorageException($e->getMessage(), $e->getCode(), $e);
-@@ -853,12 +866,19 @@ public function restore(EntityInterface $entity) {
-       // Insert the entity data in the dedicated tables.
-       $this->saveToDedicatedTables($entity, FALSE, []);
- 
-+      $transaction->commitOrRelease();
-+
-       // Ignore replica server temporarily.
-       \Drupal::service('database.replica_kill_switch')->trigger();
-     }
-     catch (\Exception $e) {
-       if (isset($transaction)) {
--        $transaction->rollBack();
-+        try {
-+          $transaction->rollBack();
-+        }
-+        catch (TransactionOutOfOrderException $rollbackException) {
-+          Error::logException(\Drupal::logger($this->entityTypeId), $rollbackException);
-+        }
-       }
-       Error::logException(\Drupal::logger($this->entityTypeId), $e);
-       throw new EntityStorageException($e->getMessage(), $e->getCode(), $e);
-diff --git a/core/lib/Drupal/Core/Entity/Sql/SqlContentEntityStorageSchema.php b/core/lib/Drupal/Core/Entity/Sql/SqlContentEntityStorageSchema.php
-index 6473a846133..4d230f23969 100644
---- a/core/lib/Drupal/Core/Entity/Sql/SqlContentEntityStorageSchema.php
-+++ b/core/lib/Drupal/Core/Entity/Sql/SqlContentEntityStorageSchema.php
-@@ -789,6 +789,10 @@ public function onFieldStorageDefinitionDelete(FieldStorageDefinitionInterface $
-             ->from($this->getSelectQueryForFieldStorageDeletion($revision_table, $shared_table_field_columns, $dedicated_table_field_columns, $field_table_name))
-             ->execute();
-         }
-+
-+        if (isset($transaction)) {
-+          $transaction->commitOrRelease();
-+        }
-       }
-       catch (\Exception $e) {
-         if ($this->database->supportsTransactionalDDL()) {
-@@ -1742,6 +1746,10 @@ protected function updateDedicatedTableSchema(FieldStorageDefinitionInterface $s
-         // to a dedicated table schema, hence we should use the proper API.
-         $this->performFieldSchemaOperation('delete', $original);
-         $this->performFieldSchemaOperation('create', $storage_definition);
-+
-+        if (isset($transaction)) {
-+          $transaction->commitOrRelease();
-+        }
-       }
-       catch (\Exception $e) {
-         if ($this->database->supportsTransactionalDDL()) {
-@@ -1836,6 +1844,10 @@ protected function updateSharedTableSchema(FieldStorageDefinitionInterface $stor
-         // to a schema table schema, hence we should use the proper API.
-         $this->performFieldSchemaOperation('delete', $original);
-         $this->performFieldSchemaOperation('create', $storage_definition);
-+
-+        if (isset($transaction)) {
-+          $transaction->commitOrRelease();
-+        }
-       }
-       catch (\Exception $e) {
-         if ($this->database->supportsTransactionalDDL()) {
-diff --git a/core/lib/Drupal/Core/EventSubscriber/MenuRouterRebuildSubscriber.php b/core/lib/Drupal/Core/EventSubscriber/MenuRouterRebuildSubscriber.php
-index 72e49111bac..0c0b31080f6 100644
---- a/core/lib/Drupal/Core/EventSubscriber/MenuRouterRebuildSubscriber.php
-+++ b/core/lib/Drupal/Core/EventSubscriber/MenuRouterRebuildSubscriber.php
-@@ -57,14 +57,15 @@ public function onRouterRebuild($event) {
-   protected function menuLinksRebuild() {
-     if ($this->lock->acquire(__FUNCTION__)) {
-       try {
--        $transaction = $this->connection->startTransaction();
-         // Ensure the menu links are up to date.
-+        $transaction = $this->connection->startTransaction();
-         $this->menuLinkManager->rebuild();
-+        $transaction->commitOrRelease();
-         // Ignore any database replicas temporarily.
-         $this->replicaKillSwitch->trigger();
-       }
-       catch (\Exception $e) {
--        if (isset($transaction)) {
-+        if (isset($transaction) && $this->connection->inTransaction()) {
-           $transaction->rollBack();
-         }
-         Error::logException($this->logger, $e);
-diff --git a/core/lib/Drupal/Core/Menu/MenuTreeStorage.php b/core/lib/Drupal/Core/Menu/MenuTreeStorage.php
-index fb5d75a9c2d..2c1cef40e69 100644
---- a/core/lib/Drupal/Core/Menu/MenuTreeStorage.php
-+++ b/core/lib/Drupal/Core/Menu/MenuTreeStorage.php
-@@ -304,6 +304,7 @@ protected function doSave(array $link) {
-         $this->updateParentalStatus($original);
-       }
-       $this->updateParentalStatus($link);
-+      $transaction->commitOrRelease();
-     }
-     catch (\Exception $e) {
-       if (isset($transaction)) {
-diff --git a/core/lib/Drupal/Core/Routing/MatcherDumper.php b/core/lib/Drupal/Core/Routing/MatcherDumper.php
-index 4907172f7df..b22464d9a5b 100644
---- a/core/lib/Drupal/Core/Routing/MatcherDumper.php
-+++ b/core/lib/Drupal/Core/Routing/MatcherDumper.php
-@@ -159,6 +159,8 @@ public function dump(array $options = []): string {
-         }
-         $insert->execute();
-       }
-+
-+      $transaction->commitOrRelease();
-     }
-     catch (\Exception $e) {
-       if (isset($transaction)) {
-diff --git a/core/modules/pgsql/src/Driver/Database/pgsql/Connection.php b/core/modules/pgsql/src/Driver/Database/pgsql/Connection.php
-index 40b2de75cf0..1de3caa18ea 100644
---- a/core/modules/pgsql/src/Driver/Database/pgsql/Connection.php
-+++ b/core/modules/pgsql/src/Driver/Database/pgsql/Connection.php
-@@ -85,6 +85,12 @@ class Connection extends DatabaseConnection implements SupportsTemporaryTablesIn
-    * @see ::addSavepoint()
-    * @see ::releaseSavepoint()
-    * @see ::rollbackSavepoint()
-+   *
-+   * @deprecated in drupal:11.3.0 and is removed from drupal:13.0.0. Use
-+   *   TransactionManager to start a transaction then call ::commitOrRelease()
-+   *   or ::rollback() on it.
-+   *
-+   * @see https://www.drupal.org/node/3524461
-    */
-   protected array $savepoints = [];
- 
-@@ -227,13 +233,19 @@ public function query($query, array $args = [], $options = []) {
-       // mimic MySQL and SQLite transactions which don't fail if a single query
-       // fails. This is important for tables that are created on demand. For
-       // example, \Drupal\Core\Cache\DatabaseBackend.
--      $this->addSavepoint();
-+      if ($this->inTransaction()) {
-+        $savepoint = $this->startTransaction('mimic_implicit_commit');
-+      }
-       try {
-         $return = parent::query($query, $args, $options);
--        $this->releaseSavepoint();
-+        if (isset($savepoint)) {
-+          $savepoint->commitOrRelease();
-+        }
-       }
-       catch (\Exception $e) {
--        $this->rollbackSavepoint();
-+        if (isset($savepoint)) {
-+          $savepoint->rollback();
-+        }
-         throw $e;
-       }
-     }
-@@ -378,8 +390,15 @@ public function getFullQualifiedTableName($table) {
-    * @param string $savepoint_name
-    *   A string representing the savepoint name. By default,
-    *   "mimic_implicit_commit" is used.
-+   *
-+   * @deprecated in drupal:11.3.0 and is removed from drupal:13.0.0. Use
-+   *   TransactionManager to start a transaction then call ::commitOrRelease()
-+   *   or ::rollback() on it.
-+   *
-+   * @see https://www.drupal.org/node/3524461
-    */
-   public function addSavepoint($savepoint_name = 'mimic_implicit_commit') {
-+    @trigger_error(__METHOD__ . '() is deprecated in drupal:11.3.0 and is removed from drupal:13.0.0. Use TransactionManager to start a transaction then call ::commitOrRelease() or ::rollback() on it. See https://www.drupal.org/node/3524461', E_USER_DEPRECATED);
-     if ($this->inTransaction()) {
-       $this->savepoints[$savepoint_name] = $this->startTransaction($savepoint_name);
-     }
-@@ -391,8 +410,15 @@ public function addSavepoint($savepoint_name = 'mimic_implicit_commit') {
-    * @param string $savepoint_name
-    *   A string representing the savepoint name. By default,
-    *   "mimic_implicit_commit" is used.
-+   *
-+   * @deprecated in drupal:11.3.0 and is removed from drupal:13.0.0. Use
-+   *   TransactionManager to start a transaction then call ::commitOrRelease()
-+   *   or ::rollback() on it.
-+   *
-+   * @see https://www.drupal.org/node/3524461
-    */
-   public function releaseSavepoint($savepoint_name = 'mimic_implicit_commit') {
-+    @trigger_error(__METHOD__ . '() is deprecated in drupal:11.3.0 and is removed from drupal:13.0.0. Use TransactionManager to start a transaction then call ::commitOrRelease() or ::rollback() on it. See https://www.drupal.org/node/3524461', E_USER_DEPRECATED);
-     if ($this->inTransaction() && $this->transactionManager()->has($savepoint_name)) {
-       unset($this->savepoints[$savepoint_name]);
-     }
-@@ -404,8 +430,15 @@ public function releaseSavepoint($savepoint_name = 'mimic_implicit_commit') {
-    * @param string $savepoint_name
-    *   A string representing the savepoint name. By default,
-    *   "mimic_implicit_commit" is used.
-+   *
-+   * @deprecated in drupal:11.3.0 and is removed from drupal:13.0.0. Use
-+   *   TransactionManager to start a transaction then call ::commitOrRelease()
-+   *   or ::rollback() on it.
-+   *
-+   * @see https://www.drupal.org/node/3524461
-    */
-   public function rollbackSavepoint($savepoint_name = 'mimic_implicit_commit') {
-+    @trigger_error(__METHOD__ . '() is deprecated in drupal:11.3.0 and is removed from drupal:13.0.0. Use TransactionManager to start a transaction then call ::commitOrRelease() or ::rollback() on it. See https://www.drupal.org/node/3524461', E_USER_DEPRECATED);
-     if ($this->inTransaction() && $this->transactionManager()->has($savepoint_name)) {
-       $this->savepoints[$savepoint_name]->rollBack();
-       unset($this->savepoints[$savepoint_name]);
-diff --git a/core/modules/pgsql/src/Driver/Database/pgsql/Delete.php b/core/modules/pgsql/src/Driver/Database/pgsql/Delete.php
-index 9585a9c4bc5..1502d229096 100644
---- a/core/modules/pgsql/src/Driver/Database/pgsql/Delete.php
-+++ b/core/modules/pgsql/src/Driver/Database/pgsql/Delete.php
-@@ -13,17 +13,22 @@ class Delete extends QueryDelete {
-    * {@inheritdoc}
-    */
-   public function execute() {
--    $this->connection->addSavepoint();
-+    if ($this->connection->inTransaction()) {
-+      $savepoint = $this->connection->startTransaction('mimic_implicit_commit');
-+    }
-     try {
-       $result = parent::execute();
-+      if (isset($savepoint)) {
-+        $savepoint->commitOrRelease();
-+      }
-+      return $result;
-     }
-     catch (\Exception $e) {
--      $this->connection->rollbackSavepoint();
-+      if (isset($savepoint)) {
-+        $savepoint->rollback();
-+      }
-       throw $e;
-     }
--    $this->connection->releaseSavepoint();
--
--    return $result;
-   }
- 
- }
-diff --git a/core/modules/pgsql/src/Driver/Database/pgsql/Insert.php b/core/modules/pgsql/src/Driver/Database/pgsql/Insert.php
-index 223daeb8d8a..e51b8c8a3cc 100644
---- a/core/modules/pgsql/src/Driver/Database/pgsql/Insert.php
-+++ b/core/modules/pgsql/src/Driver/Database/pgsql/Insert.php
-@@ -86,16 +86,22 @@ public function execute() {
-     // mimic MySQL and SQLite transactions which don't fail if a single query
-     // fails. This is important for tables that are created on demand. For
-     // example, \Drupal\Core\Cache\DatabaseBackend.
--    $this->connection->addSavepoint();
-+    if ($this->connection->inTransaction()) {
-+      $savepoint = $this->connection->startTransaction('mimic_implicit_commit');
-+    }
-     try {
-       $stmt->execute(NULL, $this->queryOptions);
-       if (isset($table_information->serial_fields[0])) {
-         $last_insert_id = $stmt->fetchField();
-       }
--      $this->connection->releaseSavepoint();
-+      if (isset($savepoint)) {
-+        $savepoint->commitOrRelease();
-+      }
-     }
-     catch (\Exception $e) {
--      $this->connection->rollbackSavepoint();
-+      if (isset($savepoint)) {
-+        $savepoint->rollback();
-+      }
-       $this->connection->exceptionHandler()->handleExecutionException($e, $stmt, [], $this->queryOptions);
-     }
- 
-diff --git a/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php b/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php
-index 440dc7179db..a7eade89dd9 100644
---- a/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php
-+++ b/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php
-@@ -147,7 +147,10 @@ public function queryTableInformation($table) {
-         'blob_fields' => [],
-         'sequences' => [],
-       ];
--      $this->connection->addSavepoint();
-+
-+      if ($this->connection->inTransaction()) {
-+        $savepoint = $this->connection->startTransaction('mimic_implicit_commit');
-+      }
- 
-       try {
-         // The bytea columns and sequences for a table can be found in
-@@ -171,10 +174,14 @@ public function queryTableInformation($table) {
-         ]);
-       }
-       catch (\Exception $e) {
--        $this->connection->rollbackSavepoint();
-+        if (isset($savepoint)) {
-+          $savepoint->rollback();
-+        }
-         throw $e;
-       }
--      $this->connection->releaseSavepoint();
-+      if (isset($savepoint)) {
-+        $savepoint->commitOrRelease();
-+      }
- 
-       // If the table information does not yet exist in the PostgreSQL
-       // metadata, then return the default table information here, so that it
-@@ -260,7 +267,9 @@ public function queryFieldInformation($table, $field, $constraint_type = 'c') {
-     $schema = $prefixInfo['schema'];
-     $table_name = $prefixInfo['table'];
- 
--    $this->connection->addSavepoint();
-+    if ($this->connection->inTransaction()) {
-+      $savepoint = $this->connection->startTransaction('mimic_implicit_commit');
-+    }
- 
-     try {
-       $checks = $this->connection->query("SELECT conname FROM pg_class cl INNER JOIN pg_constraint co ON co.conrelid = cl.oid INNER JOIN pg_attribute attr ON attr.attrelid = cl.oid AND attr.attnum = ANY (co.conkey) INNER JOIN pg_namespace ns ON cl.relnamespace = ns.oid WHERE co.contype = :constraint_type AND ns.nspname = :schema AND cl.relname = :table AND attr.attname = :column", [
-@@ -271,11 +280,15 @@ public function queryFieldInformation($table, $field, $constraint_type = 'c') {
-       ]);
-     }
-     catch (\Exception $e) {
--      $this->connection->rollbackSavepoint();
-+      if (isset($savepoint)) {
-+        $savepoint->rollback();
-+      }
-       throw $e;
-     }
- 
--    $this->connection->releaseSavepoint();
-+    if (isset($savepoint)) {
-+      $savepoint->commitOrRelease();
-+    }
- 
-     $field_information = $checks->fetchCol();
- 
-diff --git a/core/modules/pgsql/src/Driver/Database/pgsql/Select.php b/core/modules/pgsql/src/Driver/Database/pgsql/Select.php
-index ac3adaceaa5..a0f15be8083 100644
---- a/core/modules/pgsql/src/Driver/Database/pgsql/Select.php
-+++ b/core/modules/pgsql/src/Driver/Database/pgsql/Select.php
-@@ -143,15 +143,21 @@ public function addExpression($expression, $alias = NULL, $arguments = []) {
-    * {@inheritdoc}
-    */
-   public function execute() {
--    $this->connection->addSavepoint();
-+    if ($this->connection->inTransaction()) {
-+      $savepoint = $this->connection->startTransaction('mimic_implicit_commit');
-+    }
-     try {
-       $result = parent::execute();
-     }
-     catch (\Exception $e) {
--      $this->connection->rollbackSavepoint();
-+      if (isset($savepoint)) {
-+        $savepoint->rollback();
-+      }
-       throw $e;
-     }
--    $this->connection->releaseSavepoint();
-+    if (isset($savepoint)) {
-+      $savepoint->commitOrRelease();
-+    }
- 
-     return $result;
-   }
-diff --git a/core/modules/pgsql/src/Driver/Database/pgsql/Truncate.php b/core/modules/pgsql/src/Driver/Database/pgsql/Truncate.php
-index 18115e0a7d0..d35336c56c9 100644
---- a/core/modules/pgsql/src/Driver/Database/pgsql/Truncate.php
-+++ b/core/modules/pgsql/src/Driver/Database/pgsql/Truncate.php
-@@ -13,15 +13,21 @@ class Truncate extends QueryTruncate {
-    * {@inheritdoc}
-    */
-   public function execute() {
--    $this->connection->addSavepoint();
-+    if ($this->connection->inTransaction()) {
-+      $savepoint = $this->connection->startTransaction('mimic_implicit_commit');
-+    }
-     try {
-       $result = parent::execute();
-     }
-     catch (\Exception $e) {
--      $this->connection->rollbackSavepoint();
-+      if (isset($savepoint)) {
-+        $savepoint->rollback();
-+      }
-       throw $e;
-     }
--    $this->connection->releaseSavepoint();
-+    if (isset($savepoint)) {
-+      $savepoint->commitOrRelease();
-+    }
- 
-     return $result;
-   }
-diff --git a/core/modules/pgsql/src/Driver/Database/pgsql/Update.php b/core/modules/pgsql/src/Driver/Database/pgsql/Update.php
-index 0b4f9a0f4f6..19206f85e6a 100644
---- a/core/modules/pgsql/src/Driver/Database/pgsql/Update.php
-+++ b/core/modules/pgsql/src/Driver/Database/pgsql/Update.php
-@@ -71,14 +71,20 @@ public function execute() {
-       }
-     }
- 
--    $this->connection->addSavepoint();
-+    if ($this->connection->inTransaction()) {
-+      $savepoint = $this->connection->startTransaction('mimic_implicit_commit');
-+    }
-     try {
-       $stmt->execute(NULL, $this->queryOptions);
--      $this->connection->releaseSavepoint();
-+      if (isset($savepoint)) {
-+        $savepoint->commitOrRelease();
-+      }
-       return $stmt->rowCount();
-     }
-     catch (\Exception $e) {
--      $this->connection->rollbackSavepoint();
-+      if (isset($savepoint)) {
-+        $savepoint->rollback();
-+      }
-       $this->connection->exceptionHandler()->handleExecutionException($e, $stmt, [], $this->queryOptions);
-     }
-   }
-diff --git a/core/modules/pgsql/src/Driver/Database/pgsql/Upsert.php b/core/modules/pgsql/src/Driver/Database/pgsql/Upsert.php
-index 35823a270b1..a26555b2a00 100644
---- a/core/modules/pgsql/src/Driver/Database/pgsql/Upsert.php
-+++ b/core/modules/pgsql/src/Driver/Database/pgsql/Upsert.php
-@@ -78,14 +78,20 @@ public function execute() {
-     // mimic MySQL and SQLite transactions which don't fail if a single query
-     // fails. This is important for tables that are created on demand. For
-     // example, \Drupal\Core\Cache\DatabaseBackend.
--    $this->connection->addSavepoint();
-+    if ($this->connection->inTransaction()) {
-+      $savepoint = $this->connection->startTransaction('mimic_implicit_commit');
-+    }
-     try {
-       $stmt->execute(NULL, $options);
--      $this->connection->releaseSavepoint();
-+      if (isset($savepoint)) {
-+        $savepoint->commitOrRelease();
-+      }
-       return $stmt->rowCount();
-     }
-     catch (\Exception $e) {
--      $this->connection->rollbackSavepoint();
-+      if (isset($savepoint)) {
-+        $savepoint->rollback();
-+      }
-       $this->connection->exceptionHandler()->handleExecutionException($e, $stmt, [], $options);
-     }
-   }
-diff --git a/core/modules/sqlite/src/Driver/Database/sqlite/Insert.php b/core/modules/sqlite/src/Driver/Database/sqlite/Insert.php
-index 301b6e5bb4f..6bc3e7362f2 100644
---- a/core/modules/sqlite/src/Driver/Database/sqlite/Insert.php
-+++ b/core/modules/sqlite/src/Driver/Database/sqlite/Insert.php
-@@ -65,6 +65,7 @@ public function execute() {
-             $this->connection->exceptionHandler()->handleExecutionException($e, $stmt, $insert_values, $this->queryOptions);
-           }
-         }
-+        $transaction->commitOrRelease();
-       }
-       // Re-initialize the values array so that we can re-use this query.
-       $this->insertValues = [];
-diff --git a/core/modules/workspaces/src/WorkspaceAssociation.php b/core/modules/workspaces/src/WorkspaceAssociation.php
-index 8ed8fbb2ad2..d19ebeebe28 100644
---- a/core/modules/workspaces/src/WorkspaceAssociation.php
-+++ b/core/modules/workspaces/src/WorkspaceAssociation.php
-@@ -102,6 +102,8 @@ public function trackEntity(RevisionableInterface $entity, WorkspaceInterface $w
-         }
-         $insert_query->execute();
-       }
-+
-+      $transaction->commitOrRelease();
-     }
-     catch (\Exception $e) {
-       if (isset($transaction)) {
-diff --git a/core/modules/workspaces/src/WorkspaceMerger.php b/core/modules/workspaces/src/WorkspaceMerger.php
-index 30792ed0c6c..2ac5db3c4a3 100644
---- a/core/modules/workspaces/src/WorkspaceMerger.php
-+++ b/core/modules/workspaces/src/WorkspaceMerger.php
-@@ -65,6 +65,7 @@ public function merge() {
-           }
-         }
-       }
-+      $transaction->commitOrRelease();
-     }
-     catch (\Exception $e) {
-       if (isset($transaction)) {
-diff --git a/core/modules/workspaces/src/WorkspacePublisher.php b/core/modules/workspaces/src/WorkspacePublisher.php
-index a964234daf1..78e6c1d9873 100644
---- a/core/modules/workspaces/src/WorkspacePublisher.php
-+++ b/core/modules/workspaces/src/WorkspacePublisher.php
-@@ -84,6 +84,7 @@ public function publish() {
-           }
-         }
-       });
-+      $transaction->commitOrRelease();
-     }
-     catch (\Exception $e) {
-       if (isset($transaction)) {
-diff --git a/core/tests/Drupal/KernelTests/Core/Database/DeleteTruncateTest.php b/core/tests/Drupal/KernelTests/Core/Database/DeleteTruncateTest.php
-index 0c5da802929..d8fffb5c1a1 100644
---- a/core/tests/Drupal/KernelTests/Core/Database/DeleteTruncateTest.php
-+++ b/core/tests/Drupal/KernelTests/Core/Database/DeleteTruncateTest.php
-@@ -97,10 +97,9 @@ public function testTruncateInTransaction(): void {
-     $num_records_after = $this->connection->select('test')->countQuery()->execute()->fetchField();
-     $this->assertEquals(0, $num_records_after);
- 
--    // Close the transaction, and check that there are still no records in the
-+    // Commit the transaction, and check that there are still no records in the
-     // table.
--    // phpcs:ignore DrupalPractice.CodeAnalysis.VariableAnalysis.UnusedVariable
--    $transaction = NULL;
-+    $transaction->commitOrRelease();
-     $this->assertFalse($this->connection->inTransaction());
-     $num_records_after = $this->connection->select('test')->countQuery()->execute()->fetchField();
-     $this->assertEquals(0, $num_records_after);
-diff --git a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
-index cbda6e3d7f7..660b67e39c1 100644
---- a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
-+++ b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificTransactionTestBase.php
-@@ -12,6 +12,7 @@
- use Drupal\Core\Database\Transaction\TransactionManagerBase;
- use Drupal\Core\Database\TransactionNameNonUniqueException;
- use Drupal\Core\Database\TransactionOutOfOrderException;
-+use PHPUnit\Framework\Attributes\IgnoreDeprecations;
- 
- /**
-  * Tests the transaction abstraction system.
-@@ -251,6 +252,7 @@ public function testRollbackRootWithActiveSavepoint(): void {
-   /**
-    * Tests savepoint transaction rollback.
-    */
-+  #[IgnoreDeprecations]
-   public function testRollbackSavepoint(): void {
-     $transaction = $this->createRootTransaction();
-     $savepoint = $this->createFirstSavepointTransaction();
-@@ -343,6 +345,7 @@ public function testRollbackSavepointWithLaterSavepoint(): void {
-    * The behavior of this test should be identical for connections that support
-    * transactions and those that do not.
-    */
-+  #[IgnoreDeprecations]
-   public function testCommittedTransaction(): void {
-     try {
-       // Create two nested transactions. The changes should be committed.
-@@ -362,6 +365,7 @@ public function testCommittedTransaction(): void {
-   /**
-    * Tests the compatibility of transactions with DDL statements.
-    */
-+  #[IgnoreDeprecations]
-   public function testTransactionWithDdlStatement(): void {
-     // First, test that a commit works normally, even with DDL statements.
-     $transaction = $this->createRootTransaction('', FALSE);
-@@ -542,6 +546,7 @@ public function assertRowAbsent(string $name, ?string $message = NULL): void {
-   /**
-    * Tests transaction stacking, commit, and rollback.
-    */
-+  #[IgnoreDeprecations]
-   public function testTransactionStacking(): void {
-     // Standard case: pop the inner transaction before the outer transaction.
-     $transaction = $this->createRootTransaction('', FALSE);
-@@ -579,6 +584,7 @@ public function testTransactionStacking(): void {
-   /**
-    * Tests that transactions can continue to be used if a query fails.
-    */
-+  #[IgnoreDeprecations]
-   public function testQueryFailureInTransaction(): void {
-     $transaction = $this->createRootTransaction('test_transaction', FALSE);
-     $this->connection->schema()->dropTable('test');
-@@ -697,6 +703,7 @@ public function testQueryFailureInTransaction(): void {
-   /**
-    * Tests releasing a savepoint before last is safe.
-    */
-+  #[IgnoreDeprecations]
-   public function testReleaseIntermediateSavepoint(): void {
-     $transaction = $this->createRootTransaction();
-     $savepoint1 = $this->createFirstSavepointTransaction('', FALSE);
-@@ -737,6 +744,7 @@ public function testReleaseIntermediateSavepoint(): void {
-   /**
-    * Tests committing a transaction while savepoints are active.
-    */
-+  #[IgnoreDeprecations]
-   public function testCommitWithActiveSavepoint(): void {
-     $transaction = $this->createRootTransaction();
-     // phpcs:ignore DrupalPractice.CodeAnalysis.VariableAnalysis
-@@ -792,6 +800,7 @@ public function testRootTransactionEndCallbackAddedWithoutTransaction(): void {
-   /**
-    * Tests post-transaction callback executes after transaction commit.
-    */
-+  #[IgnoreDeprecations]
-   public function testRootTransactionEndCallbackCalledOnCommit(): void {
-     $transaction = $this->createRootTransaction('', FALSE);
-     $this->connection->transactionManager()->addPostTransactionCallback([$this, 'rootTransactionCallback']);
-@@ -835,6 +844,7 @@ public function testRootTransactionEndCallbackCalledAfterRollbackAndDestruction(
-   /**
-    * Tests post-transaction callback executes after a DDL statement.
-    */
-+  #[IgnoreDeprecations]
-   public function testRootTransactionEndCallbackCalledAfterDdlAndDestruction(): void {
-     $transaction = $this->createRootTransaction('', FALSE);
-     $this->connection->transactionManager()->addPostTransactionCallback([$this, 'rootTransactionCallback']);
-diff --git a/core/tests/Drupal/KernelTests/Core/Database/TransactionTest.php b/core/tests/Drupal/KernelTests/Core/Database/TransactionTest.php
-index f40a977f6f4..ba1c43dbc23 100644
---- a/core/tests/Drupal/KernelTests/Core/Database/TransactionTest.php
-+++ b/core/tests/Drupal/KernelTests/Core/Database/TransactionTest.php
-@@ -509,9 +509,10 @@ public function testTransactionWithDdlStatement(): void {
-       }
-     }
-     $this->assertRowPresent('row');
-+    unset($transaction);
-+    $this->cleanUp();
- 
-     // Even in different order.
--    $this->cleanUp();
-     $transaction = $this->createRootTransaction('', FALSE);
-     $this->executeDDLStatement();
-     $this->insertRow('row');
-@@ -533,9 +534,10 @@ public function testTransactionWithDdlStatement(): void {
-       }
-     }
-     $this->assertRowPresent('row');
-+    unset($transaction);
-+    $this->cleanUp();
- 
-     // Even with stacking.
--    $this->cleanUp();
-     $transaction = $this->createRootTransaction('', FALSE);
-     $transaction2 = $this->createFirstSavepointTransaction('', FALSE);
-     $this->executeDDLStatement();
-@@ -560,23 +562,18 @@ public function testTransactionWithDdlStatement(): void {
-     $this->insertRow('row');
-     $transaction3->commitOrRelease();
- 
--    if ($this->connection->supportsTransactionalDDL()) {
--      $transaction->commitOrRelease();
--    }
--    else {
--      try {
--        $transaction->commitOrRelease();
--        $this->fail('TransactionOutOfOrderException was expected, but did not throw.');
--      }
--      catch (TransactionOutOfOrderException) {
--        // Just continue, this is out or order since $transaction3 started a
--        // new root.
--      }
--    }
-+    // If this is running on a database supporting transactional DDL,
-+    // $transaction is still active. Otherwise, the initial root
-+    // transaction's commit is a no-op now since the DDL statement forced a
-+    // commit and then $transaction3 was fully committed too: we do not raise
-+    // any error in this case.
-+    $transaction->commitOrRelease();
-+
-     $this->assertRowPresent('row');
-+    unset($transaction, $transaction2, $transaction3);
-+    $this->cleanUp();
- 
-     // A transaction after a DDL statement should still work the same.
--    $this->cleanUp();
-     $transaction = $this->createRootTransaction('', FALSE);
-     $transaction2 = $this->createFirstSavepointTransaction('', FALSE);
-     $this->executeDDLStatement();
-@@ -614,12 +611,13 @@ public function testTransactionWithDdlStatement(): void {
-       }
-     }
-     $this->assertRowAbsent('row');
-+    unset($transaction, $transaction2, $transaction3);
-+    $this->cleanUp();
- 
-     // The behavior of a rollback depends on the type of database server.
-     if ($this->connection->supportsTransactionalDDL()) {
-       // For database servers that support transactional DDL, a rollback
-       // of a transaction including DDL statements should be possible.
--      $this->cleanUp();
-       $transaction = $this->createRootTransaction('', FALSE);
-       $this->insertRow('row');
-       $this->executeDDLStatement();
-@@ -975,18 +973,22 @@ public function testReleaseIntermediateSavepoint(): void {
-    * Tests committing a transaction while savepoints are active.
-    */
-   public function testCommitWithActiveSavepoint(): void {
-+dump('*** A ***');
-     $transaction = $this->createRootTransaction();
-     // phpcs:ignore DrupalPractice.CodeAnalysis.VariableAnalysis
-+dump('*** B ***');
-     $savepoint1 = $this->createFirstSavepointTransaction('', FALSE);
- 
-     // Starts a savepoint transaction. Corresponds to 'SAVEPOINT savepoint_2'
-     // on the database.
-+dump('*** C ***');
-     $savepoint2 = $this->connection->startTransaction();
-     $this->assertSame(3, $this->connection->transactionManager()->stackDepth());
- 
-     $this->insertRow('row');
- 
-     // Commit the root transaction.
-+dump('*** D ***');
-     $transaction->commitOrRelease();
-     // Since we have committed the outer (root) Transaction object, the inner
-     // (savepoint) ones have been dropped by the database already, and we are
-@@ -999,6 +1001,7 @@ public function testCommitWithActiveSavepoint(): void {
-     // our transaction stack.
-     $this->expectException(TransactionOutOfOrderException::class);
-     $this->expectExceptionMessageMatches("/^Error attempting commit of .*\\\\savepoint_2\\. Active stack: .* empty/");
-+dump('*** E ***');
-     $savepoint2->commitOrRelease();
-   }
- 
-@@ -1117,7 +1120,10 @@ public function testRootTransactionEndCallbackCalledAfterDdlAndDestruction(): vo
-     $this->assertRowAbsent('rtcRollback');
-     $this->assertRowPresent('row');
- 
--    // Destruct the transaction.
-+    // Commit and destruct the transaction. Non-transactional DDL database
-+    // will have committed already, so the explicit commit would be a no-op in
-+    // that case.
-+    $transaction->commitOrRelease();
-     unset($transaction);
- 
-     // The post-transaction callback should now have inserted a 'rtcCommit'
+<?php
+
+declare(strict_types=1);
+
+namespace Drupal\KernelTests\Core\Database;
+
+use Drupal\Core\Database\Database;
+use Drupal\Core\Database\Transaction;
+use Drupal\Core\Database\Transaction\ClientConnectionTransactionState;
+use Drupal\Core\Database\Transaction\StackItem;
+use Drupal\Core\Database\Transaction\StackItemType;
+use Drupal\Core\Database\Transaction\TransactionManagerBase;
+use Drupal\Core\Database\TransactionNameNonUniqueException;
+use Drupal\Core\Database\TransactionOutOfOrderException;
+
+// cspell:ignore Tinky Winky Dipsy
+
+/**
+ * Tests the transactions, using the explicit ::commitOrRelease method.
+ *
+ * We test nesting by having two transaction layers, an outer and inner. The
+ * outer layer encapsulates the inner layer. Our transaction nesting abstraction
+ * should allow the outer layer function to call any function it wants,
+ * especially the inner layer that starts its own transaction, and be
+ * confident that, when the function it calls returns, its own transaction
+ * is still "alive."
+ *
+ * Call structure:
+ *   transactionOuterLayer()
+ *     Start transaction "A"
+ *     transactionInnerLayer()
+ *       Start transaction "B" (does nothing in database)
+ *       [Maybe decide to roll back "B"]
+ *     Do more stuff
+ *     Should still be in transaction "A"
+ *
+ * These method can be overridden by non-core database driver if their
+ * transaction behavior is different from core. For example, both oci8 (Oracle)
+ * and mysqli (MySql) clients do not have a solution to check if a transaction
+ * is active, and mysqli does not fail when rolling back and no transaction
+ * active.
+ *
+ * @group Database
+ */
+class TransactionTest extends DatabaseTestBase {
+
+  /**
+   * Keeps track of the post-transaction callback action executed.
+   */
+  protected ?string $postTransactionCallbackAction = NULL;
+
+  /**
+   * {@inheritdoc}
+   */
+  protected function setUp(): void {
+    parent::setUp();
+
+    // Set the transaction manager to trigger warnings when appropriate.
+    $this->connection->transactionManager()->triggerWarningWhenUnpilingOnVoidTransaction = TRUE;
+  }
+
+  /**
+   * Create a root Drupal transaction.
+   */
+  protected function createRootTransaction(string $name = '', bool $insertRow = TRUE): Transaction {
+    $this->assertFalse($this->connection->inTransaction());
+    $this->assertSame(0, $this->connection->transactionManager()->stackDepth());
+
+    // Start root transaction. Corresponds to 'BEGIN TRANSACTION' on the
+    // database.
+    $transaction = $this->connection->startTransaction($name);
+    $this->assertTrue($this->connection->inTransaction());
+    $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
+
+    // Insert a single row into the testing table.
+    if ($insertRow) {
+      $this->insertRow('David');
+      $this->assertRowPresent('David');
+    }
+
+    return $transaction;
+  }
+
+  /**
+   * Create a Drupal savepoint transaction after root.
+   */
+  protected function createFirstSavepointTransaction(string $name = '', bool $insertRow = TRUE): Transaction {
+    $this->assertTrue($this->connection->inTransaction());
+    $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
+
+    // Starts a savepoint transaction. Corresponds to 'SAVEPOINT savepoint_1'
+    // on the database. The name can be changed by the $name argument.
+    $savepoint = $this->connection->startTransaction($name);
+    $this->assertTrue($this->connection->inTransaction());
+    $this->assertSame(2, $this->connection->transactionManager()->stackDepth());
+
+    // Insert a single row into the testing table.
+    if ($insertRow) {
+      $this->insertRow('Roger');
+      $this->assertRowPresent('Roger');
+    }
+
+    return $savepoint;
+  }
+
+  /**
+   * Encapsulates a transaction's "inner layer" with an "outer layer".
+   *
+   * This "outer layer" transaction starts and then encapsulates the "inner
+   * layer" transaction. This nesting is used to evaluate whether the database
+   * transaction API properly supports nesting. By "properly supports," we mean
+   * the outer transaction continues to exist regardless of what functions are
+   * called and whether those functions start their own transactions.
+   *
+   * In contrast, a typical database would commit the outer transaction, start
+   * a new transaction for the inner layer, commit the inner layer transaction,
+   * and then be confused when the outer layer transaction tries to commit its
+   * transaction (which was already committed when the inner transaction
+   * started).
+   *
+   * @param string $suffix
+   *   Suffix to add to field values to differentiate tests.
+   */
+  protected function transactionOuterLayer(string $suffix): void {
+    $txn = $this->connection->startTransaction();
+
+    // Insert a single row into the testing table.
+    $this->connection->insert('test')
+      ->fields([
+        'name' => 'David' . $suffix,
+        'age' => '24',
+      ])
+      ->execute();
+
+    $this->assertTrue($this->connection->inTransaction(), 'In transaction before calling nested transaction.');
+
+    // We're already in a transaction, but we call ->transactionInnerLayer
+    // to nest another transaction inside the current one.
+    $this->transactionInnerLayer($suffix);
+
+    $this->assertTrue($this->connection->inTransaction(), 'In transaction after calling nested transaction.');
+
+    $txn->commitOrRelease();
+  }
+
+  /**
+   * Creates an "inner layer" transaction.
+   *
+   * This "inner layer" transaction is either used alone or nested inside of the
+   * "outer layer" transaction.
+   *
+   * @param string $suffix
+   *   Suffix to add to field values to differentiate tests.
+   */
+  protected function transactionInnerLayer(string $suffix): void {
+    $depth = $this->connection->transactionManager()->stackDepth();
+    // Start a transaction. If we're being called from ->transactionOuterLayer,
+    // then we're already in a transaction. Normally, that would make starting
+    // a transaction here dangerous, but the database API handles this problem
+    // for us by tracking the nesting and avoiding the danger.
+    $txn = $this->connection->startTransaction();
+
+    $depth2 = $this->connection->transactionManager()->stackDepth();
+    $this->assertSame($depth + 1, $depth2, 'Transaction depth has increased with new transaction.');
+
+    // Insert a single row into the testing table.
+    $this->connection->insert('test')
+      ->fields([
+        'name' => 'Daniel' . $suffix,
+        'age' => '19',
+      ])
+      ->execute();
+
+    $this->assertTrue($this->connection->inTransaction(), 'In transaction inside nested transaction.');
+
+    $txn->commitOrRelease();
+  }
+
+  /**
+   * Tests root transaction rollback.
+   */
+  public function testRollbackRoot(): void {
+    $transaction = $this->createRootTransaction();
+
+    // Rollback. Since we are at the root, the transaction is closed.
+    // Corresponds to 'ROLLBACK' on the database.
+    $transaction->rollBack();
+    $this->assertRowAbsent('David');
+    $this->assertFalse($this->connection->inTransaction());
+    $this->assertSame(0, $this->connection->transactionManager()->stackDepth());
+  }
+
+  /**
+   * Tests root transaction rollback after savepoint rollback.
+   */
+  public function testRollbackRootAfterSavepointRollback(): void {
+    $transaction = $this->createRootTransaction();
+    $savepoint = $this->createFirstSavepointTransaction();
+
+    // Rollback savepoint. It should get released too. Corresponds to 'ROLLBACK
+    // TO savepoint_1' plus 'RELEASE savepoint_1' on the database.
+    $savepoint->rollBack();
+    $this->assertRowPresent('David');
+    $this->assertRowAbsent('Roger');
+    $this->assertTrue($this->connection->inTransaction());
+    $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
+
+    // Try to rollback root. No savepoint is active, this should succeed.
+    $transaction->rollBack();
+    $this->assertRowAbsent('David');
+    $this->assertRowAbsent('Roger');
+    $this->assertFalse($this->connection->inTransaction());
+    $this->assertSame(0, $this->connection->transactionManager()->stackDepth());
+  }
+
+  /**
+   * Tests root transaction rollback failure when savepoint is open.
+   */
+  public function testRollbackRootWithActiveSavepoint(): void {
+    $transaction = $this->createRootTransaction();
+    // phpcs:ignore DrupalPractice.CodeAnalysis.VariableAnalysis
+    $savepoint = $this->createFirstSavepointTransaction();
+
+    // Try to rollback root. Since a savepoint is active, this should fail.
+    $this->expectException(TransactionOutOfOrderException::class);
+    $this->expectExceptionMessageMatches("/^Error attempting rollback of .*\\\\drupal_transaction\\. Active stack: .*\\\\drupal_transaction > .*\\\\savepoint_1/");
+    $transaction->rollBack();
+  }
+
+  /**
+   * Tests savepoint transaction rollback.
+   */
+  public function testRollbackSavepoint(): void {
+    $transaction = $this->createRootTransaction();
+    $savepoint = $this->createFirstSavepointTransaction();
+
+    // Rollback savepoint. It should get released too. Corresponds to 'ROLLBACK
+    // TO savepoint_1' plus 'RELEASE savepoint_1' on the database.
+    $savepoint->rollBack();
+    $this->assertRowPresent('David');
+    $this->assertRowAbsent('Roger');
+    $this->assertTrue($this->connection->inTransaction());
+    $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
+
+    // Insert a row.
+    $this->insertRow('Syd');
+
+    // Commit root.
+    $transaction->commitOrRelease();
+    $this->assertRowPresent('David');
+    $this->assertRowAbsent('Roger');
+    $this->assertRowPresent('Syd');
+    $this->assertFalse($this->connection->inTransaction());
+    $this->assertSame(0, $this->connection->transactionManager()->stackDepth());
+  }
+
+  /**
+   * Tests savepoint transaction commit after rollback.
+   */
+  public function testCommitAfterRollbackSameSavepoint(): void {
+    $transaction = $this->createRootTransaction();
+    $savepoint = $this->createFirstSavepointTransaction();
+
+    // Rollback savepoint. It should get released too. Corresponds to 'ROLLBACK
+    // TO savepoint_1' plus 'RELEASE savepoint_1' on the database.
+    $savepoint->rollBack();
+    $this->assertRowPresent('David');
+    $this->assertRowAbsent('Roger');
+    $this->assertTrue($this->connection->inTransaction());
+    $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
+
+    // Insert a row.
+    $this->insertRow('Syd');
+
+    // Try releasing savepoint. Should fail since it was released already.
+    try {
+      $savepoint->commitOrRelease();
+      $this->fail('Expected TransactionOutOfOrderException was not thrown');
+    }
+    catch (\Exception $e) {
+      $this->assertInstanceOf(TransactionOutOfOrderException::class, $e);
+      $this->assertMatchesRegularExpression("/^Error attempting commit of .*\\\\savepoint_1\\. Active stack: .*\\\\drupal_transaction/", $e->getMessage());
+    }
+    $this->assertRowPresent('David');
+    $this->assertRowAbsent('Roger');
+    $this->assertRowPresent('Syd');
+    $this->assertTrue($this->connection->inTransaction());
+    $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
+
+    // Commit root.
+    $transaction->commitOrRelease();
+    $this->assertRowPresent('David');
+    $this->assertRowAbsent('Roger');
+    $this->assertRowPresent('Syd');
+    $this->assertFalse($this->connection->inTransaction());
+    $this->assertSame(0, $this->connection->transactionManager()->stackDepth());
+  }
+
+  /**
+   * Tests savepoint transaction rollback after commit.
+   */
+  public function testRollbackAfterCommitSameSavepoint(): void {
+    $transaction = $this->createRootTransaction();
+    $savepoint = $this->createFirstSavepointTransaction();
+
+    // Release savepoint. Corresponds to 'RELEASE savepoint_1' on the database.
+    $savepoint->commitOrRelease();
+    $this->assertRowPresent('David');
+    $this->assertRowPresent('Roger');
+    $this->assertTrue($this->connection->inTransaction());
+    $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
+
+    // Insert a row.
+    $this->insertRow('Syd');
+
+    // Try rolling back savepoint. Should fail since it was released already.
+    try {
+      $savepoint->rollback();
+      $this->fail('Expected TransactionOutOfOrderException was not thrown');
+    }
+    catch (\Exception $e) {
+      $this->assertInstanceOf(TransactionOutOfOrderException::class, $e);
+      $this->assertMatchesRegularExpression("/^Error attempting rollback of .*\\\\savepoint_1\\. Active stack: .*\\\\drupal_transaction/", $e->getMessage());
+    }
+    $this->assertRowPresent('David');
+    $this->assertRowPresent('Roger');
+    $this->assertRowPresent('Syd');
+    $this->assertTrue($this->connection->inTransaction());
+    $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
+
+    // Commit root.
+    $transaction->commitOrRelease();
+    $this->assertRowPresent('David');
+    $this->assertRowPresent('Roger');
+    $this->assertRowPresent('Syd');
+    $this->assertFalse($this->connection->inTransaction());
+    $this->assertSame(0, $this->connection->transactionManager()->stackDepth());
+  }
+
+  /**
+   * Tests savepoint transaction duplicated rollback.
+   */
+  public function testRollbackTwiceSameSavepoint(): void {
+    // phpcs:ignore DrupalPractice.CodeAnalysis.VariableAnalysis
+    $transaction = $this->createRootTransaction();
+    $savepoint = $this->createFirstSavepointTransaction();
+
+    // Rollback savepoint. It should get released too. Corresponds to 'ROLLBACK
+    // TO savepoint_1' plus 'RELEASE savepoint_1' on the database.
+    $savepoint->rollBack();
+    $this->assertRowPresent('David');
+    $this->assertRowAbsent('Roger');
+    $this->assertTrue($this->connection->inTransaction());
+    $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
+
+    // Insert a row.
+    $this->insertRow('Syd');
+
+    // Rollback savepoint again. Should fail since it was released already.
+    try {
+      $savepoint->rollBack();
+      $this->fail('Expected TransactionOutOfOrderException was not thrown');
+    }
+    catch (\Exception $e) {
+      $this->assertInstanceOf(TransactionOutOfOrderException::class, $e);
+      $this->assertMatchesRegularExpression("/^Error attempting rollback of .*\\\\savepoint_1\\. Active stack: .*\\\\drupal_transaction/", $e->getMessage());
+    }
+    $this->assertRowPresent('David');
+    $this->assertRowAbsent('Roger');
+    $this->assertRowPresent('Syd');
+    $this->assertTrue($this->connection->inTransaction());
+    $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
+  }
+
+  /**
+   * Tests savepoint transaction rollback failure when later savepoints exist.
+   */
+  public function testRollbackSavepointWithLaterSavepoint(): void {
+    // phpcs:ignore DrupalPractice.CodeAnalysis.VariableAnalysis
+    $transaction = $this->createRootTransaction();
+    $savepoint1 = $this->createFirstSavepointTransaction();
+
+    // Starts another savepoint transaction. Corresponds to 'SAVEPOINT
+    // savepoint_2' on the database.
+    // phpcs:ignore DrupalPractice.CodeAnalysis.VariableAnalysis
+    $savepoint2 = $this->connection->startTransaction();
+    $this->assertTrue($this->connection->inTransaction());
+    $this->assertSame(3, $this->connection->transactionManager()->stackDepth());
+
+    // Insert a row.
+    $this->insertRow('Syd');
+    $this->assertRowPresent('David');
+    $this->assertRowPresent('Roger');
+    $this->assertRowPresent('Syd');
+
+    // Try to rollback to savepoint 1. Out of order.
+    $this->expectException(TransactionOutOfOrderException::class);
+    $this->expectExceptionMessageMatches("/^Error attempting rollback of .*\\\\savepoint_1\\. Active stack: .*\\\\drupal_transaction > .*\\\\savepoint_1 > .*\\\\savepoint_2/");
+    $savepoint1->rollBack();
+  }
+
+  /**
+   * Tests commit does not fail when committing after DDL.
+   *
+   * In core, SQLite and PostgreSql databases support transactional DDL, MySql
+   * does not.
+   */
+  public function testCommitAfterDdl(): void {
+    $transaction = $this->createRootTransaction();
+    $savepoint = $this->createFirstSavepointTransaction();
+
+    $this->executeDDLStatement();
+
+    $this->assertRowPresent('David');
+    $this->assertRowPresent('Roger');
+    if ($this->connection->supportsTransactionalDDL()) {
+      $this->assertTrue($this->connection->inTransaction());
+      $this->assertSame(2, $this->connection->transactionManager()->stackDepth());
+    }
+    else {
+      $this->assertFalse($this->connection->inTransaction());
+    }
+
+    $this->assertRowPresent('David');
+    $this->assertRowPresent('Roger');
+    if ($this->connection->supportsTransactionalDDL()) {
+      $savepoint->commitOrRelease();
+      $this->assertTrue($this->connection->inTransaction());
+      $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
+    }
+    else {
+      set_error_handler(static function (int $errno, string $errstr): bool {
+        throw new \ErrorException($errstr);
+      });
+      try {
+        $savepoint->commitOrRelease();
+      }
+      catch (\ErrorException $e) {
+        $this->assertSame('Transaction::commitOrRelease() was not processed because a prior execution of a DDL statement already committed the transaction.', $e->getMessage());
+      }
+      finally {
+        restore_error_handler();
+      }
+      $this->assertFalse($this->connection->inTransaction());
+    }
+
+    if ($this->connection->supportsTransactionalDDL()) {
+      $transaction->commitOrRelease();
+    }
+    else {
+      set_error_handler(static function (int $errno, string $errstr): bool {
+        throw new \ErrorException($errstr);
+      });
+      try {
+        $transaction->commitOrRelease();
+      }
+      catch (\ErrorException $e) {
+        $this->assertSame('Transaction::commitOrRelease() was not processed because a prior execution of a DDL statement already committed the transaction.', $e->getMessage());
+      }
+      finally {
+        restore_error_handler();
+      }
+    }
+    $this->assertRowPresent('David');
+    $this->assertRowPresent('Roger');
+    $this->assertFalse($this->connection->inTransaction());
+  }
+
+  /**
+   * Tests a committed transaction.
+   *
+   * The behavior of this test should be identical for connections that support
+   * transactions and those that do not.
+   */
+  public function testCommittedTransaction(): void {
+    // Create two nested transactions. The changes should be committed.
+    $this->transactionOuterLayer('A');
+
+    // Because we committed, both of the inserted rows should be present.
+    $saved_age = $this->connection->query('SELECT [age] FROM {test} WHERE [name] = :name', [':name' => 'DavidA'])->fetchField();
+    $this->assertSame('24', $saved_age, 'Can retrieve DavidA row after commit.');
+    $saved_age = $this->connection->query('SELECT [age] FROM {test} WHERE [name] = :name', [':name' => 'DanielA'])->fetchField();
+    $this->assertSame('19', $saved_age, 'Can retrieve DanielA row after commit.');
+  }
+
+  /**
+   * Tests the compatibility of transactions with DDL statements.
+   */
+  public function testTransactionWithDdlStatement(): void {
+    // First, test that a commit works normally, even with DDL statements.
+    $transaction = $this->createRootTransaction('', FALSE);
+    $this->insertRow('row');
+    $this->executeDDLStatement();
+    if ($this->connection->supportsTransactionalDDL()) {
+      $transaction->commitOrRelease();
+    }
+    else {
+      set_error_handler(static function (int $errno, string $errstr): bool {
+        throw new \ErrorException($errstr);
+      });
+      try {
+        $transaction->commitOrRelease();
+      }
+      catch (\ErrorException $e) {
+        $this->assertSame('Transaction::commitOrRelease() was not processed because a prior execution of a DDL statement already committed the transaction.', $e->getMessage());
+      }
+      finally {
+        restore_error_handler();
+      }
+    }
+    $this->assertRowPresent('row');
+    unset($transaction);
+    $this->cleanUp();
+
+    // Even in different order.
+    $transaction = $this->createRootTransaction('', FALSE);
+    $this->executeDDLStatement();
+    $this->insertRow('row');
+    if ($this->connection->supportsTransactionalDDL()) {
+      $transaction->commitOrRelease();
+    }
+    else {
+      set_error_handler(static function (int $errno, string $errstr): bool {
+        throw new \ErrorException($errstr);
+      });
+      try {
+        $transaction->commitOrRelease();
+      }
+      catch (\ErrorException $e) {
+        $this->assertSame('Transaction::commitOrRelease() was not processed because a prior execution of a DDL statement already committed the transaction.', $e->getMessage());
+      }
+      finally {
+        restore_error_handler();
+      }
+    }
+    $this->assertRowPresent('row');
+    unset($transaction);
+    $this->cleanUp();
+
+    // Even with stacking.
+    $transaction = $this->createRootTransaction('', FALSE);
+    $transaction2 = $this->createFirstSavepointTransaction('', FALSE);
+    $this->executeDDLStatement();
+    if ($this->connection->supportsTransactionalDDL()) {
+      $transaction2->commitOrRelease();
+    }
+    else {
+      set_error_handler(static function (int $errno, string $errstr): bool {
+        throw new \ErrorException($errstr);
+      });
+      try {
+        $transaction2->commitOrRelease();
+      }
+      catch (\ErrorException $e) {
+        $this->assertSame('Transaction::commitOrRelease() was not processed because a prior execution of a DDL statement already committed the transaction.', $e->getMessage());
+      }
+      finally {
+        restore_error_handler();
+      }
+    }
+    $transaction3 = $this->connection->startTransaction();
+    $this->insertRow('row');
+    $transaction3->commitOrRelease();
+
+    // If this is running on a database supporting transactional DDL,
+    // $transaction is still active. Otherwise, the initial root
+    // transaction's commit is a no-op now since the DDL statement forced a
+    // commit and then $transaction3 was fully committed too: we do not raise
+    // any error in this case.
+    $transaction->commitOrRelease();
+
+    $this->assertRowPresent('row');
+    unset($transaction, $transaction2, $transaction3);
+    $this->cleanUp();
+
+    // A transaction after a DDL statement should still work the same.
+    $transaction = $this->createRootTransaction('', FALSE);
+    $transaction2 = $this->createFirstSavepointTransaction('', FALSE);
+    $this->executeDDLStatement();
+    if ($this->connection->supportsTransactionalDDL()) {
+      $transaction2->commitOrRelease();
+    }
+    else {
+      set_error_handler(static function (int $errno, string $errstr): bool {
+        throw new \ErrorException($errstr);
+      });
+      try {
+        $transaction2->commitOrRelease();
+      }
+      catch (\ErrorException $e) {
+        $this->assertSame('Transaction::commitOrRelease() was not processed because a prior execution of a DDL statement already committed the transaction.', $e->getMessage());
+      }
+      finally {
+        restore_error_handler();
+      }
+    }
+    $transaction3 = $this->connection->startTransaction();
+    $this->insertRow('row');
+    $transaction3->rollBack();
+    if ($this->connection->supportsTransactionalDDL()) {
+      $transaction->commitOrRelease();
+    }
+    else {
+      try {
+        $transaction->commitOrRelease();
+        $this->fail('TransactionOutOfOrderException was expected, but did not throw.');
+      }
+      catch (TransactionOutOfOrderException) {
+        // Just continue, this is out or order since $transaction3 started a
+        // new root.
+      }
+    }
+    $this->assertRowAbsent('row');
+    unset($transaction, $transaction2, $transaction3);
+    $this->cleanUp();
+
+    // The behavior of a rollback depends on the type of database server.
+    if ($this->connection->supportsTransactionalDDL()) {
+      // For database servers that support transactional DDL, a rollback
+      // of a transaction including DDL statements should be possible.
+      $transaction = $this->createRootTransaction('', FALSE);
+      $this->insertRow('row');
+      $this->executeDDLStatement();
+      $transaction->rollBack();
+      $this->assertRowAbsent('row');
+
+      // Including with stacking.
+      $this->cleanUp();
+      $transaction = $this->createRootTransaction('', FALSE);
+      $transaction2 = $this->createFirstSavepointTransaction('', FALSE);
+      $this->executeDDLStatement();
+      $transaction2->commitOrRelease();
+      $transaction3 = $this->connection->startTransaction();
+      $this->insertRow('row');
+      $transaction3->commitOrRelease();
+      $this->assertRowPresent('row');
+      $transaction->rollBack();
+      $this->assertRowAbsent('row');
+    }
+  }
+
+  /**
+   * Tests rollback after a DDL statement when no transactional DDL supported.
+   */
+  public function testRollbackAfterDdlStatementForNonTransactionalDdlDatabase(): void {
+    if ($this->connection->supportsTransactionalDDL()) {
+      $this->markTestSkipped('This test only works for database that do not support transactional DDL.');
+    }
+
+    // For database servers that do not support transactional DDL,
+    // the DDL statement should commit the transaction stack.
+    $this->cleanUp();
+    $transaction = $this->createRootTransaction('', FALSE);
+    $reflectionMethod = new \ReflectionMethod(get_class($this->connection->transactionManager()), 'getConnectionTransactionState');
+    $this->assertSame(1, $this->connection->transactionManager()->stackDepth());
+    $this->assertEquals(ClientConnectionTransactionState::Active, $reflectionMethod->invoke($this->connection->transactionManager()));
+    $this->insertRow('row');
+    $this->executeDDLStatement();
+    $this->assertSame(0, $this->connection->transactionManager()->stackDepth());
+    $this->assertEquals(ClientConnectionTransactionState::Voided, $reflectionMethod->invoke($this->connection->transactionManager()));
+
+    // Try to rollback the root transaction. Since the DDL already committed
+    // it, it should fail.
+    set_error_handler(static function (int $errno, string $errstr): bool {
+      throw new \ErrorException($errstr);
+    });
+    try {
+      $transaction->rollBack();
+    }
+    catch (\ErrorException $e) {
+      $this->assertSame('Transaction::rollBack() failed because of a prior execution of a DDL statement.', $e->getMessage());
+    }
+    finally {
+      restore_error_handler();
+    }
+
+    try {
+      $transaction->commitOrRelease();
+      $this->fail('TransactionOutOfOrderException was expected, but did not throw.');
+    }
+    catch (TransactionOutOfOrderException) {
+      // Just continue, the attempted rollback made the overall state to
+      // ClientConnectionTransactionState::RollbackFailed.
+    }
+
+    $manager = $this->connection->transactionManager();
+    $this->assertSame(0, $manager->stackDepth());
+    $reflectedTransactionState = new \ReflectionMethod($manager, 'getConnectionTransactionState');
+    $this->assertSame(ClientConnectionTransactionState::RollbackFailed, $reflectedTransactionState->invoke($manager));
+    $this->assertRowPresent('row');
+  }
+
+  /**
+   * Inserts a single row into the testing table.
+   */
+  protected function insertRow(string $name): void {
+    $this->connection->insert('test')
+      ->fields([
+        'name' => $name,
+      ])
+      ->execute();
+  }
+
+  /**
+   * Executes a DDL statement.
+   */
+  protected function executeDDLStatement(): void {
+    static $count = 0;
+    $table = [
+      'fields' => [
+        'id' => [
+          'type' => 'serial',
+          'unsigned' => TRUE,
+          'not null' => TRUE,
+        ],
+      ],
+      'primary key' => ['id'],
+    ];
+    $this->connection->schema()->createTable('database_test_' . ++$count, $table);
+  }
+
+  /**
+   * Starts over for a new test.
+   */
+  protected function cleanUp(): void {
+    $this->connection->truncate('test')
+      ->execute();
+    $this->postTransactionCallbackAction = NULL;
+    $this->assertSame(0, $this->connection->transactionManager()->stackDepth());
+  }
+
+  /**
+   * Asserts that a given row is present in the test table.
+   *
+   * @param string $name
+   *   The name of the row.
+   * @param string $message
+   *   The message to log for the assertion.
+   *
+   * @internal
+   */
+  public function assertRowPresent(string $name, ?string $message = NULL): void {
+    $present = (boolean) $this->connection->query('SELECT 1 FROM {test} WHERE [name] = :name', [':name' => $name])->fetchField();
+    $this->assertTrue($present, $message ?? "Row '{$name}' should be present, but it actually does not exist.");
+  }
+
+  /**
+   * Asserts that a given row is absent from the test table.
+   *
+   * @param string $name
+   *   The name of the row.
+   * @param string $message
+   *   The message to log for the assertion.
+   *
+   * @internal
+   */
+  public function assertRowAbsent(string $name, ?string $message = NULL): void {
+    $present = (boolean) $this->connection->query('SELECT 1 FROM {test} WHERE [name] = :name', [':name' => $name])->fetchField();
+    $this->assertFalse($present, $message ?? "Row '{$name}' should be absent, but it actually exists.");
+  }
+
+  /**
+   * Tests transaction stacking, commit, and rollback.
+   */
+  public function testTransactionStacking(): void {
+    // Standard case: pop the inner transaction before the outer transaction.
+    $transaction = $this->createRootTransaction('', FALSE);
+    $this->insertRow('outer');
+    $transaction2 = $this->createFirstSavepointTransaction('', FALSE);
+    $this->insertRow('inner');
+    // Pop the inner transaction.
+    $transaction2->commitOrRelease();
+    $this->assertTrue($this->connection->inTransaction(), 'Still in a transaction after popping the inner transaction');
+    // Pop the outer transaction.
+    $transaction->commitOrRelease();
+    $this->assertFalse($this->connection->inTransaction(), 'Transaction closed after popping the outer transaction');
+    $this->assertRowPresent('outer');
+    $this->assertRowPresent('inner');
+
+    // Rollback the inner transaction.
+    $this->cleanUp();
+    $transaction = $this->createRootTransaction('', FALSE);
+    $this->insertRow('outer');
+    $transaction2 = $this->createFirstSavepointTransaction('', FALSE);
+    $this->insertRow('inner');
+    // Now rollback the inner transaction.
+    $transaction2->rollBack();
+    $this->assertTrue($this->connection->inTransaction(), 'Still in a transaction after popping the outer transaction');
+    // Pop the outer transaction, it should commit.
+    $this->insertRow('outer-after-inner-rollback');
+    $transaction->commitOrRelease();
+    $this->assertFalse($this->connection->inTransaction(), 'Transaction closed after popping the inner transaction');
+    $this->assertRowPresent('outer');
+    $this->assertRowAbsent('inner');
+    $this->assertRowPresent('outer-after-inner-rollback');
+  }
+
+  /**
+   * Tests that transactions can continue to be used if a query fails.
+   */
+  public function testQueryFailureInTransaction(): void {
+    $transaction = $this->createRootTransaction('test_transaction', FALSE);
+    $this->connection->schema()->dropTable('test');
+
+    // Test a failed query using the query() method.
+    try {
+      $this->connection->query('SELECT [age] FROM {test} WHERE [name] = :name', [':name' => 'David'])->fetchField();
+      $this->fail('Using the query method should have failed.');
+    }
+    catch (\Exception) {
+      // Just continue testing.
+    }
+
+    // Test a failed select query.
+    try {
+      $this->connection->select('test')
+        ->fields('test', ['name'])
+        ->execute();
+
+      $this->fail('Select query should have failed.');
+    }
+    catch (\Exception) {
+      // Just continue testing.
+    }
+
+    // Test a failed insert query.
+    try {
+      $this->connection->insert('test')
+        ->fields([
+          'name' => 'David',
+          'age' => '24',
+        ])
+        ->execute();
+
+      $this->fail('Insert query should have failed.');
+    }
+    catch (\Exception) {
+      // Just continue testing.
+    }
+
+    // Test a failed update query.
+    try {
+      $this->connection->update('test')
+        ->fields(['name' => 'Tiffany'])
+        ->condition('id', 1)
+        ->execute();
+
+      $this->fail('Update query should have failed.');
+    }
+    catch (\Exception) {
+      // Just continue testing.
+    }
+
+    // Test a failed delete query.
+    try {
+      $this->connection->delete('test')
+        ->condition('id', 1)
+        ->execute();
+
+      $this->fail('Delete query should have failed.');
+    }
+    catch (\Exception) {
+      // Just continue testing.
+    }
+
+    // Test a failed merge query.
+    try {
+      $this->connection->merge('test')
+        ->key('job', 'Presenter')
+        ->fields([
+          'age' => '31',
+          'name' => 'Tiffany',
+        ])
+        ->execute();
+
+      $this->fail('Merge query should have failed.');
+    }
+    catch (\Exception) {
+      // Just continue testing.
+    }
+
+    // Test a failed upsert query.
+    try {
+      $this->connection->upsert('test')
+        ->key('job')
+        ->fields(['job', 'age', 'name'])
+        ->values([
+          'job' => 'Presenter',
+          'age' => 31,
+          'name' => 'Tiffany',
+        ])
+        ->execute();
+
+      $this->fail('Upsert query should have failed.');
+    }
+    catch (\Exception) {
+      // Just continue testing.
+    }
+
+    // Create the missing schema and insert a row.
+    $this->installSchema('database_test', ['test']);
+    $this->connection->insert('test')
+      ->fields([
+        'name' => 'David',
+        'age' => '24',
+      ])
+      ->execute();
+
+    // Commit the transaction.
+    if ($this->connection->supportsTransactionalDDL()) {
+      $transaction->commitOrRelease();
+    }
+    else {
+      set_error_handler(static function (int $errno, string $errstr): bool {
+        throw new \ErrorException($errstr);
+      });
+      try {
+        $transaction->commitOrRelease();
+      }
+      catch (\ErrorException $e) {
+        $this->assertSame('Transaction::commitOrRelease() was not processed because a prior execution of a DDL statement already committed the transaction.', $e->getMessage());
+      }
+      finally {
+        restore_error_handler();
+      }
+    }
+
+    $saved_age = $this->connection->query('SELECT [age] FROM {test} WHERE [name] = :name', [':name' => 'David'])->fetchField();
+    $this->assertEquals('24', $saved_age);
+  }
+
+  /**
+   * Tests releasing a savepoint before last is safe.
+   */
+  public function testReleaseIntermediateSavepoint(): void {
+    $transaction = $this->createRootTransaction();
+    $savepoint1 = $this->createFirstSavepointTransaction('', FALSE);
+
+    // Starts a savepoint transaction. Corresponds to 'SAVEPOINT savepoint_2'
+    // on the database.
+    $savepoint2 = $this->connection->startTransaction();
+    $this->assertSame(3, $this->connection->transactionManager()->stackDepth());
+    // Starts a savepoint transaction. Corresponds to 'SAVEPOINT savepoint_3'
+    // on the database.
+    // phpcs:ignore DrupalPractice.CodeAnalysis.VariableAnalysis
+    $savepoint3 = $this->connection->startTransaction();
+    $this->assertSame(4, $this->connection->transactionManager()->stackDepth());
+    // Starts a savepoint transaction. Corresponds to 'SAVEPOINT savepoint_4'
+    // on the database.
+    // phpcs:ignore DrupalPractice.CodeAnalysis.VariableAnalysis
+    $savepoint4 = $this->connection->startTransaction();
+    $this->assertSame(5, $this->connection->transactionManager()->stackDepth());
+
+    $this->insertRow('row');
+
+    // Release savepoint transaction. Corresponds to 'RELEASE SAVEPOINT
+    // savepoint_2' on the database.
+    $savepoint2->commitOrRelease();
+    // Since we have committed an intermediate savepoint Transaction object,
+    // the savepoints created later have been dropped by the database already.
+    $this->assertSame(2, $this->connection->transactionManager()->stackDepth());
+    $this->assertRowPresent('row');
+
+    // Commit the remaining Transaction objects. The client transaction is
+    // eventually committed.
+    $savepoint1->commitOrRelease();
+    $transaction->commitOrRelease();
+    $this->assertFalse($this->connection->inTransaction());
+    $this->assertRowPresent('row');
+  }
+
+  /**
+   * Tests committing a transaction while savepoints are active.
+   */
+  public function testCommitWithActiveSavepoint(): void {
+dump('*** A ***');
+    $transaction = $this->createRootTransaction();
+    // phpcs:ignore DrupalPractice.CodeAnalysis.VariableAnalysis
+dump('*** B ***');
+    $savepoint1 = $this->createFirstSavepointTransaction('', FALSE);
+
+    // Starts a savepoint transaction. Corresponds to 'SAVEPOINT savepoint_2'
+    // on the database.
+dump('*** C ***');
+    $savepoint2 = $this->connection->startTransaction();
+    $this->assertSame(3, $this->connection->transactionManager()->stackDepth());
+
+    $this->insertRow('row');
+
+    // Commit the root transaction.
+dump('*** D ***');
+    $transaction->commitOrRelease();
+    // Since we have committed the outer (root) Transaction object, the inner
+    // (savepoint) ones have been dropped by the database already, and we are
+    // no longer in an active transaction state.
+    $this->assertSame(0, $this->connection->transactionManager()->stackDepth());
+    $this->assertFalse($this->connection->inTransaction());
+    $this->assertRowPresent('row');
+    // Trying to release the inner (savepoint) Transaction object is a no-op
+    // at this point since the root transaction was fully committed already: we
+    // do not raise any error in this case.
+    $savepoint2->commitOrRelease();
+  }
+
+  /**
+   * Tests for transaction names.
+   */
+  public function testTransactionName(): void {
+    $transaction = $this->createRootTransaction('', FALSE);
+    $this->assertSame('drupal_transaction', $transaction->name());
+
+    $savepoint1 = $this->createFirstSavepointTransaction('', FALSE);
+    $this->assertSame('savepoint_1', $savepoint1->name());
+
+    $this->expectException(TransactionNameNonUniqueException::class);
+    $this->expectExceptionMessage("savepoint_1 is already in use.");
+    $this->connection->startTransaction('savepoint_1');
+  }
+
+  /**
+   * Tests for arbitrary transaction names.
+   */
+  public function testArbitraryTransactionNames(): void {
+    $transaction = $this->createRootTransaction('TinkyWinky', FALSE);
+    // Despite setting a name, the root transaction is always named
+    // 'drupal_transaction'.
+    $this->assertSame('drupal_transaction', $transaction->name());
+
+    $savepoint1 = $this->createFirstSavepointTransaction('Dipsy', FALSE);
+    $this->assertSame('Dipsy', $savepoint1->name());
+
+    $this->expectException(TransactionNameNonUniqueException::class);
+    $this->expectExceptionMessage("Dipsy is already in use.");
+    $this->connection->startTransaction('Dipsy');
+  }
+
+  /**
+   * Tests that adding a post-transaction callback fails with no transaction.
+   */
+  public function testRootTransactionEndCallbackAddedWithoutTransaction(): void {
+    $this->expectException(\LogicException::class);
+    $this->connection->transactionManager()->addPostTransactionCallback([$this, 'rootTransactionCallback']);
+  }
+
+  /**
+   * Tests post-transaction callback executes after transaction commit.
+   */
+  public function testRootTransactionEndCallbackCalledOnCommit(): void {
+    $transaction = $this->createRootTransaction('', FALSE);
+    $this->connection->transactionManager()->addPostTransactionCallback([$this, 'rootTransactionCallback']);
+    $this->insertRow('row');
+    $this->assertNull($this->postTransactionCallbackAction);
+    $this->assertRowAbsent('rtcCommit');
+
+    // Callbacks are processed only when destructing the transaction.
+    // Executing a commit is not sufficient by itself.
+    $transaction->commitOrRelease();
+    $this->assertNull($this->postTransactionCallbackAction);
+    $this->assertRowPresent('row');
+    $this->assertRowAbsent('rtcCommit');
+
+    // Destruct the transaction.
+    unset($transaction);
+
+    // The post-transaction callback should now have inserted a 'rtcCommit'
+    // row.
+    $this->assertSame('rtcCommit', $this->postTransactionCallbackAction);
+    $this->assertRowPresent('row');
+    $this->assertRowPresent('rtcCommit');
+  }
+
+  /**
+   * Tests post-transaction callback executes after transaction rollback.
+   */
+  public function testRootTransactionEndCallbackCalledAfterRollbackAndDestruction(): void {
+    $transaction = $this->createRootTransaction('', FALSE);
+    $this->connection->transactionManager()->addPostTransactionCallback([$this, 'rootTransactionCallback']);
+    $this->insertRow('row');
+    $this->assertNull($this->postTransactionCallbackAction);
+
+    // Callbacks are processed only when destructing the transaction.
+    // Executing a rollback is not sufficient by itself.
+    $transaction->rollBack();
+    $this->assertNull($this->postTransactionCallbackAction);
+    $this->assertRowAbsent('rtcCommit');
+    $this->assertRowAbsent('rtcRollback');
+    $this->assertRowAbsent('row');
+
+    // Destruct the transaction.
+    unset($transaction);
+
+    // The post-transaction callback should now have inserted a 'rtcRollback'
+    // row.
+    $this->assertSame('rtcRollback', $this->postTransactionCallbackAction);
+    $this->assertRowAbsent('rtcCommit');
+    $this->assertRowPresent('rtcRollback');
+    $this->assertRowAbsent('row');
+  }
+
+  /**
+   * Tests post-transaction callback executes after a DDL statement.
+   */
+  public function testRootTransactionEndCallbackCalledAfterDdlAndDestruction(): void {
+    $transaction = $this->createRootTransaction('', FALSE);
+    $this->connection->transactionManager()->addPostTransactionCallback([$this, 'rootTransactionCallback']);
+    $this->insertRow('row');
+    $this->assertNull($this->postTransactionCallbackAction);
+
+    // Callbacks are processed only when destructing the transaction.
+    // Executing a DDL statement is not sufficient itself.
+    // We cannot use truncate here, since it has protective code to fall back
+    // to a transactional delete when in transaction. We drop an unrelated
+    // table instead.
+    $this->connection->schema()->dropTable('test_people');
+    $this->assertNull($this->postTransactionCallbackAction);
+    $this->assertRowAbsent('rtcCommit');
+    $this->assertRowAbsent('rtcRollback');
+    $this->assertRowPresent('row');
+
+    // Commit and destruct the transaction. Non-transactional DDL database
+    // will have committed already, so the explicit commit would be a no-op in
+    // that case.
+    $transaction->commitOrRelease();
+    unset($transaction);
+
+    // The post-transaction callback should now have inserted a 'rtcCommit'
+    // row.
+    $this->assertSame('rtcCommit', $this->postTransactionCallbackAction);
+    $this->assertRowPresent('rtcCommit');
+    $this->assertRowAbsent('rtcRollback');
+    $this->assertRowPresent('row');
+  }
+
+  /**
+   * Tests post-transaction rollback executes after a DDL statement.
+   *
+   * For database servers that support transactional DDL, a rollback of a
+   * transaction including DDL statements is possible.
+   */
+  public function testRootTransactionEndCallbackCalledAfterDdlAndRollbackForTransactionalDdlDatabase(): void {
+    if (!$this->connection->supportsTransactionalDDL()) {
+      $this->markTestSkipped('This test only works for database supporting transactional DDL.');
+    }
+
+    $transaction = $this->createRootTransaction('', FALSE);
+    $this->connection->transactionManager()->addPostTransactionCallback([$this, 'rootTransactionCallback']);
+    $this->insertRow('row');
+    $this->assertNull($this->postTransactionCallbackAction);
+
+    // Callbacks are processed only when destructing the transaction.
+    // Executing a DDL statement is not sufficient itself.
+    // We cannot use truncate here, since it has protective code to fall back
+    // to a transactional delete when in transaction. We drop an unrelated
+    // table instead.
+    $this->connection->schema()->dropTable('test_people');
+    $this->assertNull($this->postTransactionCallbackAction);
+    $this->assertRowAbsent('rtcCommit');
+    $this->assertRowAbsent('rtcRollback');
+    $this->assertRowPresent('row');
+
+    // Callbacks are processed only when destructing the transaction.
+    // Executing the rollback is not sufficient by itself.
+    $transaction->rollBack();
+    $this->assertNull($this->postTransactionCallbackAction);
+    $this->assertRowAbsent('rtcCommit');
+    $this->assertRowAbsent('rtcRollback');
+    $this->assertRowAbsent('row');
+
+    // Destruct the transaction.
+    unset($transaction);
+
+    // The post-transaction callback should now have inserted a 'rtcRollback'
+    // row.
+    $this->assertSame('rtcRollback', $this->postTransactionCallbackAction);
+    $this->assertRowAbsent('rtcCommit');
+    $this->assertRowPresent('rtcRollback');
+    $this->assertRowAbsent('row');
+  }
+
+  /**
+   * Tests post-transaction rollback failure after a DDL statement.
+   *
+   * For database servers that support transactional DDL, a rollback of a
+   * transaction including DDL statements is not possible, since a commit
+   * happened already. We cannot decide what should be the status of the
+   * callback, an exception is thrown.
+   */
+  public function testRootTransactionEndCallbackFailureUponDdlAndRollbackForNonTransactionalDdlDatabase(): void {
+    if ($this->connection->supportsTransactionalDDL()) {
+      $this->markTestSkipped('This test only works for database that do not support transactional DDL.');
+    }
+
+    $transaction = $this->createRootTransaction('', FALSE);
+    $this->connection->transactionManager()->addPostTransactionCallback([$this, 'rootTransactionCallback']);
+    $this->insertRow('row');
+    $this->assertNull($this->postTransactionCallbackAction);
+
+    // Callbacks are processed only when destructing the transaction.
+    // Executing a DDL statement is not sufficient itself.
+    // We cannot use truncate here, since it has protective code to fall back
+    // to a transactional delete when in transaction. We drop an unrelated
+    // table instead.
+    $this->connection->schema()->dropTable('test_people');
+    $this->assertNull($this->postTransactionCallbackAction);
+    $this->assertRowAbsent('rtcCommit');
+    $this->assertRowAbsent('rtcRollback');
+    $this->assertRowPresent('row');
+
+    set_error_handler(static function (int $errno, string $errstr): bool {
+      throw new \ErrorException($errstr);
+    });
+    try {
+      $transaction->rollBack();
+    }
+    catch (\ErrorException $e) {
+      $this->assertSame('Transaction::rollBack() failed because of a prior execution of a DDL statement.', $e->getMessage());
+    }
+    finally {
+      restore_error_handler();
+    }
+
+    unset($transaction);
+
+    // The post-transaction callback should now have inserted a 'rtcRollback'
+    // row.
+    $this->assertSame('rtcRollback', $this->postTransactionCallbackAction);
+    $this->assertRowAbsent('rtcCommit');
+    $this->assertRowPresent('rtcRollback');
+    $manager = $this->connection->transactionManager();
+    $this->assertSame(0, $manager->stackDepth());
+    $reflectedTransactionState = new \ReflectionMethod($manager, 'getConnectionTransactionState');
+    $this->assertSame(ClientConnectionTransactionState::RollbackFailed, $reflectedTransactionState->invoke($manager));
+    $this->assertRowPresent('row');
+  }
+
+  /**
+   * A post-transaction callback for testing purposes.
+   */
+  public function rootTransactionCallback(bool $success): void {
+    $this->postTransactionCallbackAction = $success ? 'rtcCommit' : 'rtcRollback';
+    $this->insertRow($this->postTransactionCallbackAction);
+  }
+
+  /**
+   * Tests TransactionManager failure.
+   */
+  public function testTransactionManagerFailureOnPendingStackItems(): void {
+    $connectionInfo = Database::getConnectionInfo();
+    Database::addConnectionInfo('default', 'test_fail', $connectionInfo['default']);
+    $testConnection = Database::getConnection('test_fail');
+
+    // Add a fake item to the stack.
+    $manager = $testConnection->transactionManager();
+    $reflectionMethod = new \ReflectionMethod($manager, 'addStackItem');
+    $reflectionMethod->invoke($manager, 'bar', new StackItem('qux', StackItemType::Root));
+    // Ensure transaction state can be determined during object destruction.
+    // This is necessary for the test to pass when xdebug.mode has the 'develop'
+    // option enabled.
+    $reflectionProperty = new \ReflectionProperty(TransactionManagerBase::class, 'connectionTransactionState');
+    $reflectionProperty->setValue($manager, ClientConnectionTransactionState::Active);
+
+    // Ensure that __destruct() results in an assertion error. Note that this
+    // will normally be called by PHP during the object's destruction but Drupal
+    // will commit all transactions when a database is closed thereby making
+    // this impossible to test unless it is called directly.
+    try {
+      $manager->__destruct();
+      $this->fail("Expected AssertionError error not thrown");
+    }
+    catch (\AssertionError $e) {
+      $this->assertStringStartsWith('Transaction $stack was not empty. Active stack: bar\\qux', $e->getMessage());
+    }
+
+    // Clean up.
+    $reflectionProperty = new \ReflectionProperty(TransactionManagerBase::class, 'stack');
+    $reflectionProperty->setValue($manager, []);
+    unset($testConnection);
+    Database::closeConnection('test_fail');
+  }
+
+}
