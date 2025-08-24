@@ -1341,13 +1341,14 @@ index a4211a5bec1..ea8a1ebe872 100644
    # A test subscriber for the database API events.
    Drupal\database_test\EventSubscriber\DatabaseEventSubscriber: ~
 diff --git a/core/modules/system/tests/modules/database_test/src/EventSubscriber/DatabaseEventSubscriber.php b/core/modules/system/tests/modules/database_test/src/EventSubscriber/DatabaseEventSubscriber.php
-index 029d6ee5a31..907793d6e9b 100644
+index 029d6ee5a31..6ea778c15e6 100644
 --- a/core/modules/system/tests/modules/database_test/src/EventSubscriber/DatabaseEventSubscriber.php
 +++ b/core/modules/system/tests/modules/database_test/src/EventSubscriber/DatabaseEventSubscriber.php
-@@ -7,6 +7,14 @@
+@@ -7,6 +7,15 @@
  use Drupal\Core\Database\Event\StatementExecutionEndEvent;
  use Drupal\Core\Database\Event\StatementExecutionFailureEvent;
  use Drupal\Core\Database\Event\StatementExecutionStartEvent;
++use Drupal\Core\Database\Event\TransactionAutoCommitEvent;
 +use Drupal\Core\Database\Event\TransactionBeginEvent;
 +use Drupal\Core\Database\Event\TransactionCommitEvent;
 +use Drupal\Core\Database\Event\TransactionReleaseSavepointEvent;
@@ -1359,7 +1360,7 @@ index 029d6ee5a31..907793d6e9b 100644
  use Symfony\Component\EventDispatcher\EventSubscriberInterface;
  
  /**
-@@ -34,6 +42,12 @@ class DatabaseEventSubscriber implements EventSubscriberInterface {
+@@ -34,6 +43,12 @@ class DatabaseEventSubscriber implements EventSubscriberInterface {
     */
    public array $statementIdsInExecution = [];
  
@@ -1372,12 +1373,13 @@ index 029d6ee5a31..907793d6e9b 100644
    /**
     * {@inheritdoc}
     */
-@@ -42,6 +56,12 @@ public static function getSubscribedEvents(): array {
+@@ -42,6 +57,13 @@ public static function getSubscribedEvents(): array {
        StatementExecutionStartEvent::class => 'onStatementExecutionStart',
        StatementExecutionEndEvent::class => 'onStatementExecutionEnd',
        StatementExecutionFailureEvent::class => 'onStatementExecutionFailure',
 +      TransactionBeginEvent::class => 'onTransactionBegin',
 +      TransactionSavepointEvent::class => 'onTransactionSavepoint',
++      TransactionAutoCommitEvent::class => 'onTransactionAutoCommit',
 +      TransactionCommitEvent::class => 'onTransactionCommit',
 +      TransactionReleaseSavepointEvent::class => 'onTransactionReleaseSavepoint',
 +      TransactionRollbackEvent::class => 'onTransactionRollback',
@@ -1385,7 +1387,7 @@ index 029d6ee5a31..907793d6e9b 100644
      ];
    }
  
-@@ -78,4 +98,64 @@ public function onStatementExecutionFailure(StatementExecutionFailureEvent $even
+@@ -78,4 +100,74 @@ public function onStatementExecutionFailure(StatementExecutionFailureEvent $even
      $this->countStatementFailures++;
    }
  
@@ -1407,6 +1409,16 @@ index 029d6ee5a31..907793d6e9b 100644
 +   */
 +  public function onTransactionSavepoint(TransactionSavepointEvent $event): void {
 +    $this->keyValue->get('TransactionEventTest')->set('event_data', get_class($event) . ' ' . $event->key . ' ' . $event->target . ' ' . $event->id . '\\' . $event->name . ' stack: ' . implode(' > ', $event->stackItems));
++  }
++
++  /**
++   * Subscribes to a TransactionAutoCommitEvent.
++   *
++   * @param \Drupal\Core\Database\Event\TransactionAutoCommitEvent $event
++   *   The transaction event.
++   */
++  public function onTransactionCommit(TransactionAutoCommitEvent $event): void {
++    $this->keyValue->get('TransactionEventTest')->set('event_data', get_class($event) . ' ' . $event->key . ' ' . $event->target . ' ' . $event->id . '\\' . $event->name);
 +  }
 +
 +  /**
@@ -1452,10 +1464,10 @@ index 029d6ee5a31..907793d6e9b 100644
  }
 diff --git a/core/tests/Drupal/KernelTests/Core/Database/TransactionEventTest.php b/core/tests/Drupal/KernelTests/Core/Database/TransactionEventTest.php
 new file mode 100644
-index 00000000000..767098e6c0c
+index 00000000000..a1c732c41ac
 --- /dev/null
 +++ b/core/tests/Drupal/KernelTests/Core/Database/TransactionEventTest.php
-@@ -0,0 +1,129 @@
+@@ -0,0 +1,130 @@
 +<?php
 +
 +declare(strict_types=1);
@@ -1531,7 +1543,7 @@ index 00000000000..767098e6c0c
 +  /**
 +   * Tests DDL auto-commit.
 +   */
-+  public function testDDLAutoCommit(): void {
++  public function testAutoCommitOnDataDefinitionLanguageStatement(): void {
 +    if ($this->connection->supportsTransactionalDDL()) {
 +      $this->markTestSkipped('This test is only relevant for databases that do not support transactional DDL.');
 +    }
@@ -1549,8 +1561,9 @@ index 00000000000..767098e6c0c
 +
 +    $tx = $this->connection->startTransaction();
 +    $this->connection->schema()->createTable('database_test_00', $table);
-+    $this->assertMatchesRegularExpression("/^.*TransactionCommitEvent default default .*\\\\drupal_transaction commit-type: AutomaticUponDDL$/", \Drupal::keyValue('TransactionEventTest')->get('event_data'));
++    $this->assertMatchesRegularExpression("/^.*TransactionAutoCommitEvent default default .*\\\\drupal_transaction$/", \Drupal::keyValue('TransactionEventTest')->get('event_data'));
 +    unset($tx);
++    $this->assertMatchesRegularExpression("/^.*TransactionCommitEvent default default .*\\\\drupal_transaction commit-type: AutomaticUponDDL$/", \Drupal::keyValue('TransactionEventTest')->get('event_data'));
 +  }
 +
 +  /**
