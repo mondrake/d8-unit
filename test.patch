@@ -637,7 +637,7 @@ index 00000000000..cff631275cc
 +
 +}
 diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
-index f379e770c15..7a339b92971 100644
+index f379e770c15..34f1e9c03fa 100644
 --- a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
 +++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
 @@ -5,8 +5,21 @@
@@ -662,7 +662,22 @@ index f379e770c15..7a339b92971 100644
  use Drupal\Core\Database\TransactionNameNonUniqueException;
  use Drupal\Core\Database\TransactionOutOfOrderException;
  
-@@ -167,6 +180,7 @@ protected function stack(): array {
+@@ -101,6 +114,14 @@ abstract class TransactionManagerBase implements TransactionManagerInterface {
+    */
+   private ClientConnectionTransactionState $connectionTransactionState;
+ 
++  /**
++   * Whether the root transaction was auto-committed.
++   *
++   * Normally FALSE, is set to TRUE when an autocommit occurred on the
++   * database engine.
++   */
++  private bool $isAutoCommitted = FALSE;
++
+   /**
+    * Whether to trigger warnings when unpiling a void transaction.
+    *
+@@ -167,6 +188,7 @@ protected function stack(): array {
     *   changes the order of object destruction when the develop mode is enabled.
     */
    public function commitAll(): void {
@@ -670,7 +685,7 @@ index f379e770c15..7a339b92971 100644
      foreach (array_reverse($this->stack()) as $id => $item) {
        $this->unpile($item->name, $id);
      }
-@@ -233,12 +247,23 @@ protected function dumpStackItemsAsString(): string {
+@@ -233,12 +255,23 @@ protected function dumpStackItemsAsString(): string {
      if ($this->stack() === []) {
        return '*** empty ***';
      }
@@ -699,7 +714,7 @@ index f379e770c15..7a339b92971 100644
    }
  
    /**
-@@ -248,6 +273,32 @@ public function inTransaction(): bool {
+@@ -248,6 +281,32 @@ public function inTransaction(): bool {
      return (bool) $this->stackDepth() && $this->getConnectionTransactionState() === ClientConnectionTransactionState::Active;
    }
  
@@ -732,7 +747,7 @@ index f379e770c15..7a339b92971 100644
    /**
     * {@inheritdoc}
     */
-@@ -273,25 +324,42 @@ public function push(string $name = ''): Transaction {
+@@ -273,25 +332,42 @@ public function push(string $name = ''): Transaction {
      // Do the client-level processing.
      if ($this->stackDepth() === 0) {
        $this->beginClientTransaction();
@@ -780,7 +795,28 @@ index f379e770c15..7a339b92971 100644
      // Actually return a new Transaction object.
      return new Transaction($this->connection, $name, $id);
    }
-@@ -324,7 +392,7 @@ public function purge(string $name, string $id): void {
+@@ -306,6 +382,20 @@ public function purge(string $name, string $id): void {
+     // statement, was executed that terminated the database transaction. So, we
+     // can process the post transaction callbacks.
+     if (!isset($this->stack()[$id]) && isset($this->voidedItems[$id]) && $this->rootId === $id) {
++      if ($this->isAutoCommitted) {
++        if ($this->connection->isEventEnabled(TransactionCommitEvent::class)) {
++          $this->connection->dispatchEvent(new TransactionCommitEvent(
++            $this->connection->getKey(),
++            $this->connection->getTarget(),
++            $id,
++            $name,
++            $this->getConnectionTransactionState(),
++            $this->stackItemsAsArray(),
++            CommitType::AutomaticUponDDL,
++          ));
++        }
++        $this->isAutoCommitted = FALSE;
++      }
+       $this->processPostTransactionCallbacks();
+       $this->rootId = NULL;
+       unset($this->voidedItems[$id]);
+@@ -324,7 +414,7 @@ public function purge(string $name, string $id): void {
      // When we get here, the transaction (or savepoint) is still active on the
      // database. We can unpile it, and if we are left with no more items in the
      // stack, we can also process the post transaction callbacks.
@@ -789,7 +825,35 @@ index f379e770c15..7a339b92971 100644
      $this->removeStackItem($id);
      if ($this->rootId === $id) {
        $this->processPostTransactionCallbacks();
-@@ -352,7 +420,7 @@ public function unpile(string $name, string $id): void {
+@@ -337,11 +427,26 @@ public function purge(string $name, string $id): void {
+    */
+   public function unpile(string $name, string $id): void {
+     // If the transaction was voided, we cannot unpile. Skip but trigger a user
+-    // warning if requested.
++    // warning if requested. If an autocommit happened, emit the
++    // TransactionCommitEvent.
+     if ($this->getConnectionTransactionState() === ClientConnectionTransactionState::Voided) {
+       if ($this->triggerWarningWhenUnpilingOnVoidTransaction) {
+         trigger_error('Transaction::commitOrRelease() was not processed because a prior execution of a DDL statement already committed the transaction.', E_USER_WARNING);
+       }
++      if ($this->isAutoCommitted) {
++        if ($this->connection->isEventEnabled(TransactionCommitEvent::class)) {
++          $this->connection->dispatchEvent(new TransactionCommitEvent(
++            $this->connection->getKey(),
++            $this->connection->getTarget(),
++            $id,
++            $name,
++            $this->getConnectionTransactionState(),
++            $this->stackItemsAsArray(),
++            CommitType::AutomaticUponDDL,
++          ));
++        }
++        $this->isAutoCommitted = FALSE;
++      }
+       return;
+     }
+ 
+@@ -352,7 +457,7 @@ public function unpile(string $name, string $id): void {
      }
  
      // Commit the transaction.
@@ -798,7 +862,7 @@ index f379e770c15..7a339b92971 100644
  
      // Void the transaction stack item.
      $this->voidStackItem($id);
-@@ -365,13 +433,15 @@ public function unpile(string $name, string $id): void {
+@@ -365,13 +470,15 @@ public function unpile(string $name, string $id): void {
     *   The name of the transaction.
     * @param string $id
     *   The id of the transaction.
@@ -815,7 +879,7 @@ index f379e770c15..7a339b92971 100644
      if ($this->getConnectionTransactionState() !== ClientConnectionTransactionState::Active) {
        // The stack got corrupted.
        throw new TransactionOutOfOrderException("Transaction {$id}\\{$name} is out of order. Active stack: " . $this->dumpStackItemsAsString());
-@@ -388,12 +458,76 @@ protected function commit(string $name, string $id): void {
+@@ -388,12 +495,76 @@ protected function commit(string $name, string $id): void {
      if ($this->stackDepth() > 1 && $this->stack()[$id]->type === StackItemType::Savepoint) {
        // Release the client transaction savepoint in case the Drupal
        // transaction is not a root one.
@@ -894,7 +958,7 @@ index f379e770c15..7a339b92971 100644
      }
      else {
        // The stack got corrupted.
-@@ -423,20 +557,77 @@ public function rollback(string $name, string $id): void {
+@@ -423,20 +594,77 @@ public function rollback(string $name, string $id): void {
          // Rollback the client transaction to the savepoint when the Drupal
          // transaction is not a root one. Then, release the savepoint too. The
          // client connection remains active.
@@ -979,7 +1043,7 @@ index f379e770c15..7a339b92971 100644
          }
        }
        else {
-@@ -510,7 +701,12 @@ protected function getConnectionTransactionState(): ClientConnectionTransactionS
+@@ -510,7 +738,12 @@ protected function getConnectionTransactionState(): ClientConnectionTransactionS
     * Processes the root transaction rollback.
     */
    protected function processRootRollback(): void {
@@ -993,7 +1057,7 @@ index f379e770c15..7a339b92971 100644
    }
  
    /**
-@@ -522,8 +718,10 @@ protected function processRootRollback(): void {
+@@ -522,8 +755,10 @@ protected function processRootRollback(): void {
    protected function processRootCommit(): void {
      $clientCommit = $this->commitClientTransaction();
      if (!$clientCommit) {
@@ -1005,7 +1069,7 @@ index f379e770c15..7a339b92971 100644
    }
  
    /**
-@@ -621,7 +819,38 @@ public function voidClientTransaction(): void {
+@@ -621,7 +856,29 @@ public function voidClientTransaction(): void {
      while ($i = array_key_last($this->stack())) {
        $this->voidStackItem((string) $i);
      }
@@ -1016,20 +1080,9 @@ index f379e770c15..7a339b92971 100644
 +  }
 +
 +  /**
-+   * Handles automatic commit occurred upon execution of a DDL statement.
-+   *
-+   * In some cases the active transaction is automatically committed by the
-+   * database server when a DDL statement is executed during a transaction
-+   * (for example, MySql). In such cases we void the remaining items on the
-+   * stack, and emit a TransactionAutoCommitEvent to notify that a db commit
-+   * happened while the Drupal transaction was still active. Later, a normal
-+   * TransactionCommitEvent is triggered when the Drupal transaction is
-+   * finalized.
-+   *
-+   * This method should only be called internally by a database driver.
++   * {@inheritdoc}
 +   */
 +  public function handleAutomaticCommitUponDDL(): void {
-+    $this->voidClientTransaction();
 +    if ($this->connection->isEventEnabled(TransactionAutoCommitEvent::class)) {
 +      $i = array_key_first($this->stack);
 +      assert($this->stack[$i]->type === StackItemType::Root);
@@ -1042,11 +1095,13 @@ index f379e770c15..7a339b92971 100644
 +        $this->stackItemsAsArray(),
 +      ));
 +    }
++    $this->voidClientTransaction();
++    $this->isAutoCommitted = TRUE;
    }
  
  }
 diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php
-index 0f7744da95d..3c3d620edce 100644
+index 0f7744da95d..60d4c8c6165 100644
 --- a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php
 +++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php
 @@ -19,6 +19,22 @@ interface TransactionManagerInterface {
@@ -1072,7 +1127,7 @@ index 0f7744da95d..3c3d620edce 100644
    /**
     * Checks if a named Drupal transaction is active.
     *
-@@ -122,16 +138,25 @@ public function rollback(string $name, string $id): void;
+@@ -122,16 +138,28 @@ public function rollback(string $name, string $id): void;
    /**
     * Voids the client connection.
     *
@@ -1093,8 +1148,11 @@ index 0f7744da95d..3c3d620edce 100644
 +   *
 +   * In some cases the active transaction is automatically committed by the
 +   * database server when a DDL statement is executed during a transaction
-+   * (for example, MySql). In such cases we need to trigger a
-+   * TransactionCommitEvent and void the remaining items on the stack.
++   * (for example, MySql). In such cases we void the remaining items on the
++   * stack, and emit a TransactionAutoCommitEvent to notify that a db commit
++   * happened while the Drupal transaction was still active. Later, a normal
++   * TransactionCommitEvent is triggered when the Drupal transaction is
++   * finalized.
 +   *
 +   * This method should only be called internally by a database driver.
 +   */
