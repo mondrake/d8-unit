@@ -1,2120 +1,1071 @@
-diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
-index a0d9fc67d1a..8abfdac57d5 100644
---- a/core/lib/Drupal/Core/Database/Connection.php
-+++ b/core/lib/Drupal/Core/Database/Connection.php
-@@ -1495,7 +1495,7 @@ public function isEventEnabled(string $eventName): bool {
-   /**
-    * Enables database API events dispatching.
-    *
--   * @param string[] $eventNames
-+   * @param list<class-string<\Drupal\Core\Database\Event\DatabaseEvent>> $eventNames
-    *   A list of database events to be enabled.
-    *
-    * @return static
-@@ -1503,6 +1503,7 @@ public function isEventEnabled(string $eventName): bool {
-   public function enableEvents(array $eventNames): static {
-     foreach ($eventNames as $eventName) {
-       assert(class_exists($eventName), "Event class {$eventName} does not exist");
-+      assert(is_a($eventName, DatabaseEvent::class, TRUE), "Event class {$eventName} is not a valid database event class");
-       $this->enabledEvents[$eventName] = TRUE;
-     }
-     return $this;
-@@ -1511,7 +1512,7 @@ public function enableEvents(array $eventNames): static {
-   /**
-    * Disables database API events dispatching.
-    *
--   * @param string[] $eventNames
-+   * @param list<class-string<\Drupal\Core\Database\Event\DatabaseEvent>> $eventNames
-    *   A list of database events to be disabled.
-    *
-    * @return static
-@@ -1519,6 +1520,7 @@ public function enableEvents(array $eventNames): static {
-   public function disableEvents(array $eventNames): static {
-     foreach ($eventNames as $eventName) {
-       assert(class_exists($eventName), "Event class {$eventName} does not exist");
-+      assert(is_a($eventName, DatabaseEvent::class, TRUE), "Event class {$eventName} is not a valid database event class");
-       $this->enabledEvents[$eventName] = FALSE;
-     }
-     return $this;
-diff --git a/core/lib/Drupal/Core/Database/Event/StatementExecutionEndEvent.php b/core/lib/Drupal/Core/Database/Event/StatementExecutionEndEvent.php
-index 30718843d6c..4114ccbbc7d 100644
---- a/core/lib/Drupal/Core/Database/Event/StatementExecutionEndEvent.php
-+++ b/core/lib/Drupal/Core/Database/Event/StatementExecutionEndEvent.php
-@@ -28,6 +28,10 @@ class StatementExecutionEndEvent extends DatabaseEvent {
-    *   called.
-    * @param float $startTime
-    *   The time of the statement execution start.
-+   * @param string|null $transactionId
-+   *   The current transaction id if active.
-+   * @param string|null $transactionName
-+   *   The current transaction name if active.
-    */
-   public function __construct(
-     public readonly int $statementObjectId,
-@@ -37,6 +41,8 @@ public function __construct(
-     public readonly array $args,
-     public readonly array $caller,
-     public readonly float $startTime,
-+    public readonly ?string $transactionId = NULL,
-+    public readonly ?string $transactionName = NULL,
-   ) {
-     parent::__construct();
-   }
-diff --git a/core/lib/Drupal/Core/Database/Event/StatementExecutionFailureEvent.php b/core/lib/Drupal/Core/Database/Event/StatementExecutionFailureEvent.php
-index 682e59f2389..b13f87fc1a3 100644
---- a/core/lib/Drupal/Core/Database/Event/StatementExecutionFailureEvent.php
-+++ b/core/lib/Drupal/Core/Database/Event/StatementExecutionFailureEvent.php
-@@ -34,6 +34,10 @@ class StatementExecutionFailureEvent extends StatementExecutionEndEvent {
-    *   The code of the exception that was thrown.
-    * @param string $exceptionMessage
-    *   The message of the exception that was thrown.
-+   * @param string|null $transactionId
-+   *   The current transaction id if active.
-+   * @param string|null $transactionName
-+   *   The current transaction name if active.
-    */
-   public function __construct(
-     int $statementObjectId,
-@@ -46,8 +50,10 @@ public function __construct(
-     public readonly string $exceptionClass,
-     public readonly int|string $exceptionCode,
-     public readonly string $exceptionMessage,
-+    ?string $transactionId = NULL,
-+    ?string $transactionName = NULL,
-   ) {
--    parent::__construct($statementObjectId, $key, $target, $queryString, $args, $caller, $startTime);
-+    parent::__construct($statementObjectId, $key, $target, $queryString, $args, $caller, $startTime, $transactionId, $transactionName);
-   }
+diff --git a/.gitlab-ci.yml b/.gitlab-ci.yml
+index 106b7eb756e..34e64e2d264 100644
+--- a/.gitlab-ci.yml
++++ b/.gitlab-ci.yml
+@@ -68,7 +68,7 @@ variables:
+   PARENT_PIPELINE_ID: $CI_PIPELINE_ID
+   _TARGET_PHP: "8.4-ubuntu"
+   PHPUNIT_CONFIGURATION_FILE_PATH: $CI_PROJECT_DIR/core
+-  PHPUNIT_FAIL_ON_PHPUNIT_DEPRECATION: false
++  PHPUNIT_FAIL_ON_PHPUNIT_DEPRECATION: true
  
+ #############
+ # Stages    #
+@@ -583,7 +583,6 @@ default:
+     KUBERNETES_CPU_REQUEST: "4"
+     CONCURRENCY: 24
+     _TARGET_PHP: "8.3-ubuntu"
+-    PHPUNIT_FAIL_ON_PHPUNIT_DEPRECATION: true
+ 
+ '⚡️ PHPUnit Unit tests on PHP 8.4':
+   <<: [ *default-job-settings-lint, *default-phpunit-job-settings ]
+@@ -591,7 +590,6 @@ default:
+     TESTSUITE: PHPUnit-Unit
+     KUBERNETES_CPU_REQUEST: "4"
+     CONCURRENCY: 24
+-    PHPUNIT_FAIL_ON_PHPUNIT_DEPRECATION: true
+ 
+ '⚡️ PHPUnit Unit tests on PHP 8.5':
+   <<: [ *default-job-settings-lint, *default-phpunit-job-settings ]
+@@ -601,20 +599,17 @@ default:
+     KUBERNETES_CPU_REQUEST: "4"
+     CONCURRENCY: 24
+     _TARGET_PHP: "8.5-ubuntu"
+-    PHPUNIT_FAIL_ON_PHPUNIT_DEPRECATION: true
+ 
+ '⚡️ Component unit tests on PHP 8.3':
+   <<: [ *default-job-settings-lint, *default-component-unit-test-job-settings ]
+   variables:
+     KUBERNETES_CPU_REQUEST: "2"
+     _TARGET_PHP: "8.3-ubuntu"
+-    PHPUNIT_FAIL_ON_PHPUNIT_DEPRECATION: true
+ 
+ '⚡️ Component unit tests on PHP 8.4':
+   <<: [ *default-job-settings-lint, *default-component-unit-test-job-settings ]
+   variables:
+     KUBERNETES_CPU_REQUEST: "2"
+-    PHPUNIT_FAIL_ON_PHPUNIT_DEPRECATION: true
+ 
+ '⚡️ Component unit tests on PHP 8.5':
+   <<: [ *default-job-settings-lint, *default-component-unit-test-job-settings ]
+@@ -622,7 +617,6 @@ default:
+   variables:
+     KUBERNETES_CPU_REQUEST: "2"
+     _TARGET_PHP: "8.5-ubuntu"
+-    PHPUNIT_FAIL_ON_PHPUNIT_DEPRECATION: true
+ 
+ '✅️ PHPStan rules tests':
+   <<: [ *default-job-settings-lint ]
+diff --git a/.gitlab-ci/pipeline.yml b/.gitlab-ci/pipeline.yml
+index 981afc15ebe..bf3f378f1d1 100644
+--- a/.gitlab-ci/pipeline.yml
++++ b/.gitlab-ci/pipeline.yml
+@@ -27,10 +27,6 @@ default:
+       [[ $_TARGET_DB == pgsql* ]] && export SIMPLETEST_DB=pgsql://$POSTGRES_USER:$POSTGRES_PASSWORD@database/$POSTGRES_DB?module=pgsql
+     - echo "SIMPLETEST_DB = $SIMPLETEST_DB"
+     - export PHPUNIT_CONFIGURATION_FILE_PATH=$CI_PROJECT_DIR/core
+-    - |
+-      [[ $TESTSUITE == PHPUnit-Build ]] && export PHPUNIT_FAIL_ON_PHPUNIT_DEPRECATION=true
+-      [[ $TESTSUITE == PHPUnit-Functional ]] && export PHPUNIT_FAIL_ON_PHPUNIT_DEPRECATION=true
+-      [[ $TESTSUITE == PHPUnit-FunctionalJavascript ]] && export PHPUNIT_FAIL_ON_PHPUNIT_DEPRECATION=true
+     - $CI_PROJECT_DIR/.gitlab-ci/scripts/server-setup.sh
+   after_script:
+     - sed -i "s#$CI_PROJECT_DIR/##" ./sites/default/files/simpletest/phpunit-*.xml || true
+@@ -77,7 +73,7 @@ variables:
+   MINK_DRIVER_ARGS_WEBDRIVER_CHROMEDRIVER_NON_W3C: '["chrome", {"browserName":"chrome","goog:chromeOptions":{"args":["--disable-dev-shm-usage","--disable-gpu","--headless","--dns-prefetch-disable"]}}, "http://localhost:9515"]'
+   CI_PARALLEL_NODE_INDEX: $CI_NODE_INDEX
+   CI_PARALLEL_NODE_TOTAL: $CI_NODE_TOTAL
+-  PHPUNIT_FAIL_ON_PHPUNIT_DEPRECATION: false
++  PHPUNIT_FAIL_ON_PHPUNIT_DEPRECATION: true
+ 
+ .with-database: &with-database
+   name: $_CONFIG_DOCKERHUB_ROOT/$_TARGET_DB:production
+diff --git a/core/.deprecation-ignore.txt b/core/.deprecation-ignore.txt
+index 3d220395485..b3bb0e6616e 100644
+--- a/core/.deprecation-ignore.txt
++++ b/core/.deprecation-ignore.txt
+@@ -33,6 +33,7 @@
+ %Since symfony/http-foundation 7.2: NativeSessionStorage's "sid_bits_per_character" option is deprecated and will be ignored in Symfony 8.0.%
+ 
+ # Drupal 12.
++%expectDeprecation\(\) is deprecated in drupal:11\.3\.0%
+ %The "Drupal\\Core\\Database\\Query\\Select::hasAllTags\(\)" method will require a new "string \.\.\. \$tags" argument in the next major version of its interface%
+ %The "Drupal\\Core\\Database\\Query\\Select::hasAnyTag\(\)" method will require a new "string \.\.\. \$tags" argument in the next major version of its interface%
+ %The "Drupal\\Core\\Database\\Query\\SelectExtender::hasAllTags\(\)" method will require a new "string \.\.\. \$tags" argument in the next major version of its interface%
+diff --git a/core/.phpstan-baseline.php b/core/.phpstan-baseline.php
+index 8689c24a62b..c76c3da0cda 100644
+--- a/core/.phpstan-baseline.php
++++ b/core/.phpstan-baseline.php
+@@ -25856,6 +25856,15 @@
+ 	'count' => 1,
+ 	'path' => __DIR__ . '/modules/node/tests/src/Functional/NodeBlockFunctionalTest.php',
+ ];
++$ignoreErrors[] = [
++	'message' => '#^Call to deprecated method expectDeprecation\\(\\) of class Drupal\\\\Tests\\\\BrowserTestBase\\:
++in drupal\\:11\\.3\\.0 and is removed from drupal\\:12\\.0\\.0\\. Use
++  \\$this\\-\\>expectUserDeprecationMessage\\(\\) or
++  \\$this\\-\\>expectUserDeprecationMessageMatches\\(\\) instead\\.$#',
++	'identifier' => 'method.deprecated',
++	'count' => 1,
++	'path' => __DIR__ . '/modules/node/tests/src/Functional/NodePageVariableDeprecationTest.php',
++];
+ $ignoreErrors[] = [
+ 	'message' => '#^Method Drupal\\\\Tests\\\\node\\\\Functional\\\\NodeTestBase\\:\\:assertNodeAccess\\(\\) has no return type specified\\.$#',
+ 	'identifier' => 'missingType.return',
+@@ -33672,6 +33681,15 @@
+ 	'count' => 1,
+ 	'path' => __DIR__ . '/modules/taxonomy/tests/src/Functional/Rest/VocabularyXmlBasicAuthTest.php',
+ ];
++$ignoreErrors[] = [
++	'message' => '#^Call to deprecated method expectDeprecation\\(\\) of class Drupal\\\\Tests\\\\BrowserTestBase\\:
++in drupal\\:11\\.3\\.0 and is removed from drupal\\:12\\.0\\.0\\. Use
++  \\$this\\-\\>expectUserDeprecationMessage\\(\\) or
++  \\$this\\-\\>expectUserDeprecationMessageMatches\\(\\) instead\\.$#',
++	'identifier' => 'method.deprecated',
++	'count' => 1,
++	'path' => __DIR__ . '/modules/taxonomy/tests/src/Functional/TaxonomyTermPageVariableDeprecationTest.php',
++];
+ $ignoreErrors[] = [
+ 	'message' => '#^Method Drupal\\\\Tests\\\\taxonomy\\\\Functional\\\\TaxonomyTestBase\\:\\:createEntityReferenceField\\(\\) has no return type specified\\.$#',
+ 	'identifier' => 'missingType.return',
+@@ -46544,6 +46562,15 @@
+ 	'count' => 1,
+ 	'path' => __DIR__ . '/tests/Drupal/KernelTests/KernelTestBase.php',
+ ];
++$ignoreErrors[] = [
++	'message' => '#^Usage of deprecated trait Drupal\\\\TestTools\\\\Extension\\\\DeprecationBridge\\\\ExpectDeprecationTrait in class Drupal\\\\KernelTests\\\\KernelTestBase\\:
++in drupal\\:11\\.3\\.0 and is removed from drupal\\:12\\.0\\.0\\. Use
++  \\$this\\-\\>expectUserDeprecationMessage\\(\\) or
++  \\$this\\-\\>expectUserDeprecationMessageMatches\\(\\) instead\\.$#',
++	'identifier' => 'traitUse.deprecatedTrait',
++	'count' => 1,
++	'path' => __DIR__ . '/tests/Drupal/KernelTests/KernelTestBase.php',
++];
+ $ignoreErrors[] = [
+ 	'message' => '#^Variable \\$value in isset\\(\\) always exists and is not nullable\\.$#',
+ 	'identifier' => 'isset.variable',
+@@ -46971,6 +46998,15 @@
+ 	'count' => 1,
+ 	'path' => __DIR__ . '/tests/Drupal/Tests/BrowserTestBase.php',
+ ];
++$ignoreErrors[] = [
++	'message' => '#^Usage of deprecated trait Drupal\\\\TestTools\\\\Extension\\\\DeprecationBridge\\\\ExpectDeprecationTrait in class Drupal\\\\Tests\\\\BrowserTestBase\\:
++in drupal\\:11\\.3\\.0 and is removed from drupal\\:12\\.0\\.0\\. Use
++  \\$this\\-\\>expectUserDeprecationMessage\\(\\) or
++  \\$this\\-\\>expectUserDeprecationMessageMatches\\(\\) instead\\.$#',
++	'identifier' => 'traitUse.deprecatedTrait',
++	'count' => 1,
++	'path' => __DIR__ . '/tests/Drupal/Tests/BrowserTestBase.php',
++];
+ $ignoreErrors[] = [
+ 	'message' => '#^Method Drupal\\\\Tests\\\\Component\\\\Annotation\\\\AnnotationBaseStub\\:\\:get\\(\\) has no return type specified\\.$#',
+ 	'identifier' => 'missingType.return',
+@@ -49905,6 +49941,15 @@
+ 	'count' => 1,
+ 	'path' => __DIR__ . '/tests/Drupal/Tests/PerformanceData.php',
+ ];
++$ignoreErrors[] = [
++	'message' => '#^Usage of deprecated trait Drupal\\\\TestTools\\\\Extension\\\\DeprecationBridge\\\\ExpectDeprecationTrait in class Drupal\\\\Tests\\\\UnitTestCase\\:
++in drupal\\:11\\.3\\.0 and is removed from drupal\\:12\\.0\\.0\\. Use
++  \\$this\\-\\>expectUserDeprecationMessage\\(\\) or
++  \\$this\\-\\>expectUserDeprecationMessageMatches\\(\\) instead\\.$#',
++	'identifier' => 'traitUse.deprecatedTrait',
++	'count' => 1,
++	'path' => __DIR__ . '/tests/Drupal/Tests/UnitTestCase.php',
++];
+ $ignoreErrors[] = [
+ 	'message' => '#^Method Drupal\\\\Tests\\\\WebAssert\\:\\:assert\\(\\) has no return type specified\\.$#',
+ 	'identifier' => 'missingType.return',
+diff --git a/core/assets/schemas/v1/icon_pack.schema.json b/core/assets/schemas/v1/icon_pack.schema.json
+index 548341717ea..18e0a70bc62 100644
+--- a/core/assets/schemas/v1/icon_pack.schema.json
++++ b/core/assets/schemas/v1/icon_pack.schema.json
+@@ -93,7 +93,7 @@
+       "title": "Asset library",
+       "description": "The ID of an asset library",
+       "type": "string",
+-      "pattern": "^\\w+/[A-Za-z]+[\\w-]*$"
++      "pattern": "^\\w+/[A-Za-z]+\\w*$"
+     }
+   }
  }
-diff --git a/core/lib/Drupal/Core/Database/Event/StatementExecutionStartEvent.php b/core/lib/Drupal/Core/Database/Event/StatementExecutionStartEvent.php
-index 010f810966a..124142556ed 100644
---- a/core/lib/Drupal/Core/Database/Event/StatementExecutionStartEvent.php
-+++ b/core/lib/Drupal/Core/Database/Event/StatementExecutionStartEvent.php
-@@ -26,6 +26,10 @@ class StatementExecutionStartEvent extends DatabaseEvent {
-    * @param array $caller
-    *   A normalized debug backtrace entry representing the last non-db method
-    *   called.
-+   * @param string|null $transactionId
-+   *   The current transaction id if active.
-+   * @param string|null $transactionName
-+   *   The current transaction name if active.
+\ No newline at end of file
+diff --git a/core/modules/migrate/tests/src/Unit/Exception/MigrateSkipProcessExceptionTest.php b/core/modules/migrate/tests/src/Unit/Exception/MigrateSkipProcessExceptionTest.php
+index eddae890f98..7970c3eaa9f 100644
+--- a/core/modules/migrate/tests/src/Unit/Exception/MigrateSkipProcessExceptionTest.php
++++ b/core/modules/migrate/tests/src/Unit/Exception/MigrateSkipProcessExceptionTest.php
+@@ -21,7 +21,7 @@ class MigrateSkipProcessExceptionTest extends UnitTestCase {
     */
-   public function __construct(
-     public readonly int $statementObjectId,
-@@ -34,6 +38,8 @@ public function __construct(
-     public readonly string $queryString,
-     public readonly array $args,
-     public readonly array $caller,
-+    public readonly ?string $transactionId = NULL,
-+    public readonly ?string $transactionName = NULL,
-   ) {
-     parent::__construct();
-   }
-diff --git a/core/lib/Drupal/Core/Database/Event/TransactionAutoCommitEvent.php b/core/lib/Drupal/Core/Database/Event/TransactionAutoCommitEvent.php
-new file mode 100644
-index 00000000000..922e579077c
---- /dev/null
-+++ b/core/lib/Drupal/Core/Database/Event/TransactionAutoCommitEvent.php
-@@ -0,0 +1,18 @@
-+<?php
-+
-+declare(strict_types=1);
-+
-+namespace Drupal\Core\Database\Event;
-+
-+/**
-+ * Emitted when an automatic commit is detected.
-+ *
-+ * In some cases the active transaction is automatically committed by the
-+ * database server when a DDL statement is executed during a transaction
-+ * (for example, MySql). In such cases we emit this event to notify that a
-+ * commit occurred while the Drupal transaction is still active.
-+ * A normal TransactionCommitEvent is anyway emitted later once the Drupal
-+ * transaction is committed.
-+ */
-+final class TransactionAutoCommitEvent extends TransactionEventBase {
-+}
-diff --git a/core/lib/Drupal/Core/Database/Event/TransactionBeginEvent.php b/core/lib/Drupal/Core/Database/Event/TransactionBeginEvent.php
-new file mode 100644
-index 00000000000..fd8801bdbd4
---- /dev/null
-+++ b/core/lib/Drupal/Core/Database/Event/TransactionBeginEvent.php
-@@ -0,0 +1,11 @@
-+<?php
-+
-+declare(strict_types=1);
-+
-+namespace Drupal\Core\Database\Event;
-+
-+/**
-+ * Represents the beginning of a transaction.
-+ */
-+final class TransactionBeginEvent extends TransactionEventBase {
-+}
-diff --git a/core/lib/Drupal/Core/Database/Event/TransactionCommitEvent.php b/core/lib/Drupal/Core/Database/Event/TransactionCommitEvent.php
-new file mode 100644
-index 00000000000..e95cf6c57f5
---- /dev/null
-+++ b/core/lib/Drupal/Core/Database/Event/TransactionCommitEvent.php
-@@ -0,0 +1,11 @@
-+<?php
-+
-+declare(strict_types=1);
-+
-+namespace Drupal\Core\Database\Event;
-+
-+/**
-+ * Represents the commit of a transaction.
-+ */
-+final class TransactionCommitEvent extends TransactionCommitOrReleaseEventBase {
-+}
-diff --git a/core/lib/Drupal/Core/Database/Event/TransactionCommitFailureEvent.php b/core/lib/Drupal/Core/Database/Event/TransactionCommitFailureEvent.php
-new file mode 100644
-index 00000000000..801f0d0bc4e
---- /dev/null
-+++ b/core/lib/Drupal/Core/Database/Event/TransactionCommitFailureEvent.php
-@@ -0,0 +1,11 @@
-+<?php
-+
-+declare(strict_types=1);
-+
-+namespace Drupal\Core\Database\Event;
-+
-+/**
-+ * Represents the failed commit of a transaction.
-+ */
-+final class TransactionCommitFailureEvent extends TransactionCommitOrReleaseFailureEventBase {
-+}
-diff --git a/core/lib/Drupal/Core/Database/Event/TransactionCommitOrReleaseEventBase.php b/core/lib/Drupal/Core/Database/Event/TransactionCommitOrReleaseEventBase.php
-new file mode 100644
-index 00000000000..90c1147ca32
---- /dev/null
-+++ b/core/lib/Drupal/Core/Database/Event/TransactionCommitOrReleaseEventBase.php
-@@ -0,0 +1,48 @@
-+<?php
-+
-+declare(strict_types=1);
-+
-+namespace Drupal\Core\Database\Event;
-+
-+use Drupal\Core\Database\Transaction\ClientConnectionTransactionState;
-+use Drupal\Core\Database\Transaction\CommitType;
-+
-+/**
-+ * Represents the commit of a transaction.
-+ */
-+abstract class TransactionCommitOrReleaseEventBase extends TransactionEventBase {
-+
-+  /**
-+   * Constructor.
-+   *
-+   * See 'Customizing database settings' in settings.php for an explanation of
-+   * the $key and $target connection values.
-+   *
-+   * @param string $key
-+   *   The database connection key.
-+   * @param string $target
-+   *   The database connection target.
-+   * @param string $id
-+   *   The id of the transaction.
-+   * @param string $name
-+   *   The name of the transaction.
-+   * @param \Drupal\Core\Database\Transaction\ClientConnectionTransactionState $transactionState
-+   *   The state of the client transaction.
-+   * @param array $stackItems
-+   *   The current transaction stack items.
-+   * @param \Drupal\Core\Database\Transaction\CommitType $type
-+   *   The type of commit.
-+   */
-+  public function __construct(
-+    string $key,
-+    string $target,
-+    string $id,
-+    string $name,
-+    ClientConnectionTransactionState $transactionState,
-+    array $stackItems,
-+    public readonly CommitType $type,
-+  ) {
-+    parent::__construct($key, $target, $id, $name, $transactionState, $stackItems);
-+  }
-+
-+}
-diff --git a/core/lib/Drupal/Core/Database/Event/TransactionCommitOrReleaseFailureEventBase.php b/core/lib/Drupal/Core/Database/Event/TransactionCommitOrReleaseFailureEventBase.php
-new file mode 100644
-index 00000000000..6b140596d15
---- /dev/null
-+++ b/core/lib/Drupal/Core/Database/Event/TransactionCommitOrReleaseFailureEventBase.php
-@@ -0,0 +1,54 @@
-+<?php
-+
-+declare(strict_types=1);
-+
-+namespace Drupal\Core\Database\Event;
-+
-+use Drupal\Core\Database\Transaction\ClientConnectionTransactionState;
-+use Drupal\Core\Database\Transaction\CommitType;
-+
-+/**
-+ * Base class for database transaction commit failure events.
-+ */
-+abstract class TransactionCommitOrReleaseFailureEventBase extends TransactionFailureEventBase {
-+
-+  /**
-+   * Constructor.
-+   *
-+   * See 'Customizing database settings' in settings.php for an explanation of
-+   * the $key and $target connection values.
-+   *
-+   * @param string $key
-+   *   The database connection key.
-+   * @param string $target
-+   *   The database connection target.
-+   * @param string $id
-+   *   The id of the transaction.
-+   * @param string $name
-+   *   The name of the transaction.
-+   * @param \Drupal\Core\Database\Transaction\ClientConnectionTransactionState $transactionState
-+   *   The state of the client transaction.
-+   * @param array $stackItems
-+   *   The current transaction stack items.
-+   * @param class-string $className
-+   *   The FQCN of the exception.
-+   * @param string $message
-+   *   The message of the exception.
-+   * @param \Drupal\Core\Database\Transaction\CommitType $type
-+   *   The type of commit.
-+   */
-+  public function __construct(
-+    string $key,
-+    string $target,
-+    string $id,
-+    string $name,
-+    ClientConnectionTransactionState $transactionState,
-+    array $stackItems,
-+    string $className,
-+    string $message,
-+    public readonly CommitType $type,
-+  ) {
-+    parent::__construct($key, $target, $id, $name, $transactionState, $stackItems, $className, $message);
-+  }
-+
-+}
-diff --git a/core/lib/Drupal/Core/Database/Event/TransactionEvent.php b/core/lib/Drupal/Core/Database/Event/TransactionEvent.php
-new file mode 100644
-index 00000000000..b810b886f71
---- /dev/null
-+++ b/core/lib/Drupal/Core/Database/Event/TransactionEvent.php
-@@ -0,0 +1,35 @@
-+<?php
-+
-+declare(strict_types=1);
-+
-+namespace Drupal\Core\Database\Event;
-+
-+/**
-+ * Enumeration of the transaction related database events.
-+ */
-+enum TransactionEvent: string {
-+
-+  case Begin = TransactionBeginEvent::class;
-+  case Commit = TransactionCommitEvent::class;
-+  case CommitFailure = TransactionCommitFailureEvent::class;
-+  case ReleaseSavepoint = TransactionReleaseSavepointEvent::class;
-+  case ReleaseSavepointFailure = TransactionReleaseSavepointFailureEvent::class;
-+  case Rollback = TransactionRollbackEvent::class;
-+  case RollbackFailure = TransactionRollbackFailureEvent::class;
-+  case RollbackToSavepoint = TransactionRollbackToSavepointEvent::class;
-+  case RollbackToSavepointFailure = TransactionRollbackToSavepointFailureEvent::class;
-+  case Savepoint = TransactionSavepointEvent::class;
-+
-+  case AutoCommit = TransactionAutoCommitEvent::class;
-+
-+  /**
-+   * Returns an array with all transaction related event classes.
-+   *
-+   * @return list<class-string<\Drupal\Core\Database\Event\TransactionEventBase>>
-+   *   An array with all transaction related event classes.
-+   */
-+  public static function all(): array {
-+    return array_map(fn(self $case) => $case->value, self::cases());
-+  }
-+
-+}
-diff --git a/core/lib/Drupal/Core/Database/Event/TransactionEventBase.php b/core/lib/Drupal/Core/Database/Event/TransactionEventBase.php
-new file mode 100644
-index 00000000000..0e41b9d95a8
---- /dev/null
-+++ b/core/lib/Drupal/Core/Database/Event/TransactionEventBase.php
-@@ -0,0 +1,44 @@
-+<?php
-+
-+declare(strict_types=1);
-+
-+namespace Drupal\Core\Database\Event;
-+
-+use Drupal\Core\Database\Transaction\ClientConnectionTransactionState;
-+
-+/**
-+ * Base class for database transaction events.
-+ */
-+abstract class TransactionEventBase extends DatabaseEvent {
-+
-+  /**
-+   * Constructor.
-+   *
-+   * See 'Customizing database settings' in settings.php for an explanation of
-+   * the $key and $target connection values.
-+   *
-+   * @param string $key
-+   *   The database connection key.
-+   * @param string $target
-+   *   The database connection target.
-+   * @param string $id
-+   *   The id of the transaction.
-+   * @param string $name
-+   *   The name of the transaction.
-+   * @param \Drupal\Core\Database\Transaction\ClientConnectionTransactionState $transactionState
-+   *   The state of the client transaction.
-+   * @param array $stackItems
-+   *   The current transaction stack items.
-+   */
-+  public function __construct(
-+    public readonly string $key,
-+    public readonly string $target,
-+    public readonly string $id,
-+    public readonly string $name,
-+    public readonly ClientConnectionTransactionState $transactionState,
-+    public readonly array $stackItems,
-+  ) {
-+    parent::__construct();
-+  }
-+
-+}
-diff --git a/core/lib/Drupal/Core/Database/Event/TransactionFailureEventBase.php b/core/lib/Drupal/Core/Database/Event/TransactionFailureEventBase.php
-new file mode 100644
-index 00000000000..bf04371a498
---- /dev/null
-+++ b/core/lib/Drupal/Core/Database/Event/TransactionFailureEventBase.php
-@@ -0,0 +1,50 @@
-+<?php
-+
-+declare(strict_types=1);
-+
-+namespace Drupal\Core\Database\Event;
-+
-+use Drupal\Core\Database\Transaction\ClientConnectionTransactionState;
-+
-+/**
-+ * Base class for database transaction failure events.
-+ */
-+abstract class TransactionFailureEventBase extends TransactionEventBase {
-+
-+  /**
-+   * Constructor.
-+   *
-+   * See 'Customizing database settings' in settings.php for an explanation of
-+   * the $key and $target connection values.
-+   *
-+   * @param string $key
-+   *   The database connection key.
-+   * @param string $target
-+   *   The database connection target.
-+   * @param string $id
-+   *   The id of the transaction.
-+   * @param string $name
-+   *   The name of the transaction.
-+   * @param \Drupal\Core\Database\Transaction\ClientConnectionTransactionState $transactionState
-+   *   The state of the client transaction.
-+   * @param array $stackItems
-+   *   The current transaction stack items.
-+   * @param class-string $className
-+   *   The FQCN of the exception.
-+   * @param string $message
-+   *   The message of the exception.
-+   */
-+  public function __construct(
-+    string $key,
-+    string $target,
-+    string $id,
-+    string $name,
-+    ClientConnectionTransactionState $transactionState,
-+    array $stackItems,
-+    public readonly string $className,
-+    public readonly string $message,
-+  ) {
-+    parent::__construct($key, $target, $id, $name, $transactionState, $stackItems);
-+  }
-+
-+}
-diff --git a/core/lib/Drupal/Core/Database/Event/TransactionReleaseSavepointEvent.php b/core/lib/Drupal/Core/Database/Event/TransactionReleaseSavepointEvent.php
-new file mode 100644
-index 00000000000..61d61710da2
---- /dev/null
-+++ b/core/lib/Drupal/Core/Database/Event/TransactionReleaseSavepointEvent.php
-@@ -0,0 +1,11 @@
-+<?php
-+
-+declare(strict_types=1);
-+
-+namespace Drupal\Core\Database\Event;
-+
-+/**
-+ * Represents a savepoint release.
-+ */
-+final class TransactionReleaseSavepointEvent extends TransactionCommitOrReleaseEventBase {
-+}
-diff --git a/core/lib/Drupal/Core/Database/Event/TransactionReleaseSavepointFailureEvent.php b/core/lib/Drupal/Core/Database/Event/TransactionReleaseSavepointFailureEvent.php
-new file mode 100644
-index 00000000000..df0367bcfdc
---- /dev/null
-+++ b/core/lib/Drupal/Core/Database/Event/TransactionReleaseSavepointFailureEvent.php
-@@ -0,0 +1,11 @@
-+<?php
-+
-+declare(strict_types=1);
-+
-+namespace Drupal\Core\Database\Event;
-+
-+/**
-+ * Represents a failed savepoint release.
-+ */
-+final class TransactionReleaseSavepointFailureEvent extends TransactionCommitOrReleaseFailureEventBase {
-+}
-diff --git a/core/lib/Drupal/Core/Database/Event/TransactionRollbackEvent.php b/core/lib/Drupal/Core/Database/Event/TransactionRollbackEvent.php
-new file mode 100644
-index 00000000000..3f64c0d0e89
---- /dev/null
-+++ b/core/lib/Drupal/Core/Database/Event/TransactionRollbackEvent.php
-@@ -0,0 +1,11 @@
-+<?php
-+
-+declare(strict_types=1);
-+
-+namespace Drupal\Core\Database\Event;
-+
-+/**
-+ * Represents the rollback of a transaction.
-+ */
-+final class TransactionRollbackEvent extends TransactionEventBase {
-+}
-diff --git a/core/lib/Drupal/Core/Database/Event/TransactionRollbackFailureEvent.php b/core/lib/Drupal/Core/Database/Event/TransactionRollbackFailureEvent.php
-new file mode 100644
-index 00000000000..6b1c7d59cbd
---- /dev/null
-+++ b/core/lib/Drupal/Core/Database/Event/TransactionRollbackFailureEvent.php
-@@ -0,0 +1,11 @@
-+<?php
-+
-+declare(strict_types=1);
-+
-+namespace Drupal\Core\Database\Event;
-+
-+/**
-+ * Represents the failed rollback of a transaction.
-+ */
-+final class TransactionRollbackFailureEvent extends TransactionFailureEventBase {
-+}
-diff --git a/core/lib/Drupal/Core/Database/Event/TransactionRollbackToSavepointEvent.php b/core/lib/Drupal/Core/Database/Event/TransactionRollbackToSavepointEvent.php
-new file mode 100644
-index 00000000000..2c5be72e257
---- /dev/null
-+++ b/core/lib/Drupal/Core/Database/Event/TransactionRollbackToSavepointEvent.php
-@@ -0,0 +1,11 @@
-+<?php
-+
-+declare(strict_types=1);
-+
-+namespace Drupal\Core\Database\Event;
-+
-+/**
-+ * Represents the rollback of a transaction to a savepoint.
-+ */
-+final class TransactionRollbackToSavepointEvent extends TransactionEventBase {
-+}
-diff --git a/core/lib/Drupal/Core/Database/Event/TransactionRollbackToSavepointFailureEvent.php b/core/lib/Drupal/Core/Database/Event/TransactionRollbackToSavepointFailureEvent.php
-new file mode 100644
-index 00000000000..9c17ee84d68
---- /dev/null
-+++ b/core/lib/Drupal/Core/Database/Event/TransactionRollbackToSavepointFailureEvent.php
-@@ -0,0 +1,11 @@
-+<?php
-+
-+declare(strict_types=1);
-+
-+namespace Drupal\Core\Database\Event;
-+
-+/**
-+ * Represents the failed rollback of a transaction to a savepoint.
-+ */
-+final class TransactionRollbackToSavepointFailureEvent extends TransactionFailureEventBase {
-+}
-diff --git a/core/lib/Drupal/Core/Database/Event/TransactionSavepointEvent.php b/core/lib/Drupal/Core/Database/Event/TransactionSavepointEvent.php
-new file mode 100644
-index 00000000000..b3109980fbb
---- /dev/null
-+++ b/core/lib/Drupal/Core/Database/Event/TransactionSavepointEvent.php
-@@ -0,0 +1,11 @@
-+<?php
-+
-+declare(strict_types=1);
-+
-+namespace Drupal\Core\Database\Event;
-+
-+/**
-+ * Represents the activation of a transaction savepoint.
-+ */
-+final class TransactionSavepointEvent extends TransactionEventBase {
-+}
-diff --git a/core/lib/Drupal/Core/Database/Schema.php b/core/lib/Drupal/Core/Database/Schema.php
-index 2f548ffb1d1..b07585813aa 100644
---- a/core/lib/Drupal/Core/Database/Schema.php
-+++ b/core/lib/Drupal/Core/Database/Schema.php
-@@ -138,7 +138,7 @@ protected function executeDdlStatement(string $sql, array $arguments = [], array
-     // DDL statements when in a transaction force a commit in some databases.
-     // Void the transaction in that case.
-     if (!$this->connection->supportsTransactionalDDL() && $this->connection->transactionManager()->inTransaction()) {
--      $this->connection->transactionManager()->voidClientTransaction();
-+      $this->connection->transactionManager()->handleAutomaticCommitUponDDL();
-     }
+   public function testDeprecation(): void {
+     $this->expectException(MigrateSkipProcessException::class);
+-    $this->expectDeprecation("Unsilenced deprecation: " . MigrateSkipProcessException::class . " is deprecated in drupal:10.3.0 and is removed from drupal:12.0.0. Return TRUE from a process plugin's isPipelineStopped() method to halt further processing on a pipeline. See https://www.drupal.org/node/3414511");
++    $this->expectDeprecation(MigrateSkipProcessException::class . " is deprecated in drupal:10.3.0 and is removed from drupal:12.0.0. Return TRUE from a process plugin's isPipelineStopped() method to halt further processing on a pipeline. See https://www.drupal.org/node/3414511");
+     throw new MigrateSkipProcessException();
    }
  
-diff --git a/core/lib/Drupal/Core/Database/Statement/StatementBase.php b/core/lib/Drupal/Core/Database/Statement/StatementBase.php
-index e266616975f..a7374310443 100644
---- a/core/lib/Drupal/Core/Database/Statement/StatementBase.php
-+++ b/core/lib/Drupal/Core/Database/Statement/StatementBase.php
-@@ -145,7 +145,9 @@ protected function dispatchStatementExecutionStartEvent(array $args): ?Statement
-         $this->connection->getTarget(),
-         $this->getQueryString(),
-         $args,
--        $this->connection->findCallerFromDebugBacktrace()
-+        $this->connection->findCallerFromDebugBacktrace(),
-+        $this->connection->transactionManager()->currentTransactionId(),
-+        $this->connection->transactionManager()->currentTransactionName(),
-       );
-       $this->connection->dispatchEvent($startEvent);
-       return $startEvent;
-@@ -168,7 +170,9 @@ protected function dispatchStatementExecutionEndEvent(?StatementExecutionStartEv
-         $startEvent->queryString,
-         $startEvent->args,
-         $startEvent->caller,
--        $startEvent->time
-+        $startEvent->time,
-+        $startEvent->transactionId,
-+        $startEvent->transactionName,
-       ));
-     }
+diff --git a/core/tests/Drupal/KernelTests/KernelTestBase.php b/core/tests/Drupal/KernelTests/KernelTestBase.php
+index 4396f2cd3cd..e75935d4120 100644
+--- a/core/tests/Drupal/KernelTests/KernelTestBase.php
++++ b/core/tests/Drupal/KernelTests/KernelTestBase.php
+@@ -25,6 +25,8 @@
+ use Drupal\Tests\PhpUnitCompatibilityTrait;
+ use Drupal\Tests\TestRequirementsTrait;
+ use Drupal\TestTools\Comparator\MarkupInterfaceComparator;
++use Drupal\TestTools\ErrorHandler\BootstrapErrorHandler;
++use Drupal\TestTools\Extension\DeprecationBridge\DeprecationHandler;
+ use Drupal\TestTools\Extension\DeprecationBridge\ExpectDeprecationTrait;
+ use Drupal\TestTools\Extension\Dump\DebugDump;
+ use Drupal\TestTools\Extension\SchemaInspector;
+@@ -699,6 +701,13 @@ protected function tearDown(): void {
+     $this->container = NULL;
+     new Settings([]);
+ 
++    // We expect that the current error handler is the one set during the
++    // PHPUnit bootstrap. If not, the error handler was changed during the test
++    // execution but not properly restored during ::tearDown().
++    if (DeprecationHandler::isEnabled() && !get_error_handler() instanceof BootstrapErrorHandler) {
++      throw new \RuntimeException(sprintf('%s registered its own error handler without restoring the previous one before or during tear down. This can cause unpredictable test results. Ensure the test cleans up after itself.', $this->name()));
++    }
++
+     parent::tearDown();
    }
-@@ -194,6 +198,8 @@ protected function dispatchStatementExecutionFailureEvent(?StatementExecutionSta
-         get_class($e),
-         $e->getCode(),
-         $e->getMessage(),
-+        $startEvent->transactionId,
-+        $startEvent->transactionName,
-       ));
+ 
+diff --git a/core/tests/Drupal/TestTools/ErrorHandler/BootstrapErrorHandler.php b/core/tests/Drupal/TestTools/ErrorHandler/BootstrapErrorHandler.php
+index 71079770a1a..1665a9b4fee 100644
+--- a/core/tests/Drupal/TestTools/ErrorHandler/BootstrapErrorHandler.php
++++ b/core/tests/Drupal/TestTools/ErrorHandler/BootstrapErrorHandler.php
+@@ -13,10 +13,8 @@
+  *
+  * This code works in coordination with DeprecationHandler.
+  *
+- * This error handler is registered during PHPUnit's runner bootstrap, and is
+- * essentially used to capture deprecations occurring before tests are run (for
+- * example, deprecations triggered by the DebugClassloader). When test runs
+- * are prepared, a test specific TestErrorHandler is activated instead.
++ * This error handler is registered during PHPUnit's runner bootstrap, and
++ * overrides PHPUnit's own error handler.
+  *
+  * @see \Drupal\TestTools\Extension\DeprecationBridge\DeprecationHandler
+  *
+@@ -55,12 +53,6 @@ public function __invoke(int $errorNumber, string $errorString, string $errorFil
+       throw new \RuntimeException(__METHOD__ . '() must not be called if the deprecation handler is not enabled.');
      }
-   }
-diff --git a/core/lib/Drupal/Core/Database/Transaction/CommitType.php b/core/lib/Drupal/Core/Database/Transaction/CommitType.php
-new file mode 100644
-index 00000000000..cff631275cc
---- /dev/null
-+++ b/core/lib/Drupal/Core/Database/Transaction/CommitType.php
-@@ -0,0 +1,16 @@
-+<?php
-+
-+declare(strict_types=1);
-+
-+namespace Drupal\Core\Database\Transaction;
-+
-+/**
-+ * Enumeration of the types of commit for Drupal transactions.
-+ */
-+enum CommitType {
-+
-+  case Explicit;
-+  case ImplicitOnDestruct;
-+  case AutomaticUponDDL;
-+
-+}
-diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
-index f379e770c15..d640fc87b24 100644
---- a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
-+++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
-@@ -5,8 +5,21 @@
- namespace Drupal\Core\Database\Transaction;
  
- use Drupal\Core\Database\Connection;
-+use Drupal\Core\Database\Event\TransactionAutoCommitEvent;
-+use Drupal\Core\Database\Event\TransactionBeginEvent;
-+use Drupal\Core\Database\Event\TransactionCommitEvent;
-+use Drupal\Core\Database\Event\TransactionCommitFailureEvent;
-+use Drupal\Core\Database\Event\TransactionEvent;
-+use Drupal\Core\Database\Event\TransactionReleaseSavepointEvent;
-+use Drupal\Core\Database\Event\TransactionReleaseSavepointFailureEvent;
-+use Drupal\Core\Database\Event\TransactionRollbackEvent;
-+use Drupal\Core\Database\Event\TransactionRollbackFailureEvent;
-+use Drupal\Core\Database\Event\TransactionRollbackToSavepointEvent;
-+use Drupal\Core\Database\Event\TransactionRollbackToSavepointFailureEvent;
-+use Drupal\Core\Database\Event\TransactionSavepointEvent;
- use Drupal\Core\Database\Transaction;
- use Drupal\Core\Database\TransactionCommitFailedException;
-+use Drupal\Core\Database\TransactionException;
- use Drupal\Core\Database\TransactionNameNonUniqueException;
- use Drupal\Core\Database\TransactionOutOfOrderException;
- 
-@@ -101,6 +114,14 @@ abstract class TransactionManagerBase implements TransactionManagerInterface {
-    */
-   private ClientConnectionTransactionState $connectionTransactionState;
- 
-+  /**
-+   * Whether the root transaction was auto-committed.
-+   *
-+   * Normally FALSE, is set to TRUE when an autocommit occurred on the
-+   * database engine.
-+   */
-+  private bool $isAutoCommitted = FALSE;
-+
-   /**
-    * Whether to trigger warnings when unpiling a void transaction.
-    *
-@@ -167,6 +188,7 @@ protected function stack(): array {
-    *   changes the order of object destruction when the develop mode is enabled.
-    */
-   public function commitAll(): void {
-+    $this->connection->disableEvents(TransactionEvent::all());
-     foreach (array_reverse($this->stack()) as $id => $item) {
-       $this->unpile($item->name, $id);
-     }
-@@ -233,12 +255,23 @@ protected function dumpStackItemsAsString(): string {
-     if ($this->stack() === []) {
-       return '*** empty ***';
-     }
-+    return implode(' > ', $this->stackItemsAsArray());
-+  }
- 
--    $temp = [];
--    foreach ($this->stack() as $id => $item) {
--      $temp[] = $id . '\\' . $item->name;
+-    // We collect a deprecation no matter what.
+-    if (E_USER_DEPRECATED === $errorNumber || E_DEPRECATED === $errorNumber) {
+-      $prefix = (error_reporting() & $errorNumber) ? 'Unsilenced deprecation: ' : '';
+-      DeprecationHandler::collectActualDeprecation($prefix . $errorString);
 -    }
--    return implode(' > ', $temp);
-+  /**
-+   * Produces an array representation of the stack items.
-+   *
-+   * Drivers should not override this method unless they also override the
-+   * $stack property.
-+   *
-+   * @return list<string>
-+   *   The array of stack items represented like id\name.
-+   */
-+  protected function stackItemsAsArray(): array {
-+    return array_map(fn(string $id, StackItem $item): string => $id . '\\' . $item->name,
-+      array_keys($this->stack()),
-+      array_values($this->stack()),
-+    );
-   }
- 
-   /**
-@@ -248,6 +281,20 @@ public function inTransaction(): bool {
-     return (bool) $this->stackDepth() && $this->getConnectionTransactionState() === ClientConnectionTransactionState::Active;
-   }
- 
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function currentTransactionId(): ?string {
-+    return $this->inTransaction() ? array_key_last($this->stack) : NULL;
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function currentTransactionName(): ?string {
-+    return $this->inTransaction() ? end($this->stack)->name : NULL;
-+  }
-+
-   /**
-    * {@inheritdoc}
-    */
-@@ -273,25 +320,42 @@ public function push(string $name = ''): Transaction {
-     // Do the client-level processing.
-     if ($this->stackDepth() === 0) {
-       $this->beginClientTransaction();
--      $type = StackItemType::Root;
-       $this->setConnectionTransactionState(ClientConnectionTransactionState::Active);
-+      $this->addStackItem($id, new StackItem($name, StackItemType::Root));
-       // Only set ::rootId if there's not one set already, which may happen in
-       // case of broken transactions.
-       if ($this->rootId === NULL) {
-         $this->rootId = $id;
-       }
-+      if ($this->connection->isEventEnabled(TransactionBeginEvent::class)) {
-+        $this->connection->dispatchEvent(new TransactionBeginEvent(
-+          $this->connection->getKey(),
-+          $this->connection->getTarget(),
-+          $id,
-+          $name,
-+          $this->getConnectionTransactionState(),
-+          $this->stackItemsAsArray(),
-+        ));
-+      }
-     }
-     else {
-       // If we're already in a Drupal transaction then we want to create a
-       // database savepoint, rather than try to begin another database
-       // transaction.
-       $this->addClientSavepoint($name);
--      $type = StackItemType::Savepoint;
-+      $this->addStackItem($id, new StackItem($name, StackItemType::Savepoint));
-+      if ($this->connection->isEventEnabled(TransactionSavepointEvent::class)) {
-+        $this->connection->dispatchEvent(new TransactionSavepointEvent(
-+          $this->connection->getKey(),
-+          $this->connection->getTarget(),
-+          $id,
-+          $name,
-+          $this->getConnectionTransactionState(),
-+          $this->stackItemsAsArray(),
-+        ));
-+      }
-     }
- 
--    // Add an item on the stack, increasing its depth.
--    $this->addStackItem($id, new StackItem($name, $type));
 -
-     // Actually return a new Transaction object.
-     return new Transaction($this->connection, $name, $id);
-   }
-@@ -306,6 +370,20 @@ public function purge(string $name, string $id): void {
-     // statement, was executed that terminated the database transaction. So, we
-     // can process the post transaction callbacks.
-     if (!isset($this->stack()[$id]) && isset($this->voidedItems[$id]) && $this->rootId === $id) {
-+      if ($this->isAutoCommitted) {
-+        if ($this->connection->isEventEnabled(TransactionCommitEvent::class)) {
-+          $this->connection->dispatchEvent(new TransactionCommitEvent(
-+            $this->connection->getKey(),
-+            $this->connection->getTarget(),
-+            $id,
-+            $name,
-+            $this->getConnectionTransactionState(),
-+            $this->stackItemsAsArray(),
-+            CommitType::AutomaticUponDDL,
-+          ));
-+        }
-+        $this->isAutoCommitted = FALSE;
-+      }
-       $this->processPostTransactionCallbacks();
-       $this->rootId = NULL;
-       unset($this->voidedItems[$id]);
-@@ -324,7 +402,7 @@ public function purge(string $name, string $id): void {
-     // When we get here, the transaction (or savepoint) is still active on the
-     // database. We can unpile it, and if we are left with no more items in the
-     // stack, we can also process the post transaction callbacks.
--    $this->commit($name, $id);
-+    $this->commit($name, $id, CommitType::ImplicitOnDestruct);
-     $this->removeStackItem($id);
-     if ($this->rootId === $id) {
-       $this->processPostTransactionCallbacks();
-@@ -337,11 +415,26 @@ public function purge(string $name, string $id): void {
-    */
-   public function unpile(string $name, string $id): void {
-     // If the transaction was voided, we cannot unpile. Skip but trigger a user
--    // warning if requested.
-+    // warning if requested. If an autocommit happened, emit the
-+    // TransactionCommitEvent.
-     if ($this->getConnectionTransactionState() === ClientConnectionTransactionState::Voided) {
-       if ($this->triggerWarningWhenUnpilingOnVoidTransaction) {
-         trigger_error('Transaction::commitOrRelease() was not processed because a prior execution of a DDL statement already committed the transaction.', E_USER_WARNING);
-       }
-+      if ($this->isAutoCommitted) {
-+        if ($this->connection->isEventEnabled(TransactionCommitEvent::class)) {
-+          $this->connection->dispatchEvent(new TransactionCommitEvent(
-+            $this->connection->getKey(),
-+            $this->connection->getTarget(),
-+            $id,
-+            $name,
-+            $this->getConnectionTransactionState(),
-+            $this->stackItemsAsArray(),
-+            CommitType::AutomaticUponDDL,
-+          ));
-+        }
-+        $this->isAutoCommitted = FALSE;
-+      }
-       return;
-     }
+     // If the deprecation handled is one of those in the ignore list, we keep
+     // running.
+     if ((E_USER_DEPRECATED === $errorNumber || E_DEPRECATED === $errorNumber) && DeprecationHandler::isIgnoredDeprecation($errorString)) {
+diff --git a/core/tests/Drupal/TestTools/ErrorHandler/TestErrorHandler.php b/core/tests/Drupal/TestTools/ErrorHandler/TestErrorHandler.php
+deleted file mode 100644
+index 8ad1de3f634..00000000000
+--- a/core/tests/Drupal/TestTools/ErrorHandler/TestErrorHandler.php
++++ /dev/null
+@@ -1,75 +0,0 @@
+-<?php
+-
+-declare(strict_types=1);
+-
+-namespace Drupal\TestTools\ErrorHandler;
+-
+-use Drupal\TestTools\Extension\DeprecationBridge\DeprecationHandler;
+-use PHPUnit\Framework\TestCase;
+-
+-/**
+- * Drupal's PHPUnit test level error handler.
+- *
+- * This code works in coordination with DeprecationHandler.
+- *
+- * This error handler is registered during the preparation of a PHPUnit's test,
+- * and is essentially used to capture deprecations occurring during test
+- * executions. When test runs are torn down, the more generic
+- * BootstrapErrorHandler is restored.
+- *
+- * @see \Drupal\TestTools\Extension\DeprecationBridge\DeprecationHandler
+- *
+- * @internal
+- */
+-final class TestErrorHandler {
+-
+-  /**
+-   * @param \Drupal\TestTools\ErrorHandler\BootstrapErrorHandler $parentHandler
+-   *   The parent error handler.
+-   * @param \PHPUnit\Framework\TestCase $testCase
+-   *   The test case being executed.
+-   */
+-  public function __construct(
+-    private readonly BootstrapErrorHandler $parentHandler,
+-    private readonly TestCase $testCase,
+-  ) {
+-  }
+-
+-  /**
+-   * Executes when the object is called as a function.
+-   *
+-   * @param int $errorNumber
+-   *   The level of the error raised.
+-   * @param string $errorString
+-   *   The error message.
+-   * @param string $errorFile
+-   *   The filename that the error was raised in.
+-   * @param int $errorLine
+-   *   The line number the error was raised at.
+-   *
+-   * @return bool
+-   *   TRUE to stop error handling, FALSE to let the normal error handler
+-   *   continue.
+-   */
+-  public function __invoke(int $errorNumber, string $errorString, string $errorFile, int $errorLine): bool {
+-    if (!DeprecationHandler::isEnabled()) {
+-      throw new \RuntimeException(__METHOD__ . '() must not be called if the deprecation handler is not enabled.');
+-    }
+-
+-    // We are within a test execution. If we have a deprecation and the test is
+-    // a deprecation test, than we just collect the deprecation and return to
+-    // execution, since deprecations are expected.
+-    if ((E_USER_DEPRECATED === $errorNumber || E_DEPRECATED === $errorNumber) && DeprecationHandler::isDeprecationTest($this->testCase)) {
+-      $prefix = (error_reporting() & $errorNumber) ? 'Unsilenced deprecation: ' : '';
+-      DeprecationHandler::collectActualDeprecation($prefix . $errorString);
+-      return TRUE;
+-    }
+-
+-    // In all other cases (errors, warnings, deprecations in normal tests), we
+-    // fall back to the parent error handler, which is the one that was
+-    // registered in the test runner bootstrap (BootstrapErrorHandler).
+-    call_user_func($this->parentHandler, $errorNumber, $errorString, $errorFile, $errorLine);
+-    return TRUE;
+-  }
+-
+-}
+diff --git a/core/tests/Drupal/TestTools/Extension/DeprecationBridge/DeprecationHandler.php b/core/tests/Drupal/TestTools/Extension/DeprecationBridge/DeprecationHandler.php
+index f66ef7c8c94..59d7f1e4d3a 100644
+--- a/core/tests/Drupal/TestTools/Extension/DeprecationBridge/DeprecationHandler.php
++++ b/core/tests/Drupal/TestTools/Extension/DeprecationBridge/DeprecationHandler.php
+@@ -4,14 +4,12 @@
  
-@@ -352,7 +445,7 @@ public function unpile(string $name, string $id): void {
-     }
+ namespace Drupal\TestTools\Extension\DeprecationBridge;
  
-     // Commit the transaction.
--    $this->commit($name, $id);
-+    $this->commit($name, $id, CommitType::Explicit);
- 
-     // Void the transaction stack item.
-     $this->voidStackItem($id);
-@@ -365,13 +458,15 @@ public function unpile(string $name, string $id): void {
-    *   The name of the transaction.
-    * @param string $id
-    *   The id of the transaction.
-+   * @param \Drupal\Core\Database\Transaction\CommitType|null $commitType
-+   *   The type of commit.
-    *
-    * @throws \Drupal\Core\Database\TransactionOutOfOrderException
-    *   If a Drupal Transaction with the specified name does not exist.
-    * @throws \Drupal\Core\Database\TransactionCommitFailedException
-    *   If the commit of the root transaction failed.
-    */
--  protected function commit(string $name, string $id): void {
-+  protected function commit(string $name, string $id, ?CommitType $commitType = NULL): void {
-     if ($this->getConnectionTransactionState() !== ClientConnectionTransactionState::Active) {
-       // The stack got corrupted.
-       throw new TransactionOutOfOrderException("Transaction {$id}\\{$name} is out of order. Active stack: " . $this->dumpStackItemsAsString());
-@@ -388,12 +483,76 @@ protected function commit(string $name, string $id): void {
-     if ($this->stackDepth() > 1 && $this->stack()[$id]->type === StackItemType::Savepoint) {
-       // Release the client transaction savepoint in case the Drupal
-       // transaction is not a root one.
--      $this->releaseClientSavepoint($name);
-+      try {
-+        if (!$this->releaseClientSavepoint($name)) {
-+          throw new TransactionCommitFailedException("Release savepoint $name failed");
-+        }
-+        $this->removeStackItem($id);
-+        if ($this->connection->isEventEnabled(TransactionReleaseSavepointEvent::class)) {
-+          $this->connection->dispatchEvent(new TransactionReleaseSavepointEvent(
-+            $this->connection->getKey(),
-+            $this->connection->getTarget(),
-+            $id,
-+            $name,
-+            $this->getConnectionTransactionState(),
-+            $this->stackItemsAsArray(),
-+            $commitType,
-+          ));
-+        }
-+      }
-+      catch (\Exception $e) {
-+        $this->setConnectionTransactionState(ClientConnectionTransactionState::CommitFailed);
-+        $this->voidClientTransaction();
-+        if ($this->connection->isEventEnabled(TransactionReleaseSavepointFailureEvent::class)) {
-+          $this->connection->dispatchEvent(new TransactionReleaseSavepointFailureEvent(
-+            $this->connection->getKey(),
-+            $this->connection->getTarget(),
-+            $id,
-+            $name,
-+            $this->getConnectionTransactionState(),
-+            $this->stackItemsAsArray(),
-+            get_class($e),
-+            $e->getMessage(),
-+            $commitType,
-+          ));
-+        }
-+      }
-     }
-     elseif ($this->stackDepth() === 1 && $this->stack()[$id]->type === StackItemType::Root) {
-       // If this was the root Drupal transaction, we can commit the client
-       // transaction.
--      $this->processRootCommit();
-+      try {
-+        $this->processRootCommit();
-+        $this->voidStackItem($id);
-+        if ($this->connection->isEventEnabled(TransactionCommitEvent::class)) {
-+          $this->connection->dispatchEvent(new TransactionCommitEvent(
-+            $this->connection->getKey(),
-+            $this->connection->getTarget(),
-+            $id,
-+            $name,
-+            $this->getConnectionTransactionState(),
-+            $this->stackItemsAsArray(),
-+            $commitType,
-+          ));
-+        }
-+      }
-+      catch (\Exception $e) {
-+        $this->voidClientTransaction();
-+        if ($this->connection->isEventEnabled(TransactionCommitFailureEvent::class)) {
-+          $this->connection->dispatchEvent(new TransactionCommitFailureEvent(
-+            $this->connection->getKey(),
-+            $this->connection->getTarget(),
-+            $id,
-+            $name,
-+            $this->getConnectionTransactionState(),
-+            $this->stackItemsAsArray(),
-+            get_class($e),
-+            $e->getMessage(),
-+            $commitType,
-+          ));
-+        }
-+        throw $e;
-+      }
-     }
-     else {
-       // The stack got corrupted.
-@@ -409,7 +568,20 @@ public function rollback(string $name, string $id): void {
-     // trigger a user warning.
-     if ($this->getConnectionTransactionState() === ClientConnectionTransactionState::Voided) {
-       $this->connectionTransactionState = ClientConnectionTransactionState::RollbackFailed;
--      trigger_error('Transaction::rollBack() failed because of a prior execution of a DDL statement.', E_USER_WARNING);
-+      $message = 'Transaction::rollBack() failed because of a prior execution of a DDL statement.';
-+      if ($this->connection->isEventEnabled(TransactionRollbackFailureEvent::class)) {
-+        $this->connection->dispatchEvent(new TransactionRollbackFailureEvent(
-+          $this->connection->getKey(),
-+          $this->connection->getTarget(),
-+          $id,
-+          $name,
-+          $this->getConnectionTransactionState(),
-+          $this->stackItemsAsArray(),
-+          get_class($this),
-+          $message,
-+        ));
-+      }
-+      trigger_error($message, E_USER_WARNING);
-       return;
-     }
- 
-@@ -423,20 +595,77 @@ public function rollback(string $name, string $id): void {
-         // Rollback the client transaction to the savepoint when the Drupal
-         // transaction is not a root one. Then, release the savepoint too. The
-         // client connection remains active.
--        $this->rollbackClientSavepoint($name);
--        $this->releaseClientSavepoint($name);
--        // The Transaction object remains open, and when it will get destructed
--        // no commit should happen. Void the stack item.
--        $this->voidStackItem($id);
-+        try {
-+          if (!$this->rollbackClientSavepoint($name)) {
-+            throw new TransactionException("Rollback to savepoint $name failed");
-+          }
-+          if (!$this->releaseClientSavepoint($name)) {
-+            throw new TransactionException("Release savepoint $name failed");
-+          }
-+          // The Transaction object remains open, and when it will get
-+          // destructed no commit should happen. Void the stack item.
-+          $this->voidStackItem($id);
-+          if ($this->connection->isEventEnabled(TransactionRollbackToSavepointEvent::class)) {
-+            $this->connection->dispatchEvent(new TransactionRollbackToSavepointEvent(
-+              $this->connection->getKey(),
-+              $this->connection->getTarget(),
-+              $id,
-+              $name,
-+              $this->getConnectionTransactionState(),
-+              $this->stackItemsAsArray(),
-+            ));
-+          }
-+        }
-+        catch (\Exception $e) {
-+          $this->setConnectionTransactionState(ClientConnectionTransactionState::RollbackFailed);
-+          $this->voidClientTransaction();
-+          if ($this->connection->isEventEnabled(TransactionRollbackToSavepointFailureEvent::class)) {
-+            $this->connection->dispatchEvent(new TransactionRollbackToSavepointFailureEvent(
-+              $this->connection->getKey(),
-+              $this->connection->getTarget(),
-+              $id,
-+              $name,
-+              $this->getConnectionTransactionState(),
-+              $this->stackItemsAsArray(),
-+              get_class($e),
-+              $e->getMessage(),
-+            ));
-+          }
-+        }
-       }
-       elseif ($this->stackDepth() === 1 && $this->stack()[$id]->type === StackItemType::Root) {
-         // If this was the root Drupal transaction, we can rollback the client
-         // transaction. The transaction is closed.
--        $this->processRootRollback();
--        if ($this->getConnectionTransactionState() === ClientConnectionTransactionState::RolledBack) {
-+        try {
-+          $this->processRootRollback();
-           // The Transaction object remains open, and when it will get
-           // destructed no commit should happen. Void the stack item.
-           $this->voidStackItem($id);
-+          if ($this->connection->isEventEnabled(TransactionRollbackEvent::class)) {
-+            $this->connection->dispatchEvent(new TransactionRollbackEvent(
-+              $this->connection->getKey(),
-+              $this->connection->getTarget(),
-+              $id,
-+              $name,
-+              $this->getConnectionTransactionState(),
-+              $this->stackItemsAsArray(),
-+            ));
-+          }
-+        }
-+        catch (\Exception $e) {
-+          $this->voidClientTransaction();
-+          if ($this->connection->isEventEnabled(TransactionRollbackFailureEvent::class)) {
-+            $this->connection->dispatchEvent(new TransactionRollbackFailureEvent(
-+              $this->connection->getKey(),
-+              $this->connection->getTarget(),
-+              $id,
-+              $name,
-+              $this->getConnectionTransactionState(),
-+              $this->stackItemsAsArray(),
-+              get_class($e),
-+              $e->getMessage(),
-+            ));
-+          }
-         }
-       }
-       else {
-@@ -510,7 +739,12 @@ protected function getConnectionTransactionState(): ClientConnectionTransactionS
-    * Processes the root transaction rollback.
-    */
-   protected function processRootRollback(): void {
--    $this->rollbackClientTransaction();
-+    $clientRollback = $this->rollbackClientTransaction();
-+    if (!$clientRollback) {
-+      $this->setConnectionTransactionState(ClientConnectionTransactionState::RollbackFailed);
-+      throw new TransactionException('Transaction rollback failed');
-+    }
-+    $this->setConnectionTransactionState(ClientConnectionTransactionState::RolledBack);
-   }
- 
-   /**
-@@ -522,8 +756,10 @@ protected function processRootRollback(): void {
-   protected function processRootCommit(): void {
-     $clientCommit = $this->commitClientTransaction();
-     if (!$clientCommit) {
--      throw new TransactionCommitFailedException();
-+      $this->setConnectionTransactionState(ClientConnectionTransactionState::CommitFailed);
-+      throw new TransactionCommitFailedException('Transaction commit failed');
-     }
-+    $this->setConnectionTransactionState(ClientConnectionTransactionState::Committed);
-   }
- 
-   /**
-@@ -621,7 +857,29 @@ public function voidClientTransaction(): void {
-     while ($i = array_key_last($this->stack())) {
-       $this->voidStackItem((string) $i);
-     }
--    $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
-+    if ($this->getConnectionTransactionState() === ClientConnectionTransactionState::Active) {
-+      $this->setConnectionTransactionState(ClientConnectionTransactionState::Voided);
-+    }
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function handleAutomaticCommitUponDDL(): void {
-+    if ($this->connection->isEventEnabled(TransactionAutoCommitEvent::class)) {
-+      $i = array_key_first($this->stack);
-+      assert($this->stack[$i]->type === StackItemType::Root);
-+      $this->connection->dispatchEvent(new TransactionAutoCommitEvent(
-+        $this->connection->getKey(),
-+        $this->connection->getTarget(),
-+        $i,
-+        $this->stack[$i]->name,
-+        $this->getConnectionTransactionState(),
-+        $this->stackItemsAsArray(),
-+      ));
-+    }
-+    $this->voidClientTransaction();
-+    $this->isAutoCommitted = TRUE;
-   }
- 
- }
-diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php
-index 0f7744da95d..60d4c8c6165 100644
---- a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php
-+++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php
-@@ -19,6 +19,22 @@ interface TransactionManagerInterface {
-    */
-   public function inTransaction(): bool;
- 
-+  /**
-+   * Gets the current transaction id.
-+   *
-+   * @return string|null
-+   *   The current transaction id.
-+   */
-+  public function currentTransactionId(): ?string;
-+
-+  /**
-+   * Gets the current transaction name.
-+   *
-+   * @return string|null
-+   *   The current transaction name.
-+   */
-+  public function currentTransactionName(): ?string;
-+
-   /**
-    * Checks if a named Drupal transaction is active.
-    *
-@@ -122,16 +138,28 @@ public function rollback(string $name, string $id): void;
-   /**
-    * Voids the client connection.
-    *
--   * In some cases the active transaction can be automatically committed by the
--   * database server (for example, MySql when a DDL statement is executed
--   * during a transaction). In such cases we need to void the remaining items
--   * on the stack so that when outliving Transaction object get out of scope
--   * they will not try operations on the database.
-+   * Void any existing items on the stack so that when outliving Transaction
-+   * objects get out of scope they will not try operations on the database.
-    *
-    * This method should only be called internally by a database driver.
-    */
-   public function voidClientTransaction(): void;
- 
-+  /**
-+   * Handles automatic commit occurred upon execution of a DDL statement.
-+   *
-+   * In some cases the active transaction is automatically committed by the
-+   * database server when a DDL statement is executed during a transaction
-+   * (for example, MySql). In such cases we void the remaining items on the
-+   * stack, and emit a TransactionAutoCommitEvent to notify that a db commit
-+   * happened while the Drupal transaction was still active. Later, a normal
-+   * TransactionCommitEvent is triggered when the Drupal transaction is
-+   * finalized.
-+   *
-+   * This method should only be called internally by a database driver.
-+   */
-+  public function handleAutomaticCommitUponDDL(): void;
-+
-   /**
-    * Adds a root transaction end callback.
-    *
-diff --git a/core/lib/Drupal/Core/Database/TransactionCommitFailedException.php b/core/lib/Drupal/Core/Database/TransactionCommitFailedException.php
-index f1dbf956543..4cb99dfd4d4 100644
---- a/core/lib/Drupal/Core/Database/TransactionCommitFailedException.php
-+++ b/core/lib/Drupal/Core/Database/TransactionCommitFailedException.php
-@@ -3,6 +3,6 @@
- namespace Drupal\Core\Database;
- 
+-use PHPUnit\Framework\TestCase;
+-
  /**
-- * Exception thrown when a commit() function fails.
-+ * Exception thrown when a commit or release savepoint function fails.
+  * Drupal's PHPUnit extension to manage code deprecation.
+  *
+- * This class is a replacement for symfony/phpunit-bridge that does not
+- * support PHPUnit 10. In the future this extension might be dropped if
+- * PHPUnit adds support for all deprecation management needs.
++ * This class is a replacement for symfony/phpunit-bridge that is not
++ * supporting PHPUnit 10 and above. In the future this extension might be
++ * dropped if PHPUnit will support all deprecation management needs.
+  *
+  * @internal
   */
- class TransactionCommitFailedException extends TransactionException implements DatabaseException {}
-diff --git a/core/modules/mysql/src/Driver/Database/mysql/TransactionManager.php b/core/modules/mysql/src/Driver/Database/mysql/TransactionManager.php
-index a79749ff4bc..f0084969f35 100644
---- a/core/modules/mysql/src/Driver/Database/mysql/TransactionManager.php
-+++ b/core/modules/mysql/src/Driver/Database/mysql/TransactionManager.php
-@@ -4,8 +4,8 @@
+@@ -29,20 +27,6 @@ final class DeprecationHandler {
+    */
+   private static array $deprecationIgnorePatterns = [];
  
- namespace Drupal\mysql\Driver\Database\mysql;
- 
--use Drupal\Core\Database\Transaction\ClientConnectionTransactionState;
- use Drupal\Core\Database\Transaction\TransactionManagerBase;
-+use Drupal\Core\Database\TransactionNoActiveException;
- 
- /**
-  * MySql implementation of TransactionManagerInterface.
-@@ -24,24 +24,12 @@ protected function beginClientTransaction(): bool {
-     return $this->connection->getClientConnection()->beginTransaction();
+-  /**
+-   * A list of expected deprecation messages.
+-   *
+-   * @var list<string>
+-   */
+-  private static array $expectedDeprecations = [];
+-
+-  /**
+-   * A list of deprecation messages collected during test run.
+-   *
+-   * @var list<string>
+-   */
+-  private static array $collectedDeprecations = [];
+-
+   /**
+    * This class should not be instantiated.
+    */
+@@ -130,80 +114,6 @@ public static function init(?string $ignoreFile = NULL): void {
+     self::$enabled = TRUE;
    }
  
 -  /**
--   * {@inheritdoc}
+-   * Resets the extension.
+-   *
+-   * The extension should be reset at the beginning of each test run to ensure
+-   * matching of expected and actual deprecations.
 -   */
--  protected function processRootCommit(): void {
--    if (!$this->connection->getClientConnection()->inTransaction()) {
--      $this->voidClientTransaction();
+-  public static function reset(): void {
+-    if (!self::isEnabled()) {
 -      return;
 -    }
--    parent::processRootCommit();
+-    self::$expectedDeprecations = [];
+-    self::$collectedDeprecations = [];
+-  }
+-
+-  /**
+-   * Adds an expected deprecation.
+-   *
+-   * Tests will expect deprecations during the test execution; at the end of
+-   * each test run, collected deprecations are checked against the expected
+-   * ones.
+-   *
+-   * @param string $message
+-   *   The expected deprecation message.
+-   */
+-  public static function expectDeprecation(string $message): void {
+-    if (!self::isEnabled()) {
+-      return;
+-    }
+-    self::$expectedDeprecations[] = $message;
+-  }
+-
+-  /**
+-   * Returns all expected deprecations.
+-   *
+-   * @return list<string>
+-   *   The expected deprecation messages.
+-   */
+-  public static function getExpectedDeprecations(): array {
+-    if (!self::isEnabled()) {
+-      throw new \LogicException(__CLASS__ . ' is not initialized');
+-    }
+-    return self::$expectedDeprecations;
+-  }
+-
+-  /**
+-   * Collects an actual deprecation.
+-   *
+-   * Tests will expect deprecations during the test execution; at the end of
+-   * each test run, collected deprecations are checked against the expected
+-   * ones.
+-   *
+-   * @param string $message
+-   *   The actual deprecation message triggered via trigger_error().
+-   */
+-  public static function collectActualDeprecation(string $message): void {
+-    if (!self::isEnabled()) {
+-      return;
+-    }
+-    self::$collectedDeprecations[] = $message;
+-  }
+-
+-  /**
+-   * Returns all collected deprecations.
+-   *
+-   * @return list<string>
+-   *   The collected deprecation messages.
+-   */
+-  public static function getCollectedDeprecations(): array {
+-    if (!self::isEnabled()) {
+-      throw new \LogicException(__CLASS__ . ' is not initialized');
+-    }
+-    return self::$collectedDeprecations;
 -  }
 -
    /**
-    * {@inheritdoc}
-    */
-   protected function rollbackClientSavepoint(string $name): bool {
-     if (!$this->connection->getClientConnection()->inTransaction()) {
--      $this->voidClientTransaction();
--      return TRUE;
-+      throw new TransactionNoActiveException();
-     }
-     return parent::rollbackClientSavepoint($name);
-   }
-@@ -51,8 +39,7 @@ protected function rollbackClientSavepoint(string $name): bool {
-    */
-   protected function releaseClientSavepoint(string $name): bool {
-     if (!$this->connection->getClientConnection()->inTransaction()) {
--      $this->voidClientTransaction();
--      return TRUE;
-+      throw new TransactionNoActiveException();
-     }
-     return parent::releaseClientSavepoint($name);
-   }
-@@ -61,12 +48,7 @@ protected function releaseClientSavepoint(string $name): bool {
-    * {@inheritdoc}
-    */
-   protected function commitClientTransaction(): bool {
--    $clientCommit = $this->connection->getClientConnection()->commit();
--    $this->setConnectionTransactionState($clientCommit ?
--      ClientConnectionTransactionState::Committed :
--      ClientConnectionTransactionState::CommitFailed
--    );
--    return $clientCommit;
-+    return $this->connection->getClientConnection()->commit();
+    * Determines if an actual deprecation should be ignored.
+    *
+@@ -224,31 +134,4 @@ public static function isIgnoredDeprecation(string $deprecationMessage): bool {
+     return (bool) $result;
    }
  
+-  /**
+-   * Determines if a test case is a deprecation test.
+-   *
+-   * Deprecation tests are those that are annotated with '@group legacy' or
+-   * that have a '#[IgnoreDeprecations]' attribute.
+-   *
+-   * @param \PHPUnit\Framework\TestCase $testCase
+-   *   The test case being executed.
+-   */
+-  public static function isDeprecationTest(TestCase $testCase): bool {
+-    return $testCase->valueObjectForEvents()->metadata()->isIgnoreDeprecations()->isNotEmpty() || self::isTestInLegacyGroup($testCase);
+-  }
+-
+-  /**
+-   * Determines if a test case is part of the 'legacy' group.
+-   *
+-   * @param \PHPUnit\Framework\TestCase $testCase
+-   *   The test case being executed.
+-   */
+-  private static function isTestInLegacyGroup(TestCase $testCase): bool {
+-    $groups = [];
+-    foreach ($testCase->valueObjectForEvents()->metadata()->isGroup() as $metadata) {
+-      $groups[] = $metadata->groupName();
+-    }
+-    return in_array('legacy', $groups, TRUE);
+-  }
+-
+ }
+diff --git a/core/tests/Drupal/TestTools/Extension/DeprecationBridge/ExpectDeprecationTrait.php b/core/tests/Drupal/TestTools/Extension/DeprecationBridge/ExpectDeprecationTrait.php
+index ed73ca8fd93..e93793cfb31 100644
+--- a/core/tests/Drupal/TestTools/Extension/DeprecationBridge/ExpectDeprecationTrait.php
++++ b/core/tests/Drupal/TestTools/Extension/DeprecationBridge/ExpectDeprecationTrait.php
+@@ -4,9 +4,7 @@
+ 
+ namespace Drupal\TestTools\Extension\DeprecationBridge;
+ 
+-use Drupal\TestTools\ErrorHandler\TestErrorHandler;
+-use PHPUnit\Framework\Attributes\After;
+-use PHPUnit\Framework\Attributes\Before;
++@trigger_error('\Drupal\TestTools\Extension\DeprecationBridge\ExpectDeprecationTrait is deprecated in drupal:11.3.0 and is removed from drupal:12.0.0. Use $this->expectUserDeprecationMessage() or $this->expectUserDeprecationMessageMatches() instead. See https://www.drupal.org/node/7654312', E_USER_DEPRECATED);
+ 
+ /**
+  * A trait to include in Drupal tests to manage expected deprecations.
+@@ -14,82 +12,53 @@
+  * This code works in coordination with DeprecationHandler.
+  *
+  * This trait is a replacement for symfony/phpunit-bridge that is not
+- * supporting PHPUnit 10. In the future this extension might be dropped if
+- * PHPUnit will support all deprecation management needs.
++ * supporting PHPUnit 10 and above. In the future this extension might be
++ * dropped if PHPUnit will support all deprecation management needs.
+  *
+- * @see \Drupal\TestTools\Extension\DeprecationBridge\DeprecationHandler
++ * @deprecated in drupal:11.3.0 and is removed from drupal:12.0.0. Use
++ *   $this->expectUserDeprecationMessage() or
++ *   $this->expectUserDeprecationMessageMatches() instead.
++ *
++ * @see https://www.drupal.org/node/7654312
+  *
+  * @internal
+  */
+ trait ExpectDeprecationTrait {
+ 
+-  /**
+-   * Sets up the test error handler.
+-   *
+-   * This method is run before each test's ::setUp() method, and when the
+-   * DeprecationHandler is active, resets the extension to be able to collect
+-   * the test's deprecations, and sets TestErrorHandler as the current error
+-   * handler.
+-   *
+-   * @see \Drupal\TestTools\ErrorHandler\TestErrorHandler
+-   */
+-  #[Before]
+-  public function setUpErrorHandler(): void {
+-    if (!DeprecationHandler::isEnabled()) {
+-      return;
+-    }
+-
+-    DeprecationHandler::reset();
+-    set_error_handler(new TestErrorHandler(get_error_handler(), $this));
+-  }
+-
+-  /**
+-   * Tears down the test error handler.
+-   *
+-   * This method is run after each test's ::tearDown() method, and checks if
+-   * collected deprecations match the expectations; it also resets the error
+-   * handler to the one set prior of the change made by ::setUpErrorHandler().
+-   */
+-  #[After]
+-  public function tearDownErrorHandler(): void {
+-    if (!DeprecationHandler::isEnabled()) {
+-      return;
+-    }
+-
+-    // We expect that the current error handler is the one set by
+-    // ::setUpErrorHandler() prior to the start of the test execution. If not,
+-    // the error handler was changed during the test execution but not properly
+-    // restored during ::tearDown().
+-    if (!get_error_handler() instanceof TestErrorHandler) {
+-      throw new \RuntimeException(sprintf('%s registered its own error handler without restoring the previous one before or during tear down. This can cause unpredictable test results. Ensure the test cleans up after itself.', $this->name()));
+-    }
+-    restore_error_handler();
+-
+-    // Checks if collected deprecations match the expectations.
+-    if (DeprecationHandler::getExpectedDeprecations()) {
+-      $prefix = "@expectedDeprecation:\n";
+-      $expDep = $prefix . '%A  ' . implode("\n%A  ", DeprecationHandler::getExpectedDeprecations()) . "\n%A";
+-      $actDep = $prefix . '  ' . implode("\n  ", DeprecationHandler::getCollectedDeprecations()) . "\n";
+-      $this->assertStringMatchesFormat($expDep, $actDep);
+-    }
+-  }
+-
    /**
-@@ -74,15 +56,9 @@ protected function commitClientTransaction(): bool {
+    * Adds an expected deprecation.
+    *
+    * @param string $message
+    *   The expected deprecation message.
++   *
++   * @deprecated in drupal:11.3.0 and is removed from drupal:12.0.0. Use
++   *   $this->expectUserDeprecationMessage() or
++   *   $this->expectUserDeprecationMessageMatches() instead.
++   *
++   * @see https://www.drupal.org/node/7654312
     */
-   protected function rollbackClientTransaction(): bool {
-     if (!$this->connection->getClientConnection()->inTransaction()) {
--      $this->voidClientTransaction();
--      return FALSE;
-+      throw new TransactionNoActiveException();
-     }
--    $clientRollback = $this->connection->getClientConnection()->rollBack();
--    $this->setConnectionTransactionState($clientRollback ?
--      ClientConnectionTransactionState::RolledBack :
--      ClientConnectionTransactionState::RollbackFailed
--    );
--    return $clientRollback;
-+    return $this->connection->getClientConnection()->rollBack();
+   public function expectDeprecation(string $message): void {
+-    if (!DeprecationHandler::isDeprecationTest($this)) {
+-      throw new \RuntimeException('expectDeprecation() can only be called from tests marked with #[IgnoreDeprecations] or \'@group legacy\'');
+-    }
+-
+-    if (!DeprecationHandler::isEnabled()) {
+-      return;
+-    }
++    @trigger_error('expectDeprecation() is deprecated in drupal:11.3.0 and is removed from drupal:12.0.0. Use $this->expectUserDeprecationMessage() or $this->expectUserDeprecationMessageMatches() instead. See https://www.drupal.org/node/7654312', E_USER_DEPRECATED);
++    $this->expectUserDeprecationMessageMatches($this->regularExpressionForFormatDescription('%A' . $message . '%A'));
++  }
+ 
+-    DeprecationHandler::expectDeprecation($message);
++  private function regularExpressionForFormatDescription(string $string): string {
++    $string = strtr(preg_quote($string, '/'), [
++      '%%' => '%',
++      '%e' => preg_quote(\DIRECTORY_SEPARATOR, '/'),
++      '%s' => '[^\r\n]+',
++      '%S' => '[^\r\n]*',
++      '%a' => '.+?',
++      '%A' => '.*?',
++      '%w' => '\s*',
++      '%i' => '[+-]?\d+',
++      '%d' => '\d+',
++      '%x' => '[0-9a-fA-F]+',
++      '%f' => '[+-]?(?:\d+|(?=\.\d))(?:\.\d+)?(?:[Ee][+-]?\d+)?',
++      '%c' => '.',
++      '%0' => '\x00',
++    ]);
++    return '/^' . $string . '$/s';
    }
  
  }
-diff --git a/core/modules/mysqli/src/Driver/Database/mysqli/TransactionManager.php b/core/modules/mysqli/src/Driver/Database/mysqli/TransactionManager.php
-index 90237fd6a43..7327c98061e 100644
---- a/core/modules/mysqli/src/Driver/Database/mysqli/TransactionManager.php
-+++ b/core/modules/mysqli/src/Driver/Database/mysqli/TransactionManager.php
-@@ -4,7 +4,6 @@
+diff --git a/core/tests/Drupal/Tests/BrowserTestBase.php b/core/tests/Drupal/Tests/BrowserTestBase.php
+index 98aafad7df1..c26011b692e 100644
+--- a/core/tests/Drupal/Tests/BrowserTestBase.php
++++ b/core/tests/Drupal/Tests/BrowserTestBase.php
+@@ -21,6 +21,8 @@
+ use Drupal\Tests\node\Traits\NodeCreationTrait;
+ use Drupal\Tests\user\Traits\UserCreationTrait;
+ use Drupal\TestTools\Comparator\MarkupInterfaceComparator;
++use Drupal\TestTools\ErrorHandler\BootstrapErrorHandler;
++use Drupal\TestTools\Extension\DeprecationBridge\DeprecationHandler;
+ use Drupal\TestTools\Extension\DeprecationBridge\ExpectDeprecationTrait;
+ use Drupal\TestTools\Extension\Dump\DebugDump;
+ use GuzzleHttp\Cookie\CookieJar;
+@@ -436,6 +438,13 @@ protected function tearDown(): void {
+       $callbacks = &drupal_register_shutdown_function();
+       $callbacks = $this->originalShutdownCallbacks;
+     }
++
++    // We expect that the current error handler is the one set during the
++    // PHPUnit bootstrap. If not, the error handler was changed during the test
++    // execution but not properly restored during ::tearDown().
++    if (DeprecationHandler::isEnabled() && !get_error_handler() instanceof BootstrapErrorHandler) {
++      throw new \RuntimeException(sprintf('%s registered its own error handler without restoring the previous one before or during tear down. This can cause unpredictable test results. Ensure the test cleans up after itself.', $this->name()));
++    }
+   }
  
- namespace Drupal\mysqli\Driver\Database\mysqli;
+   /**
+diff --git a/core/tests/Drupal/Tests/Component/Assertion/InspectorTest.php b/core/tests/Drupal/Tests/Component/Assertion/InspectorTest.php
+index 2d02f97c571..86bbc4c18fe 100644
+--- a/core/tests/Drupal/Tests/Component/Assertion/InspectorTest.php
++++ b/core/tests/Drupal/Tests/Component/Assertion/InspectorTest.php
+@@ -5,7 +5,6 @@
+ namespace Drupal\Tests\Component\Assertion;
  
--use Drupal\Core\Database\Transaction\ClientConnectionTransactionState;
- use Drupal\Core\Database\Transaction\TransactionManagerBase;
+ use Drupal\Component\Assertion\Inspector;
+-use Drupal\TestTools\Extension\DeprecationBridge\ExpectDeprecationTrait;
+ use PHPUnit\Framework\Attributes\CoversClass;
+ use PHPUnit\Framework\Attributes\DataProvider;
+ use PHPUnit\Framework\Attributes\Group;
+@@ -18,8 +17,6 @@
+ #[Group('Assertion')]
+ class InspectorTest extends TestCase {
  
- /**
-@@ -33,16 +32,7 @@ protected function rollbackClientSavepoint(string $name): bool {
-     // Mysqli does not have a rollback_to_savepoint method, and it does not
-     // allow a prepared statement for 'ROLLBACK TO SAVEPOINT', so we need to
-     // fallback to querying on the client connection directly.
+-  use ExpectDeprecationTrait;
+-
+   /**
+    * Tests asserting all members are strings.
+    *
+diff --git a/core/tests/Drupal/Tests/Component/DependencyInjection/ContainerTest.php b/core/tests/Drupal/Tests/Component/DependencyInjection/ContainerTest.php
+index 87cd766c288..792da8c6a96 100644
+--- a/core/tests/Drupal/Tests/Component/DependencyInjection/ContainerTest.php
++++ b/core/tests/Drupal/Tests/Component/DependencyInjection/ContainerTest.php
+@@ -6,7 +6,6 @@
+ 
+ use Drupal\Component\DependencyInjection\Container;
+ use Drupal\Component\Utility\Crypt;
+-use Drupal\TestTools\Extension\DeprecationBridge\ExpectDeprecationTrait;
+ use PHPUnit\Framework\Attributes\CoversClass;
+ use PHPUnit\Framework\Attributes\Group;
+ use PHPUnit\Framework\TestCase;
+@@ -26,7 +25,7 @@
+ #[CoversClass(Container::class)]
+ #[Group('DependencyInjection')]
+ class ContainerTest extends TestCase {
+-  use ExpectDeprecationTrait;
++
+   use ProphecyTrait;
+ 
+   /**
+diff --git a/core/tests/Drupal/Tests/Component/DependencyInjection/Dumper/OptimizedPhpArrayDumperTest.php b/core/tests/Drupal/Tests/Component/DependencyInjection/Dumper/OptimizedPhpArrayDumperTest.php
+index 0465d11b247..4d907872bdd 100644
+--- a/core/tests/Drupal/Tests/Component/DependencyInjection/Dumper/OptimizedPhpArrayDumperTest.php
++++ b/core/tests/Drupal/Tests/Component/DependencyInjection/Dumper/OptimizedPhpArrayDumperTest.php
+@@ -6,7 +6,6 @@
+ 
+ use Drupal\Component\DependencyInjection\Dumper\OptimizedPhpArrayDumper;
+ use Drupal\Component\Utility\Crypt;
+-use Drupal\TestTools\Extension\DeprecationBridge\ExpectDeprecationTrait;
+ use PHPUnit\Framework\Attributes\CoversClass;
+ use PHPUnit\Framework\Attributes\DataProvider;
+ use PHPUnit\Framework\Attributes\Group;
+@@ -31,7 +30,6 @@
+ #[Group('DependencyInjection')]
+ class OptimizedPhpArrayDumperTest extends TestCase {
+ 
+-  use ExpectDeprecationTrait;
+   use ProphecyTrait;
+ 
+   /**
+diff --git a/core/tests/Drupal/Tests/Component/PhpStorage/FileStorageReadOnlyTest.php b/core/tests/Drupal/Tests/Component/PhpStorage/FileStorageReadOnlyTest.php
+index e1c05c7111c..66f6bab4081 100644
+--- a/core/tests/Drupal/Tests/Component/PhpStorage/FileStorageReadOnlyTest.php
++++ b/core/tests/Drupal/Tests/Component/PhpStorage/FileStorageReadOnlyTest.php
+@@ -7,7 +7,6 @@
+ use Drupal\Component\PhpStorage\FileReadOnlyStorage;
+ use Drupal\Component\PhpStorage\FileStorage;
+ use Drupal\Component\Utility\Random;
+-use Drupal\TestTools\Extension\DeprecationBridge\ExpectDeprecationTrait;
+ use PHPUnit\Framework\Attributes\CoversClass;
+ use PHPUnit\Framework\Attributes\Group;
+ 
+@@ -19,8 +18,6 @@
+ #[Group('PhpStorage')]
+ class FileStorageReadOnlyTest extends PhpStorageTestBase {
+ 
+-  use ExpectDeprecationTrait;
+-
+   /**
+    * Standard test settings to pass to storage instances.
+    *
+diff --git a/core/tests/Drupal/Tests/Component/PhpStorage/FileStorageTest.php b/core/tests/Drupal/Tests/Component/PhpStorage/FileStorageTest.php
+index e24013cfcc7..429dfd03c62 100644
+--- a/core/tests/Drupal/Tests/Component/PhpStorage/FileStorageTest.php
++++ b/core/tests/Drupal/Tests/Component/PhpStorage/FileStorageTest.php
+@@ -6,7 +6,6 @@
+ 
+ use Drupal\Component\PhpStorage\FileStorage;
+ use Drupal\Component\Utility\Random;
+-use Drupal\TestTools\Extension\DeprecationBridge\ExpectDeprecationTrait;
+ use org\bovigo\vfs\vfsStreamDirectory;
+ use PHPUnit\Framework\Attributes\CoversClass;
+ use PHPUnit\Framework\Attributes\Group;
+@@ -19,8 +18,6 @@
+ #[Group('PhpStorage')]
+ class FileStorageTest extends PhpStorageTestBase {
+ 
+-  use ExpectDeprecationTrait;
+-
+   /**
+    * Standard test settings to pass to storage instances.
+    *
+diff --git a/core/tests/Drupal/Tests/Component/Render/FormattableMarkupTest.php b/core/tests/Drupal/Tests/Component/Render/FormattableMarkupTest.php
+index 4547de6b9d3..a93c603801c 100644
+--- a/core/tests/Drupal/Tests/Component/Render/FormattableMarkupTest.php
++++ b/core/tests/Drupal/Tests/Component/Render/FormattableMarkupTest.php
+@@ -5,7 +5,6 @@
+ namespace Drupal\Tests\Component\Render;
+ 
+ use Drupal\Component\Render\FormattableMarkup;
+-use Drupal\TestTools\Extension\DeprecationBridge\ExpectDeprecationTrait;
+ use PHPUnit\Framework\Attributes\CoversClass;
+ use PHPUnit\Framework\Attributes\DataProvider;
+ use PHPUnit\Framework\Attributes\Group;
+@@ -18,8 +17,6 @@
+ #[Group('utility')]
+ class FormattableMarkupTest extends TestCase {
+ 
+-  use ExpectDeprecationTrait;
+-
+   /**
+    * The error message of the last error in the error handler.
+    *
+diff --git a/core/tests/Drupal/Tests/Component/Utility/BytesTest.php b/core/tests/Drupal/Tests/Component/Utility/BytesTest.php
+index 3a7d57caa16..75ab2d28a16 100644
+--- a/core/tests/Drupal/Tests/Component/Utility/BytesTest.php
++++ b/core/tests/Drupal/Tests/Component/Utility/BytesTest.php
+@@ -5,7 +5,6 @@
+ namespace Drupal\Tests\Component\Utility;
+ 
+ use Drupal\Component\Utility\Bytes;
+-use Drupal\TestTools\Extension\DeprecationBridge\ExpectDeprecationTrait;
+ use PHPUnit\Framework\Attributes\CoversClass;
+ use PHPUnit\Framework\Attributes\DataProvider;
+ use PHPUnit\Framework\Attributes\Group;
+@@ -21,7 +20,6 @@
+ #[Group('Utility')]
+ class BytesTest extends TestCase {
+ 
+-  use ExpectDeprecationTrait;
+   use ProphecyTrait;
+ 
+   /**
+diff --git a/core/tests/Drupal/Tests/Component/Utility/NumberTest.php b/core/tests/Drupal/Tests/Component/Utility/NumberTest.php
+index fdac9baf796..bb41f644692 100644
+--- a/core/tests/Drupal/Tests/Component/Utility/NumberTest.php
++++ b/core/tests/Drupal/Tests/Component/Utility/NumberTest.php
+@@ -5,7 +5,6 @@
+ namespace Drupal\Tests\Component\Utility;
+ 
+ use Drupal\Component\Utility\Number;
+-use Drupal\TestTools\Extension\DeprecationBridge\ExpectDeprecationTrait;
+ use PHPUnit\Framework\Attributes\CoversClass;
+ use PHPUnit\Framework\Attributes\DataProvider;
+ use PHPUnit\Framework\Attributes\Group;
+@@ -21,8 +20,6 @@
+ #[Group('Utility')]
+ class NumberTest extends TestCase {
+ 
+-  use ExpectDeprecationTrait;
+-
+   /**
+    * Tests Number::validStep() without offset.
+    *
+@@ -187,9 +184,9 @@ public function testAlphadecimalToIntThrowsExceptionWithMalformedStrings(): void
+   #[IgnoreDeprecations]
+   public function testAlphadecimalToIntReturnsZeroWithNullAndEmptyString(): void {
+     $deprecationMessage = 'Passing NULL or an empty string to Drupal\Component\Utility\Number::alphadecimalToInt() is deprecated in drupal:11.2.0 and will be removed in drupal:12.0.0. See https://www.drupal.org/node/3494472';
+-    $this->expectDeprecation($deprecationMessage);
++    $this->expectUserDeprecationMessage($deprecationMessage);
+     $this->assertSame(0, Number::alphadecimalToInt(NULL));
+-    $this->expectDeprecation($deprecationMessage);
++    $this->expectUserDeprecationMessage($deprecationMessage);
+     $this->assertSame(0, Number::alphadecimalToInt(''));
+   }
+ 
+diff --git a/core/tests/Drupal/Tests/Component/Utility/UnicodeTest.php b/core/tests/Drupal/Tests/Component/Utility/UnicodeTest.php
+index 06e6e1ef7d4..116a1d297fb 100644
+--- a/core/tests/Drupal/Tests/Component/Utility/UnicodeTest.php
++++ b/core/tests/Drupal/Tests/Component/Utility/UnicodeTest.php
+@@ -5,7 +5,6 @@
+ namespace Drupal\Tests\Component\Utility;
+ 
+ use Drupal\Component\Utility\Unicode;
+-use Drupal\TestTools\Extension\DeprecationBridge\ExpectDeprecationTrait;
+ use PHPUnit\Framework\Attributes\CoversClass;
+ use PHPUnit\Framework\Attributes\DataProvider;
+ use PHPUnit\Framework\Attributes\Group;
+@@ -17,7 +16,6 @@
+ #[CoversClass(Unicode::class)]
+ #[Group('Utility')]
+ class UnicodeTest extends TestCase {
+-  use ExpectDeprecationTrait;
+ 
+   /**
+    * Tests multibyte ucfirst.
+diff --git a/core/tests/Drupal/Tests/Core/EventSubscriber/CustomPageExceptionHtmlSubscriberTest.php b/core/tests/Drupal/Tests/Core/EventSubscriber/CustomPageExceptionHtmlSubscriberTest.php
+index 0e4d108f0fc..91efc74602a 100644
+--- a/core/tests/Drupal/Tests/Core/EventSubscriber/CustomPageExceptionHtmlSubscriberTest.php
++++ b/core/tests/Drupal/Tests/Core/EventSubscriber/CustomPageExceptionHtmlSubscriberTest.php
+@@ -129,6 +129,7 @@ protected function setUp(): void {
+    */
+   protected function tearDown(): void {
+     ini_set('error_log', $this->errorLog);
++    parent::tearDown();
+   }
+ 
+   /**
+diff --git a/core/tests/Drupal/Tests/Core/Form/FormTestBase.php b/core/tests/Drupal/Tests/Core/Form/FormTestBase.php
+index ffbff566382..2a594a700ad 100644
+--- a/core/tests/Drupal/Tests/Core/Form/FormTestBase.php
++++ b/core/tests/Drupal/Tests/Core/Form/FormTestBase.php
+@@ -205,6 +205,7 @@ protected function setUp(): void {
+   protected function tearDown(): void {
+     Html::resetSeenIds();
+     (new FormState())->clearErrors();
++    parent::tearDown();
+   }
+ 
+   /**
+diff --git a/core/tests/Drupal/Tests/Core/Test/PhpUnitBridgeIsolatedTest.php b/core/tests/Drupal/Tests/Core/Test/PhpUnitBridgeIsolatedTest.php
+index 384f2a2d549..a04e726ca49 100644
+--- a/core/tests/Drupal/Tests/Core/Test/PhpUnitBridgeIsolatedTest.php
++++ b/core/tests/Drupal/Tests/Core/Test/PhpUnitBridgeIsolatedTest.php
+@@ -21,7 +21,7 @@
+ class PhpUnitBridgeIsolatedTest extends UnitTestCase {
+ 
+   public function testDeprecatedClass(): void {
+-    $this->expectDeprecation('Drupal\deprecation_test\Deprecation\FixtureDeprecatedClass is deprecated.');
++    $this->expectUserDeprecationMessage('Drupal\deprecation_test\Deprecation\FixtureDeprecatedClass is deprecated.');
+     $deprecated = new FixtureDeprecatedClass();
+     $this->assertEquals('test', $deprecated->testFunction());
+   }
+diff --git a/core/tests/Drupal/Tests/Core/Test/PhpUnitBridgeTest.php b/core/tests/Drupal/Tests/Core/Test/PhpUnitBridgeTest.php
+index 46bf8e00853..dc741d8ba12 100644
+--- a/core/tests/Drupal/Tests/Core/Test/PhpUnitBridgeTest.php
++++ b/core/tests/Drupal/Tests/Core/Test/PhpUnitBridgeTest.php
+@@ -20,7 +20,7 @@ class PhpUnitBridgeTest extends UnitTestCase {
+    * Tests class-level deprecation.
+    */
+   public function testDeprecatedClass(): void {
+-    $this->expectDeprecation('Drupal\deprecation_test\Deprecation\FixtureDeprecatedClass is deprecated.');
++    $this->expectUserDeprecationMessage('Drupal\deprecation_test\Deprecation\FixtureDeprecatedClass is deprecated.');
+     $deprecated = new FixtureDeprecatedClass();
+     $this->assertEquals('test', $deprecated->testFunction());
+   }
+diff --git a/core/tests/Drupal/Tests/Core/Theme/Icon/IconPackManagerTest.php b/core/tests/Drupal/Tests/Core/Theme/Icon/IconPackManagerTest.php
+deleted file mode 100644
+index 79ecd9ae3df..00000000000
+--- a/core/tests/Drupal/Tests/Core/Theme/Icon/IconPackManagerTest.php
++++ /dev/null
+@@ -1,108 +0,0 @@
+-<?php
+-
+-declare(strict_types=1);
+-
+-namespace Drupal\Tests\Core\Theme\Icon;
+-
+-use Drupal\Core\Theme\Icon\IconExtractorPluginManager;
+-use Drupal\Core\Cache\CacheBackendInterface;
+-use Drupal\Core\Extension\ModuleHandlerInterface;
+-use Drupal\Core\Extension\ThemeHandlerInterface;
+-use Drupal\Core\Theme\Icon\Plugin\IconPackManager;
+-use Drupal\Core\Theme\Icon\IconCollector;
+-use Drupal\Core\Theme\Icon\Exception\IconPackConfigErrorException;
+-use Drupal\Tests\UnitTestCase;
+-use PHPUnit\Framework\Attributes\CoversClass;
+-use PHPUnit\Framework\Attributes\DataProvider;
+-use PHPUnit\Framework\Attributes\Group;
+-
+-/**
+- * Tests Drupal\Core\Theme\Icon\Plugin\IconPackManager.
+- *
+- * @group icon
+- */
+-#[CoversClass(IconPackManager::class)]
+-#[Group('icon')]
+-class IconPackManagerTest extends UnitTestCase {
+-
+-  /**
+-   * Data provider for ::testLibraryName().
+-   *
+-   * @return array
+-   *   Provide test data as:
+-   *   - (string) Library name to test
+-   *   - (bool) Flag for validity
+-   */
+-  public static function providerIconPackLibraryName(): array {
+-    return [
+-      'valid name with underscore' => ['my_theme/my_library', TRUE],
+-      'valid name with hyphen' => ['my_theme/my-library', TRUE],
+-      'valid name with hyphen and numbers' => ['my_theme/my-long-library_with_mixed-hyphens123', TRUE],
+-      'invalid theme name case 1' => ['my-theme/my-library', FALSE],
+-      'invalid theme name case 2' => ['my-theme/my_library', FALSE],
+-      'Invalid library name case 1' => ['my_theme/my library', FALSE],
+-      'Invalid library name special characters' => ['my-theme/$#random!', FALSE],
+-    ];
+-  }
+-
+-  /**
+-   * Test the library names.
+-   *
+-   * @param string $name
+-   *   The icon data.
+-   * @param bool $is_valid
+-   *   The result expected is valid or not.
+-   */
+-  #[DataProvider('providerIconPackLibraryName')]
+-  public function testIconPackLibraryName(string $name, bool $is_valid): void {
+-    // Minimal required values.
+-    $definition = [
+-      'id' => 'foo',
+-      'provider' => 'icon_test',
+-      'extractor' => 'bar',
+-      'template' => '',
+-      'library' => $name,
+-    ];
+-
+-    // Mock all dependencies for IconPackManager.
+-    $module_handler = $this->createMock(ModuleHandlerInterface::class);
+-    $theme_handler = $this->createMock(ThemeHandlerInterface::class);
+-    $cache_backend = $this->createMock(CacheBackendInterface::class);
+-
+-    // Add the IconExtractorPluginManager mock here.
+-    $icon_extractor_manager = $this->createMock(IconExtractorPluginManager::class);
+-
+-    $icon_collector = $this->createMock(IconCollector::class);
+-
+-    // Create the IconPackManager instance and pass the manager with definition.
+-    $iconPackManager = new IconPackManager(
+-      $module_handler,
+-      $theme_handler,
+-      $cache_backend,
+-      $icon_extractor_manager,
+-      $icon_collector,
+-      $this->root,
+-    );
+-
+-    $iconPackManager->setValidator();
+-
+-    $reflection = new \ReflectionClass($iconPackManager);
+-    $method = $reflection->getMethod('validateDefinition');
+-    $method->setAccessible(TRUE);
+-
 -    try {
--      return (bool) $this->connection->getClientConnection()->query('ROLLBACK TO SAVEPOINT ' . $name);
+-      $result = $method->invoke($iconPackManager, $definition);
+-      if ($is_valid) {
+-        $this->assertTrue($result);
+-      }
 -    }
--    catch (\mysqli_sql_exception) {
--      // If the rollback failed, most likely the savepoint was not there
--      // because the transaction is no longer active. In this case we void the
--      // transaction stack.
--      $this->voidClientTransaction();
--      return TRUE;
+-    catch (\Exception $e) {
+-      if (!$is_valid) {
+-        $this->assertSame('icon_test:foo Error in definition `foo`:[library] Does not match the regex pattern ^\w+/[A-Za-z]+[\w-]*$', $e->getMessage());
+-        $this->assertInstanceOf(IconPackConfigErrorException::class, $e);
+-      }
 -    }
-+    return (bool) $this->connection->getClientConnection()->query('ROLLBACK TO SAVEPOINT ' . $name);
-   }
- 
-   /**
-@@ -59,24 +49,14 @@ protected function rollbackClientTransaction(): bool {
-     // Note: mysqli::rollback() returns TRUE if there's no active transaction.
-     // This is diverging from PDO MySql. A PHP bug report exists.
-     // @see https://bugs.php.net/bug.php?id=81533.
--    $clientRollback = $this->connection->getClientConnection()->rollBack();
--    $this->setConnectionTransactionState($clientRollback ?
--      ClientConnectionTransactionState::RolledBack :
--      ClientConnectionTransactionState::RollbackFailed
--    );
--    return $clientRollback;
-+    return $this->connection->getClientConnection()->rollBack();
-   }
- 
-   /**
-    * {@inheritdoc}
-    */
-   protected function commitClientTransaction(): bool {
--    $clientCommit = $this->connection->getClientConnection()->commit();
--    $this->setConnectionTransactionState($clientCommit ?
--      ClientConnectionTransactionState::Committed :
--      ClientConnectionTransactionState::CommitFailed
--    );
--    return $clientCommit;
-+    return $this->connection->getClientConnection()->commit();
-   }
- 
- }
-diff --git a/core/modules/pgsql/src/Driver/Database/pgsql/TransactionManager.php b/core/modules/pgsql/src/Driver/Database/pgsql/TransactionManager.php
-index 4374ac993c3..86020c3f9b1 100644
---- a/core/modules/pgsql/src/Driver/Database/pgsql/TransactionManager.php
-+++ b/core/modules/pgsql/src/Driver/Database/pgsql/TransactionManager.php
-@@ -4,7 +4,6 @@
- 
- namespace Drupal\pgsql\Driver\Database\pgsql;
- 
--use Drupal\Core\Database\Transaction\ClientConnectionTransactionState;
- use Drupal\Core\Database\Transaction\TransactionManagerBase;
+-
+-  }
+-
+-}
+diff --git a/core/tests/Drupal/Tests/ExpectDeprecationTest.php b/core/tests/Drupal/Tests/ExpectDeprecationTest.php
+index f377fa12cfa..dc05454d4c5 100644
+--- a/core/tests/Drupal/Tests/ExpectDeprecationTest.php
++++ b/core/tests/Drupal/Tests/ExpectDeprecationTest.php
+@@ -12,11 +12,12 @@
+ use PHPUnit\Framework\TestCase;
  
  /**
-@@ -23,24 +22,14 @@ protected function beginClientTransaction(): bool {
-    * {@inheritdoc}
-    */
-   protected function rollbackClientTransaction(): bool {
--    $clientRollback = $this->connection->getClientConnection()->rollBack();
--    $this->setConnectionTransactionState($clientRollback ?
--      ClientConnectionTransactionState::RolledBack :
--      ClientConnectionTransactionState::RollbackFailed
--    );
--    return $clientRollback;
-+    return $this->connection->getClientConnection()->rollBack();
-   }
+- * Ensures Drupal has test coverage of Symfony's deprecation testing.
++ * Ensures test coverage for deprecation testing.
+  */
+ #[Group('Test')]
+ #[IgnoreDeprecations]
+ class ExpectDeprecationTest extends TestCase {
++
+   use ExpectDeprecationTrait;
  
    /**
-    * {@inheritdoc}
-    */
-   protected function commitClientTransaction(): bool {
--    $clientCommit = $this->connection->getClientConnection()->commit();
--    $this->setConnectionTransactionState($clientCommit ?
--      ClientConnectionTransactionState::Committed :
--      ClientConnectionTransactionState::CommitFailed
--    );
--    return $clientCommit;
-+    return $this->connection->getClientConnection()->commit();
+diff --git a/core/tests/Drupal/Tests/UnitTestCase.php b/core/tests/Drupal/Tests/UnitTestCase.php
+index b279bd1ed25..d584547d730 100644
+--- a/core/tests/Drupal/Tests/UnitTestCase.php
++++ b/core/tests/Drupal/Tests/UnitTestCase.php
+@@ -10,6 +10,8 @@
+ use Drupal\Core\DependencyInjection\ContainerBuilder;
+ use Drupal\Core\StringTranslation\TranslatableMarkup;
+ use Drupal\Core\StringTranslation\PluralTranslatableMarkup;
++use Drupal\TestTools\ErrorHandler\BootstrapErrorHandler;
++use Drupal\TestTools\Extension\DeprecationBridge\DeprecationHandler;
+ use Drupal\TestTools\Extension\DeprecationBridge\ExpectDeprecationTrait;
+ use Drupal\TestTools\Extension\Dump\DebugDump;
+ use PHPUnit\Framework\Attributes\BeforeClass;
+@@ -77,6 +79,20 @@ protected function setUp(): void {
+     chdir($this->root);
    }
  
- }
-diff --git a/core/modules/sqlite/src/Driver/Database/sqlite/TransactionManager.php b/core/modules/sqlite/src/Driver/Database/sqlite/TransactionManager.php
-index 7b422767d63..7c25879d1f7 100644
---- a/core/modules/sqlite/src/Driver/Database/sqlite/TransactionManager.php
-+++ b/core/modules/sqlite/src/Driver/Database/sqlite/TransactionManager.php
-@@ -4,7 +4,6 @@
- 
- namespace Drupal\sqlite\Driver\Database\sqlite;
- 
--use Drupal\Core\Database\Transaction\ClientConnectionTransactionState;
- use Drupal\Core\Database\Transaction\TransactionManagerBase;
- 
- /**
-@@ -23,24 +22,14 @@ protected function beginClientTransaction(): bool {
-    * {@inheritdoc}
-    */
-   protected function rollbackClientTransaction(): bool {
--    $clientRollback = $this->connection->getClientConnection()->rollBack();
--    $this->setConnectionTransactionState($clientRollback ?
--      ClientConnectionTransactionState::RolledBack :
--      ClientConnectionTransactionState::RollbackFailed
--    );
--    return $clientRollback;
-+    return $this->connection->getClientConnection()->rollBack();
-   }
- 
-   /**
-    * {@inheritdoc}
-    */
-   protected function commitClientTransaction(): bool {
--    $clientCommit = $this->connection->getClientConnection()->commit();
--    $this->setConnectionTransactionState($clientCommit ?
--      ClientConnectionTransactionState::Committed :
--      ClientConnectionTransactionState::CommitFailed
--    );
--    return $clientCommit;
-+    return $this->connection->getClientConnection()->commit();
-   }
- 
- }
-diff --git a/core/modules/system/tests/modules/database_test/database_test.services.yml b/core/modules/system/tests/modules/database_test/database_test.services.yml
-index a4211a5bec1..ea8a1ebe872 100644
---- a/core/modules/system/tests/modules/database_test/database_test.services.yml
-+++ b/core/modules/system/tests/modules/database_test/database_test.services.yml
-@@ -1,5 +1,6 @@
- services:
-   _defaults:
-+    autowire: true
-     autoconfigure: true
-   # A test subscriber for the database API events.
-   Drupal\database_test\EventSubscriber\DatabaseEventSubscriber: ~
-diff --git a/core/modules/system/tests/modules/database_test/src/EventSubscriber/DatabaseEventSubscriber.php b/core/modules/system/tests/modules/database_test/src/EventSubscriber/DatabaseEventSubscriber.php
-index 029d6ee5a31..b420e8c20cf 100644
---- a/core/modules/system/tests/modules/database_test/src/EventSubscriber/DatabaseEventSubscriber.php
-+++ b/core/modules/system/tests/modules/database_test/src/EventSubscriber/DatabaseEventSubscriber.php
-@@ -7,6 +7,16 @@
- use Drupal\Core\Database\Event\StatementExecutionEndEvent;
- use Drupal\Core\Database\Event\StatementExecutionFailureEvent;
- use Drupal\Core\Database\Event\StatementExecutionStartEvent;
-+use Drupal\Core\Database\Event\TransactionAutoCommitEvent;
-+use Drupal\Core\Database\Event\TransactionBeginEvent;
-+use Drupal\Core\Database\Event\TransactionCommitEvent;
-+use Drupal\Core\Database\Event\TransactionReleaseSavepointEvent;
-+use Drupal\Core\Database\Event\TransactionRollbackEvent;
-+use Drupal\Core\Database\Event\TransactionRollbackFailureEvent;
-+use Drupal\Core\Database\Event\TransactionRollbackToSavepointEvent;
-+use Drupal\Core\Database\Event\TransactionSavepointEvent;
-+use Drupal\Core\KeyValueStore\KeyValueFactoryInterface;
-+use Symfony\Component\DependencyInjection\Attribute\Autowire;
- use Symfony\Component\EventDispatcher\EventSubscriberInterface;
- 
- /**
-@@ -34,14 +44,28 @@ class DatabaseEventSubscriber implements EventSubscriberInterface {
-    */
-   public array $statementIdsInExecution = [];
- 
-+  public function __construct(
-+    #[Autowire(service: 'keyvalue')]
-+    protected KeyValueFactoryInterface $keyValue,
-+  ) {
++  /**
++   * {@inheritdoc}
++   */
++  protected function tearDown(): void {
++    // We expect that the current error handler is the one set during the
++    // PHPUnit bootstrap. If not, the error handler was changed during the test
++    // execution but not properly restored during ::tearDown().
++    if (DeprecationHandler::isEnabled() && !get_error_handler() instanceof BootstrapErrorHandler) {
++      throw new \RuntimeException(sprintf('%s registered its own error handler without restoring the previous one before or during tear down. This can cause unpredictable test results. Ensure the test cleans up after itself.', $this->name()));
++    }
++
++    parent::tearDown();
 +  }
 +
    /**
-    * {@inheritdoc}
-    */
-   public static function getSubscribedEvents(): array {
-     return [
--      StatementExecutionStartEvent::class => 'onStatementExecutionStart',
-       StatementExecutionEndEvent::class => 'onStatementExecutionEnd',
-       StatementExecutionFailureEvent::class => 'onStatementExecutionFailure',
-+      StatementExecutionStartEvent::class => 'onStatementExecutionStart',
-+      TransactionAutoCommitEvent::class => 'onTransactionAutoCommit',
-+      TransactionBeginEvent::class => 'onTransactionBegin',
-+      TransactionCommitEvent::class => 'onTransactionCommit',
-+      TransactionReleaseSavepointEvent::class => 'onTransactionReleaseSavepoint',
-+      TransactionRollbackEvent::class => 'onTransactionRollback',
-+      TransactionRollbackFailureEvent::class => 'onTransactionRollbackFailureEvent',
-+      TransactionRollbackToSavepointEvent::class => 'onTransactionRollbackToSavepoint',
-+      TransactionSavepointEvent::class => 'onTransactionSavepoint',
-     ];
-   }
- 
-@@ -78,4 +102,84 @@ public function onStatementExecutionFailure(StatementExecutionFailureEvent $even
-     $this->countStatementFailures++;
-   }
- 
-+  /**
-+   * Subscribes to a TransactionBeginEvent.
-+   *
-+   * @param \Drupal\Core\Database\Event\TransactionBeginEvent $event
-+   *   The transaction event.
-+   */
-+  public function onTransactionBegin(TransactionBeginEvent $event): void {
-+    $this->keyValue->get('TransactionEventTest')->set('event_data', get_class($event) . ' ' . $event->key . ' ' . $event->target . ' ' . $event->id . '\\' . $event->name);
-+  }
-+
-+  /**
-+   * Subscribes to a TransactionSavepointEvent.
-+   *
-+   * @param \Drupal\Core\Database\Event\TransactionSavepointEvent $event
-+   *   The transaction event.
-+   */
-+  public function onTransactionSavepoint(TransactionSavepointEvent $event): void {
-+    $this->keyValue->get('TransactionEventTest')->set('event_data', get_class($event) . ' ' . $event->key . ' ' . $event->target . ' ' . $event->id . '\\' . $event->name . ' stack: ' . implode(' > ', $event->stackItems));
-+  }
-+
-+  /**
-+   * Subscribes to a TransactionAutoCommitEvent.
-+   *
-+   * @param \Drupal\Core\Database\Event\TransactionAutoCommitEvent $event
-+   *   The transaction event.
-+   */
-+  public function onTransactionAutoCommit(TransactionAutoCommitEvent $event): void {
-+    $this->keyValue->get('TransactionEventTest')->set('event_data', get_class($event) . ' ' . $event->key . ' ' . $event->target . ' ' . $event->id . '\\' . $event->name);
-+  }
-+
-+  /**
-+   * Subscribes to a TransactionCommitEvent.
-+   *
-+   * @param \Drupal\Core\Database\Event\TransactionCommitEvent $event
-+   *   The transaction event.
-+   */
-+  public function onTransactionCommit(TransactionCommitEvent $event): void {
-+    $this->keyValue->get('TransactionEventTest')->set('event_data', get_class($event) . ' ' . $event->key . ' ' . $event->target . ' ' . $event->id . '\\' . $event->name . ' commit-type: ' . $event->type->name);
-+  }
-+
-+  /**
-+   * Subscribes to a TransactionReleaseSavepointEvent.
-+   *
-+   * @param \Drupal\Core\Database\Event\TransactionReleaseSavepointEvent $event
-+   *   The transaction event.
-+   */
-+  public function onTransactionReleaseSavepoint(TransactionReleaseSavepointEvent $event): void {
-+    $this->keyValue->get('TransactionEventTest')->set('event_data', get_class($event) . ' ' . $event->key . ' ' . $event->target . ' ' . $event->id . '\\' . $event->name . ' stack: ' . implode(' > ', $event->stackItems));
-+  }
-+
-+  /**
-+   * Subscribes to a TransactionRollbackEvent.
-+   *
-+   * @param \Drupal\Core\Database\Event\TransactionRollbackEvent $event
-+   *   The transaction event.
-+   */
-+  public function onTransactionRollback(TransactionRollbackEvent $event): void {
-+    $this->keyValue->get('TransactionEventTest')->set('event_data', get_class($event) . ' ' . $event->key . ' ' . $event->target . ' ' . $event->id . '\\' . $event->name);
-+  }
-+
-+  /**
-+   * Subscribes to a TransactionRollbackFailureEvent.
-+   *
-+   * @param \Drupal\Core\Database\Event\TransactionRollbackFailureEvent $event
-+   *   The transaction event.
-+   */
-+  public function onTransactionRollbackFailureEvent(TransactionRollbackFailureEvent $event): void {
-+    $this->keyValue->get('TransactionEventTest')->set('event_data', get_class($event) . ' ' . $event->key . ' ' . $event->target . ' ' . $event->id . '\\' . $event->name . ' ' . $event->className . ' ' . $event->message);
-+  }
-+
-+  /**
-+   * Subscribes to a TransactionRollbackToSavepointEvent.
-+   *
-+   * @param \Drupal\Core\Database\Event\TransactionRollbackToSavepointEvent $event
-+   *   The transaction event.
-+   */
-+  public function onTransactionRollbackToSavepoint(TransactionRollbackToSavepointEvent $event): void {
-+    $this->keyValue->get('TransactionEventTest')->set('event_data', get_class($event) . ' ' . $event->key . ' ' . $event->target . ' ' . $event->id . '\\' . $event->name . ' stack: ' . implode(' > ', $event->stackItems));
-+  }
-+
- }
-diff --git a/core/tests/Drupal/KernelTests/Core/Database/TransactionEventTest.php b/core/tests/Drupal/KernelTests/Core/Database/TransactionEventTest.php
-new file mode 100644
-index 00000000000..68202869866
---- /dev/null
-+++ b/core/tests/Drupal/KernelTests/Core/Database/TransactionEventTest.php
-@@ -0,0 +1,193 @@
-+<?php
-+
-+declare(strict_types=1);
-+
-+namespace Drupal\KernelTests\Core\Database;
-+
-+use Drupal\Core\Database\Event\TransactionEvent;
-+use PHPUnit\Framework\Attributes\Group;
-+
-+/**
-+ * Tests the Transaction events.
-+ */
-+#[Group('Database')]
-+class TransactionEventTest extends DatabaseTestBase {
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  protected function setUp(): void {
-+    parent::setUp();
-+    $this->connection->enableEvents(TransactionEvent::all());
-+  }
-+
-+  /**
-+   * Tests transaction beginning.
-+   */
-+  public function testTransactionBegin(): void {
-+    $tx = $this->connection->startTransaction();
-+    $this->assertMatchesRegularExpression("/^.*TransactionBeginEvent default default .*\\\\drupal_transaction$/", \Drupal::keyValue('TransactionEventTest')->get('event_data'));
-+    $tx->commitOrRelease();
-+  }
-+
-+  /**
-+   * Tests adding a savepoint.
-+   */
-+  public function testTransactionSavepoint(): void {
-+    $tx = $this->connection->startTransaction();
-+    $savepoint = $this->connection->startTransaction();
-+    $this->assertMatchesRegularExpression("/^.*TransactionSavepointEvent default default .*\\\\savepoint_1 stack: .*\\\\drupal_transaction > .*\\\\savepoint_1$/", \Drupal::keyValue('TransactionEventTest')->get('event_data'));
-+    $savepoint->commitOrRelease();
-+    $tx->commitOrRelease();
-+  }
-+
-+  /**
-+   * Tests committing a transaction.
-+   */
-+  public function testTransactionCommit(): void {
-+    $tx = $this->connection->startTransaction();
-+    $tx->commitOrRelease();
-+    $this->assertMatchesRegularExpression("/^.*TransactionCommitEvent default default .*\\\\drupal_transaction commit-type: Explicit$/", \Drupal::keyValue('TransactionEventTest')->get('event_data'));
-+  }
-+
-+  /**
-+   * Tests implicitly committing a transaction via object destruction.
-+   */
-+  public function testTransactionImplicitCommit(): void {
-+    $tx = $this->connection->startTransaction();
-+    unset($tx);
-+    $this->assertMatchesRegularExpression("/^.*TransactionCommitEvent default default .*\\\\drupal_transaction commit-type: ImplicitOnDestruct$/", \Drupal::keyValue('TransactionEventTest')->get('event_data'));
-+  }
-+
-+  /**
-+   * Tests committing a transaction after a savepoint was opened.
-+   */
-+  public function testTransactionCommitNested(): void {
-+    $tx = $this->connection->startTransaction();
-+    $savepoint = $this->connection->startTransaction('foo');
-+    $tx->commitOrRelease();
-+    $this->assertMatchesRegularExpression("/^.*TransactionCommitEvent default default .*\\\\drupal_transaction commit-type: Explicit$/", \Drupal::keyValue('TransactionEventTest')->get('event_data'));
-+    unset($savepoint);
-+  }
-+
-+  /**
-+   * Tests DDL auto-commit - followed by implicit commit.
-+   */
-+  public function testImplicitCommitAfterAutoCommitOnDataDefinitionLanguageStatement(): void {
-+    if ($this->connection->supportsTransactionalDDL()) {
-+      $this->markTestSkipped('This test is only relevant for databases that do not support transactional DDL.');
-+    }
-+
-+    $table = [
-+      'fields' => [
-+        'id' => [
-+          'type' => 'serial',
-+          'unsigned' => TRUE,
-+          'not null' => TRUE,
-+        ],
-+      ],
-+      'primary key' => ['id'],
-+    ];
-+
-+    $tx = $this->connection->startTransaction();
-+    $this->connection->schema()->createTable('database_test_00', $table);
-+    $this->assertMatchesRegularExpression("/^.*TransactionAutoCommitEvent default default .*\\\\drupal_transaction$/", \Drupal::keyValue('TransactionEventTest')->get('event_data'));
-+    unset($tx);
-+    $this->assertMatchesRegularExpression("/^.*TransactionCommitEvent default default .*\\\\drupal_transaction commit-type: AutomaticUponDDL$/", \Drupal::keyValue('TransactionEventTest')->get('event_data'));
-+  }
-+
-+  /**
-+   * Tests DDL auto-commit - followed by explict commit.
-+   */
-+  public function testExplicitCommitAfterAutoCommitOnDataDefinitionLanguageStatement(): void {
-+    if ($this->connection->supportsTransactionalDDL()) {
-+      $this->markTestSkipped('This test is only relevant for databases that do not support transactional DDL.');
-+    }
-+
-+    $table = [
-+      'fields' => [
-+        'id' => [
-+          'type' => 'serial',
-+          'unsigned' => TRUE,
-+          'not null' => TRUE,
-+        ],
-+      ],
-+      'primary key' => ['id'],
-+    ];
-+
-+    $tx = $this->connection->startTransaction();
-+    $this->connection->schema()->createTable('database_test_00', $table);
-+    $this->assertMatchesRegularExpression("/^.*TransactionAutoCommitEvent default default .*\\\\drupal_transaction$/", \Drupal::keyValue('TransactionEventTest')->get('event_data'));
-+    $tx->commitOrRelease();
-+    $this->assertMatchesRegularExpression("/^.*TransactionCommitEvent default default .*\\\\drupal_transaction commit-type: AutomaticUponDDL$/", \Drupal::keyValue('TransactionEventTest')->get('event_data'));
-+  }
-+
-+  /**
-+   * Tests DDL auto-commit - followed by rollback attempt.
-+   */
-+  public function testAttemptRollbackAfterAutoCommitOnDataDefinitionLanguageStatement(): void {
-+    if ($this->connection->supportsTransactionalDDL()) {
-+      $this->markTestSkipped('This test is only relevant for databases that do not support transactional DDL.');
-+    }
-+
-+    $table = [
-+      'fields' => [
-+        'id' => [
-+          'type' => 'serial',
-+          'unsigned' => TRUE,
-+          'not null' => TRUE,
-+        ],
-+      ],
-+      'primary key' => ['id'],
-+    ];
-+
-+    $tx = $this->connection->startTransaction();
-+    $this->connection->schema()->createTable('database_test_00', $table);
-+    $this->assertMatchesRegularExpression("/^.*TransactionAutoCommitEvent default default .*\\\\drupal_transaction$/", \Drupal::keyValue('TransactionEventTest')->get('event_data'));
-+    set_error_handler(static function (int $errno, string $errstr): bool {
-+      throw new \ErrorException($errstr);
-+    });
-+    try {
-+      $tx->rollback();
-+    }
-+    catch (\ErrorException $e) {
-+      $this->assertSame('Transaction::rollBack() failed because of a prior execution of a DDL statement.', $e->getMessage());
-+    }
-+    finally {
-+      restore_error_handler();
-+    }
-+    $this->assertMatchesRegularExpression("/^.*TransactionRollbackFailureEvent default default .*\\\\drupal_transaction .* Transaction::rollBack\\(\\) failed because of a prior execution of a DDL statement\\.$/", \Drupal::keyValue('TransactionEventTest')->get('event_data'));
-+  }
-+
-+  /**
-+   * Tests releasing a savepoint.
-+   */
-+  public function testTransactionReleaseSavepoint(): void {
-+    $tx = $this->connection->startTransaction();
-+    $savepoint = $this->connection->startTransaction('foo');
-+    $savepoint->commitOrRelease();
-+    $this->assertMatchesRegularExpression("/^.*TransactionReleaseSavepointEvent default default .*\\\\foo stack: .*\\\\drupal_transaction$/", \Drupal::keyValue('TransactionEventTest')->get('event_data'));
-+    unset($tx);
-+  }
-+
-+  /**
-+   * Tests rolling back a transaction.
-+   */
-+  public function testTransactionRollback(): void {
-+    $tx = $this->connection->startTransaction();
-+    $tx->rollback();
-+    $this->assertMatchesRegularExpression("/^.*TransactionRollbackEvent default default .*\\\\drupal_transaction$/", \Drupal::keyValue('TransactionEventTest')->get('event_data'));
-+  }
-+
-+  /**
-+   * Tests rolling back a transaction to a savepoint.
-+   */
-+  public function testTransactionRollbackToSavepoint(): void {
-+    $tx = $this->connection->startTransaction();
-+    $savepoint = $this->connection->startTransaction('foo');
-+    $savepoint->rollback();
-+    $this->assertMatchesRegularExpression("/^.*TransactionRollbackToSavepointEvent default default .*\\\\foo stack: .*\\\\drupal_transaction$/", \Drupal::keyValue('TransactionEventTest')->get('event_data'));
-+    unset($tx);
-+  }
-+
-+}
-diff --git a/core/tests/Drupal/Tests/Core/Database/Stub/EventSubscriber/StubTransactionEventSubscriber.php b/core/tests/Drupal/Tests/Core/Database/Stub/EventSubscriber/StubTransactionEventSubscriber.php
-new file mode 100644
-index 00000000000..b76a04c9d3b
---- /dev/null
-+++ b/core/tests/Drupal/Tests/Core/Database/Stub/EventSubscriber/StubTransactionEventSubscriber.php
-@@ -0,0 +1,58 @@
-+<?php
-+
-+declare(strict_types=1);
-+
-+namespace Drupal\Tests\Core\Database\Stub\EventSubscriber;
-+
-+use Drupal\Core\Database\Event\TransactionBeginEvent;
-+use Drupal\Core\Database\Event\TransactionCommitEvent;
-+use Drupal\Core\Database\Event\TransactionCommitFailureEvent;
-+use Drupal\Core\Database\Event\TransactionEventBase;
-+use Drupal\Core\Database\Event\TransactionReleaseSavepointEvent;
-+use Drupal\Core\Database\Event\TransactionReleaseSavepointFailureEvent;
-+use Drupal\Core\Database\Event\TransactionRollbackEvent;
-+use Drupal\Core\Database\Event\TransactionRollbackFailureEvent;
-+use Drupal\Core\Database\Event\TransactionRollbackToSavepointEvent;
-+use Drupal\Core\Database\Event\TransactionRollbackToSavepointFailureEvent;
-+use Drupal\Core\Database\Event\TransactionSavepointEvent;
-+use Symfony\Component\EventDispatcher\EventSubscriberInterface;
-+
-+/**
-+ * Responds to database API transaction events.
-+ */
-+class StubTransactionEventSubscriber implements EventSubscriberInterface {
-+
-+  /**
-+   * The last event dispatched.
-+   */
-+  public TransactionEventBase $lastEvent;
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public static function getSubscribedEvents(): array {
-+    return [
-+      TransactionBeginEvent::class => 'onTransactionEvent',
-+      TransactionCommitEvent::class => 'onTransactionEvent',
-+      TransactionCommitFailureEvent::class => 'onTransactionEvent',
-+      TransactionReleaseSavepointEvent::class => 'onTransactionEvent',
-+      TransactionReleaseSavepointFailureEvent::class => 'onTransactionEvent',
-+      TransactionRollbackEvent::class => 'onTransactionEvent',
-+      TransactionRollbackFailureEvent::class => 'onTransactionEvent',
-+      TransactionRollbackToSavepointEvent::class => 'onTransactionEvent',
-+      TransactionRollbackToSavepointFailureEvent::class => 'onTransactionEvent',
-+      TransactionSavepointEvent::class => 'onTransactionEvent',
-+    ];
-+  }
-+
-+  /**
-+   * Subscribes to a transaction event.
-+   *
-+   * @param \Drupal\Core\Database\Event\TransactionEventBase $event
-+   *   The transaction event.
-+   */
-+  public function onTransactionEvent(TransactionEventBase $event): void {
-+    $this->lastEvent = $event;
-+  }
-+
-+}
-diff --git a/core/tests/Drupal/Tests/Core/Database/Stub/StubConnection.php b/core/tests/Drupal/Tests/Core/Database/Stub/StubConnection.php
-index 4b31c06c2e6..9c1e9ece3f4 100644
---- a/core/tests/Drupal/Tests/Core/Database/Stub/StubConnection.php
-+++ b/core/tests/Drupal/Tests/Core/Database/Stub/StubConnection.php
-@@ -8,6 +8,7 @@
- use Drupal\Core\Database\ExceptionHandler;
- use Drupal\Core\Database\Log;
- use Drupal\Core\Database\StatementWrapperIterator;
-+use Drupal\Core\Database\Transaction\TransactionManagerInterface;
- use Drupal\Tests\Core\Database\Stub\Driver\Schema;
- 
- /**
-@@ -52,6 +53,20 @@ public static function open(array &$connection_options = []) {
-     return new \stdClass();
-   }
- 
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function getKey() {
-+    return 'default';
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function getTarget() {
-+    return 'default';
-+  }
-+
-   /**
-    * {@inheritdoc}
-    */
-@@ -126,4 +141,11 @@ public function condition($conjunction) {
-     return new StubCondition($conjunction);
-   }
- 
-+  /**
-+   * {@inheritdoc}
-+   */
-+  protected function driverTransactionManager(): TransactionManagerInterface {
-+    return new StubTransactionManager($this);
-+  }
-+
- }
-diff --git a/core/tests/Drupal/Tests/Core/Database/Stub/StubTransactionManager.php b/core/tests/Drupal/Tests/Core/Database/Stub/StubTransactionManager.php
-new file mode 100644
-index 00000000000..1457e3b2c8c
---- /dev/null
-+++ b/core/tests/Drupal/Tests/Core/Database/Stub/StubTransactionManager.php
-@@ -0,0 +1,61 @@
-+<?php
-+
-+declare(strict_types=1);
-+
-+namespace Drupal\Tests\Core\Database\Stub;
-+
-+use Drupal\Core\Database\Transaction\TransactionManagerBase;
-+
-+/**
-+ * A stub of the TransactionManagerBase class for testing purposes.
-+ */
-+class StubTransactionManager extends TransactionManagerBase {
-+
-+  /**
-+   * Should methods succeed or not.
-+   */
-+  public bool $success = TRUE;
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  protected function beginClientTransaction(): bool {
-+    return $this->success;
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  protected function addClientSavepoint(string $name): bool {
-+    return $this->success;
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  protected function rollbackClientSavepoint(string $name): bool {
-+    return $this->success;
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  protected function releaseClientSavepoint(string $name): bool {
-+    return $this->success;
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  protected function commitClientTransaction(): bool {
-+    return $this->success;
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  protected function rollbackClientTransaction(): bool {
-+    return $this->success;
-+  }
-+
-+}
-diff --git a/core/tests/Drupal/Tests/Core/Database/TransactionEventTest.php b/core/tests/Drupal/Tests/Core/Database/TransactionEventTest.php
-new file mode 100644
-index 00000000000..562807d50e6
---- /dev/null
-+++ b/core/tests/Drupal/Tests/Core/Database/TransactionEventTest.php
-@@ -0,0 +1,190 @@
-+<?php
-+
-+declare(strict_types=1);
-+
-+namespace Drupal\Tests\Core\Database;
-+
-+use Drupal\Core\Database\Connection;
-+use Drupal\Core\Database\Event\TransactionCommitEvent;
-+use Drupal\Core\Database\Event\TransactionCommitFailureEvent;
-+use Drupal\Core\Database\Event\TransactionEvent;
-+use Drupal\Core\Database\Event\TransactionReleaseSavepointEvent;
-+use Drupal\Core\Database\Event\TransactionReleaseSavepointFailureEvent;
-+use Drupal\Core\Database\Event\TransactionRollbackEvent;
-+use Drupal\Core\Database\Event\TransactionRollbackFailureEvent;
-+use Drupal\Core\Database\Event\TransactionRollbackToSavepointEvent;
-+use Drupal\Core\Database\Event\TransactionRollbackToSavepointFailureEvent;
-+use Drupal\Core\Database\Transaction\ClientConnectionTransactionState;
-+use Drupal\Core\Database\Transaction\CommitType;
-+use Drupal\Core\Database\TransactionCommitFailedException;
-+use Drupal\Core\DependencyInjection\Container;
-+use Drupal\Tests\Core\Database\Stub\EventSubscriber\StubTransactionEventSubscriber;
-+use Drupal\Tests\Core\Database\Stub\StubConnection;
-+use Drupal\Tests\Core\Database\Stub\StubPDO;
-+use Drupal\Tests\UnitTestCase;
-+use PHPUnit\Framework\Attributes\Group;
-+use Symfony\Component\EventDispatcher\EventDispatcher;
-+
-+/**
-+ * Tests transaction events.
-+ */
-+#[Group('Database')]
-+class TransactionEventTest extends UnitTestCase {
-+
-+  /**
-+   * A database connection.
-+   */
-+  protected Connection $connection;
-+
-+  /**
-+   * A subscriber for transaction events.
-+   */
-+  protected StubTransactionEventSubscriber $subscriber;
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  protected function setUp(): void {
-+    parent::setUp();
-+    $this->connection = new StubConnection($this->createMock(StubPDO::class), []);
-+    $this->connection->enableEvents(TransactionEvent::all());
-+
-+    $container = new Container();
-+    $dispatcher = new EventDispatcher();
-+    $this->subscriber = new StubTransactionEventSubscriber();
-+    $dispatcher->addSubscriber($this->subscriber);
-+    $container->set('event_dispatcher', $dispatcher);
-+    \Drupal::setContainer($container);
-+  }
-+
-+  /**
-+   * Tests committing a transaction.
-+   */
-+  public function testTransactionCommit(): void {
-+    $tx = $this->connection->startTransaction();
-+    $tx->commitOrRelease();
-+    $this->assertSame(TransactionCommitEvent::class, get_class($this->subscriber->lastEvent));
-+    $this->assertSame('drupal_transaction', $this->subscriber->lastEvent->name);
-+    $this->assertSame(ClientConnectionTransactionState::Committed, $this->subscriber->lastEvent->transactionState);
-+    $this->assertSame(CommitType::Explicit, $this->subscriber->lastEvent->type);
-+    $this->assertCount(0, $this->subscriber->lastEvent->stackItems);
-+  }
-+
-+  /**
-+   * Tests committing a transaction via object destruction.
-+   */
-+  public function testTransactionCommitOnDestruct(): void {
-+    $tx = $this->connection->startTransaction();
-+    unset($tx);
-+    $this->assertSame(TransactionCommitEvent::class, get_class($this->subscriber->lastEvent));
-+    $this->assertSame('drupal_transaction', $this->subscriber->lastEvent->name);
-+    $this->assertSame(ClientConnectionTransactionState::Committed, $this->subscriber->lastEvent->transactionState);
-+    $this->assertSame(CommitType::ImplicitOnDestruct, $this->subscriber->lastEvent->type);
-+    $this->assertCount(0, $this->subscriber->lastEvent->stackItems);
-+  }
-+
-+  /**
-+   * Tests a transaction commit failure.
-+   */
-+  public function testTransactionCommitFailure(): void {
-+    $tx = $this->connection->startTransaction();
-+    $this->connection->transactionManager()->success = FALSE;
-+    try {
-+      $tx->commitOrRelease();
-+    }
-+    catch (TransactionCommitFailedException) {
-+      // Expected, do nothing.
-+    }
-+    $this->assertSame(TransactionCommitFailureEvent::class, get_class($this->subscriber->lastEvent));
-+    $this->assertSame('drupal_transaction', $this->subscriber->lastEvent->name);
-+    $this->assertSame(ClientConnectionTransactionState::CommitFailed, $this->subscriber->lastEvent->transactionState);
-+    $this->assertSame(CommitType::Explicit, $this->subscriber->lastEvent->type);
-+    $this->assertCount(0, $this->subscriber->lastEvent->stackItems);
-+  }
-+
-+  /**
-+   * Tests releasing a savepoint.
-+   */
-+  public function testTransactionReleaseSavepoint(): void {
-+    $tx = $this->connection->startTransaction();
-+    $savepoint = $this->connection->startTransaction('foo');
-+    $savepoint->commitOrRelease();
-+    $this->assertSame(TransactionReleaseSavepointEvent::class, get_class($this->subscriber->lastEvent));
-+    $this->assertSame('foo', $this->subscriber->lastEvent->name);
-+    $this->assertSame(ClientConnectionTransactionState::Active, $this->subscriber->lastEvent->transactionState);
-+    $this->assertSame(CommitType::Explicit, $this->subscriber->lastEvent->type);
-+    $this->assertCount(1, $this->subscriber->lastEvent->stackItems);
-+    unset($tx);
-+  }
-+
-+  /**
-+   * Tests a transaction release savepoint failure.
-+   */
-+  public function testTransactionReleaseSavepointFailure(): void {
-+    $tx = $this->connection->startTransaction();
-+    $savepoint = $this->connection->startTransaction('foo');
-+    $this->connection->transactionManager()->success = FALSE;
-+    $savepoint->commitOrRelease();
-+    $this->assertSame(TransactionReleaseSavepointFailureEvent::class, get_class($this->subscriber->lastEvent));
-+    $this->assertSame('foo', $this->subscriber->lastEvent->name);
-+    $this->assertSame(ClientConnectionTransactionState::CommitFailed, $this->subscriber->lastEvent->transactionState);
-+    $this->assertSame(CommitType::Explicit, $this->subscriber->lastEvent->type);
-+    $this->assertCount(0, $this->subscriber->lastEvent->stackItems);
-+    unset($tx);
-+  }
-+
-+  /**
-+   * Tests rolling back a transaction.
-+   */
-+  public function testTransactionRollback(): void {
-+    $tx = $this->connection->startTransaction();
-+    $tx->rollback();
-+    $this->assertSame(TransactionRollbackEvent::class, get_class($this->subscriber->lastEvent));
-+    $this->assertSame('drupal_transaction', $this->subscriber->lastEvent->name);
-+    $this->assertSame(ClientConnectionTransactionState::RolledBack, $this->subscriber->lastEvent->transactionState);
-+    $this->assertCount(0, $this->subscriber->lastEvent->stackItems);
-+  }
-+
-+  /**
-+   * Tests a transaction rollback failure.
-+   */
-+  public function testTransactionRollbackFailure(): void {
-+    $tx = $this->connection->startTransaction();
-+    $this->connection->transactionManager()->success = FALSE;
-+    $tx->rollback();
-+    $this->assertSame(TransactionRollbackFailureEvent::class, get_class($this->subscriber->lastEvent));
-+    $this->assertSame('drupal_transaction', $this->subscriber->lastEvent->name);
-+    $this->assertSame(ClientConnectionTransactionState::RollbackFailed, $this->subscriber->lastEvent->transactionState);
-+    $this->assertCount(0, $this->subscriber->lastEvent->stackItems);
-+  }
-+
-+  /**
-+   * Tests rolling back a transaction to a savepoint.
-+   */
-+  public function testTransactionRollbackToSavepoint(): void {
-+    $tx = $this->connection->startTransaction();
-+    $savepoint = $this->connection->startTransaction('foo');
-+    $savepoint->rollback();
-+    $this->assertSame(TransactionRollbackToSavepointEvent::class, get_class($this->subscriber->lastEvent));
-+    $this->assertSame('foo', $this->subscriber->lastEvent->name);
-+    $this->assertSame(ClientConnectionTransactionState::Active, $this->subscriber->lastEvent->transactionState);
-+    $this->assertCount(1, $this->subscriber->lastEvent->stackItems);
-+    unset($tx);
-+  }
-+
-+  /**
-+   * Tests failure when rolling back a transaction to a savepoint.
-+   */
-+  public function testTransactionRollbackToSavepointFailure(): void {
-+    $tx = $this->connection->startTransaction();
-+    $savepoint = $this->connection->startTransaction('foo');
-+    $this->connection->transactionManager()->success = FALSE;
-+    $savepoint->rollback();
-+    $this->assertSame(TransactionRollbackToSavepointFailureEvent::class, get_class($this->subscriber->lastEvent));
-+    $this->assertSame('foo', $this->subscriber->lastEvent->name);
-+    $this->assertSame(ClientConnectionTransactionState::RollbackFailed, $this->subscriber->lastEvent->transactionState);
-+    $this->assertCount(0, $this->subscriber->lastEvent->stackItems);
-+    unset($tx);
-+  }
-+
-+}
+    * Returns a stub config factory that behaves according to the passed array.
+    *
