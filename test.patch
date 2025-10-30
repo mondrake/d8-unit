@@ -1,2113 +1,1142 @@
-diff --git a/core/.phpstan-baseline.php b/core/.phpstan-baseline.php
-index b338a817273..3ed95f1be1d 100644
---- a/core/.phpstan-baseline.php
-+++ b/core/.phpstan-baseline.php
-@@ -3517,42 +3517,6 @@
- 	'count' => 1,
- 	'path' => __DIR__ . '/lib/Drupal/Core/Database/Connection.php',
- ];
--$ignoreErrors[] = [
--	'message' => '#^Method Drupal\\\\Core\\\\Database\\\\Database\\:\\:addConnectionInfo\\(\\) has no return type specified\\.$#',
--	'identifier' => 'missingType.return',
--	'count' => 1,
--	'path' => __DIR__ . '/lib/Drupal/Core/Database/Database.php',
--];
--$ignoreErrors[] = [
--	'message' => '#^Method Drupal\\\\Core\\\\Database\\\\Database\\:\\:closeConnection\\(\\) has no return type specified\\.$#',
--	'identifier' => 'missingType.return',
--	'count' => 1,
--	'path' => __DIR__ . '/lib/Drupal/Core/Database/Database.php',
--];
--$ignoreErrors[] = [
--	'message' => '#^Method Drupal\\\\Core\\\\Database\\\\Database\\:\\:ignoreTarget\\(\\) has no return type specified\\.$#',
--	'identifier' => 'missingType.return',
--	'count' => 1,
--	'path' => __DIR__ . '/lib/Drupal/Core/Database/Database.php',
--];
--$ignoreErrors[] = [
--	'message' => '#^Method Drupal\\\\Core\\\\Database\\\\Database\\:\\:openConnection\\(\\) has no return type specified\\.$#',
--	'identifier' => 'missingType.return',
--	'count' => 1,
--	'path' => __DIR__ . '/lib/Drupal/Core/Database/Database.php',
--];
--$ignoreErrors[] = [
--	'message' => '#^Method Drupal\\\\Core\\\\Database\\\\Database\\:\\:parseConnectionInfo\\(\\) has no return type specified\\.$#',
--	'identifier' => 'missingType.return',
--	'count' => 1,
--	'path' => __DIR__ . '/lib/Drupal/Core/Database/Database.php',
--];
--$ignoreErrors[] = [
--	'message' => '#^Method Drupal\\\\Core\\\\Database\\\\Database\\:\\:setMultipleConnectionInfo\\(\\) has no return type specified\\.$#',
--	'identifier' => 'missingType.return',
--	'count' => 1,
--	'path' => __DIR__ . '/lib/Drupal/Core/Database/Database.php',
--];
- $ignoreErrors[] = [
- 	'message' => '#^Method Drupal\\\\Core\\\\Database\\\\Install\\\\Tasks\\:\\:checkEngineVersion\\(\\) has no return type specified\\.$#',
- 	'identifier' => 'missingType.return',
-diff --git a/core/includes/install.core.inc b/core/includes/install.core.inc
-index 98ec353d6f4..9d655f48769 100644
---- a/core/includes/install.core.inc
-+++ b/core/includes/install.core.inc
-@@ -14,6 +14,7 @@
- use Drupal\Core\Config\FileStorage;
- use Drupal\Core\Config\StorageComparer;
- use Drupal\Core\DrupalKernel;
-+use Drupal\Core\Database\ConnectionParametersInterface;
- use Drupal\Core\Database\Database;
- use Drupal\Core\Database\DatabaseExceptionWrapper;
- use Drupal\Core\Extension\Exception\UnknownExtensionException;
-@@ -1192,24 +1193,25 @@ function install_verify_database_ready(): void {
- /**
-  * Checks a database connection and returns any errors.
-  */
--function install_database_errors($database, $settings_file) {
-+function install_database_errors(ConnectionParametersInterface|array $database, $settings_file) {
-   $errors = [];
-+  $connection_options = is_array($database) ? $database : $database->toArray();
- 
-   try {
--    $driverExtension = Database::getDriverList()->get($database['namespace']);
-+    $driverExtension = Database::getDriverList()->get($connection_options['namespace']);
-     // Run driver specific validation.
--    $errors = $driverExtension->getInstallTasks()->validateDatabaseSettings($database);
-+    $errors = $driverExtension->getInstallTasks()->validateDatabaseSettings($connection_options);
-     if (!empty($errors)) {
-       // No point to try further.
-       return $errors;
-     }
-     // Run tasks associated with the database type. Any errors are caught in the
-     // calling function.
--    Database::addConnectionInfo('default', 'default', $database);
-+    Database::addConnectionInfo('default', 'default', $connection_options);
-     $errors = $driverExtension->getInstallTasks()->runTasks();
-   }
-   catch (UnknownExtensionException) {
--    $errors['driver'] = t("In your %settings_file file you have configured @drupal to use a %driver server, however your PHP installation currently does not support this database type.", ['%settings_file' => $settings_file, '@drupal' => drupal_install_profile_distribution_name(), '%driver' => $database['driver']]);
-+    $errors['driver'] = t("In your %settings_file file you have configured @drupal to use a %driver server, however your PHP installation currently does not support this database type.", ['%settings_file' => $settings_file, '@drupal' => drupal_install_profile_distribution_name(), '%driver' => $connection_options['driver']]);
-   }
-   return $errors;
- }
-diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
-index cc44c3fa64b..cdcf8b47a58 100644
---- a/core/lib/Drupal/Core/Database/Connection.php
-+++ b/core/lib/Drupal/Core/Database/Connection.php
-@@ -88,9 +88,10 @@ abstract class Connection {
-   /**
-    * The connection information for this connection object.
-    *
--   * @var array
-+   * @todo remove the array type once all drivers have moved to OO
-+   *   ConnectionParameters.
-    */
--  protected $connectionOptions = [];
-+  protected ConnectionParametersInterface|array $connectionOptions;
- 
-   /**
-    * The schema object for this connection.
-@@ -177,20 +178,22 @@ abstract class Connection {
-    *   - namespace
-    *   - Other driver-specific options.
-    */
--  public function __construct(object $connection, array $connection_options) {
-+  public function __construct(object $connection, ConnectionParametersInterface|array $connection_options) {
-     assert(count($this->identifierQuotes) === 2 && Inspector::assertAllStrings($this->identifierQuotes), '\Drupal\Core\Database\Connection::$identifierQuotes must contain 2 string values');
- 
--    // Manage the table prefix.
--    $connection_options['prefix'] = $connection_options['prefix'] ?? '';
--    $this->setPrefix($connection_options['prefix']);
--
--    // Work out the database driver namespace if none is provided. This normally
--    // written to setting.php by installer or set by
--    // \Drupal\Core\Database\Database::parseConnectionInfo().
--    if (empty($connection_options['namespace'])) {
--      $connection_options['namespace'] = (new \ReflectionObject($this))->getNamespaceName();
-+    if (is_array($connection_options)) {
-+      $connection_options = array_merge([
-+        'driver' => 'und',
-+        'namespace' => 'und',
-+        'autoload' => 'und',
-+        'database' => 'und',
-+      ], $connection_options);
-+      $connection_options = Database::getConnectionParametersFromArray(NULL, $connection_options);
-     }
- 
-+    // Manage the table prefix.
-+    $this->setPrefix($connection_options->prefix);
-+
-     $this->connection = $connection;
-     $this->connectionOptions = $connection_options;
-   }
-@@ -204,7 +207,7 @@ public function __construct(object $connection, array $connection_options) {
-    * @return object
-    *   A client connection object.
-    */
--  abstract public static function open(array &$connection_options = []);
-+  abstract public static function open(/* ConnectionParametersInterface|array $parameters */ array &$connection_options = []);
- 
-   /**
-    * Ensures that the client connection can be garbage collected.
-diff --git a/core/lib/Drupal/Core/Database/ConnectionParametersBase.php b/core/lib/Drupal/Core/Database/ConnectionParametersBase.php
+diff --git a/core/tests/Drupal/KernelTests/Core/Image/GdToolkitAvifImageManipulationTest.php b/core/tests/Drupal/KernelTests/Core/Image/GdToolkitAvifImageManipulationTest.php
 new file mode 100644
-index 00000000000..b7823ebf2c6
+index 00000000000..3e26cbabdb5
 --- /dev/null
-+++ b/core/lib/Drupal/Core/Database/ConnectionParametersBase.php
-@@ -0,0 +1,104 @@
++++ b/core/tests/Drupal/KernelTests/Core/Image/GdToolkitAvifImageManipulationTest.php
+@@ -0,0 +1,27 @@
 +<?php
 +
 +declare(strict_types=1);
 +
-+namespace Drupal\Core\Database;
++namespace Drupal\KernelTests\Core\Image;
++
++use Drupal\system\Plugin\ImageToolkit\GDToolkit;
++use PHPUnit\Framework\Attributes\CoversClass;
++use PHPUnit\Framework\Attributes\Group;
++use PHPUnit\Framework\Attributes\RequiresPhpExtension;
++use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 +
 +/**
-+ * Base class for connection parameters objects.
++ * GD image toolkit image manipulation of AVIF images.
 + */
-+abstract class ConnectionParametersBase implements ConnectionParametersInterface, \ArrayAccess {
-+
-+  public function __construct(
-+    public readonly string $driver,
-+    public readonly string $namespace,
-+    public readonly string $autoload,
-+    public readonly string $database,
-+    public readonly string $prefix = '',
-+    public readonly ?string $module = NULL,
-+    #[\SensitiveParameter]
-+    public readonly ?string $username = NULL,
-+    #[\SensitiveParameter]
-+    public readonly ?string $password = NULL,
-+    #[\SensitiveParameter]
-+    public readonly ?string $host = NULL,
-+    #[\SensitiveParameter]
-+    public readonly ?int $port = NULL,
-+    public readonly array $dependencies = [],
-+    public readonly array $init_commands = [],
-+  ) {
-+  }
++#[CoversClass(GDToolkit::class)]
++#[Group('Image')]
++#[RequiresPhpExtension('gd')]
++#[RunTestsInSeparateProcesses]
++class GdToolkitAvifImageManipulationTest extends GdToolkitImageManipulationTestBase {
 +
 +  /**
 +   * {@inheritdoc}
 +   */
-+  public static function createFromOptionsArray(array $options): static {
-+    return new static(...$options);
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function getParameters(): static|array {
-+    return $this;
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function getConnectionClass(): string {
-+    return $this->namespace . '\\Connection';
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public function toArray(): array {
-+    return get_object_vars($this);
-+  }
-+
-+  /**
-+   * {@inheritdoc}
-+   */
-+  public static function processOptionsArray(array $options): array {
-+    return $options;
-+  }
-+
-+  /**
-+   * Prevents the connection parameters from being serialized.
-+   *
-+   * @throws \LogicException
-+   */
-+  public function __serialize(): array {
-+    throw new \LogicException(get_class($this) . ' is not serializable. This probably means you are serializing an object that has an indirect reference to the database connection parameters. Adjust your code so that is not necessary. Alternatively, look at DependencySerializationTrait as a temporary solution.');
-+  }
-+
-+  /**
-+   * This is for BC support only.
-+   */
-+  public function offsetExists(mixed $offset): bool {
-+    return property_exists($this, $offset);
-+  }
-+
-+  /**
-+   * This is for BC support only.
-+   */
-+  public function offsetGet(mixed $offset): mixed {
-+    return $this->{$offset};
-+  }
-+
-+  /**
-+   * This is for BC support only.
-+   */
-+  public function offsetSet(mixed $offset, mixed $value): void {
-+    $this->{$offset} = $value;
-+  }
-+
-+  /**
-+   * This is for BC support only.
-+   */
-+  public function offsetUnset(mixed $offset): void {
-+    $this->{$offset} = NULL;
-+  }
++  protected string $sourceTestImage = 'img-test.avif';
 +
 +}
-diff --git a/core/lib/Drupal/Core/Database/ConnectionParametersInterface.php b/core/lib/Drupal/Core/Database/ConnectionParametersInterface.php
+diff --git a/core/tests/Drupal/KernelTests/Core/Image/GdToolkitGifImageManipulationTest.php b/core/tests/Drupal/KernelTests/Core/Image/GdToolkitGifImageManipulationTest.php
 new file mode 100644
-index 00000000000..21f08d27544
+index 00000000000..44043da969a
 --- /dev/null
-+++ b/core/lib/Drupal/Core/Database/ConnectionParametersInterface.php
-@@ -0,0 +1,66 @@
++++ b/core/tests/Drupal/KernelTests/Core/Image/GdToolkitGifImageManipulationTest.php
+@@ -0,0 +1,80 @@
 +<?php
 +
 +declare(strict_types=1);
 +
-+namespace Drupal\Core\Database;
++namespace Drupal\KernelTests\Core\Image;
++
++use Drupal\system\Plugin\ImageToolkit\GDToolkit;
++use PHPUnit\Framework\Attributes\CoversClass;
++use PHPUnit\Framework\Attributes\Group;
++use PHPUnit\Framework\Attributes\RequiresPhpExtension;
++use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 +
 +/**
-+ * Interface for a database connection parameters object.
++ * GD image toolkit image manipulation of GIF images.
 + */
-+interface ConnectionParametersInterface {
++#[CoversClass(GDToolkit::class)]
++#[Group('Image')]
++#[RequiresPhpExtension('gd')]
++#[RunTestsInSeparateProcesses]
++class GdToolkitGifImageManipulationTest extends GdToolkitImageManipulationTestBase {
 +
 +  /**
-+   * Returns a new instance of connection parameters.
-+   *
-+   * @param array<string, mixed> $options
-+   *   An array of connection options.
-+   *
-+   * @return static
-+   *   A new instance of connection parameters.
++   * {@inheritdoc}
 +   */
-+  public static function createFromOptionsArray(array $options): static;
++  protected string $sourceTestImage = 'image-test.gif';
 +
 +  /**
-+   * Returns the parameters.
-+   *
-+   * For BC reasons, we may need to return the parameters as an array and
-+   * not as an object.
-+   *
-+   * @return static|array<string, mixed>
-+   *   The connection parameters.
++   * Tests for GIF images with transparency.
 +   */
-+  public function getParameters(): static|array;
++  public function testGifTransparentImages(): void {
++    // Test loading an indexed GIF image with transparent color set.
++    // Color at top-right pixel should be fully transparent.
++    $file = 'image-test-transparent-indexed.gif';
++    $image = $this->imageFactory->get('core/tests/fixtures/files/' . $file);
++    $gd_image = $image->getToolkit()->getImage();
++    $color_index = imagecolorat($gd_image, $image->getWidth() - 1, 0);
++    $color = array_values(imagecolorsforindex($gd_image, $color_index));
++    $this->assertEquals(static::ROTATE_TRANSPARENT, $color, "Image {$file} after load has full transparent color at corner 1.");
 +
-+  /**
-+   * Returns the PHP class name of the connection.
-+   *
-+   * @return class-string
-+   *   The PHP class name of the connection.
-+   */
-+  public function getConnectionClass(): string;
++    // Test deliberately creating a GIF image with no transparent color set.
++    // Color at top-right pixel should be fully transparent while in memory,
++    // fully opaque after flushing image to file.
++    $file = 'image-test-no-transparent-color-set.gif';
++    $file_path = $this->directory . '/' . $file;
++    // Create image.
++    $image = $this->imageFactory->get();
++    $image->createNew(50, 20, 'gif', NULL);
++    $gd_image = $image->getToolkit()->getImage();
++    $color_index = imagecolorat($gd_image, $image->getWidth() - 1, 0);
++    $color = array_values(imagecolorsforindex($gd_image, $color_index));
++    $this->assertEquals(static::ROTATE_TRANSPARENT, $color, "New GIF image with no transparent color set after creation has full transparent color at corner 1.");
++    // Save image.
++    $this->assertTrue($image->save($file_path), "New GIF image {$file} was saved.");
++    // Reload image.
++    $image_reloaded = $this->imageFactory->get($file_path);
++    $gd_image = $image_reloaded->getToolkit()->getImage();
++    $color_index = imagecolorat($gd_image, $image_reloaded->getWidth() - 1, 0);
++    $color = array_values(imagecolorsforindex($gd_image, $color_index));
++    // Check explicitly for alpha == 0 as the rest of the color has been
++    // compressed and may have slight difference from full white.
++    $this->assertEquals(0, $color[3], "New GIF image {$file} after reload has no transparent color at corner 1.");
 +
-+  /**
-+   * Returns the connection parameters as an associative array.
-+   *
-+   * @return array<string, mixed>
-+   *   The connection parameters as an associative array.
-+   */
-+  public function toArray(): array;
-+
-+  /**
-+   * Processes an array of connection options for driver specific defaults.
-+   *
-+   * This is used internally by the database layer, should not be called
-+   * otherwise.
-+   *
-+   * @param array<string, mixed> $options
-+   *   An array of connection options.
-+   *
-+   * @return array<string, mixed>
-+   *   The processed options as an associative array.
-+   *
-+   * @internal
-+   */
-+  public static function processOptionsArray(array $options): array;
++    // Test loading an image whose transparent color index is out of range.
++    // This image was generated by taking an initial image with a palette size
++    // of 6 colors, and setting the transparent color index to 6 (one higher
++    // than the largest allowed index), as follows:
++    // @code
++    // $image = imagecreatefromgif('core/tests/fixtures/files/image-test.gif');
++    // imagecolortransparent($image, 6);
++    // imagegif($image, 'core/tests/fixtures/files/image-test-transparent-out-of-range.gif');
++    // @endcode
++    // This allows us to test that an image with an out-of-range color index
++    // can be loaded correctly.
++    $file = 'image-test-transparent-out-of-range.gif';
++    $image = $this->imageFactory->get('core/tests/fixtures/files/' . $file);
++    $this->assertTrue($image->isValid(), "Image '$file' after load should be valid, but it is not.");
++    $this->assertTrue(imageistruecolor($image->getToolkit()->getImage()), "Image '$file' after load should be a truecolor image, but it is not.");
++  }
 +
 +}
-diff --git a/core/lib/Drupal/Core/Database/Database.php b/core/lib/Drupal/Core/Database/Database.php
-index 23b5b79c7b6..4a9f0fada96 100644
---- a/core/lib/Drupal/Core/Database/Database.php
-+++ b/core/lib/Drupal/Core/Database/Database.php
-@@ -1,5 +1,7 @@
- <?php
- 
+diff --git a/core/tests/Drupal/KernelTests/Core/Image/GdToolkitImageManipulationTestBase.php b/core/tests/Drupal/KernelTests/Core/Image/GdToolkitImageManipulationTestBase.php
+new file mode 100644
+index 00000000000..cb7e1a8f8cb
+--- /dev/null
++++ b/core/tests/Drupal/KernelTests/Core/Image/GdToolkitImageManipulationTestBase.php
+@@ -0,0 +1,350 @@
++<?php
++
 +declare(strict_types=1);
 +
- namespace Drupal\Core\Database;
- 
- use Composer\Autoload\ClassLoader;
-@@ -14,52 +16,48 @@
-  * shepherding of database connections into a single location without the use of
-  * globals.
-  *
-+ * @phpstan-type UnprocessedConnectionInfoArray array{'driver': string, 'autoload'?: string, 'namespace'?: string, 'database': string, 'username'?: string, 'password'?: string, 'host'?: string, 'port'?: string|int, 'prefix'?: string, 'collation'?: string, 'pdo'?: array<mixed>, 'isolation_level'?: int|string, 'init_commands'?: list<string>, 'dependencies'?: array<string,array{'autoload': string, 'namespace': string}>}
-+ * @phpstan-import-type DatabaseLogEntry from \Drupal\Core\Database\Log
-+ *
-  * @final
-  */
- abstract class Database {
- 
-   /**
--   * A nested array of active connections, keyed by database name and target.
-+   * A nested array of active connections, keyed by database key and target.
-    *
--   * @var array
-+   * @var array<string,array<string,\Drupal\Core\Database\Connection>>
-    */
--  protected static $connections = [];
-+  protected static array $connections = [];
- 
-   /**
-    * A processed copy of the database connection information from settings.php.
-    *
--   * @var array
-+   * @var array<string,array<string,ConnectionParametersInterface>>
-    */
--  protected static $databaseInfo = [];
-+  protected static array $databaseInfo = [];
- 
-   /**
-    * A list of key/target credentials to simply ignore.
-    *
--   * @var array
-+   * @var array<string,array<string,true>>
-    */
--  protected static $ignoreTargets = [];
-+  protected static array $ignoreTargets = [];
- 
-   /**
-    * The key of the currently active database connection.
--   *
--   * @var string
-    */
--  protected static $activeKey = 'default';
-+  protected static string $activeKey = 'default';
- 
-   /**
-    * An array of active query log objects.
-    *
--   * @var array
-    * Every connection has one and only one logger object for all targets and
-    * logging keys.
-    *
--   * @code
--   *   [
--   *     '$db_key' => DatabaseLog object.
--   *   ]
--   * @endcode
-+   * @var array<string,\Drupal\Core\Database\Log>
-    */
--  protected static $logs = [];
-+  protected static array $logs = [];
- 
-   /**
-    * Starts logging a given logging key on the specified connection.
-@@ -76,7 +74,7 @@ abstract class Database {
-    *
-    * @see \Drupal\Core\Database\Log
-    */
--  final public static function startLog($logging_key, $key = 'default') {
-+  final public static function startLog(string $logging_key, string $key = 'default'): Log {
-     if (empty(self::$logs[$key])) {
-       self::$logs[$key] = new Log($key);
- 
-@@ -107,12 +105,12 @@ final public static function startLog($logging_key, $key = 'default') {
-    * @param string $key
-    *   The database connection key for which we want to log.
-    *
--   * @return array
-+   * @return list<DatabaseLogEntry>
-    *   The query log for the specified logging key and connection.
-    *
-    * @see \Drupal\Core\Database\Log
-    */
--  final public static function getLog($logging_key, $key = 'default') {
-+  final public static function getLog(string $logging_key, string $key = 'default'): array {
-     if (empty(self::$logs[$key])) {
-       return [];
-     }
-@@ -126,13 +124,14 @@ final public static function getLog($logging_key, $key = 'default') {
-    *
-    * @param string $target
-    *   The database target name.
--   * @param string $key
--   *   The database connection key. Defaults to NULL which means the active key.
-+   * @param string|null $key
-+   *   (optional) The database connection key. Defaults to NULL which means the
-+   *   active key.
-    *
-    * @return \Drupal\Core\Database\Connection
-    *   The corresponding connection object.
-    */
--  final public static function getConnection($target = 'default', $key = NULL) {
-+  final public static function getConnection(string $target = 'default', ?string $key = NULL): Connection {
-     if (!isset($key)) {
-       // By default, we want the active connection, set in setActiveConnection.
-       $key = self::$activeKey;
-@@ -163,7 +162,7 @@ final public static function getConnection($target = 'default', $key = NULL) {
-    *   TRUE if there is at least one database connection established, FALSE
-    *   otherwise.
-    */
--  final public static function isActiveConnection() {
-+  final public static function isActiveConnection(): bool {
-     return !empty(self::$activeKey) && !empty(self::$connections) && !empty(self::$connections[self::$activeKey]);
-   }
- 
-@@ -171,73 +170,113 @@ final public static function isActiveConnection() {
-    * Sets the active connection to the specified key.
-    *
-    * @return string|null
--   *   The previous database connection key.
-+   *   The previous database connection key, or NULL if no connection was
-+   *   previously active.
-    */
--  final public static function setActiveConnection($key = 'default') {
-+  final public static function setActiveConnection(string $key = 'default'): ?string {
-     if (!empty(self::$databaseInfo[$key])) {
-       $old_key = self::$activeKey;
-       self::$activeKey = $key;
-       return $old_key;
-     }
-+    return NULL;
-   }
- 
-   /**
-    * Process the configuration file for database information.
-    *
--   * @param array $info
-+   * @param UnprocessedConnectionInfoArray|list<UnprocessedConnectionInfoArray> $info
-    *   The database connection information, as defined in settings.php. The
-    *   structure of this array depends on the database driver it is connecting
-    *   to.
-+   * @param \Composer\Autoload\ClassLoader|null $class_loader
-+   *   (optional) The class loader. Used for adding the database driver to the
-+   *   autoloader if $info['autoload'] is set.
-+   * @param string|null $app_root
-+   *   (optional) The app root.
-+   *
-+   * @return \Drupal\Core\Database\ConnectionParametersInterface
-+   *   A validated connection info array.
-    */
--  final public static function parseConnectionInfo(array $info) {
-+  final public static function parseConnectionInfo(array $info, ?ClassLoader $class_loader = NULL, ?string $app_root = NULL): ConnectionParametersInterface {
-     // If there is no "driver" property, then we assume it's an array of
-     // possible connections for this target. Pick one at random. That allows
-     // us to have, for example, multiple replica servers.
-     if (empty($info['driver'])) {
--      $info = $info[mt_rand(0, count($info) - 1)];
-+      $info_pick = $info[mt_rand(0, count($info) - 1)];
-     }
- 
--    // Prefix information, default to an empty prefix.
--    $info['prefix'] = $info['prefix'] ?? '';
-+    /** @var UnprocessedConnectionInfoArray $options */
-+    $options = $info_pick ?? $info;
++namespace Drupal\KernelTests\Core\Image;
 +
-+    // Force port to an int if it exists.
-+    if (isset($options['port'])) {
-+      $options['port'] = (int) $options['port'];
++use Drupal\Core\File\FileSystemInterface;
++use Drupal\Core\Image\ImageFactory;
++use Drupal\Core\Image\ImageInterface;
++use Drupal\KernelTests\KernelTestBase;
++use PHPUnit\Framework\Attributes\DataProvider;
++
++// cspell:ignore IMG_NEAREST_NEIGHBOUR
++
++/**
++ * GD image toolkit image manipulation test base class.
++ */
++abstract class GdToolkitImageManipulationTestBase extends KernelTestBase {
++
++  /**
++   * Colors that are used in testing.
++   */
++  protected const BLACK              = [0, 0, 0, 0];
++  protected const RED                = [255, 0, 0, 0];
++  protected const GREEN              = [0, 255, 0, 0];
++  protected const BLUE               = [0, 0, 255, 0];
++  protected const YELLOW             = [255, 255, 0, 0];
++  protected const WHITE              = [255, 255, 255, 0];
++  protected const TRANSPARENT        = [0, 0, 0, 127];
++  protected const FUCHSIA            = [255, 0, 255, 0];
++  protected const ROTATE_TRANSPARENT = [255, 255, 255, 127];
++
++  /**
++   * The image factory service.
++   */
++  protected ImageFactory $imageFactory;
++
++  /**
++   * A directory where test image files can be saved to.
++   */
++  protected string $directory;
++
++  /**
++   * The file name of the image under test.
++   */
++  protected string $sourceTestImage;
++
++  /**
++   * {@inheritdoc}
++   */
++  protected static $modules = ['system'];
++
++  /**
++   * {@inheritdoc}
++   */
++  protected function setUp(): void {
++    parent::setUp();
++
++    $this->installConfig(['system']);
++
++    // Set the image factory service.
++    $this->imageFactory = $this->container->get('image.factory');
++    $this->assertEquals('gd', $this->imageFactory->getToolkitId(), 'The image factory is set to use the \'gd\' image toolkit.');
++
++    // Prepare a directory for test file results.
++    $this->directory = 'public://image_test';
++    \Drupal::service('file_system')->prepareDirectory($this->directory, FileSystemInterface::CREATE_DIRECTORY);
++  }
++
++  /**
++   * Assert two colors are equal by RGBA, net of full transparency.
++   *
++   * @param int[] $expected
++   *   The expected RGBA array.
++   * @param int[] $actual
++   *   The actual RGBA array.
++   * @param int $tolerance
++   *   The acceptable difference between the colors.
++   * @param string $message
++   *   The assertion message.
++   */
++  protected function assertColorsAreEqual(array $expected, array $actual, int $tolerance, string $message = ''): void {
++    // Fully transparent colors are equal, regardless of RGB.
++    if ($actual[3] == 127 && $expected[3] == 127) {
++      return;
 +    }
- 
-     // Backwards compatibility layer for Drupal 8 style database connection
-     // arrays. Those have the wrong 'namespace' key set, or not set at all
-     // for core supported database drivers.
--    if (empty($info['namespace']) || str_starts_with($info['namespace'], 'Drupal\\Core\\Database\\Driver\\')) {
--      switch (strtolower($info['driver'])) {
-+    if (empty($options['namespace']) || str_starts_with($options['namespace'], 'Drupal\\Core\\Database\\Driver\\')) {
-+      switch (strtolower($options['driver'])) {
-         case 'mysql':
--          $info['namespace'] = 'Drupal\\mysql\\Driver\\Database\\mysql';
-+          $options['namespace'] = 'Drupal\\mysql\\Driver\\Database\\mysql';
-           break;
- 
-         case 'pgsql':
--          $info['namespace'] = 'Drupal\\pgsql\\Driver\\Database\\pgsql';
-+          $options['namespace'] = 'Drupal\\pgsql\\Driver\\Database\\pgsql';
-           break;
- 
-         case 'sqlite':
--          $info['namespace'] = 'Drupal\\sqlite\\Driver\\Database\\sqlite';
-+          $options['namespace'] = 'Drupal\\sqlite\\Driver\\Database\\sqlite';
-           break;
-       }
-     }
++    $distance = pow(($actual[0] - $expected[0]), 2) + pow(($actual[1] - $expected[1]), 2) + pow(($actual[2] - $expected[2]), 2) + pow(($actual[3] - $expected[3]), 2);
++    $this->assertLessThanOrEqual($tolerance, $distance, $message . " - Actual: {" . implode(',', $actual) . "}, Expected: {" . implode(',', $expected) . "}, Distance: " . $distance . ", Tolerance: " . $tolerance);
++  }
 +
-     // Backwards compatibility layer for Drupal 8 style database connection
-     // arrays. Those do not have the 'autoload' key set for core database
-     // drivers.
--    if (empty($info['autoload'])) {
--      switch (trim($info['namespace'], '\\')) {
-+    if (empty($options['autoload']) && isset($options['namespace'])) {
-+      switch (trim($options['namespace'], '\\')) {
-         case "Drupal\\mysql\\Driver\\Database\\mysql":
--          $info['autoload'] = "core/modules/mysql/src/Driver/Database/mysql/";
-+          $options['autoload'] = "core/modules/mysql/src/Driver/Database/mysql/";
-           break;
- 
-         case "Drupal\\pgsql\\Driver\\Database\\pgsql":
--          $info['autoload'] = "core/modules/pgsql/src/Driver/Database/pgsql/";
-+          $options['autoload'] = "core/modules/pgsql/src/Driver/Database/pgsql/";
-           break;
- 
-         case "Drupal\\sqlite\\Driver\\Database\\sqlite":
--          $info['autoload'] = "core/modules/sqlite/src/Driver/Database/sqlite/";
-+          $options['autoload'] = "core/modules/sqlite/src/Driver/Database/sqlite/";
-           break;
-       }
-     }
- 
--    return $info;
-+    // If the database driver is provided by a module, then its code may need
-+    // to be instantiated prior to when the module's root namespace is added
-+    // to the autoloader, because that happens during service container
-+    // initialization but the container definition is likely in the database.
-+    // Therefore, allow the connection info to specify an autoload directory
-+    // for the driver.
-+    if ($class_loader && $app_root) {
-+      $class_loader->setPsr4($options['namespace'] . '\\', $app_root . DIRECTORY_SEPARATOR . $options['autoload']);
++  /**
++   * Function for finding a pixel's RGBa values.
++   */
++  public function getPixelColor(ImageInterface $image, int $x, int $y): array {
++    $toolkit = $image->getToolkit();
++    $color_index = imagecolorat($toolkit->getImage(), $x, $y);
 +
-+      // When the database driver is extending from other database drivers,
-+      // then add autoload directory for the parent database driver modules
-+      // as well.
-+      if (!empty($options['dependencies'])) {
-+        foreach ($options['dependencies'] as $dependency) {
-+          $class_loader->setPsr4($dependency['namespace'] . '\\', $app_root . DIRECTORY_SEPARATOR . $dependency['autoload']);
++    $transparent_index = imagecolortransparent($toolkit->getImage());
++    if ($color_index == $transparent_index) {
++      return [0, 0, 0, 127];
++    }
++
++    return array_values(imagecolorsforindex($toolkit->getImage(), $color_index));
++  }
++
++  /**
++   * Data provider for ::testManipulations().
++   */
++  public static function providerOperationTestCases(): array {
++    // Typically the corner colors will be unchanged. These colors are in the
++    // order of top-left, top-right, bottom-right, bottom-left.
++    $default_corners = [static::RED, static::GREEN, static::BLUE, static::TRANSPARENT];
++
++    // Setup a list of tests to perform on each type.
++    $test_cases = [
++      'resize' => [
++        'operation' => 'resize',
++        'arguments' => ['width' => 20, 'height' => 10],
++        'width' => 20,
++        'height' => 10,
++        'corners' => $default_corners,
++      ],
++      'scale_x' => [
++        'operation' => 'scale',
++        'arguments' => ['width' => 20],
++        'width' => 20,
++        'height' => 10,
++        'corners' => $default_corners,
++      ],
++      'scale_y' => [
++        'operation' => 'scale',
++        'arguments' => ['height' => 10],
++        'width' => 20,
++        'height' => 10,
++        'corners' => $default_corners,
++      ],
++      'upscale_x' => [
++        'operation' => 'scale',
++        'arguments' => ['width' => 80, 'upscale' => TRUE],
++        'width' => 80,
++        'height' => 40,
++        'corners' => $default_corners,
++      ],
++      'upscale_y' => [
++        'operation' => 'scale',
++        'arguments' => ['height' => 40, 'upscale' => TRUE],
++        'width' => 80,
++        'height' => 40,
++        'corners' => $default_corners,
++      ],
++      'crop' => [
++        'operation' => 'crop',
++        'arguments' => ['x' => 12, 'y' => 4, 'width' => 16, 'height' => 12],
++        'width' => 16,
++        'height' => 12,
++        'corners' => array_fill(0, 4, static::WHITE),
++      ],
++      'scale_and_crop' => [
++        'operation' => 'scale_and_crop',
++        'arguments' => ['width' => 10, 'height' => 8],
++        'width' => 10,
++        'height' => 8,
++        'corners' => array_fill(0, 4, static::BLACK),
++      ],
++      'convert_jpg' => [
++        'operation' => 'convert',
++        'width' => 40,
++        'height' => 20,
++        'arguments' => ['extension' => 'jpeg'],
++        'corners' => $default_corners,
++      ],
++      'convert_gif' => [
++        'operation' => 'convert',
++        'width' => 40,
++        'height' => 20,
++        'arguments' => ['extension' => 'gif'],
++        'corners' => $default_corners,
++      ],
++      'convert_png' => [
++        'operation' => 'convert',
++        'width' => 40,
++        'height' => 20,
++        'arguments' => ['extension' => 'png'],
++        'corners' => $default_corners,
++      ],
++      'convert_webp' => [
++        'operation' => 'convert',
++        'width' => 40,
++        'height' => 20,
++        'arguments' => ['extension' => 'webp'],
++        'corners' => $default_corners,
++      ],
++      'convert_avif' => [
++        'operation' => 'convert',
++        'width' => 40,
++        'height' => 20,
++        'arguments' => ['extension' => 'avif'],
++        'corners' => $default_corners,
++      ],
++    ];
++
++    // Systems using non-bundled GD2 may miss imagerotate(). Test if available.
++    if (function_exists('imagerotate')) {
++      $test_cases += [
++        'rotate_5' => [
++          'operation' => 'rotate',
++          // Fuchsia background.
++          'arguments' => ['degrees' => 5, 'background' => '#FF00FF'],
++          // @todo Re-enable dimensions' check once
++          //   https://www.drupal.org/project/drupal/issues/2921123 is resolved.
++          // 'width' => 41,
++          // 'height' => 23,
++          'corners' => array_fill(0, 4, static::FUCHSIA),
++        ],
++        'rotate_transparent_5' => [
++          'operation' => 'rotate',
++          'arguments' => ['degrees' => 5],
++          // @todo Re-enable dimensions' check once
++          //   https://www.drupal.org/project/drupal/issues/2921123 is resolved.
++          // 'width' => 41,
++          // 'height' => 23,
++          'corners' => array_fill(0, 4, static::ROTATE_TRANSPARENT),
++        ],
++        'rotate_90' => [
++          'operation' => 'rotate',
++          // Fuchsia background.
++          'arguments' => ['degrees' => 90, 'background' => '#FF00FF'],
++          'width' => 20,
++          'height' => 40,
++          'corners' => [static::TRANSPARENT, static::RED, static::GREEN, static::BLUE],
++        ],
++        'rotate_transparent_90' => [
++          'operation' => 'rotate',
++          'arguments' => ['degrees' => 90],
++          'width' => 20,
++          'height' => 40,
++          'corners' => [static::TRANSPARENT, static::RED, static::GREEN, static::BLUE],
++        ],
++      ];
++    }
++
++    // Systems using non-bundled GD2 may miss imagefilter(). Test if available.
++    if (function_exists('imagefilter')) {
++      $test_cases += [
++        'desaturate' => [
++          'operation' => 'desaturate',
++          'arguments' => [],
++          'height' => 20,
++          'width' => 40,
++          // Grayscale corners are a bit funky. Each of the corners are a shade
++          // of gray. The values of these were determined simply by looking at
++          // the final image to see what desaturated colors end up being.
++          'corners' => [
++            array_fill(0, 3, 76) + [3 => 0],
++            array_fill(0, 3, 149) + [3 => 0],
++            array_fill(0, 3, 29) + [3 => 0],
++            array_fill(0, 3, 225) + [3 => 127],
++          ],
++        ],
++      ];
++    }
++
++    $ret = [];
++    foreach ($test_cases as $test_case => $values) {
++      $operation = $values['operation'];
++      $arguments = $values['arguments'];
++      unset($values['operation'], $values['arguments']);
++      $ret[$test_case] = [$test_case, $operation, $arguments, $values];
++    }
++
++    return $ret;
++  }
++
++  /**
++   * Tests height, width and color for the corners for the final images.
++   *
++   * Since PHP can't visually check that our images have been manipulated
++   * properly, build a list of expected color values for each of the corners and
++   * the expected height and widths for the final images.
++   */
++  #[DataProvider('providerOperationTestCases')]
++  public function testManipulations(string $test_case, string $operation, array $arguments, array $expected): void {
++    // Load up a fresh image.
++    $image = $this->imageFactory->get('core/tests/fixtures/files/' . $this->sourceTestImage);
++    $toolkit = $image->getToolkit();
++    $this->assertTrue($image->isValid());
++    $image_original_type = $image->getToolkit()->getType();
++
++    $this->assertTrue(imageistruecolor($toolkit->getImage()), "Image '$this->sourceTestImage' after load should be a truecolor image, but it is not.");
++
++    // Since PHP 8.5 the default interpolation method has changed from
++    // IMG_BILINEAR_FIXED to GD_LINEAR. On top of that, the implementation of
++    // IMG_BILINEAR_FIXED has changed as well, so it cannot be used consistently
++    // in all supported PHP versions.
++    // So, interpolation method is set to IMG_NEAREST_NEIGHBOUR which
++    // equals to IMG_BILINEAR_FIXED in PHP versions before 8.5, and has not
++    // in PHP 8.5.
++    // @see https://github.com/php/php-src/commit/0f40e62ca7d2b38ff3afa7fb500661724732f265
++    // imagesetinterpolation($toolkit->getImage(), IMG_NEAREST_NEIGHBOUR);
++
++    // Perform our operation.
++    $image->apply($operation, $arguments);
++
++    // Flush Image object to disk storage.
++    $file_path = 'core/tests/fixtures/files/aaa' . $test_case . image_type_to_extension($image->getToolkit()->getType());
++    $image->save($file_path);
++    $file_path = $this->directory . '/' . $test_case . image_type_to_extension($image->getToolkit()->getType());
++    $image->save($file_path);
++
++    // Check that the both the GD object and the Image object have an accurate
++    // record of the dimensions.
++    if (isset($expected['height']) && isset($expected['width'])) {
++      $this->assertSame($expected['height'], imagesy($toolkit->getImage()), "Image '$this->sourceTestImage' after '$test_case' should have a proper height.");
++      $this->assertSame($expected['width'], imagesx($toolkit->getImage()), "Image '$this->sourceTestImage' after '$test_case' should have a proper width.");
++      $this->assertSame($expected['height'], $image->getHeight(), "Image '$this->sourceTestImage' after '$test_case' should have a proper height.");
++      $this->assertSame($expected['width'], $image->getWidth(), "Image '$this->sourceTestImage' after '$test_case' should have a proper width.");
++    }
++
++    // Now check each of the corners to ensure color correctness.
++    foreach ($expected['corners'] as $key => $expected_color) {
++      // Get the location of the corner.
++      [$x, $y] = match ($key) {
++        0 => [0, 0],
++        1 => [$image->getWidth() - 1, 0],
++        2 => [$image->getWidth() - 1, $image->getHeight() - 1],
++        3 => [0, $image->getHeight() - 1],
++      };
++
++      $actual_color = $this->getPixelColor($image, $x, $y);
++
++      // If image cannot handle transparent colors, skip the pixel color test.
++      if ($actual_color[3] === 0 && $expected_color[3] === 127) {
++        continue;
++      }
++
++      // JPEG and AVIF have small differences in color after processing.
++      $tolerance = match($image_original_type) {
++        IMAGETYPE_JPEG, IMAGETYPE_AVIF => 3,
++        default => 0,
++      };
++
++      $this->assertColorsAreEqual($expected_color, $actual_color, $tolerance, "Image '$this->sourceTestImage' object after '$test_case' action has the correct color placement at corner '$key'");
++    }
++
++    // Check that saved image reloads without raising PHP errors.
++    $image_reloaded = $this->imageFactory->get($file_path);
++    $this->assertInstanceOf(\GdImage::class, $image_reloaded->getToolkit()->getImage());
++  }
++
++}
+diff --git a/core/tests/Drupal/KernelTests/Core/Image/GdToolkitJpegImageManipulationTest.php b/core/tests/Drupal/KernelTests/Core/Image/GdToolkitJpegImageManipulationTest.php
+new file mode 100644
+index 00000000000..a9e7408b1b0
+--- /dev/null
++++ b/core/tests/Drupal/KernelTests/Core/Image/GdToolkitJpegImageManipulationTest.php
+@@ -0,0 +1,27 @@
++<?php
++
++declare(strict_types=1);
++
++namespace Drupal\KernelTests\Core\Image;
++
++use Drupal\system\Plugin\ImageToolkit\GDToolkit;
++use PHPUnit\Framework\Attributes\CoversClass;
++use PHPUnit\Framework\Attributes\Group;
++use PHPUnit\Framework\Attributes\RequiresPhpExtension;
++use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
++
++/**
++ * GD image toolkit image manipulation of JPEG images.
++ */
++#[CoversClass(GDToolkit::class)]
++#[Group('Image')]
++#[RequiresPhpExtension('gd')]
++#[RunTestsInSeparateProcesses]
++class GdToolkitJpegImageManipulationTest extends GdToolkitImageManipulationTestBase {
++
++  /**
++   * {@inheritdoc}
++   */
++  protected string $sourceTestImage = 'image-test.jpg';
++
++}
+diff --git a/core/tests/Drupal/KernelTests/Core/Image/GdToolkitNoTransparencyGifImageManipulationTest.php b/core/tests/Drupal/KernelTests/Core/Image/GdToolkitNoTransparencyGifImageManipulationTest.php
+new file mode 100644
+index 00000000000..f5e698718b6
+--- /dev/null
++++ b/core/tests/Drupal/KernelTests/Core/Image/GdToolkitNoTransparencyGifImageManipulationTest.php
+@@ -0,0 +1,53 @@
++<?php
++
++declare(strict_types=1);
++
++namespace Drupal\KernelTests\Core\Image;
++
++use Drupal\system\Plugin\ImageToolkit\GDToolkit;
++use PHPUnit\Framework\Attributes\CoversClass;
++use PHPUnit\Framework\Attributes\Group;
++use PHPUnit\Framework\Attributes\RequiresPhpExtension;
++use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
++
++/**
++ * GD image toolkit image manipulation of no-transparency GIF images.
++ */
++#[CoversClass(GDToolkit::class)]
++#[Group('Image')]
++#[RequiresPhpExtension('gd')]
++#[RunTestsInSeparateProcesses]
++class GdToolkitNoTransparencyGifImageManipulationTest extends GdToolkitImageManipulationTestBase {
++
++  /**
++   * {@inheritdoc}
++   */
++  protected string $sourceTestImage = 'image-test-no-transparency.gif';
++
++  /**
++   * {@inheritdoc}
++   */
++  public static function providerOperationTestCases(): array {
++    $ret = parent::providerOperationTestCases();
++
++    // The test gif that does not have transparency color set is a special
++    // case.
++    foreach ($ret as $test_case => &$data) {
++      foreach ($data[3]['corners'] as &$expected_color) {
++        if ($test_case == 'desaturate') {
++          // For desaturating, keep the expected color from the test data, but
++          // set alpha channel to fully opaque.
++          $expected_color[3] = 0;
++        }
++        elseif ($expected_color === static::TRANSPARENT) {
++          // Set expected pixel to yellow where the others have
++          // transparent.
++          $expected_color = static::YELLOW;
 +        }
 +      }
 +    }
 +
-+    $parameters_class = $options['namespace'] . '\\ConnectionParameters';
-+    if (class_exists($parameters_class)) {
-+      $options = $parameters_class::processOptionsArray($options);
-+    }
-+
-+    return self::getConnectionParametersFromArray($parameters_class, $options);
-   }
- 
-   /**
-@@ -258,45 +297,23 @@ final public static function parseConnectionInfo(array $info) {
-    *   The database key.
-    * @param string $target
-    *   The database target name.
--   * @param array $info
-+   * @param UnprocessedConnectionInfoArray $info
-    *   The database connection information, as defined in settings.php. The
-    *   structure of this array depends on the database driver it is connecting
-    *   to.
--   * @param \Composer\Autoload\ClassLoader $class_loader
--   *   The class loader. Used for adding the database driver to the autoloader
--   *   if $info['autoload'] is set.
--   * @param string $app_root
--   *   The app root.
-+   * @param \Composer\Autoload\ClassLoader|null $class_loader
-+   *   (optional) The class loader. Used for adding the database driver to the
-+   *   autoloader if $info['autoload'] is set.
-+   * @param string|null $app_root
-+   *   (optional) The app root.
-    *
-    * @see \Drupal\Core\Database\Database::setActiveConnection
-    */
--  final public static function addConnectionInfo($key, $target, array $info, $class_loader = NULL, $app_root = NULL) {
--    if (empty(self::$databaseInfo[$key][$target])) {
--      $info = self::parseConnectionInfo($info);
--      self::$databaseInfo[$key][$target] = $info;
--
--      // If the database driver is provided by a module, then its code may need
--      // to be instantiated prior to when the module's root namespace is added
--      // to the autoloader, because that happens during service container
--      // initialization but the container definition is likely in the database.
--      // Therefore, allow the connection info to specify an autoload directory
--      // for the driver.
--      if (isset($info['autoload']) && $class_loader && $app_root) {
--        $class_loader->addPsr4($info['namespace'] . '\\', $app_root . '/' . $info['autoload']);
--
--        // When the database driver is extending from other database drivers,
--        // then add autoload directory for the parent database driver modules
--        // as well.
--        if (!empty($info['dependencies'])) {
--          assert(is_array($info['dependencies']));
--          foreach ($info['dependencies'] as $dependency) {
--            if (isset($dependency['namespace']) && isset($dependency['autoload'])) {
--              $class_loader->addPsr4($dependency['namespace'] . '\\', $app_root . '/' . $dependency['autoload']);
--            }
--          }
--        }
--      }
-+  final public static function addConnectionInfo($key, $target, ConnectionParametersInterface|array $info, ?ClassLoader $class_loader = NULL, ?string $app_root = NULL): void {
-+    if (!empty(self::$databaseInfo[$key][$target])) {
-+      return;
-     }
-+    self::$databaseInfo[$key][$target] = is_array($info) ? self::parseConnectionInfo($info, $class_loader, $app_root) : $info;
-   }
- 
-   /**
-@@ -305,39 +322,41 @@ final public static function addConnectionInfo($key, $target, array $info, $clas
-    * @param string $key
-    *   (optional) The connection key for which to return information.
-    *
--   * @return array|null
--   *   An associative array of database information. Defaults to an empty array.
-+   * @return array<string,ConnectionParametersInterface>
-+   *   An associative array of database information, keyed by target. Defaults
-+   *   to an empty array.
-    */
--  final public static function getConnectionInfo($key = 'default') {
-+  final public static function getConnectionInfo(string $key = 'default'): array {
-     if (!empty(self::$databaseInfo[$key])) {
-       return self::$databaseInfo[$key];
-     }
-+    return [];
-   }
- 
-   /**
-    * Gets connection information for all available databases.
-    *
--   * @return array
-+   * @return array<string,array<string,ConnectionParametersInterface>>
-    *   An associative array of database information for all available database,
--   *   keyed by the database name. Defaults to an empty array.
-+   *   keyed by the database key and target. Defaults to an empty array.
-    */
--  final public static function getAllConnectionInfo() {
-+  final public static function getAllConnectionInfo(): array {
-     return self::$databaseInfo;
-   }
- 
-   /**
-    * Sets connection information for multiple databases.
-    *
--   * @param array $databases
-+   * @param array<string,array<string,UnprocessedConnectionInfoArray>> $databases
-    *   A multi-dimensional array specifying database connection parameters, as
-    *   defined in settings.php.
--   * @param \Composer\Autoload\ClassLoader $class_loader
--   *   The class loader. Used for adding the database driver(s) to the
--   *   autoloader if $databases[$key][$target]['autoload'] is set.
--   * @param string $app_root
--   *   The app root.
-+   * @param \Composer\Autoload\ClassLoader|null $class_loader
-+   *   (optional) The class loader. Used for adding the database driver(s) to
-+   *   the autoloader if $databases[$key][$target]['autoload'] is set.
-+   * @param string|null $app_root
-+   *   (optional) The app root.
-    */
--  final public static function setMultipleConnectionInfo(array $databases, $class_loader = NULL, $app_root = NULL) {
-+  final public static function setMultipleConnectionInfo(array $databases, ?ClassLoader $class_loader = NULL, ?string $app_root = NULL): void {
-     foreach ($databases as $key => $targets) {
-       foreach ($targets as $target => $info) {
-         self::addConnectionInfo($key, $target, $info, $class_loader, $app_root);
-@@ -356,7 +375,7 @@ final public static function setMultipleConnectionInfo(array $databases, $class_
-    * @return bool
-    *   TRUE in case of success, FALSE otherwise.
-    */
--  final public static function renameConnection($old_key, $new_key) {
-+  final public static function renameConnection(string $old_key, string $new_key): bool {
-     if (!empty(self::$databaseInfo[$old_key]) && empty(self::$databaseInfo[$new_key])) {
-       // Migrate the database connection information.
-       self::$databaseInfo[$new_key] = self::$databaseInfo[$old_key];
-@@ -370,9 +389,7 @@ final public static function renameConnection($old_key, $new_key) {
- 
-       return TRUE;
-     }
--    else {
--      return FALSE;
--    }
-+    return FALSE;
-   }
- 
-   /**
-@@ -384,44 +401,45 @@ final public static function renameConnection($old_key, $new_key) {
-    * @return bool
-    *   TRUE in case of success, FALSE otherwise.
-    */
--  final public static function removeConnection($key) {
-+  final public static function removeConnection(string $key): bool {
-     if (isset(self::$databaseInfo[$key])) {
-       self::closeConnection(NULL, $key);
-       unset(self::$databaseInfo[$key]);
-       return TRUE;
-     }
--    else {
--      return FALSE;
--    }
-+    return FALSE;
-   }
- 
-   /**
-    * Opens a connection to the server specified by the given key and target.
-    *
-    * @param string $key
--   *   The database connection key, as specified in settings.php. The default is
--   *   "default".
-+   *   The database connection key, as specified in settings.php.
-    * @param string $target
-    *   The database target to open.
-    *
-    * @throws \Drupal\Core\Database\ConnectionNotDefinedException
-    * @throws \Drupal\Core\Database\DriverNotSpecifiedException
-+   *
-+   * @return \Drupal\Core\Database\Connection
-+   *   The opened database connection.
-    */
--  final protected static function openConnection($key, $target) {
-+  final protected static function openConnection(string $key, string $target): Connection {
-     // If the requested database does not exist then it is an unrecoverable
-     // error.
-     if (!isset(self::$databaseInfo[$key])) {
-       throw new ConnectionNotDefinedException('The specified database connection is not defined: ' . $key);
-     }
- 
--    if (!self::$databaseInfo[$key][$target]['driver']) {
-+    if (!self::$databaseInfo[$key][$target]->driver) {
-       throw new DriverNotSpecifiedException('Driver not specified for this database connection: ' . $key);
-     }
- 
--    $driver_class = self::$databaseInfo[$key][$target]['namespace'] . '\\Connection';
--
--    $client_connection = $driver_class::open(self::$databaseInfo[$key][$target]);
--    $new_connection = new $driver_class($client_connection, self::$databaseInfo[$key][$target]);
-+    $driver_class = self::$databaseInfo[$key][$target]->getConnectionClass();
-+    $parameters = self::$databaseInfo[$key][$target]->getParameters();
-+    $client_connection = $driver_class::open($parameters);
-+    $new_connection = new $driver_class($client_connection, $parameters);
-+    assert($new_connection instanceof Connection);
-     $new_connection->setTarget($target);
-     $new_connection->setKey($key);
- 
-@@ -439,27 +457,24 @@ final protected static function openConnection($key, $target) {
-    * Closes a connection to the server specified by the given key and target.
-    *
-    * @param string $target
--   *   The database target name.  Defaults to NULL meaning that all target
--   *   connections will be closed.
-+   *   (optional) The database target name. Defaults to NULL meaning that all
-+   *   target connections will be closed.
-    * @param string $key
--   *   The database connection key. Defaults to NULL which means the active key.
-+   *   (optional) The database connection key. Defaults to NULL which means the
-+   *   active key.
-    */
--  public static function closeConnection($target = NULL, $key = NULL) {
-+  public static function closeConnection(?string $target = NULL, ?string $key = NULL): void {
-     // Gets the active connection by default.
-     if (!isset($key)) {
-       $key = self::$activeKey;
-     }
-     if (isset($target) && isset(self::$connections[$key][$target])) {
--      if (self::$connections[$key][$target] instanceof Connection) {
--        self::$connections[$key][$target]->commitAll();
--      }
-+      self::$connections[$key][$target]->commitAll();
-       unset(self::$connections[$key][$target]);
-     }
-     elseif (isset(self::$connections[$key])) {
-       foreach (self::$connections[$key] as $connection) {
--        if ($connection instanceof Connection) {
--          $connection->commitAll();
--        }
-+        $connection->commitAll();
-       }
-       unset(self::$connections[$key]);
-     }
-@@ -488,7 +503,7 @@ public static function closeConnection($target = NULL, $key = NULL) {
-    * @param string $target
-    *   The target of the specified key to ignore.
-    */
--  public static function ignoreTarget($key, $target) {
-+  public static function ignoreTarget(string $key, string $target): void {
-     self::$ignoreTargets[$key][$target] = TRUE;
-   }
- 
-@@ -504,7 +519,7 @@ public static function ignoreTarget($key, $target) {
-    *   directories are excluded in the search. When NULL will be determined by
-    *   the extension_discovery_scan_tests setting.
-    *
--   * @return array
-+   * @return ConnectionParametersInterface
-    *   The database connection info.
-    *
-    * @throws \InvalidArgumentException
-@@ -513,7 +528,7 @@ public static function ignoreTarget($key, $target) {
-    * @throws \RuntimeException
-    *   Exception thrown when a module provided database driver does not exist.
-    */
--  public static function convertDbUrlToConnectionInfo(string $url, $root = NULL, ?bool $include_test_drivers = NULL): array {
-+  public static function convertDbUrlToConnectionInfo(string $url, $root = NULL, ?bool $include_test_drivers = NULL): ConnectionParametersInterface {
-     if ($root !== NULL) {
-       if (is_bool($root)) {
-         $include_test_drivers = $root;
-@@ -540,6 +555,7 @@ public static function convertDbUrlToConnectionInfo(string $url, $root = NULL, ?
-     // Use the driver name as the module name when the module name is not
-     // provided.
-     $module = $query['module'] ?? $driverName;
-+    assert(is_string($module));
- 
-     $driverNamespace = "Drupal\\{$module}\\Driver\\Database\\{$driverName}";
- 
-@@ -579,7 +595,12 @@ public static function convertDbUrlToConnectionInfo(string $url, $root = NULL, ?
-       $options['dependencies'] = $autoloadInfo['dependencies'];
-     }
- 
--    return $options;
-+    $parameters_class = $driverNamespace . '\\ConnectionParameters';
-+    if (class_exists($parameters_class)) {
-+      $options = $parameters_class::processOptionsArray($options);
-+    }
-+
-+    return self::getConnectionParametersFromArray($parameters_class, $options);
-   }
- 
-   /**
-@@ -609,18 +630,22 @@ public static function getDriverList(): DatabaseDriverList {
-    * @throws \RuntimeException
-    *   When the database connection is not defined.
-    */
--  public static function getConnectionInfoAsUrl($key = 'default') {
-+  public static function getConnectionInfoAsUrl(string $key = 'default'): string {
-     $db_info = static::getConnectionInfo($key);
-     if (empty($db_info) || empty($db_info['default'])) {
-       throw new \RuntimeException("Database connection $key not defined or missing the 'default' settings");
-     }
--    $namespace = $db_info['default']['namespace'];
-+    $parameters = $db_info['default']->toArray();
-+
-     // Add the module name to the connection options to make it easy for the
-     // connection class's createUrlFromConnectionOptions() method to add it to
-     // the URL.
--    $db_info['default']['module'] = explode('\\', $namespace)[1];
-+    $namespace = $parameters['namespace'];
-+    $parameters['module'] = explode('\\', $namespace)[1];
-     $connection_class = $namespace . '\\Connection';
--    return $connection_class::createUrlFromConnectionOptions($db_info['default']);
-+    $url = $connection_class::createUrlFromConnectionOptions($parameters);
-+    assert(is_string($url));
-+    return $url;
-   }
- 
-   /**
-@@ -644,9 +669,7 @@ public static function commitAllOnShutdown(bool $shutdown = FALSE): void {
-     if ($shutdown) {
-       foreach (self::$connections as $targets) {
-         foreach ($targets as $connection) {
--          if ($connection instanceof Connection) {
--            $connection->commitAll();
--          }
-+          $connection->commitAll();
-         }
-       }
-       return;
-@@ -662,4 +685,96 @@ public static function commitAllOnShutdown(bool $shutdown = FALSE): void {
-     }
-   }
- 
-+  /**
-+   * Converts a connection options array to a ConnectionParameters object.
-+   *
-+   * @param class-string|null $class
-+   *   The PHP class managing the parameters.
-+   * @param array $connection_options
-+   *   An array of options for the connection.
-+   *
-+   * @return ConnectionParametersInterface
-+   *   A ConnectionParameters object.
-+   */
-+  final public static function getConnectionParametersFromArray(?string $class, array $connection_options): ConnectionParametersInterface {
-+    if (!$class || !class_exists($class)) {
-+      return new class ($connection_options) extends ConnectionParametersBase {
-+
-+        /**
-+         * Backfill connection options.
-+         */
-+        private array $optionsBackfill;
-+
-+        public function __construct(array $options) {
-+          parent::__construct(
-+            $options['driver'] ?? 'und',
-+            $options['namespace'] ?? 'und',
-+            $options['autoload'] ?? 'und',
-+            $options['database'] ?? 'und',
-+            $options['prefix'] ?? '',
-+            $options['module'] ?? NULL,
-+            $options['username'] ?? NULL,
-+            $options['password'] ?? NULL,
-+            $options['host'] ?? NULL,
-+            $options['port'] ?? NULL,
-+            $options['dependencies'] ?? [],
-+            $options['init_commands'] ?? [],
-+          );
-+          $this->optionsBackfill = array_merge($options, get_object_vars($this));
-+        }
-+
-+        /**
-+         * {@inheritdoc}
-+         */
-+        public static function createFromOptionsArray(array $options): static {
-+          return new static($options);
-+        }
-+
-+        /**
-+         * {@inheritdoc}
-+         */
-+        public function getParameters(): array {
-+          return $this->optionsBackfill;
-+        }
-+
-+        /**
-+         * {@inheritdoc}
-+         */
-+        public function toArray(): array {
-+          return $this->optionsBackfill;
-+        }
-+
-+        /**
-+         * This is for BC support only.
-+         */
-+        public function offsetExists(mixed $offset): bool {
-+          return array_key_exists($offset, $this->optionsBackfill);
-+        }
-+
-+        /**
-+         * This is for BC support only.
-+         */
-+        public function &offsetGet(mixed $offset): mixed {
-+          return $this->optionsBackfill[$offset];
-+        }
-+
-+        /**
-+         * This is for BC support only.
-+         */
-+        public function offsetSet(mixed $offset, mixed $value): void {
-+          $this->optionsBackfill[$offset] = $value;
-+        }
-+
-+        /**
-+         * This is for BC support only.
-+         */
-+        public function offsetUnset(mixed $offset): void {
-+          unset($this->optionsBackfill[$offset]);
-+        }
-+
-+      };
-+    }
-+    return new $class(...$connection_options);
++    return $ret;
 +  }
 +
- }
-diff --git a/core/lib/Drupal/Core/Database/Log.php b/core/lib/Drupal/Core/Database/Log.php
-index 2949754c54f..100d426d1d5 100644
---- a/core/lib/Drupal/Core/Database/Log.php
-+++ b/core/lib/Drupal/Core/Database/Log.php
-@@ -14,6 +14,8 @@
-  *
-  * Every connection has one and only one logging object on it for all targets
-  * and logging keys.
-+ *
-+ * @phpstan-type DatabaseLogEntry array{'query': string, 'args': list<mixed>, 'caller': string, 'target': string, 'time': float, 'start': float}
-  */
- class Log {
- 
-@@ -22,8 +24,8 @@ class Log {
-    *
-    * This will only be used if the query logger is enabled.
-    *
--   * @var array
--   * The structure for the logging array is as follows:
-+   * @var array<string,list<DatabaseLogEntry>>
-+   *   The structure for the logging array is as follows:
-    *
-    * @code
-    * [
-@@ -75,7 +77,7 @@ public function start($logging_key) {
-    * @param string $logging_key
-    *   The logging key to fetch.
-    *
--   * @return array
-+   * @return list<DatabaseLogEntry>
-    *   An indexed array of all query records for this logging key.
-    */
-   public function get($logging_key) {
-diff --git a/core/lib/Drupal/Core/Extension/DatabaseDriver.php b/core/lib/Drupal/Core/Extension/DatabaseDriver.php
-index 430685df5d8..c80d9452942 100644
---- a/core/lib/Drupal/Core/Extension/DatabaseDriver.php
-+++ b/core/lib/Drupal/Core/Extension/DatabaseDriver.php
-@@ -158,7 +158,7 @@ public function getInstallTasks(): Tasks {
-    * @return array{
-    *     'autoload': string,
-    *     'namespace': string,
--   *     'dependencies': array<string, array{'autoload': string, 'namespace': string}>,
-+   *     'dependencies'?: array<string, array{'autoload': string, 'namespace': string}>,
-    *   }
-    */
-   // phpcs:enable
-diff --git a/core/lib/Drupal/Core/Installer/Form/SiteSettingsForm.php b/core/lib/Drupal/Core/Installer/Form/SiteSettingsForm.php
-index 6d34a92c8ba..dfe685bfa69 100644
---- a/core/lib/Drupal/Core/Installer/Form/SiteSettingsForm.php
-+++ b/core/lib/Drupal/Core/Installer/Form/SiteSettingsForm.php
-@@ -80,7 +80,11 @@ public function buildForm(array $form, FormStateInterface $form_state) {
-     // connection already, since the submit handler of this form is responsible
-     // for writing all $settings to settings.php (not limited to $databases).
-     $input = &$form_state->getUserInput();
--    if (!isset($input['driver']) && $database = Database::getConnectionInfo()) {
-+    $database = [];
-+    foreach (Database::getConnectionInfo() as $target => $parameters) {
-+      $database[$target] = $parameters->toArray();
-+    }
-+    if (!isset($input['driver']) && !empty($database)) {
-       $input['driver'] = $database['default']['namespace'];
-       $input[$database['default']['namespace']] = $database['default'];
-     }
-diff --git a/core/lib/Drupal/Core/Test/FunctionalTestSetupTrait.php b/core/lib/Drupal/Core/Test/FunctionalTestSetupTrait.php
-index 53fa9614722..bf61ded8939 100644
---- a/core/lib/Drupal/Core/Test/FunctionalTestSetupTrait.php
-+++ b/core/lib/Drupal/Core/Test/FunctionalTestSetupTrait.php
-@@ -549,7 +549,7 @@ protected function rebuildAll() {
-    *   Array of parameters for use in install_drupal().
-    */
-   protected function installParameters() {
--    $formInput = Database::getConnectionInfo()['default'];
-+    $formInput = Database::getConnectionInfo()['default']->toArray();
-     $driverName = $formInput['driver'];
-     $driverNamespace = $formInput['namespace'];
- 
-diff --git a/core/lib/Drupal/Core/Test/TestSetupTrait.php b/core/lib/Drupal/Core/Test/TestSetupTrait.php
-index b25af6f622b..ed32cae1414 100644
---- a/core/lib/Drupal/Core/Test/TestSetupTrait.php
-+++ b/core/lib/Drupal/Core/Test/TestSetupTrait.php
-@@ -166,9 +166,12 @@ protected function changeDatabasePrefix(): void {
-     else {
-       Database::renameConnection('default', 'simpletest_original_default');
-       foreach ($connection_info as $target => $value) {
-+        $class = get_class($value);
-+        $parameters = $value->toArray();
-         // Replace the full table prefix definition to ensure that no table
-         // prefixes of the test runner leak into the test.
--        $connection_info[$target]['prefix'] = $value['prefix'] . $this->databasePrefix;
-+        $parameters['prefix'] .= $this->databasePrefix;
-+        $connection_info[$target] = $class::createFromOptionsArray($parameters);
-       }
-       Database::removeConnection('default');
-       Database::addConnectionInfo('default', 'default', $connection_info['default']);
-diff --git a/core/modules/migrate/tests/src/Kernel/MigrateMissingDatabaseTest.php b/core/modules/migrate/tests/src/Kernel/MigrateMissingDatabaseTest.php
-index 8d52786a09f..9fea84522c7 100644
---- a/core/modules/migrate/tests/src/Kernel/MigrateMissingDatabaseTest.php
-+++ b/core/modules/migrate/tests/src/Kernel/MigrateMissingDatabaseTest.php
-@@ -39,7 +39,7 @@ protected function setUp(): void {
-     $this->migrationPluginManager = \Drupal::service('plugin.manager.migration');
- 
-     // Set the 'migrate' database connection to use a missing database.
--    $info = Database::getConnectionInfo('default')['default'];
-+    $info = Database::getConnectionInfo('default')['default']->toArray();
-     $info['database'] = 'godot';
-     Database::addConnectionInfo('migrate', 'default', $info);
-   }
-diff --git a/core/modules/migrate/tests/src/Kernel/MigrateSqlSourceTestBase.php b/core/modules/migrate/tests/src/Kernel/MigrateSqlSourceTestBase.php
-index b8dc2cc2113..16778850a58 100644
---- a/core/modules/migrate/tests/src/Kernel/MigrateSqlSourceTestBase.php
-+++ b/core/modules/migrate/tests/src/Kernel/MigrateSqlSourceTestBase.php
-@@ -5,8 +5,8 @@
- namespace Drupal\Tests\migrate\Kernel;
- 
- use Drupal\Core\Cache\MemoryCounterBackendFactory;
-+use Drupal\Core\Database\Database;
- use Drupal\Core\DependencyInjection\ContainerBuilder;
--use Drupal\sqlite\Driver\Database\sqlite\Connection;
- use PHPUnit\Framework\Attributes\DataProvider;
- use PHPUnit\Framework\Attributes\RequiresPhpExtension;
- use Symfony\Component\DependencyInjection\Reference;
-@@ -40,9 +40,11 @@ protected function getDatabase(array $source_data) {
-     // Create an in-memory SQLite database. Plugins can interact with it like
-     // any other database, and it will cease to exist when the connection is
-     // closed.
--    $connection_options = ['database' => ':memory:'];
--    $pdo = Connection::open($connection_options);
--    $connection = new Connection($pdo, $connection_options);
-+    Database::addConnectionInfo('migrate', 'default', [
-+      'driver' => 'sqlite',
-+      'database' => ':memory:',
-+    ]);
-+    $connection = Database::getConnection('default', 'migrate');
- 
-     // Create the tables and fill them with data.
-     foreach ($source_data as $table => $rows) {
-diff --git a/core/modules/migrate/tests/src/Kernel/MigrateTestBase.php b/core/modules/migrate/tests/src/Kernel/MigrateTestBase.php
-index 4f4089b3ac3..42a99e1e5cb 100644
---- a/core/modules/migrate/tests/src/Kernel/MigrateTestBase.php
-+++ b/core/modules/migrate/tests/src/Kernel/MigrateTestBase.php
-@@ -98,9 +98,11 @@ private function createMigrationConnection() {
-     }
-     $connection_info = Database::getConnectionInfo('default');
-     foreach ($connection_info as $target => $value) {
--      $prefix = $value['prefix'];
-+      $class = get_class($value);
-+      $parameters = $value->toArray();
-       // Tests use 7 character prefixes at most so this can't cause collisions.
--      $connection_info[$target]['prefix'] = $prefix . '0';
-+      $parameters['prefix'] = $value->prefix . '0';
-+      $connection_info[$target] = $class::createFromOptionsArray($parameters);
-     }
-     Database::addConnectionInfo('migrate', 'default', $connection_info['default']);
-   }
-diff --git a/core/modules/migrate/tests/src/Kernel/Plugin/MigrationPluginListTest.php b/core/modules/migrate/tests/src/Kernel/Plugin/MigrationPluginListTest.php
-index 94ab8107eec..6a6f97f6df9 100644
---- a/core/modules/migrate/tests/src/Kernel/Plugin/MigrationPluginListTest.php
-+++ b/core/modules/migrate/tests/src/Kernel/Plugin/MigrationPluginListTest.php
-@@ -139,9 +139,11 @@ public function testGetDefinitions(): void {
-     }
-     $connection_info = Database::getConnectionInfo('default');
-     foreach ($connection_info as $target => $value) {
--      $prefix = $value['prefix'];
-+      $class = get_class($value);
-+      $options = $value->toArray();
-       // Tests use 7 character prefixes at most so this can't cause collisions.
--      $connection_info[$target]['prefix'] = $prefix . '0';
-+      $options['prefix'] = $value->prefix . '0';
-+      $connection_info[$target] = $class::createFromOptionsArray($options);
-     }
-     Database::addConnectionInfo('migrate', 'default', $connection_info['default']);
- 
-diff --git a/core/modules/migrate/tests/src/Kernel/QueryBatchTest.php b/core/modules/migrate/tests/src/Kernel/QueryBatchTest.php
-index d71fce18d1a..98c6a6cd52d 100644
---- a/core/modules/migrate/tests/src/Kernel/QueryBatchTest.php
-+++ b/core/modules/migrate/tests/src/Kernel/QueryBatchTest.php
-@@ -4,11 +4,11 @@
- 
- namespace Drupal\Tests\migrate\Kernel;
- 
-+use Drupal\Core\Database\Database;
- use Drupal\KernelTests\KernelTestBase;
- use Drupal\migrate\MigrateException;
- use Drupal\migrate\Plugin\MigrateIdMapInterface;
- use Drupal\migrate\Plugin\MigrationInterface;
--use Drupal\sqlite\Driver\Database\sqlite\Connection;
- use Drupal\TestTools\Random;
- use PHPUnit\Framework\Attributes\CoversClass;
- use PHPUnit\Framework\Attributes\DataProvider;
-@@ -234,9 +234,11 @@ protected function getDatabase(array $source_data) {
-     // Create an in-memory SQLite database. Plugins can interact with it like
-     // any other database, and it will cease to exist when the connection is
-     // closed.
--    $connection_options = ['database' => ':memory:'];
--    $pdo = Connection::open($connection_options);
--    $connection = new Connection($pdo, $connection_options);
-+    Database::addConnectionInfo('migrate-query-batch', 'default', [
-+      'driver' => 'sqlite',
-+      'database' => ':memory:',
-+    ]);
-+    $connection = Database::getConnection('default', 'migrate-query-batch');
- 
-     // Create the tables and fill them with data.
-     foreach ($source_data as $table => $rows) {
-diff --git a/core/modules/migrate/tests/src/Kernel/SqlBaseTest.php b/core/modules/migrate/tests/src/Kernel/SqlBaseTest.php
-index 58691d91ad7..bd58c45fd19 100644
---- a/core/modules/migrate/tests/src/Kernel/SqlBaseTest.php
-+++ b/core/modules/migrate/tests/src/Kernel/SqlBaseTest.php
-@@ -142,7 +142,7 @@ public function testBrokenConnection(): void {
-     $sql_base = new TestSqlBase([], $this->migration);
-     $target = 'test_state_db_target2';
-     $key = 'test_state_migrate_connection2';
--    $database = Database::getConnectionInfo('default')['default'];
-+    $database = Database::getConnectionInfo('default')['default']->toArray();
-     $database['database'] = 'godot';
-     $config = ['target' => $target, 'key' => $key, 'database' => $database];
-     $database_state_key = 'migrate_sql_base_test2';
-diff --git a/core/modules/migrate/tests/src/Unit/MigrateSqlIdMapTest.php b/core/modules/migrate/tests/src/Unit/MigrateSqlIdMapTest.php
-index 386c3fdbab1..2a9e7438cd7 100644
---- a/core/modules/migrate/tests/src/Unit/MigrateSqlIdMapTest.php
-+++ b/core/modules/migrate/tests/src/Unit/MigrateSqlIdMapTest.php
-@@ -9,6 +9,7 @@
- use Drupal\migrate\Plugin\MigrationInterface;
- use Drupal\migrate\Row;
- use Drupal\sqlite\Driver\Database\sqlite\Connection;
-+use Drupal\sqlite\Driver\Database\sqlite\ConnectionParameters;
- use PHPUnit\Framework\Attributes\DataProvider;
- use PHPUnit\Framework\Attributes\Group;
- 
-@@ -1012,12 +1013,9 @@ public function testDestroy(): void {
-    * Tests the getQualifiedMapTable method with a prefixed database.
-    */
-   public function testGetQualifiedMapTablePrefix(): void {
--    $connection_options = [
--      'database' => ':memory:',
--      'prefix' => 'prefix',
--    ];
--    $pdo = Connection::open($connection_options);
--    $this->database = new Connection($pdo, $connection_options);
-+    $connection_parameters = new ConnectionParameters('sqlite', __NAMESPACE__, __DIR__, ':memory:', 'prefix');
-+    $pdo = Connection::open($connection_parameters);
-+    $this->database = new Connection($pdo, $connection_parameters);
-     $qualified_map_table = $this->getIdMap()->getQualifiedMapTableName();
-     // The SQLite driver is a special flower. It will prefix tables with
-     // PREFIX.TABLE, instead of the standard PREFIXTABLE.
-diff --git a/core/modules/migrate/tests/src/Unit/MigrateTestCase.php b/core/modules/migrate/tests/src/Unit/MigrateTestCase.php
-index e0f4e16ff44..f7d1cac605a 100644
---- a/core/modules/migrate/tests/src/Unit/MigrateTestCase.php
-+++ b/core/modules/migrate/tests/src/Unit/MigrateTestCase.php
-@@ -4,10 +4,11 @@
- 
- namespace Drupal\Tests\migrate\Unit;
- 
--use Drupal\sqlite\Driver\Database\sqlite\Connection;
- use Drupal\Core\DependencyInjection\ContainerBuilder;
- use Drupal\migrate\Plugin\MigrateIdMapInterface;
- use Drupal\migrate\Plugin\MigrationInterface;
-+use Drupal\sqlite\Driver\Database\sqlite\Connection;
-+use Drupal\sqlite\Driver\Database\sqlite\ConnectionParameters;
- use Drupal\Tests\UnitTestCase;
- 
- /**
-@@ -113,9 +114,14 @@ protected function getMigration($id_map = NULL) {
-    */
-   protected function getDatabase(array $database_contents, $connection_options = []) {
-     if (extension_loaded('pdo_sqlite')) {
--      $connection_options['database'] = ':memory:';
--      $pdo = Connection::open($connection_options);
--      $connection = new Connection($pdo, $connection_options);
-+      $connection_parameters = new ConnectionParameters(
-+        $connection_options['driver'] ?? 'sqlite',
-+        $connection_options['namespace'] ?? '',
-+        $connection_options['autoload'] ?? '',
-+        ':memory:',
-+      );
-+      $pdo = Connection::open($connection_parameters);
-+      $connection = new Connection($pdo, $connection_parameters);
-     }
-     else {
-       $this->markTestSkipped('The pdo_sqlite extension is not available.');
-diff --git a/core/modules/migrate_drupal/tests/src/Kernel/MigrateMissingDatabaseTest.php b/core/modules/migrate_drupal/tests/src/Kernel/MigrateMissingDatabaseTest.php
-index 5a27179d0fc..14ed5198719 100644
---- a/core/modules/migrate_drupal/tests/src/Kernel/MigrateMissingDatabaseTest.php
-+++ b/core/modules/migrate_drupal/tests/src/Kernel/MigrateMissingDatabaseTest.php
-@@ -38,7 +38,7 @@ protected function setUp(): void {
-     $this->migrationPluginManager = \Drupal::service('plugin.manager.migration');
- 
-     // Set the 'migrate' database connection to use a missing host.
--    $info = Database::getConnectionInfo('default')['default'];
-+    $info = Database::getConnectionInfo('default')['default']->toArray();
-     $info['host'] = 'does_not_exist';
-     Database::addConnectionInfo('migrate', 'default', $info);
-   }
-diff --git a/core/modules/migrate_drupal_ui/src/Form/CredentialForm.php b/core/modules/migrate_drupal_ui/src/Form/CredentialForm.php
-index 50a0328b262..b35be75d73b 100644
---- a/core/modules/migrate_drupal_ui/src/Form/CredentialForm.php
-+++ b/core/modules/migrate_drupal_ui/src/Form/CredentialForm.php
-@@ -303,11 +303,11 @@ public function validateForm(array &$form, FormStateInterface $form_state) {
-     if (!$this->errors) {
-       $options = array_flip(['database', 'host', 'port', 'prefix', 'namespace']);
-       $source = array_map('strval', array_intersect_key(
--        $connection->getConnectionOptions(),
-+        $connection->getConnectionOptions()->toArray(),
-         $options,
-       ));
-       $destination = array_map('strval', array_intersect_key(
--        Database::getConnection()->getConnectionOptions(),
-+        Database::getConnection()->getConnectionOptions()->toArray(),
-         $options,
-       ));
-       ksort($source);
-diff --git a/core/modules/migrate_drupal_ui/tests/src/Functional/CredentialFormTest.php b/core/modules/migrate_drupal_ui/tests/src/Functional/CredentialFormTest.php
-index 403aa5cf8ab..fcc27f39dd6 100644
---- a/core/modules/migrate_drupal_ui/tests/src/Functional/CredentialFormTest.php
-+++ b/core/modules/migrate_drupal_ui/tests/src/Functional/CredentialFormTest.php
-@@ -146,7 +146,7 @@ protected function getMissingPaths(): array {
-    * @see \Drupal\migrate_drupal_ui\Form\CredentialForm
-    */
-   protected function getDestinationSiteCredentials(): array {
--    $connection_options = \Drupal::database()->getConnectionOptions();
-+    $connection_options = \Drupal::database()->getConnectionOptions()->toArray();
-     $version = $this->getLegacyDrupalVersion($this->sourceDatabase);
-     $driver = $connection_options['driver'];
- 
-diff --git a/core/modules/migrate_drupal_ui/tests/src/Functional/MigrateUpgradeTestBase.php b/core/modules/migrate_drupal_ui/tests/src/Functional/MigrateUpgradeTestBase.php
-index a6633fed5e9..5af645b98c2 100644
---- a/core/modules/migrate_drupal_ui/tests/src/Functional/MigrateUpgradeTestBase.php
-+++ b/core/modules/migrate_drupal_ui/tests/src/Functional/MigrateUpgradeTestBase.php
-@@ -98,7 +98,7 @@ protected function loadFixture($path) {
-    * @todo Remove when we don't use global. https://www.drupal.org/node/2552791
-    */
-   protected function createMigrationConnection() {
--    $connection_info = Database::getConnectionInfo('default')['default'];
-+    $connection_info = Database::getConnectionInfo('default')['default']->toArray();
-     if ($connection_info['driver'] === 'sqlite') {
-       // Create database file in the test site's public file directory so that
-       // \Drupal\Tests\BrowserTestBase::cleanupEnvironment() will delete this
-@@ -294,7 +294,7 @@ protected function assertUpgrade(array $entity_counts) {
-    * @see \Drupal\migrate_drupal_ui\Form\CredentialForm
-    */
-   protected function getCredentials() {
--    $connection_options = $this->sourceDatabase->getConnectionOptions();
-+    $connection_options = $this->sourceDatabase->getConnectionOptions()->toArray();
-     $version = $this->getLegacyDrupalVersion($this->sourceDatabase);
-     $driver = $connection_options['driver'];
- 
-diff --git a/core/modules/migrate_drupal_ui/tests/src/Functional/d7/FilePathTest.php b/core/modules/migrate_drupal_ui/tests/src/Functional/d7/FilePathTest.php
-index ae4f7f0e6f9..6a53b08c5e1 100644
---- a/core/modules/migrate_drupal_ui/tests/src/Functional/d7/FilePathTest.php
-+++ b/core/modules/migrate_drupal_ui/tests/src/Functional/d7/FilePathTest.php
-@@ -122,7 +122,7 @@ public function testFilePath(string $file_private_path, string $file_public_path
-       ->condition('name', 'file_temporary_path')
-       ->execute();
- 
--    $connection_options = $this->sourceDatabase->getConnectionOptions();
-+    $connection_options = $this->sourceDatabase->getConnectionOptions()->toArray();
-     $driver = $connection_options['driver'];
- 
-     // Use the driver connection form to get the correct options out of the
-diff --git a/core/modules/pgsql/src/Driver/Database/pgsql/Connection.php b/core/modules/pgsql/src/Driver/Database/pgsql/Connection.php
-index efad76ecb73..0bd857f0153 100644
---- a/core/modules/pgsql/src/Driver/Database/pgsql/Connection.php
-+++ b/core/modules/pgsql/src/Driver/Database/pgsql/Connection.php
-@@ -104,14 +104,16 @@ public function __construct(\PDO $connection, array $connection_options) {
-     // We need to set the connectionOptions before the parent, because setPrefix
-     // needs this.
-     $this->connectionOptions = $connection_options;
-+dump($this->connectionOptions);
- 
-     parent::__construct($connection, $connection_options);
-+dump($this->connectionOptions);
- 
-     // Force PostgreSQL to use the UTF-8 character set by default.
-     $this->connection->exec("SET NAMES 'UTF8'");
- 
-     // Execute PostgreSQL init_commands.
--    if (isset($connection_options['init_commands'])) {
-+    if (!empty($connection_options['init_commands'])) {
-       $this->connection->exec(implode('; ', $connection_options['init_commands']));
-     }
-   }
-diff --git a/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php b/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php
-index cec4b44178e..3321bc0141e 100644
---- a/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php
-+++ b/core/modules/sqlite/src/Driver/Database/sqlite/Connection.php
-@@ -77,13 +77,13 @@ class Connection extends DatabaseConnection implements SupportsTemporaryTablesIn
-   /**
-    * Constructs a \Drupal\sqlite\Driver\Database\sqlite\Connection object.
-    */
--  public function __construct(\PDO $connection, array $connection_options) {
-+  public function __construct(\PDO $connection, ConnectionParameters $connection_options) {
-     // @phpstan-ignore class.notFound
-     assert(\PHP_VERSION_ID >= 80400 ? $connection instanceof Sqlite : TRUE);
-     parent::__construct($connection, $connection_options);
- 
-     // Empty prefix means query the main database -- no need to attach anything.
--    $prefix = $this->connectionOptions['prefix'] ?? '';
-+    $prefix = $this->connectionOptions->prefix;
-     if ($prefix !== '') {
-       $this->attachDatabase($prefix);
-       // Add a ., so queries become prefix.table, which is proper syntax for
-@@ -98,24 +98,16 @@ public function __construct(\PDO $connection, array $connection_options) {
-   /**
-    * {@inheritdoc}
-    */
--  public static function open(array &$connection_options = []) {
--    // Allow PDO options to be overridden.
--    $connection_options += [
--      'pdo' => [],
--    ];
--    $connection_options['pdo'] += [
--      \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
--      // Convert numeric values to strings when fetching.
--      \PDO::ATTR_STRINGIFY_FETCHES => TRUE,
--    ];
-+  public static function open(ConnectionParameters|array &$connection_options = []) {
-+    assert($connection_options instanceof ConnectionParameters);
- 
-     try {
-       if (\PHP_VERSION_ID >= 80400) {
-         // @phpstan-ignore class.notFound
--        $sqlite = new Sqlite('sqlite:' . $connection_options['database'], '', '', $connection_options['pdo']);
-+        $sqlite = new Sqlite('sqlite:' . $connection_options->database, '', '', $connection_options->pdo);
-       }
-       else {
--        $sqlite = new PDOConnection('sqlite:' . $connection_options['database'], '', '', $connection_options['pdo']);
-+        $sqlite = new PDOConnection('sqlite:' . $connection_options->database, '', '', $connection_options->pdo);
-       }
-     }
-     catch (\PDOException $e) {
-@@ -179,19 +171,9 @@ public static function open(array &$connection_options = []) {
-       $sqlite->sqliteCreateCollation('NOCASE_UTF8', ['Drupal\Component\Utility\Unicode', 'strcasecmp']);
-     }
- 
--    // Set SQLite init_commands if not already defined. Enable the Write-Ahead
--    // Logging (WAL) for SQLite. See https://www.drupal.org/node/2348137 and
--    // https://www.sqlite.org/wal.html.
--    $connection_options += [
--      'init_commands' => [],
--    ];
--    $connection_options['init_commands'] += [
--      'wal' => "PRAGMA journal_mode=WAL",
--    ];
--
-     // Execute sqlite init_commands.
--    if (isset($connection_options['init_commands'])) {
--      $sqlite->exec(implode('; ', $connection_options['init_commands']));
-+    if (!empty($connection_options->init_commands)) {
-+      $sqlite->exec(implode('; ', $connection_options->init_commands));
-     }
- 
-     return $sqlite;
-@@ -213,11 +195,11 @@ public function __destruct() {
-           $count = $this->query('SELECT COUNT(*) FROM ' . $prefix . '.sqlite_master WHERE type = :type AND name NOT LIKE :pattern', [':type' => 'table', ':pattern' => 'sqlite_%'])->fetchField();
- 
-           // We can prune the database file if it doesn't have any tables.
--          if ($count == 0 && $this->connectionOptions['database'] != ':memory:' && file_exists($this->connectionOptions['database'] . '-' . $prefix)) {
-+          if ($count == 0 && $this->connectionOptions->database != ':memory:' && file_exists($this->connectionOptions->database . '-' . $prefix)) {
-             // Detach the database.
-             $this->query('DETACH DATABASE :schema', [':schema' => $prefix]);
-             // Destroy the database file.
--            unlink($this->connectionOptions['database'] . '-' . $prefix);
-+            unlink($this->connectionOptions->database . '-' . $prefix);
-           }
-         }
-         catch (\Exception) {
-@@ -238,7 +220,7 @@ public function attachDatabase(string $database): void {
-       // In memory database use ':memory:' as database name. According to
-       // http://www.sqlite.org/inmemorydb.html it will open a unique database so
-       // attaching it twice is not a problem.
--      $database_file = $this->connectionOptions['database'] !== ':memory:' ? $this->connectionOptions['database'] . '-' . $database : $this->connectionOptions['database'];
-+      $database_file = $this->connectionOptions->database !== ':memory:' ? $this->connectionOptions->database . '-' . $database : $this->connectionOptions->database;
-       $this->query('ATTACH DATABASE :database_file AS :database', [':database_file' => $database_file, ':database' => $database]);
-       $this->attachedDatabases[$database] = $database;
-     }
-diff --git a/core/modules/sqlite/src/Driver/Database/sqlite/ConnectionParameters.php b/core/modules/sqlite/src/Driver/Database/sqlite/ConnectionParameters.php
++}
+diff --git a/core/tests/Drupal/KernelTests/Core/Image/GdToolkitPngImageManipulationTest.php b/core/tests/Drupal/KernelTests/Core/Image/GdToolkitPngImageManipulationTest.php
 new file mode 100644
-index 00000000000..764573254f8
+index 00000000000..3da40f7db55
 --- /dev/null
-+++ b/core/modules/sqlite/src/Driver/Database/sqlite/ConnectionParameters.php
-@@ -0,0 +1,55 @@
++++ b/core/tests/Drupal/KernelTests/Core/Image/GdToolkitPngImageManipulationTest.php
+@@ -0,0 +1,75 @@
 +<?php
 +
 +declare(strict_types=1);
 +
-+namespace Drupal\sqlite\Driver\Database\sqlite;
++namespace Drupal\KernelTests\Core\Image;
 +
-+use Drupal\Core\Database\ConnectionParametersBase;
++use Drupal\Core\Image\ImageFactory;
++use Drupal\system\Plugin\ImageToolkit\GDToolkit;
++use PHPUnit\Framework\Attributes\CoversClass;
++use PHPUnit\Framework\Attributes\DataProvider;
++use PHPUnit\Framework\Attributes\Group;
++use PHPUnit\Framework\Attributes\RequiresPhpExtension;
++use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
++
++// cspell:ignore iccp
 +
 +/**
-+ * Connection parameters object for an SQLite database.
++ * GD image toolkit image manipulation of PNG images.
 + */
-+class ConnectionParameters extends ConnectionParametersBase {
-+
-+  public function __construct(
-+    string $driver,
-+    string $namespace,
-+    string $autoload,
-+    string $database,
-+    string $prefix = '',
-+    ?string $module = NULL,
-+    ?string $username = NULL,
-+    ?string $password = NULL,
-+    ?string $host = NULL,
-+    ?int $port = NULL,
-+    array $dependencies = [],
-+    array $init_commands = [],
-+    public readonly array $pdo = [],
-+  ) {
-+    parent::__construct($driver, $namespace, $autoload, $database, $prefix, $module, $username, $password, $host, $port, $dependencies, $init_commands);
-+  }
++#[CoversClass(GDToolkit::class)]
++#[Group('Image')]
++#[RequiresPhpExtension('gd')]
++#[RunTestsInSeparateProcesses]
++class GdToolkitPngImageManipulationTest extends GdToolkitImageManipulationTestBase {
 +
 +  /**
 +   * {@inheritdoc}
 +   */
-+  public static function processOptionsArray(array $options): array {
-+    $options = array_merge(['init_commands' => [], 'pdo' => []], $options);
++  protected string $sourceTestImage = 'image-test.png';
 +
-+    // Allow PDO options to be overridden.
-+    $options['pdo'] += [
-+      \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
-+      // Convert numeric values to strings when fetching.
-+      \PDO::ATTR_STRINGIFY_FETCHES => TRUE,
++  /**
++   * Tests that GD doesn't trigger warnings for iCCP sRGB profiles.
++   *
++   * If image is saved with 'sRGB IEC61966-2.1' sRGB profile, GD will trigger
++   * a warning about an incorrect sRGB profile'.
++   */
++  #[DataProvider('pngImageProvider')]
++  public function testIncorrectIccpSrgbProfile(string $image_uri): void {
++    $warning_detected = FALSE;
++    // @see https://github.com/sebastianbergmann/phpunit/issues/5062
++    $error_handler = static function () use (&$warning_detected): void {
++      $warning_detected = TRUE;
++    };
++    // $error_level is intentionally set to 0. It's required for PHP '@'
++    // suppression not to trigger Drupal error handler. In that case native
++    // PHP handler will be called and Drupal's will serve like a notification.
++    set_error_handler($error_handler, 0);
++
++    $image_factory = $this->container->get('image.factory');
++    \assert($image_factory instanceof ImageFactory);
++
++    $image = $image_factory->get($image_uri, 'gd');
++    // We need to do any image manipulation to trigger GD profile loading.
++    $image->resize('100', '100');
++
++    self::assertFalse($warning_detected);
++
++    restore_error_handler();
++  }
++
++  /**
++   * Provides a list of PNG image URIs for testing.
++   *
++   * @return \Generator
++   *   The test data.
++   */
++  public static function pngImageProvider(): \Generator {
++    yield 'valid image 1' => ['core/tests/fixtures/files/image-1.png'];
++    yield 'valid image 2' => ['core/tests/fixtures/files/image-test.png'];
++    yield 'PNG with iCCP profile' => [
++      'core/tests/fixtures/files/image-test-iccp-profile.png',
 +    ];
-+
-+    // Set SQLite init_commands if not already defined. Enable the Write-Ahead
-+    // Logging (WAL) for SQLite. See https://www.drupal.org/node/2348137 and
-+    // https://www.sqlite.org/wal.html.
-+    $options['init_commands'] += [
-+      'wal' => "PRAGMA journal_mode=WAL",
-+    ];
-+
-+    return $options;
 +  }
 +
 +}
-diff --git a/core/modules/sqlite/src/Driver/Database/sqlite/Install/Tasks.php b/core/modules/sqlite/src/Driver/Database/sqlite/Install/Tasks.php
-index 2620d1adc1e..34a67598d3f 100644
---- a/core/modules/sqlite/src/Driver/Database/sqlite/Install/Tasks.php
-+++ b/core/modules/sqlite/src/Driver/Database/sqlite/Install/Tasks.php
-@@ -75,17 +75,17 @@ protected function connect() {
-       // Attempt to create the database if it is not found.
-       if ($e->getCode() == Connection::DATABASE_NOT_FOUND) {
-         // Remove the database string from connection info.
--        $connection_info = Database::getConnectionInfo();
--        $database = $connection_info['default']['database'];
-+        $connection_info = Database::getConnectionInfo()['default']->toArray();
-+        $database = $connection_info['database'];
+diff --git a/core/tests/Drupal/KernelTests/Core/Image/GdToolkitWebpImageManipulationTest.php b/core/tests/Drupal/KernelTests/Core/Image/GdToolkitWebpImageManipulationTest.php
+new file mode 100644
+index 00000000000..5c08a4c2ea2
+--- /dev/null
++++ b/core/tests/Drupal/KernelTests/Core/Image/GdToolkitWebpImageManipulationTest.php
+@@ -0,0 +1,27 @@
++<?php
++
++declare(strict_types=1);
++
++namespace Drupal\KernelTests\Core\Image;
++
++use Drupal\system\Plugin\ImageToolkit\GDToolkit;
++use PHPUnit\Framework\Attributes\CoversClass;
++use PHPUnit\Framework\Attributes\Group;
++use PHPUnit\Framework\Attributes\RequiresPhpExtension;
++use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
++
++/**
++ * GD image toolkit image manipulation of WEBP images.
++ */
++#[CoversClass(GDToolkit::class)]
++#[Group('Image')]
++#[RequiresPhpExtension('gd')]
++#[RunTestsInSeparateProcesses]
++class GdToolkitWebpImageManipulationTest extends GdToolkitImageManipulationTestBase {
++
++  /**
++   * {@inheritdoc}
++   */
++  protected string $sourceTestImage = 'img-test.webp';
++
++}
+diff --git a/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php b/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php
+index a28374e7dbd..74a0e3c526c 100644
+--- a/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php
++++ b/core/tests/Drupal/KernelTests/Core/Image/ToolkitGdTest.php
+@@ -6,7 +6,6 @@
  
-         // We cannot use \Drupal::service('file_system')->getTempDirectory()
-         // here because we haven't yet successfully connected to the database.
--        $connection_info['default']['database'] = \Drupal::service('file_system')->tempnam(sys_get_temp_dir(), 'sqlite');
-+        $connection_info['database'] = \Drupal::service('file_system')->tempnam(sys_get_temp_dir(), 'sqlite');
+ use Drupal\Core\File\FileSystemInterface;
+ use Drupal\Core\Image\ImageFactory;
+-use Drupal\Core\Image\ImageInterface;
+ use Drupal\KernelTests\KernelTestBase;
+ use Drupal\system\Plugin\ImageToolkit\GDToolkit;
+ use PHPUnit\Framework\Attributes\CoversClass;
+@@ -15,7 +14,8 @@
+ use PHPUnit\Framework\Attributes\RequiresPhpExtension;
+ use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
  
-         // In order to change the Database::$databaseInfo array, need to remove
-         // the active connection, then re-add it with the new info.
-         Database::removeConnection('default');
--        Database::addConnectionInfo('default', 'default', $connection_info['default']);
-+        Database::addConnectionInfo('default', 'default', $connection_info);
+-// cspell:ignore iccp, imagecreatefrom
++// cspell:ignore imagecreatefrom
++
+ /**
+  * Tests for the GD image toolkit.
+  */
+@@ -25,30 +25,13 @@
+ #[RunTestsInSeparateProcesses]
+ class ToolkitGdTest extends KernelTestBase {
  
-         try {
-           Database::getConnection()->createDatabase($database);
-@@ -93,8 +93,8 @@ protected function connect() {
- 
-           // Now, restore the database config.
-           Database::removeConnection('default');
--          $connection_info['default']['database'] = $database;
--          Database::addConnectionInfo('default', 'default', $connection_info['default']);
-+          $connection_info['database'] = $database;
-+          Database::addConnectionInfo('default', 'default', $connection_info);
- 
-           // Check the database connection.
-           Database::getConnection();
-diff --git a/core/modules/sqlite/tests/src/Unit/ConnectionTest.php b/core/modules/sqlite/tests/src/Unit/ConnectionTest.php
-index daea942680a..4fd0b0843fd 100644
---- a/core/modules/sqlite/tests/src/Unit/ConnectionTest.php
-+++ b/core/modules/sqlite/tests/src/Unit/ConnectionTest.php
-@@ -5,6 +5,7 @@
- namespace Drupal\Tests\sqlite\Unit;
- 
- use Drupal\sqlite\Driver\Database\sqlite\Connection;
-+use Drupal\sqlite\Driver\Database\sqlite\ConnectionParameters;
- use Drupal\Tests\Core\Database\Stub\StubPDO;
- use Drupal\Tests\UnitTestCase;
- use Pdo\Sqlite;
-@@ -32,8 +33,11 @@ class ConnectionTest extends UnitTestCase {
+-  /**
+-   * Colors that are used in testing.
+-   */
+-  protected const BLACK              = [0, 0, 0, 0];
+-  protected const RED                = [255, 0, 0, 0];
+-  protected const GREEN              = [0, 255, 0, 0];
+-  protected const BLUE               = [0, 0, 255, 0];
+-  protected const YELLOW             = [255, 255, 0, 0];
+-  protected const WHITE              = [255, 255, 255, 0];
+-  protected const TRANSPARENT        = [0, 0, 0, 127];
+-  protected const FUCHSIA            = [255, 0, 255, 0];
+-  protected const ROTATE_TRANSPARENT = [255, 255, 255, 127];
+-
+   /**
+    * The image factory service.
+-   *
+-   * @var \Drupal\Core\Image\ImageFactory
     */
-   #[DataProvider('providerCreateConnectionOptionsFromUrl')]
-   public function testCreateConnectionOptionsFromUrl(string $url, string $expected): void {
--    // @phpstan-ignore class.notFound
--    $sqlite_connection = new Connection($this->createMock(\PHP_VERSION_ID >= 80400 ? Sqlite::class : StubPDO::class), []);
-+    $sqlite_connection = new Connection(
-+      // @phpstan-ignore class.notFound
-+      $this->createMock(\PHP_VERSION_ID >= 80400 ? Sqlite::class : StubPDO::class),
-+      new ConnectionParameters('sqlite', __NAMESPACE__, __DIR__, ':memory:')
-+    );
-     $database = $sqlite_connection->createConnectionOptionsFromUrl($url, NULL);
-     $this->assertEquals('sqlite', $database['driver']);
-     $this->assertEquals($expected, $database['database']);
-@@ -62,8 +66,11 @@ public static function providerCreateConnectionOptionsFromUrl(): array {
-   public function testDeprecationOfRootInConnectionOptionsFromUrl(): void {
-     $this->expectDeprecation('Passing the $root value to Drupal\sqlite\Driver\Database\sqlite\Connection::createConnectionOptionsFromUrl() is deprecated in drupal:11.2.0 and will be removed in drupal:12.0.0. There is no replacement. See https://www.drupal.org/node/3511287');
-     $root = dirname(__DIR__, 8);
--    // @phpstan-ignore class.notFound
--    $sqlite_connection = new Connection($this->createMock(\PHP_VERSION_ID >= 80400 ? Sqlite::class : StubPDO::class), []);
-+    $sqlite_connection = new Connection(
-+      // @phpstan-ignore class.notFound
-+      $this->createMock(\PHP_VERSION_ID >= 80400 ? Sqlite::class : StubPDO::class),
-+      new ConnectionParameters('sqlite', __NAMESPACE__, __DIR__, ':memory:'),
-+    );
-     $database = $sqlite_connection->createConnectionOptionsFromUrl('sqlite://localhost/tmp/test', $root);
-     $this->assertEquals('sqlite', $database['driver']);
-     $this->assertEquals('tmp/test', $database['database']);
-diff --git a/core/tests/Drupal/FunctionalTests/Installer/DistributionProfileExistingSettingsTest.php b/core/tests/Drupal/FunctionalTests/Installer/DistributionProfileExistingSettingsTest.php
-index 8432dbc9d61..a3e019c631c 100644
---- a/core/tests/Drupal/FunctionalTests/Installer/DistributionProfileExistingSettingsTest.php
-+++ b/core/tests/Drupal/FunctionalTests/Installer/DistributionProfileExistingSettingsTest.php
-@@ -59,12 +59,12 @@ protected function prepareEnvironment(): void {
-     ];
+   protected ImageFactory $imageFactory;
  
-     // Pre-configure database credentials.
--    $connection_info = Database::getConnectionInfo();
--    unset($connection_info['default']['pdo']);
--    unset($connection_info['default']['init_commands']);
-+    $connection_info = Database::getConnectionInfo()['default']->toArray();
-+    unset($connection_info['pdo']);
-+    unset($connection_info['init_commands']);
+   /**
+    * A directory where test image files can be saved to.
+-   *
+-   * @var string
+    */
+   protected string $directory;
  
-     $this->settings['databases']['default'] = (object) [
--      'value' => $connection_info,
-+      'value' => ['default' => $connection_info],
-       'required' => TRUE,
-     ];
- 
-diff --git a/core/tests/Drupal/FunctionalTests/Installer/InstallerBrokenDatabaseCredentialsTest.php b/core/tests/Drupal/FunctionalTests/Installer/InstallerBrokenDatabaseCredentialsTest.php
-index 214d2f8bca5..4b2e4ff20e1 100644
---- a/core/tests/Drupal/FunctionalTests/Installer/InstallerBrokenDatabaseCredentialsTest.php
-+++ b/core/tests/Drupal/FunctionalTests/Installer/InstallerBrokenDatabaseCredentialsTest.php
-@@ -26,7 +26,10 @@ class InstallerBrokenDatabaseCredentialsTest extends InstallerTestBase {
-   protected function prepareEnvironment(): void {
-     parent::prepareEnvironment();
-     // Pre-configure database credentials in settings.php.
--    $connection_info = Database::getConnectionInfo();
-+    $connection_info = [];
-+    foreach (Database::getConnectionInfo() as $target => $parameters) {
-+      $connection_info[$target] = $parameters->toArray();
-+    }
- 
-     if ($connection_info['default']['driver'] !== 'mysql') {
-       $this->markTestSkipped('This test relies on overriding the mysql driver');
-diff --git a/core/tests/Drupal/FunctionalTests/Installer/InstallerBrokenDatabasePortSettingsTest.php b/core/tests/Drupal/FunctionalTests/Installer/InstallerBrokenDatabasePortSettingsTest.php
-index 9df7fdae447..60e45788a0f 100644
---- a/core/tests/Drupal/FunctionalTests/Installer/InstallerBrokenDatabasePortSettingsTest.php
-+++ b/core/tests/Drupal/FunctionalTests/Installer/InstallerBrokenDatabasePortSettingsTest.php
-@@ -26,7 +26,10 @@ class InstallerBrokenDatabasePortSettingsTest extends InstallerTestBase {
-   protected function prepareEnvironment(): void {
-     parent::prepareEnvironment();
-     // Pre-configure database credentials in settings.php.
--    $connection_info = Database::getConnectionInfo();
-+    $connection_info = [];
-+    foreach (Database::getConnectionInfo() as $target => $parameters) {
-+      $connection_info[$target] = $parameters->toArray();
-+    }
- 
-     if ($connection_info['default']['driver'] !== 'mysql') {
-       $this->markTestSkipped('This test relies on overriding the mysql driver');
-diff --git a/core/tests/Drupal/FunctionalTests/Installer/InstallerExistingBrokenDatabaseSettingsTest.php b/core/tests/Drupal/FunctionalTests/Installer/InstallerExistingBrokenDatabaseSettingsTest.php
-index a0ad8bbe0f1..642436cfa03 100644
---- a/core/tests/Drupal/FunctionalTests/Installer/InstallerExistingBrokenDatabaseSettingsTest.php
-+++ b/core/tests/Drupal/FunctionalTests/Installer/InstallerExistingBrokenDatabaseSettingsTest.php
-@@ -26,7 +26,10 @@ class InstallerExistingBrokenDatabaseSettingsTest extends InstallerTestBase {
-   protected function prepareEnvironment(): void {
-     parent::prepareEnvironment();
-     // Pre-configure database credentials in settings.php.
--    $connection_info = Database::getConnectionInfo();
-+    $connection_info = [];
-+    foreach (Database::getConnectionInfo() as $target => $parameters) {
-+      $connection_info[$target] = $parameters->toArray();
-+    }
- 
-     if ($connection_info['default']['driver'] !== 'mysql') {
-       $this->markTestSkipped('This test relies on overriding the mysql driver');
-diff --git a/core/tests/Drupal/FunctionalTests/Installer/InstallerExistingConfigExistingSettingsTest.php b/core/tests/Drupal/FunctionalTests/Installer/InstallerExistingConfigExistingSettingsTest.php
-index 827225927a9..7202bac2198 100644
---- a/core/tests/Drupal/FunctionalTests/Installer/InstallerExistingConfigExistingSettingsTest.php
-+++ b/core/tests/Drupal/FunctionalTests/Installer/InstallerExistingConfigExistingSettingsTest.php
-@@ -31,12 +31,12 @@ protected function prepareEnvironment(): void {
-     ];
- 
-     // Pre-configure database credentials.
--    $connection_info = Database::getConnectionInfo();
--    unset($connection_info['default']['pdo']);
--    unset($connection_info['default']['init_commands']);
-+    $connection_info = Database::getConnectionInfo()['default']->toArray();
-+    unset($connection_info['pdo']);
-+    unset($connection_info['init_commands']);
- 
-     $this->settings['databases']['default'] = (object) [
--      'value' => $connection_info,
-+      'value' => ['default' => $connection_info],
-       'required' => TRUE,
-     ];
-   }
-diff --git a/core/tests/Drupal/FunctionalTests/Installer/InstallerExistingDatabaseSettingsTest.php b/core/tests/Drupal/FunctionalTests/Installer/InstallerExistingDatabaseSettingsTest.php
-index 5a5b10be1df..3bce7b43c0e 100644
---- a/core/tests/Drupal/FunctionalTests/Installer/InstallerExistingDatabaseSettingsTest.php
-+++ b/core/tests/Drupal/FunctionalTests/Installer/InstallerExistingDatabaseSettingsTest.php
-@@ -26,12 +26,12 @@ class InstallerExistingDatabaseSettingsTest extends InstallerTestBase {
-   protected function prepareEnvironment(): void {
-     parent::prepareEnvironment();
-     // Pre-configure database credentials in settings.php.
--    $connection_info = Database::getConnectionInfo();
--    unset($connection_info['default']['pdo']);
--    unset($connection_info['default']['init_commands']);
-+    $connection_info = Database::getConnectionInfo()['default']->toArray();
-+    unset($connection_info['pdo']);
-+    unset($connection_info['init_commands']);
- 
-     $this->settings['databases']['default'] = (object) [
--      'value' => $connection_info,
-+      'value' => ['default' => $connection_info],
-       'required' => TRUE,
-     ];
-   }
-diff --git a/core/tests/Drupal/FunctionalTests/Installer/InstallerExistingSettingsNoProfileTest.php b/core/tests/Drupal/FunctionalTests/Installer/InstallerExistingSettingsNoProfileTest.php
-index ce6a9ef8822..47c7a35b218 100644
---- a/core/tests/Drupal/FunctionalTests/Installer/InstallerExistingSettingsNoProfileTest.php
-+++ b/core/tests/Drupal/FunctionalTests/Installer/InstallerExistingSettingsNoProfileTest.php
-@@ -39,12 +39,12 @@ protected function prepareEnvironment(): void {
-     ];
- 
-     // Pre-configure database credentials.
--    $connection_info = Database::getConnectionInfo();
--    unset($connection_info['default']['pdo']);
--    unset($connection_info['default']['init_commands']);
-+    $connection_info = Database::getConnectionInfo()['default']->toArray();
-+    unset($connection_info['pdo']);
-+    unset($connection_info['init_commands']);
- 
-     $this->settings['databases']['default'] = (object) [
--      'value' => $connection_info,
-+      'value' => ['default' => $connection_info],
-       'required' => TRUE,
-     ];
- 
-diff --git a/core/tests/Drupal/FunctionalTests/Installer/InstallerExistingSettingsTest.php b/core/tests/Drupal/FunctionalTests/Installer/InstallerExistingSettingsTest.php
-index 612f48597a2..e4bd1c7c8db 100644
---- a/core/tests/Drupal/FunctionalTests/Installer/InstallerExistingSettingsTest.php
-+++ b/core/tests/Drupal/FunctionalTests/Installer/InstallerExistingSettingsTest.php
-@@ -38,12 +38,12 @@ protected function prepareEnvironment(): void {
-     ];
- 
-     // Pre-configure database credentials.
--    $connection_info = Database::getConnectionInfo();
--    unset($connection_info['default']['pdo']);
--    unset($connection_info['default']['init_commands']);
-+    $connection_info = Database::getConnectionInfo()['default']->toArray();
-+    unset($connection_info['pdo']);
-+    unset($connection_info['init_commands']);
- 
-     $this->settings['databases']['default'] = (object) [
--      'value' => $connection_info,
-+      'value' => ['default' => $connection_info],
-       'required' => TRUE,
-     ];
- 
-diff --git a/core/tests/Drupal/FunctionalTests/Update/UpdatePathTestBase.php b/core/tests/Drupal/FunctionalTests/Update/UpdatePathTestBase.php
-index 3ee78e55365..1686c82e17b 100644
---- a/core/tests/Drupal/FunctionalTests/Update/UpdatePathTestBase.php
-+++ b/core/tests/Drupal/FunctionalTests/Update/UpdatePathTestBase.php
-@@ -179,8 +179,12 @@ protected function prepareSettings() {
-     ];
- 
-     // Since the installer isn't run, add the database settings here too.
-+    $database = [];
-+    foreach (Database::getConnectionInfo() as $target => $parameters) {
-+      $database[$target] = $parameters->toArray();
-+    }
-     $settings['databases']['default'] = (object) [
--      'value' => Database::getConnectionInfo(),
-+      'value' => $database,
-       'required' => TRUE,
-     ];
- 
-diff --git a/core/tests/Drupal/KernelTests/Core/Database/ConnectionTest.php b/core/tests/Drupal/KernelTests/Core/Database/ConnectionTest.php
-index 3e17151524b..9ed1105664a 100644
---- a/core/tests/Drupal/KernelTests/Core/Database/ConnectionTest.php
-+++ b/core/tests/Drupal/KernelTests/Core/Database/ConnectionTest.php
-@@ -108,10 +108,10 @@ public function testConnectionOptions(): void {
- 
-     // Get a fresh copy of the default connection options.
-     $connectionOptions = $db->getConnectionOptions();
--    $this->assertSame($connectionOptions2, $connectionOptions, 'The default and replica connection options are identical.');
-+    $this->assertEquals($connectionOptions2, $connectionOptions);
- 
-     // Set up a new connection with different connection info.
--    $test = $connection_info['default'];
-+    $test = $connection_info['default']->toArray();
-     $test['database'] .= 'test';
-     Database::addConnectionInfo('test', 'default', $test);
-     $connection_info = Database::getConnectionInfo('test');
-@@ -121,35 +121,6 @@ public function testConnectionOptions(): void {
-     $this->assertNotEquals($connection_info['default']['database'], $connectionOptions['database'], 'The test connection info database does not match the current connection options database.');
+@@ -74,298 +57,6 @@ protected function setUp(): void {
+     \Drupal::service('file_system')->prepareDirectory($this->directory, FileSystemInterface::CREATE_DIRECTORY);
    }
  
 -  /**
--   * Tests per-table prefix connection option.
+-   * Assert two colors are equal by RGBA, net of full transparency.
+-   *
+-   * @param int[] $expected
+-   *   The expected RGBA array.
+-   * @param int[] $actual
+-   *   The actual RGBA array.
+-   * @param int $tolerance
+-   *   The acceptable difference between the colors.
+-   * @param string $message
+-   *   The assertion message.
 -   */
--  public function testPerTablePrefixOption(): void {
--    $connection_info = Database::getConnectionInfo('default');
--    $new_connection_info = $connection_info['default'];
--    $new_connection_info['prefix'] = [
--      'default' => $connection_info['default']['prefix'],
--      'test_table' => $connection_info['default']['prefix'] . '_bar',
--    ];
--    Database::addConnectionInfo('default', 'foo', $new_connection_info);
--    $this->expectException(\AssertionError::class);
--    Database::getConnection('foo', 'default');
+-  protected function assertColorsAreEqual(array $expected, array $actual, int $tolerance, string $message = ''): void {
+-    // Fully transparent colors are equal, regardless of RGB.
+-    if ($actual[3] == 127 && $expected[3] == 127) {
+-      return;
+-    }
+-    $distance = pow(($actual[0] - $expected[0]), 2) + pow(($actual[1] - $expected[1]), 2) + pow(($actual[2] - $expected[2]), 2) + pow(($actual[3] - $expected[3]), 2);
+-    $this->assertLessThanOrEqual($tolerance, $distance, $message . " - Actual: {" . implode(',', $actual) . "}, Expected: {" . implode(',', $expected) . "}, Distance: " . $distance . ", Tolerance: " . $tolerance);
 -  }
 -
 -  /**
--   * Tests the prefix connection option in array form.
+-   * Function for finding a pixel's RGBa values.
 -   */
--  public function testPrefixArrayOption(): void {
--    $connection_info = Database::getConnectionInfo('default');
--    $new_connection_info = $connection_info['default'];
--    $new_connection_info['prefix'] = [
--      'default' => $connection_info['default']['prefix'],
--    ];
--    Database::addConnectionInfo('default', 'foo', $new_connection_info);
--    $this->expectException(\AssertionError::class);
--    Database::getConnection('foo', 'default');
+-  public function getPixelColor(ImageInterface $image, int $x, int $y): array {
+-    $toolkit = $image->getToolkit();
+-    $color_index = imagecolorat($toolkit->getImage(), $x, $y);
+-
+-    $transparent_index = imagecolortransparent($toolkit->getImage());
+-    if ($color_index == $transparent_index) {
+-      return [0, 0, 0, 127];
+-    }
+-
+-    return array_values(imagecolorsforindex($toolkit->getImage(), $color_index));
 -  }
 -
-   /**
-    * Ensure that you cannot execute multiple statements in a query.
-    */
-diff --git a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificConnectionUnitTestBase.php b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificConnectionUnitTestBase.php
-index 9bd8f14d203..c0bbbe36d12 100644
---- a/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificConnectionUnitTestBase.php
-+++ b/core/tests/Drupal/KernelTests/Core/Database/DriverSpecificConnectionUnitTestBase.php
-@@ -213,9 +213,9 @@ public function testConnectionOpen(): void {
-     // Ensure the default error mode is set to exception.
-     $this->assertSame(\PDO::ERRMODE_EXCEPTION, $error_mode);
- 
--    $connection_info = Database::getConnectionInfo();
--    $connection_info['default']['pdo'][\PDO::ATTR_ERRMODE] = \PDO::ERRMODE_SILENT;
--    Database::addConnectionInfo('test', 'default', $connection_info['default']);
-+    $connection_info = Database::getConnectionInfo()['default']->toArray();
-+    $connection_info['pdo'][\PDO::ATTR_ERRMODE] = \PDO::ERRMODE_SILENT;
-+    Database::addConnectionInfo('test', 'default', $connection_info);
-     $test_connection = Database::getConnection('default', 'test');
- 
-     $reflection = new \ReflectionObject($test_connection);
-diff --git a/core/tests/Drupal/KernelTests/KernelTestBase.php b/core/tests/Drupal/KernelTests/KernelTestBase.php
-index 3763567ce57..c6f85927de8 100644
---- a/core/tests/Drupal/KernelTests/KernelTestBase.php
-+++ b/core/tests/Drupal/KernelTests/KernelTestBase.php
-@@ -334,8 +334,8 @@ protected function bootKernel() {
- 
-     // When a module is providing the database driver, then enable that module.
-     $connection_info = Database::getConnectionInfo();
--    $namespace = $connection_info['default']['namespace'] ?? '';
--    $autoload = $connection_info['default']['autoload'] ?? '';
-+    $namespace = $connection_info['default']->namespace;
-+    $autoload = $connection_info['default']->autoload;
-     if (str_contains($autoload, 'src/Driver/Database/')) {
-       [$first, $second] = explode('\\', $namespace, 3);
-       if ($first === 'Drupal' && strtolower($second) === $second) {
-@@ -452,9 +452,12 @@ protected function getDatabaseConnectionInfo() {
-     if (!empty($connection_info)) {
-       Database::renameConnection('default', 'simpletest_original_default');
-       foreach ($connection_info as $target => $value) {
-+        $class = get_class($value);
-+        $parameters = $value->toArray();
-         // Replace the full table prefix definition to ensure that no table
-         // prefixes of the test runner leak into the test.
--        $connection_info[$target]['prefix'] = $this->databasePrefix;
-+        $parameters['prefix'] = $this->databasePrefix ?? '';
-+        $connection_info[$target] = $class::createFromOptionsArray($parameters);
-       }
-     }
-     return $connection_info;
-@@ -671,9 +674,9 @@ protected function tearDown(): void {
- 
-     // Remove all prefixed tables.
-     $original_connection_info = Database::getConnectionInfo('simpletest_original_default');
--    $original_prefix = $original_connection_info['default']['prefix'] ?? NULL;
-+    $original_prefix = $original_connection_info['default']?->prefix ?? NULL;
-     $test_connection_info = Database::getConnectionInfo('default');
--    $test_prefix = $test_connection_info['default']['prefix'] ?? NULL;
-+    $test_prefix = $test_connection_info['default']?->prefix ?? NULL;
-     if ($original_prefix != $test_prefix) {
-       $tables = Database::getConnection()->schema()->findTables('%');
-       foreach ($tables as $table) {
-diff --git a/core/tests/Drupal/KernelTests/KernelTestBaseDatabaseDriverModuleTest.php b/core/tests/Drupal/KernelTests/KernelTestBaseDatabaseDriverModuleTest.php
-index 198fe2d9feb..af1a1e71296 100644
---- a/core/tests/Drupal/KernelTests/KernelTestBaseDatabaseDriverModuleTest.php
-+++ b/core/tests/Drupal/KernelTests/KernelTestBaseDatabaseDriverModuleTest.php
-@@ -29,7 +29,7 @@ protected function getDatabaseConnectionInfo() {
-       throw new \Exception('There is no database connection so no tests can be run. You must provide a SIMPLETEST_DB environment variable to run PHPUnit based functional tests outside of run-tests.sh. See https://www.drupal.org/node/2116263#skipped-tests for more information.');
-     }
-     else {
--      $database = Database::convertDbUrlToConnectionInfo($db_url);
-+      $database = Database::convertDbUrlToConnectionInfo($db_url)->toArray();
- 
-       if (in_array($database['driver'], ['mysql', 'pgsql'])) {
-         // Change the used database driver to the one provided by the module
-@@ -48,9 +48,12 @@ protected function getDatabaseConnectionInfo() {
-     if (!empty($connection_info)) {
-       Database::renameConnection('default', 'simpletest_original_default');
-       foreach ($connection_info as $target => $value) {
-+        $class = get_class($value);
-+        $options = $value->toArray();
-         // Replace the table prefix definition to ensure that no table of the
-         // test runner leak into the test.
--        $connection_info[$target]['prefix'] = $this->databasePrefix;
-+        $options['prefix'] = $this->databasePrefix ?? '';
-+        $connection_info[$target] = $class::createFromOptionsArray($options);
-       }
-     }
-     return $connection_info;
-diff --git a/core/tests/Drupal/KernelTests/Scripts/TestSiteApplicationTest.php b/core/tests/Drupal/KernelTests/Scripts/TestSiteApplicationTest.php
-index 2c768b691e9..8d026b17abc 100644
---- a/core/tests/Drupal/KernelTests/Scripts/TestSiteApplicationTest.php
-+++ b/core/tests/Drupal/KernelTests/Scripts/TestSiteApplicationTest.php
-@@ -296,7 +296,7 @@ public function testUserLogin(): void {
-    *   The database key of the added connection.
-    */
-   protected function addTestDatabase($db_prefix): string {
--    $database = Database::convertDbUrlToConnectionInfo(getenv('SIMPLETEST_DB'));
-+    $database = Database::convertDbUrlToConnectionInfo(getenv('SIMPLETEST_DB'))->toArray();
-     $database['prefix'] = $db_prefix;
-     $target = __CLASS__ . $db_prefix;
-     Database::addConnectionInfo($target, 'default', $database);
-diff --git a/core/tests/Drupal/TestSite/Commands/TestSiteTearDownCommand.php b/core/tests/Drupal/TestSite/Commands/TestSiteTearDownCommand.php
-index 7e601981d4c..566fab1e04d 100644
---- a/core/tests/Drupal/TestSite/Commands/TestSiteTearDownCommand.php
-+++ b/core/tests/Drupal/TestSite/Commands/TestSiteTearDownCommand.php
-@@ -84,7 +84,7 @@ protected function execute(InputInterface $input, OutputInterface $output): int
-   protected function tearDown(TestDatabase $test_database, $db_url): void {
-     // Connect to the test database.
-     $root = dirname(__DIR__, 5);
--    $database = Database::convertDbUrlToConnectionInfo($db_url);
-+    $database = Database::convertDbUrlToConnectionInfo($db_url)->toArray();
-     $database['prefix'] = $test_database->getDatabasePrefix();
-     Database::addConnectionInfo(__CLASS__, 'default', $database);
- 
-diff --git a/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php b/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
-index 751f6198637..a248db6f657 100644
---- a/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
-+++ b/core/tests/Drupal/Tests/Core/Database/ConnectionTest.php
-@@ -686,8 +686,10 @@ public static function provideQueriesToTrim() {
-    */
-   public function testFindCallerFromDebugBacktrace(): void {
-     Database::addConnectionInfo('default', 'default', [
--      'driver' => 'test',
-+      'driver' => 'stub',
-       'namespace' => 'Drupal\Tests\Core\Database\Stub',
-+      'autoload' => __DIR__ . '/Stub/',
-+      'database' => 'stub',
-     ]);
-     $connection = new StubConnection($this->createMock(StubPDO::class), []);
-     $result = $connection->findCallerFromDebugBacktrace();
-diff --git a/core/tests/Drupal/Tests/Core/Database/Stub/StubConnection.php b/core/tests/Drupal/Tests/Core/Database/Stub/StubConnection.php
-index 4b31c06c2e6..ce766a8263f 100644
---- a/core/tests/Drupal/Tests/Core/Database/Stub/StubConnection.php
-+++ b/core/tests/Drupal/Tests/Core/Database/Stub/StubConnection.php
-@@ -42,7 +42,13 @@ class StubConnection extends Connection {
-    */
-   public function __construct(\PDO $connection, array $connection_options, $identifier_quotes = ['', '']) {
-     $this->identifierQuotes = $identifier_quotes;
--    parent::__construct($connection, $connection_options);
-+    $options = array_merge([
-+      'driver' => 'stub',
-+      'namespace' => __NAMESPACE__,
-+      'autoload' => __DIR__,
-+      'database' => 'stub',
-+    ], $connection_options);
-+    parent::__construct($connection, $options);
-   }
- 
-   /**
-diff --git a/core/tests/Drupal/Tests/Core/Database/UrlConversionTest.php b/core/tests/Drupal/Tests/Core/Database/UrlConversionTest.php
-index f2c181c0149..010275efda8 100644
---- a/core/tests/Drupal/Tests/Core/Database/UrlConversionTest.php
-+++ b/core/tests/Drupal/Tests/Core/Database/UrlConversionTest.php
-@@ -4,6 +4,7 @@
- 
- namespace Drupal\Tests\Core\Database;
- 
-+use Drupal\Core\Database\ConnectionParametersInterface;
- use Drupal\Core\Database\Database;
- use Drupal\Core\Extension\Exception\UnknownExtensionException;
- use Drupal\Tests\UnitTestCase;
-@@ -35,7 +36,8 @@ class UrlConversionTest extends UnitTestCase {
-   #[DataProvider('providerConvertDbUrlToConnectionInfo')]
-   public function testDbUrlToConnectionConversion($url, $database_array, $include_test_drivers): void {
-     $result = Database::convertDbUrlToConnectionInfo($url, $include_test_drivers);
--    $this->assertEquals($database_array, $result);
-+    $this->assertInstanceOf(ConnectionParametersInterface::class, $result);
-+    $this->assertEquals($database_array, array_intersect_key($result->toArray(), $database_array));
-   }
- 
-   /**
-@@ -323,7 +325,7 @@ public function testNoModuleSpecifiedDefaultsToDriverName(): void {
-         ],
-       ],
-     ];
--    $this->assertSame($expected, $connection_info);
-+    $this->assertEquals($expected, array_intersect_key($connection_info->toArray(), $expected));
-   }
- 
-   /**
-@@ -483,9 +485,9 @@ public static function providerGetConnectionInfoAsUrl() {
-    */
-   #[DataProvider('providerInvalidArgumentGetConnectionInfoAsUrl')]
-   public function testGetInvalidArgumentGetConnectionInfoAsUrl(array $connection_options, $expected_exception_message): void {
-+    $this->expectException(\ArgumentCountError::class);
-+    $this->expectExceptionMessageMatches($expected_exception_message);
-     Database::addConnectionInfo('default', 'default', $connection_options);
--    $this->expectException(\InvalidArgumentException::class);
--    $this->expectExceptionMessage($expected_exception_message);
-     Database::getConnectionInfoAsUrl();
-   }
- 
-@@ -506,7 +508,7 @@ public static function providerInvalidArgumentGetConnectionInfoAsUrl() {
-           'host' => 'localhost',
-           'namespace' => 'Drupal\sqlite\Driver\Database\sqlite',
-         ],
--        "As a minimum, the connection options array must contain at least the 'driver' and 'database' keys",
-+        '/__construct\(\): Argument #4 \(\$database\) not passed/',
-       ],
-     ];
-   }
-diff --git a/core/tests/Drupal/Tests/Core/Site/SettingsTest.php b/core/tests/Drupal/Tests/Core/Site/SettingsTest.php
-index 7a7cc70f7e4..ee9b898b04d 100644
---- a/core/tests/Drupal/Tests/Core/Site/SettingsTest.php
-+++ b/core/tests/Drupal/Tests/Core/Site/SettingsTest.php
-@@ -5,6 +5,7 @@
- namespace Drupal\Tests\Core\Site;
- 
- use Composer\Autoload\ClassLoader;
-+use Drupal\Core\Database\ConnectionParametersInterface;
- use Drupal\Core\Database\Database;
- use Drupal\Core\Site\Settings;
- use Drupal\Tests\UnitTestCase;
-@@ -332,6 +333,7 @@ public static function providerTestRealDeprecatedSettings(): array {
-   public function testDatabaseInfoInitialization(string $driver, ?string $namespace, ?string $autoload, string $expected_namespace, ?string $expected_autoload): void {
-     $databases['mock'][$driver] = [
-       'driver' => $driver,
-+      'database' => 'test',
-       'prefix' => '',
-     ];
-     if (!is_null($namespace)) {
-@@ -351,27 +353,24 @@ public function testDatabaseInfoInitialization(string $driver, ?string $namespac
-     $class_loader = $this->createMock(ClassLoader::class);
-     if (!empty($expected_autoload)) {
-       $class_loader->expects($this->once())
--        ->method('addPsr4')
-+        ->method('setPsr4')
-         ->with($expected_namespace . '\\', vfsStream::url('root') . '/' . $expected_autoload);
-     }
-     else {
-       $class_loader->expects($this->never())
--        ->method('addPsr4');
-+        ->method('setPsr4');
-     }
- 
-     Settings::initialize(vfsStream::url('root'), 'sites', $class_loader);
- 
--    $expected = [
--      $driver => [
--        'driver' => $driver,
--        'namespace' => $expected_namespace,
--        'prefix' => '',
+-  /**
+-   * Data provider for ::testManipulations().
+-   */
+-  public static function providerTestImageFiles(): array {
+-    // Typically the corner colors will be unchanged. These colors are in the
+-    // order of top-left, top-right, bottom-right, bottom-left.
+-    $default_corners = [static::RED, static::GREEN, static::BLUE, static::TRANSPARENT];
+-
+-    // Setup a list of tests to perform on each type.
+-    $test_cases = [
+-      'resize' => [
+-        'operation' => 'resize',
+-        'arguments' => ['width' => 20, 'height' => 10],
+-        'width' => 20,
+-        'height' => 10,
+-        'corners' => $default_corners,
+-      ],
+-      'scale_x' => [
+-        'operation' => 'scale',
+-        'arguments' => ['width' => 20],
+-        'width' => 20,
+-        'height' => 10,
+-        'corners' => $default_corners,
+-      ],
+-      'scale_y' => [
+-        'operation' => 'scale',
+-        'arguments' => ['height' => 10],
+-        'width' => 20,
+-        'height' => 10,
+-        'corners' => $default_corners,
+-      ],
+-      'upscale_x' => [
+-        'operation' => 'scale',
+-        'arguments' => ['width' => 80, 'upscale' => TRUE],
+-        'width' => 80,
+-        'height' => 40,
+-        'corners' => $default_corners,
+-      ],
+-      'upscale_y' => [
+-        'operation' => 'scale',
+-        'arguments' => ['height' => 40, 'upscale' => TRUE],
+-        'width' => 80,
+-        'height' => 40,
+-        'corners' => $default_corners,
+-      ],
+-      'crop' => [
+-        'operation' => 'crop',
+-        'arguments' => ['x' => 12, 'y' => 4, 'width' => 16, 'height' => 12],
+-        'width' => 16,
+-        'height' => 12,
+-        'corners' => array_fill(0, 4, static::WHITE),
+-      ],
+-      'scale_and_crop' => [
+-        'operation' => 'scale_and_crop',
+-        'arguments' => ['width' => 10, 'height' => 8],
+-        'width' => 10,
+-        'height' => 8,
+-        'corners' => array_fill(0, 4, static::BLACK),
+-      ],
+-      'convert_jpg' => [
+-        'operation' => 'convert',
+-        'width' => 40,
+-        'height' => 20,
+-        'arguments' => ['extension' => 'jpeg'],
+-        'corners' => $default_corners,
+-      ],
+-      'convert_gif' => [
+-        'operation' => 'convert',
+-        'width' => 40,
+-        'height' => 20,
+-        'arguments' => ['extension' => 'gif'],
+-        'corners' => $default_corners,
+-      ],
+-      'convert_png' => [
+-        'operation' => 'convert',
+-        'width' => 40,
+-        'height' => 20,
+-        'arguments' => ['extension' => 'png'],
+-        'corners' => $default_corners,
+-      ],
+-      'convert_webp' => [
+-        'operation' => 'convert',
+-        'width' => 40,
+-        'height' => 20,
+-        'arguments' => ['extension' => 'webp'],
+-        'corners' => $default_corners,
+-      ],
+-      'convert_avif' => [
+-        'operation' => 'convert',
+-        'width' => 40,
+-        'height' => 20,
+-        'arguments' => ['extension' => 'avif'],
+-        'corners' => $default_corners,
 -      ],
 -    ];
-+    $mock_connection_parameters = Database::getConnectionInfo('mock')[$driver];
-+    $this->assertInstanceOf(ConnectionParametersInterface::class, $mock_connection_parameters);
-+    $this->assertSame($driver, $mock_connection_parameters->driver);
-+    $this->assertSame($expected_namespace, $mock_connection_parameters->namespace);
-+    $this->assertSame('', $mock_connection_parameters->prefix);
-     if (!is_null($expected_autoload)) {
--      $expected[$driver]['autoload'] = $expected_autoload;
-+      $this->assertSame($expected_autoload, $mock_connection_parameters->autoload);
-     }
--    $this->assertEquals($expected, Database::getConnectionInfo('mock'));
-   }
- 
+-
+-    // Systems using non-bundled GD2 may miss imagerotate(). Test if available.
+-    if (function_exists('imagerotate')) {
+-      $test_cases += [
+-        'rotate_5' => [
+-          'operation' => 'rotate',
+-          // Fuchsia background.
+-          'arguments' => ['degrees' => 5, 'background' => '#FF00FF'],
+-          // @todo Re-enable dimensions' check once
+-          //   https://www.drupal.org/project/drupal/issues/2921123 is resolved.
+-          // 'width' => 41,
+-          // 'height' => 23,
+-          'corners' => array_fill(0, 4, static::FUCHSIA),
+-        ],
+-        'rotate_transparent_5' => [
+-          'operation' => 'rotate',
+-          'arguments' => ['degrees' => 5],
+-          // @todo Re-enable dimensions' check once
+-          //   https://www.drupal.org/project/drupal/issues/2921123 is resolved.
+-          // 'width' => 41,
+-          // 'height' => 23,
+-          'corners' => array_fill(0, 4, static::ROTATE_TRANSPARENT),
+-        ],
+-        'rotate_90' => [
+-          'operation' => 'rotate',
+-          // Fuchsia background.
+-          'arguments' => ['degrees' => 90, 'background' => '#FF00FF'],
+-          'width' => 20,
+-          'height' => 40,
+-          'corners' => [static::TRANSPARENT, static::RED, static::GREEN, static::BLUE],
+-        ],
+-        'rotate_transparent_90' => [
+-          'operation' => 'rotate',
+-          'arguments' => ['degrees' => 90],
+-          'width' => 20,
+-          'height' => 40,
+-          'corners' => [static::TRANSPARENT, static::RED, static::GREEN, static::BLUE],
+-        ],
+-      ];
+-    }
+-
+-    // Systems using non-bundled GD2 may miss imagefilter(). Test if available.
+-    if (function_exists('imagefilter')) {
+-      $test_cases += [
+-        'desaturate' => [
+-          'operation' => 'desaturate',
+-          'arguments' => [],
+-          'height' => 20,
+-          'width' => 40,
+-          // Grayscale corners are a bit funky. Each of the corners are a shade
+-          // of gray. The values of these were determined simply by looking at
+-          // the final image to see what desaturated colors end up being.
+-          'corners' => [
+-            array_fill(0, 3, 76) + [3 => 0],
+-            array_fill(0, 3, 149) + [3 => 0],
+-            array_fill(0, 3, 29) + [3 => 0],
+-            array_fill(0, 3, 225) + [3 => 127],
+-          ],
+-        ],
+-      ];
+-    }
+-
+-    $ret = [];
+-    foreach ([
+-      'image-test.png',
+-      'image-test.gif',
+-      'image-test-no-transparency.gif',
+-      'image-test.jpg',
+-      'img-test.webp',
+-      'img-test.avif',
+-    ] as $file_name) {
+-      foreach ($test_cases as $test_case => $values) {
+-        $operation = $values['operation'];
+-        $arguments = $values['arguments'];
+-        unset($values['operation'], $values['arguments']);
+-        $ret[] = [$file_name, $test_case, $operation, $arguments, $values];
+-      }
+-    }
+-
+-    return $ret;
+-  }
+-
+-  /**
+-   * Tests height, width and color for the corners for the final images.
+-   *
+-   * Since PHP can't visually check that our images have been manipulated
+-   * properly, build a list of expected color values for each of the corners and
+-   * the expected height and widths for the final images.
+-   */
+-  #[DataProvider('providerTestImageFiles')]
+-  public function testManipulations(string $file_name, string $test_case, string $operation, array $arguments, array $expected): void {
+-    // Load up a fresh image.
+-    $image = $this->imageFactory->get('core/tests/fixtures/files/' . $file_name);
+-    $toolkit = $image->getToolkit();
+-    $this->assertTrue($image->isValid());
+-    $image_original_type = $image->getToolkit()->getType();
+-
+-    $this->assertTrue(imageistruecolor($toolkit->getImage()), "Image '$file_name' after load should be a truecolor image, but it is not.");
+-
+-    // Perform our operation.
+-    $image->apply($operation, $arguments);
+-
+-    // Flush Image object to disk storage.
+-    $file_path = $this->directory . '/' . $test_case . image_type_to_extension($image->getToolkit()->getType());
+-    $image->save($file_path);
+-
+-    // Check that the both the GD object and the Image object have an accurate
+-    // record of the dimensions.
+-    if (isset($expected['height']) && isset($expected['width'])) {
+-      $this->assertSame($expected['height'], imagesy($toolkit->getImage()), "Image '$file_name' after '$test_case' should have a proper height.");
+-      $this->assertSame($expected['width'], imagesx($toolkit->getImage()), "Image '$file_name' after '$test_case' should have a proper width.");
+-      $this->assertSame($expected['height'], $image->getHeight(), "Image '$file_name' after '$test_case' should have a proper height.");
+-      $this->assertSame($expected['width'], $image->getWidth(), "Image '$file_name' after '$test_case' should have a proper width.");
+-    }
+-
+-    // Now check each of the corners to ensure color correctness.
+-    foreach ($expected['corners'] as $key => $expected_color) {
+-      // The test gif that does not have transparency color set is a
+-      // special case.
+-      if ($file_name === 'image-test-no-transparency.gif') {
+-        if ($test_case == 'desaturate') {
+-          // For desaturating, keep the expected color from the test
+-          // data, but set alpha channel to fully opaque.
+-          $expected_color[3] = 0;
+-        }
+-        elseif ($expected_color === static::TRANSPARENT) {
+-          // Set expected pixel to yellow where the others have
+-          // transparent.
+-          $expected_color = static::YELLOW;
+-        }
+-      }
+-
+-      // Get the location of the corner.
+-      [$x, $y] = match ($key) {
+-        0 => [0, 0],
+-        1 => [$image->getWidth() - 1, 0],
+-        2 => [$image->getWidth() - 1, $image->getHeight() - 1],
+-        3 => [0, $image->getHeight() - 1],
+-      };
+-
+-      $actual_color = $this->getPixelColor($image, $x, $y);
+-
+-      // If image cannot handle transparent colors, skip the pixel color test.
+-      if ($actual_color[3] === 0 && $expected_color[3] === 127) {
+-        continue;
+-      }
+-
+-      // JPEG and AVIF have small differences in color after processing.
+-      $tolerance = match($image_original_type) {
+-        IMAGETYPE_JPEG, IMAGETYPE_AVIF => 3,
+-        default => 0,
+-      };
+-
+-      $this->assertColorsAreEqual($expected_color, $actual_color, $tolerance, "Image '$file_name' object after '$test_case' action has the correct color placement at corner '$key'");
+-    }
+-
+-    // Check that saved image reloads without raising PHP errors.
+-    $image_reloaded = $this->imageFactory->get($file_path);
+-    $this->assertInstanceOf(\GdImage::class, $image_reloaded->getToolkit()->getImage());
+-  }
+-
    /**
-@@ -383,21 +382,18 @@ public static function providerTestDatabaseInfoInitialization(): array {
-       ['mysql', '', NULL, 'Drupal\\mysql\\Driver\\Database\\mysql', 'core/modules/mysql/src/Driver/Database/mysql/'],
-       ['mysql', 'Drupal\\Core\\Database\\Driver\\mysql', NULL, 'Drupal\\mysql\\Driver\\Database\\mysql', 'core/modules/mysql/src/Driver/Database/mysql/'],
-       ['mysql', 'Drupal\\mysql\\Driver\\Database\\mysql', NULL, 'Drupal\\mysql\\Driver\\Database\\mysql', 'core/modules/mysql/src/Driver/Database/mysql/'],
--      ['mysql', 'Drupal\\Driver\\Database\\mysql', NULL, 'Drupal\\Driver\\Database\\mysql', NULL],
-       ['mysql', 'Drupal\\mysql\\Driver\\Database\\mysql', 'modules/custom/mysql/src/Driver/Database/mysql/', 'Drupal\\mysql\\Driver\\Database\\mysql', 'modules/custom/mysql/src/Driver/Database/mysql/'],
- 
-       ['pgsql', NULL, NULL, 'Drupal\\pgsql\\Driver\\Database\\pgsql', 'core/modules/pgsql/src/Driver/Database/pgsql/'],
-       ['pgsql', '', NULL, 'Drupal\\pgsql\\Driver\\Database\\pgsql', 'core/modules/pgsql/src/Driver/Database/pgsql/'],
-       ['pgsql', 'Drupal\\Core\\Database\\Driver\\pgsql', NULL, 'Drupal\\pgsql\\Driver\\Database\\pgsql', 'core/modules/pgsql/src/Driver/Database/pgsql/'],
-       ['pgsql', 'Drupal\\pgsql\\Driver\\Database\\pgsql', NULL, 'Drupal\\pgsql\\Driver\\Database\\pgsql', 'core/modules/pgsql/src/Driver/Database/pgsql/'],
--      ['pgsql', 'Drupal\\Driver\\Database\\pgsql', NULL, 'Drupal\\Driver\\Database\\pgsql', NULL],
-       ['pgsql', 'Drupal\\pgsql\\Driver\\Database\\pgsql', 'modules/custom/pgsql/src/Driver/Database/pgsql/', 'Drupal\\pgsql\\Driver\\Database\\pgsql', 'modules/custom/pgsql/src/Driver/Database/pgsql/'],
- 
-       ['sqlite', NULL, NULL, 'Drupal\\sqlite\\Driver\\Database\\sqlite', 'core/modules/sqlite/src/Driver/Database/sqlite/'],
-       ['sqlite', '', NULL, 'Drupal\\sqlite\\Driver\\Database\\sqlite', 'core/modules/sqlite/src/Driver/Database/sqlite/'],
-       ['sqlite', 'Drupal\\Core\\Database\\Driver\\sqlite', NULL, 'Drupal\\sqlite\\Driver\\Database\\sqlite', 'core/modules/sqlite/src/Driver/Database/sqlite/'],
-       ['sqlite', 'Drupal\\sqlite\\Driver\\Database\\sqlite', NULL, 'Drupal\\sqlite\\Driver\\Database\\sqlite', 'core/modules/sqlite/src/Driver/Database/sqlite/'],
--      ['sqlite', 'Drupal\\Driver\\Database\\sqlite', NULL, 'Drupal\\Driver\\Database\\sqlite', NULL],
-       ['sqlite', 'Drupal\\sqlite\\Driver\\Database\\sqlite', 'modules/custom/sqlite/src/Driver/Database/sqlite/', 'Drupal\\sqlite\\Driver\\Database\\sqlite', 'modules/custom/sqlite/src/Driver/Database/sqlite/'],
-     ];
+    * Tests supported extensions.
+    *
+@@ -461,59 +152,6 @@ public function testCreateNewFailures(): void {
+     $this->assertTrue($image->isValid(), 'CreateNew with valid arguments validates the Image.');
    }
+ 
+-  /**
+-   * Tests for GIF images with transparency.
+-   */
+-  public function testGifTransparentImages(): void {
+-    // Test loading an indexed GIF image with transparent color set.
+-    // Color at top-right pixel should be fully transparent.
+-    $file = 'image-test-transparent-indexed.gif';
+-    $image = $this->imageFactory->get('core/tests/fixtures/files/' . $file);
+-    $gd_image = $image->getToolkit()->getImage();
+-    $color_index = imagecolorat($gd_image, $image->getWidth() - 1, 0);
+-    $color = array_values(imagecolorsforindex($gd_image, $color_index));
+-    $this->assertEquals(static::ROTATE_TRANSPARENT, $color, "Image {$file} after load has full transparent color at corner 1.");
+-
+-    // Test deliberately creating a GIF image with no transparent color set.
+-    // Color at top-right pixel should be fully transparent while in memory,
+-    // fully opaque after flushing image to file.
+-    $file = 'image-test-no-transparent-color-set.gif';
+-    $file_path = $this->directory . '/' . $file;
+-    // Create image.
+-    $image = $this->imageFactory->get();
+-    $image->createNew(50, 20, 'gif', NULL);
+-    $gd_image = $image->getToolkit()->getImage();
+-    $color_index = imagecolorat($gd_image, $image->getWidth() - 1, 0);
+-    $color = array_values(imagecolorsforindex($gd_image, $color_index));
+-    $this->assertEquals(static::ROTATE_TRANSPARENT, $color, "New GIF image with no transparent color set after creation has full transparent color at corner 1.");
+-    // Save image.
+-    $this->assertTrue($image->save($file_path), "New GIF image {$file} was saved.");
+-    // Reload image.
+-    $image_reloaded = $this->imageFactory->get($file_path);
+-    $gd_image = $image_reloaded->getToolkit()->getImage();
+-    $color_index = imagecolorat($gd_image, $image_reloaded->getWidth() - 1, 0);
+-    $color = array_values(imagecolorsforindex($gd_image, $color_index));
+-    // Check explicitly for alpha == 0 as the rest of the color has been
+-    // compressed and may have slight difference from full white.
+-    $this->assertEquals(0, $color[3], "New GIF image {$file} after reload has no transparent color at corner 1.");
+-
+-    // Test loading an image whose transparent color index is out of range.
+-    // This image was generated by taking an initial image with a palette size
+-    // of 6 colors, and setting the transparent color index to 6 (one higher
+-    // than the largest allowed index), as follows:
+-    // @code
+-    // $image = imagecreatefromgif('core/tests/fixtures/files/image-test.gif');
+-    // imagecolortransparent($image, 6);
+-    // imagegif($image, 'core/tests/fixtures/files/image-test-transparent-out-of-range.gif');
+-    // @endcode
+-    // This allows us to test that an image with an out-of-range color index
+-    // can be loaded correctly.
+-    $file = 'image-test-transparent-out-of-range.gif';
+-    $image = $this->imageFactory->get('core/tests/fixtures/files/' . $file);
+-    $this->assertTrue($image->isValid(), "Image '$file' after load should be valid, but it is not.");
+-    $this->assertTrue(imageistruecolor($image->getToolkit()->getImage()), "Image '$file' after load should be a truecolor image, but it is not.");
+-  }
+-
+   /**
+    * Tests calling a missing image operation plugin.
+    */
+@@ -541,48 +179,4 @@ public function testGetRequirements(): void {
+     ], $this->imageFactory->get()->getToolkit()->getRequirements());
+   }
+ 
+-  /**
+-   * Tests that GD doesn't trigger warnings for iCCP sRGB profiles.
+-   *
+-   * If image is saved with 'sRGB IEC61966-2.1' sRGB profile, GD will trigger
+-   * a warning about an incorrect sRGB profile'.
+-   */
+-  #[DataProvider('pngImageProvider')]
+-  public function testIncorrectIccpSrgbProfile(string $image_uri): void {
+-    $warning_detected = FALSE;
+-    // @see https://github.com/sebastianbergmann/phpunit/issues/5062
+-    $error_handler = static function () use (&$warning_detected): void {
+-      $warning_detected = TRUE;
+-    };
+-    // $error_level is intentionally set to 0. It's required for PHP '@'
+-    // suppression not to trigger Drupal error handler. In that case native
+-    // PHP handler will be called and Drupal's will serve like a notification.
+-    set_error_handler($error_handler, 0);
+-
+-    $image_factory = $this->container->get('image.factory');
+-    \assert($image_factory instanceof ImageFactory);
+-
+-    $image = $image_factory->get($image_uri, 'gd');
+-    // We need to do any image manipulation to trigger GD profile loading.
+-    $image->resize('100', '100');
+-
+-    self::assertFalse($warning_detected);
+-
+-    restore_error_handler();
+-  }
+-
+-  /**
+-   * Provides a list of PNG image URIs for testing.
+-   *
+-   * @return \Generator
+-   *   The test data.
+-   */
+-  public static function pngImageProvider(): \Generator {
+-    yield 'valid image 1' => ['core/tests/fixtures/files/image-1.png'];
+-    yield 'valid image 2' => ['core/tests/fixtures/files/image-test.png'];
+-    yield 'PNG with iCCP profile' => [
+-      'core/tests/fixtures/files/image-test-iccp-profile.png',
+-    ];
+-  }
+-
+ }
