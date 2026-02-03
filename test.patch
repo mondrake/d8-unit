@@ -10,41 +10,57 @@ index e41df23075a..dc053a73d20 100644
      ];
  
      try {
+diff --git a/core/modules/mysqli/src/Driver/Database/mysqli/Result.php b/core/modules/mysqli/src/Driver/Database/mysqli/Result.php
+index 2c5e57c3aa8..2713236baa6 100644
+--- a/core/modules/mysqli/src/Driver/Database/mysqli/Result.php
++++ b/core/modules/mysqli/src/Driver/Database/mysqli/Result.php
+@@ -23,7 +23,7 @@ class Result extends ResultBase {
+    *   The fetch mode.
+    * @param array{class: class-string, constructor_args: list<mixed>, column: int, cursor_orientation?: int, cursor_offset?: int} $fetchOptions
+    *   The fetch options.
+-   * @param \mysqli_result|false $mysqliResult
++   * @param \mysqli_result|bool $mysqliResult
+    *   The MySQLi result object.
+    * @param \mysqli $mysqliConnection
+    *   Client database connection object.
+@@ -31,7 +31,7 @@ class Result extends ResultBase {
+   public function __construct(
+     FetchAs $fetchMode,
+     array $fetchOptions,
+-    protected readonly \mysqli_result|false $mysqliResult,
++    protected readonly \mysqli_result|bool $mysqliResult,
+     protected readonly \mysqli $mysqliConnection,
+   ) {
+     parent::__construct($fetchMode, $fetchOptions);
 diff --git a/core/modules/mysqli/src/Driver/Database/mysqli/Statement.php b/core/modules/mysqli/src/Driver/Database/mysqli/Statement.php
-index f3b4346992d..f2378ed96ae 100644
+index f3b4346992d..ef7a5660cac 100644
 --- a/core/modules/mysqli/src/Driver/Database/mysqli/Statement.php
 +++ b/core/modules/mysqli/src/Driver/Database/mysqli/Statement.php
-@@ -88,10 +88,28 @@ public function execute($args = [], $options = []) {
-       if (!$this->hasClientStatement()) {
-         // Replace named placeholders with positional ones if needed.
-         $this->paramsPositions = array_flip(array_keys($args));
-+dump(['a', $this->queryString, $args, $this->paramsPositions]);
+@@ -91,7 +91,22 @@ public function execute($args = [], $options = []) {
          $converter = new NamedPlaceholderConverter();
          $converter->parse($this->queryString, $args);
          [$convertedQueryString, $args] = [$converter->getConvertedSQL(), $converter->getConvertedParameters()];
 -        $this->clientStatement = $this->clientConnection->prepare($convertedQueryString);
-+dump(['b', $convertedQueryString, $args]);
 +        if ($this->connection->getConnectionOptions()['use_prepared_statements']) {
 +          $this->clientStatement = $this->clientConnection->prepare($convertedQueryString);
 +        }
 +        else {
 +          $args = array_map(fn (string $arg): string => "'". $this->clientConnection->real_escape_string($arg) . "'", $args);
 +          preg_match_all('/(?<!\?)\?(?!\?)/', $convertedQueryString, $matches, \PREG_OFFSET_CAPTURE);
-+          $strx = '';
++          $executableQueryString = '';
 +          $iStart = 0;
 +          $iArg = 0;
-+          foreach ($matches[0] as $x) {
-+              $iLength = $x[1] - $iStart;
-+              $strx .= substr($convertedQueryString, $iStart, $iLength) . $args[$iArg++];
++          foreach ($matches[0] as $match) {
++              $iLength = $match[1] - $iStart;
++              $executableQueryString .= substr($convertedQueryString, $iStart, $iLength) . $args[$iArg++];
 +              $iStart = $iStart + $iLength + 1;
 +          }
-+          $strx .= substr($convertedQueryString, $iStart);
-+dump(['c', $convertedQueryString, $args, $strx]);
++          $executableQueryString .= substr($convertedQueryString, $iStart);
 +        }
        }
        else {
          // Transform the $args to positional.
-@@ -104,13 +122,18 @@ public function execute($args = [], $options = []) {
+@@ -104,13 +119,24 @@ public function execute($args = [], $options = []) {
  
        // In mysqli, the results of the statement execution are returned in a
        // different object than the statement itself.
@@ -65,7 +81,13 @@ index f3b4346992d..f2378ed96ae 100644
 +        );
 +      }
 +      else {
-+
++        $return = $this->getClientStatement()->query($executableQueryString);
++        $this->result = new Result(
++          $this->fetchMode,
++          $this->fetchOptions,
++          $return,
++          $this->clientConnection,
++        );
 +      }
        $this->markResultsetIterable($return);
      }
