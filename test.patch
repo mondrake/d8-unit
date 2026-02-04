@@ -33,10 +33,10 @@ index 2c5e57c3aa8..2713236baa6 100644
    ) {
      parent::__construct($fetchMode, $fetchOptions);
 diff --git a/core/modules/mysqli/src/Driver/Database/mysqli/Statement.php b/core/modules/mysqli/src/Driver/Database/mysqli/Statement.php
-index f3b4346992d..4083ba41a4c 100644
+index f3b4346992d..ce7d349d4b5 100644
 --- a/core/modules/mysqli/src/Driver/Database/mysqli/Statement.php
 +++ b/core/modules/mysqli/src/Driver/Database/mysqli/Statement.php
-@@ -91,7 +91,22 @@ public function execute($args = [], $options = []) {
+@@ -91,7 +91,25 @@ public function execute($args = [], $options = []) {
          $converter = new NamedPlaceholderConverter();
          $converter->parse($this->queryString, $args);
          [$convertedQueryString, $args] = [$converter->getConvertedSQL(), $converter->getConvertedParameters()];
@@ -45,51 +45,102 @@ index f3b4346992d..4083ba41a4c 100644
 +          $this->clientStatement = $this->clientConnection->prepare($convertedQueryString);
 +        }
 +        else {
-+          $args = array_map(fn (string $arg): string => "'". $this->clientConnection->real_escape_string($arg) . "'", $args);
++          $args = array_map(
++            fn (?string $arg): string => $arg === NULL ? 'NULL' : "'" . $this->clientConnection->real_escape_string($arg) . "'",
++            $args,
++          );
 +          preg_match_all('/(?<!\?)\?(?!\?)/', $convertedQueryString, $matches, \PREG_OFFSET_CAPTURE);
 +          $executableQueryString = '';
 +          $iStart = 0;
 +          $iArg = 0;
 +          foreach ($matches[0] as $match) {
-+              $iLength = $match[1] - $iStart;
-+              $executableQueryString .= substr($convertedQueryString, $iStart, $iLength) . $args[$iArg++];
-+              $iStart = $iStart + $iLength + 1;
++            $iLength = $match[1] - $iStart;
++            $executableQueryString .= substr($convertedQueryString, $iStart, $iLength) . $args[$iArg++];
++            $iStart = $iStart + $iLength + 1;
 +          }
 +          $executableQueryString .= substr($convertedQueryString, $iStart);
 +        }
        }
        else {
          // Transform the $args to positional.
-@@ -104,13 +119,25 @@ public function execute($args = [], $options = []) {
+@@ -104,11 +122,19 @@ public function execute($args = [], $options = []) {
  
        // In mysqli, the results of the statement execution are returned in a
        // different object than the statement itself.
 -      $return = $this->getClientStatement()->execute($args);
--      $this->result = new Result(
--        $this->fetchMode,
--        $this->fetchOptions,
--        $this->getClientStatement()->get_result(),
--        $this->clientConnection,
--      );
 +      if ($this->connection->getConnectionOptions()['use_prepared_statements']) {
 +        $return = $this->getClientStatement()->execute($args);
-+        $this->result = new Result(
-+          $this->fetchMode,
-+          $this->fetchOptions,
-+          $this->getClientStatement()->get_result(),
-+          $this->clientConnection,
-+        );
++        $result = $this->getClientStatement()->get_result();
 +      }
 +      else {
-+        $return = $this->clientConnection->query($executableQueryString);
-+        $this->result = new Result(
-+          $this->fetchMode,
-+          $this->fetchOptions,
-+          $return,
-+          $this->clientConnection,
-+        );
-+        $return = (bool) $return;
++        assert(isset($executableQueryString));
++        $result = $this->clientConnection->query($executableQueryString);
++        $return = (bool) $result;
 +      }
+       $this->result = new Result(
+         $this->fetchMode,
+         $this->fetchOptions,
+-        $this->getClientStatement()->get_result(),
++        $result,
+         $this->clientConnection,
+       );
        $this->markResultsetIterable($return);
-     }
-     catch (\Exception $e) {
+diff --git a/core/modules/mysqli/tests/src/Kernel/mysqli/PreparedStatementOptionTest.php b/core/modules/mysqli/tests/src/Kernel/mysqli/PreparedStatementOptionTest.php
+new file mode 100644
+index 00000000000..64ee2723d79
+--- /dev/null
++++ b/core/modules/mysqli/tests/src/Kernel/mysqli/PreparedStatementOptionTest.php
+@@ -0,0 +1,37 @@
++<?php
++
++declare(strict_types=1);
++
++namespace Drupal\Tests\mysqli\Kernel\mysqli;
++
++use Drupal\KernelTests\Core\Database\DriverSpecificTransactionTestBase;
++use PHPUnit\Framework\Attributes\Group;
++use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
++use PHPUnit\Framework\Attributes\TestWith;
++
++/**
++ * Tests for the use of prepared statements in mysqli.
++ */
++#[Group('Database')]
++#[RunTestsInSeparateProcesses]
++class PreparedStatementOptionTest extends DriverSpecificTransactionTestBase {
++
++  /**
++   * Tests for the use of prepared statements in mysqli.
++   *
++   * @param bool $usePreparedStatements
++   *   Whether or not to use prepared statements when querying.
++   */
++  #[TestWith([TRUE])]
++  #[TestWith([FALSE])]
++  public function testNoBlocksCreatedDuringConfigSync(bool $usePreparedStatements): void {
++    // Create an additional connection with the 'use_prepared_statements'
++    // option set to our testing.
++    $connectionInfo = Database::getConnectionInfo();
++    $connectionInfo['default']['use_prepared_statements'] = $usePreparedStatements;
++    Database::addConnectionInfo('default', 'test', $connectionInfo['default']);
++    $testConnection = Database::getConnection('test');
++    $this->assertSame($usePreparedStatements, $testConnection->getConnectionOptions()['use_prepared_statements']);
++  }
++
++}
+diff --git a/core/tests/Drupal/FunctionalTests/Installer/InstallerTestBase.php b/core/tests/Drupal/FunctionalTests/Installer/InstallerTestBase.php
+index 82c5d8e6b69..be346ca35b2 100644
+--- a/core/tests/Drupal/FunctionalTests/Installer/InstallerTestBase.php
++++ b/core/tests/Drupal/FunctionalTests/Installer/InstallerTestBase.php
+@@ -259,7 +259,10 @@ protected function setUpProfile() {
+   protected function setUpSettings() {
+     $parameters = $this->parameters['forms']['install_settings_form'];
+     $driver = $parameters['driver'];
+-    unset($parameters[$driver]['dependencies']);
++    unset(
++      $parameters[$driver]['dependencies'],
++      $parameters[$driver]['use_prepared_statements'],
++    );
+     $edit = $this->translatePostValues($parameters);
+     $this->submitForm($edit, $this->translations['Save and continue']);
+   }
