@@ -33,7 +33,7 @@ index 2c5e57c3aa8..2713236baa6 100644
    ) {
      parent::__construct($fetchMode, $fetchOptions);
 diff --git a/core/modules/mysqli/src/Driver/Database/mysqli/Statement.php b/core/modules/mysqli/src/Driver/Database/mysqli/Statement.php
-index f3b4346992d..ce7d349d4b5 100644
+index f3b4346992d..32874002fd2 100644
 --- a/core/modules/mysqli/src/Driver/Database/mysqli/Statement.php
 +++ b/core/modules/mysqli/src/Driver/Database/mysqli/Statement.php
 @@ -91,7 +91,25 @@ public function execute($args = [], $options = []) {
@@ -63,17 +63,19 @@ index f3b4346992d..ce7d349d4b5 100644
        }
        else {
          // Transform the $args to positional.
-@@ -104,11 +122,19 @@ public function execute($args = [], $options = []) {
+@@ -104,11 +122,21 @@ public function execute($args = [], $options = []) {
  
        // In mysqli, the results of the statement execution are returned in a
        // different object than the statement itself.
 -      $return = $this->getClientStatement()->execute($args);
 +      if ($this->connection->getConnectionOptions()['use_prepared_statements']) {
++dump(['yes', $convertedQueryString]);
 +        $return = $this->getClientStatement()->execute($args);
 +        $result = $this->getClientStatement()->get_result();
 +      }
 +      else {
 +        assert(isset($executableQueryString));
++dump(['no', $executableQueryString]);
 +        $result = $this->clientConnection->query($executableQueryString);
 +        $return = (bool) $result;
 +      }
@@ -87,17 +89,18 @@ index f3b4346992d..ce7d349d4b5 100644
        $this->markResultsetIterable($return);
 diff --git a/core/modules/mysqli/tests/src/Kernel/mysqli/PreparedStatementOptionTest.php b/core/modules/mysqli/tests/src/Kernel/mysqli/PreparedStatementOptionTest.php
 new file mode 100644
-index 00000000000..64ee2723d79
+index 00000000000..2e29ad7b31b
 --- /dev/null
 +++ b/core/modules/mysqli/tests/src/Kernel/mysqli/PreparedStatementOptionTest.php
-@@ -0,0 +1,37 @@
+@@ -0,0 +1,70 @@
 +<?php
 +
 +declare(strict_types=1);
 +
 +namespace Drupal\Tests\mysqli\Kernel\mysqli;
 +
-+use Drupal\KernelTests\Core\Database\DriverSpecificTransactionTestBase;
++use Drupal\Core\Database\Database;
++use Drupal\KernelTests\Core\Database\DriverSpecificKernelTestBase;
 +use PHPUnit\Framework\Attributes\Group;
 +use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 +use PHPUnit\Framework\Attributes\TestWith;
@@ -107,7 +110,7 @@ index 00000000000..64ee2723d79
 + */
 +#[Group('Database')]
 +#[RunTestsInSeparateProcesses]
-+class PreparedStatementOptionTest extends DriverSpecificTransactionTestBase {
++class PreparedStatementOptionTest extends DriverSpecificKernelTestBase {
 +
 +  /**
 +   * Tests for the use of prepared statements in mysqli.
@@ -125,6 +128,38 @@ index 00000000000..64ee2723d79
 +    Database::addConnectionInfo('default', 'test', $connectionInfo['default']);
 +    $testConnection = Database::getConnection('test');
 +    $this->assertSame($usePreparedStatements, $testConnection->getConnectionOptions()['use_prepared_statements']);
++
++    // Taken below from SelectComplexTest::testGroupBy() to test a non-trivial
++    // query.
++    $query = $testConnection->select('test_task', 't');
++    $countField = $query->addExpression('COUNT([task])', 'num');
++    $taskField = $query->addField('t', 'task');
++    $query->orderBy($countField);
++    $query->groupBy($taskField);
++    $this->assertMatchesRegularExpression("/ORDER BY .*[^\w\s]num[^\w\s]/", (string) $query);
++    $this->assertMatchesRegularExpression("/GROUP BY .*[^\w\s]task[^\w\s]/", (string) $query);
++    $result = $query->execute();
++    $numRecords = 0;
++    $lastCount = 0;
++    $records = [];
++    // Verify that the results are returned in the correct order.
++    foreach ($result as $record) {
++      $numRecords++;
++      $this->assertGreaterThanOrEqual($lastCount, $record->$countField);
++      $lastCount = $record->$countField;
++      $records[$record->$taskField] = $record->$countField;
++    }
++    $correctResults = [
++      'eat' => 1,
++      'sleep' => 2,
++      'code' => 1,
++      'found new band' => 1,
++      'perform at superbowl' => 1,
++    ];
++    foreach ($correctResults as $task => $count) {
++      $this->assertEquals($count, $records[$task]);
++    }
++    $this->assertEquals(6, $numRecords);
 +  }
 +
 +}
