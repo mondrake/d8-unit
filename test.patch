@@ -1,166 +1,958 @@
-diff --git a/core/modules/mysqli/src/Driver/Database/mysqli/Connection.php b/core/modules/mysqli/src/Driver/Database/mysqli/Connection.php
-index e41df23075a..dc053a73d20 100644
---- a/core/modules/mysqli/src/Driver/Database/mysqli/Connection.php
-+++ b/core/modules/mysqli/src/Driver/Database/mysqli/Connection.php
-@@ -64,6 +64,7 @@ public static function open(array &$connection_options = []) {
-     // Allow PDO options to be overridden.
-     $connection_options += [
-       'pdo' => [],
-+      'use_prepared_statements' => FALSE,
-     ];
+diff --git a/core/lib/Drupal/Core/Database/FetchModeTrait.php b/core/lib/Drupal/Core/Database/FetchModeTrait.php
+index 70bb994e2cb..137ad14992c 100644
+--- a/core/lib/Drupal/Core/Database/FetchModeTrait.php
++++ b/core/lib/Drupal/Core/Database/FetchModeTrait.php
+@@ -98,8 +98,8 @@ protected function assocToColumn(array $rowAssoc, array $columnNames, int $colum
+   protected function assocToFetchMode(array $rowAssoc, FetchAs $mode, array $fetchOptions): array|object|int|float|string|bool|NULL {
+     return match($mode) {
+       FetchAs::Associative => $rowAssoc,
+-      FetchAs::ClassObject => $this->assocToClass($rowAssoc, $fetchOptions['class'], $fetchOptions['constructor_args']),
+-      FetchAs::Column => $this->assocToColumn($rowAssoc, array_keys($rowAssoc), $fetchOptions['column']),
++      FetchAs::ClassObject => $this->assocToClass($rowAssoc, $fetchOptions['class'] ?? \stdClass::class, $fetchOptions['constructor_args'] ?? []),
++      FetchAs::Column => $this->assocToColumn($rowAssoc, array_keys($rowAssoc), $fetchOptions['column'] ?? 0),
+       FetchAs::List => $this->assocToNum($rowAssoc),
+       FetchAs::Object => $this->assocToObj($rowAssoc),
+     };
+diff --git a/core/lib/Drupal/Core/Database/Statement/PdoResult.php b/core/lib/Drupal/Core/Database/Statement/PdoResult.php
+index 20b0ae168cd..a4da4d2f1b2 100644
+--- a/core/lib/Drupal/Core/Database/Statement/PdoResult.php
++++ b/core/lib/Drupal/Core/Database/Statement/PdoResult.php
+@@ -6,6 +6,8 @@
  
-     try {
-diff --git a/core/modules/mysqli/src/Driver/Database/mysqli/Result.php b/core/modules/mysqli/src/Driver/Database/mysqli/Result.php
-index 2c5e57c3aa8..2713236baa6 100644
---- a/core/modules/mysqli/src/Driver/Database/mysqli/Result.php
-+++ b/core/modules/mysqli/src/Driver/Database/mysqli/Result.php
-@@ -23,7 +23,7 @@ class Result extends ResultBase {
+ /**
+  * Class for PDO-provided results of a data query language (DQL) statement.
++ *
++ * @phpstan-import-type FetchOptions from \Drupal\Core\Database\Statement\ResultBase
+  */
+ class PdoResult extends ResultBase {
+ 
+@@ -16,18 +18,22 @@ class PdoResult extends ResultBase {
+    *
+    * @param \Drupal\Core\Database\Statement\FetchAs $fetchMode
     *   The fetch mode.
-    * @param array{class: class-string, constructor_args: list<mixed>, column: int, cursor_orientation?: int, cursor_offset?: int} $fetchOptions
+-   * @param array{class: class-string, constructor_args: list<mixed>, column: int, cursor_orientation?: int, cursor_offset?: int} $fetchOptions
++   * @param FetchOptions $fetchOptions
     *   The fetch options.
--   * @param \mysqli_result|false $mysqliResult
-+   * @param \mysqli_result|bool $mysqliResult
-    *   The MySQLi result object.
-    * @param \mysqli $mysqliConnection
-    *   Client database connection object.
-@@ -31,7 +31,7 @@ class Result extends ResultBase {
+    * @param \PDOStatement $clientStatement
+    *   The PDO Statement object. PDO does not provide a separate object for
+    *   results, se we need to fetch data from the Statement.
++   * @param bool $valid
++   *   TRUE if the statement's ::execute() call was successful, or FALSE on
++   *   failure.
+    */
    public function __construct(
      FetchAs $fetchMode,
      array $fetchOptions,
--    protected readonly \mysqli_result|false $mysqliResult,
-+    protected readonly \mysqli_result|bool $mysqliResult,
-     protected readonly \mysqli $mysqliConnection,
+     protected readonly \PDOStatement $clientStatement,
++    bool $valid,
    ) {
-     parent::__construct($fetchMode, $fetchOptions);
-diff --git a/core/modules/mysqli/src/Driver/Database/mysqli/Statement.php b/core/modules/mysqli/src/Driver/Database/mysqli/Statement.php
-index f3b4346992d..ce7d349d4b5 100644
---- a/core/modules/mysqli/src/Driver/Database/mysqli/Statement.php
-+++ b/core/modules/mysqli/src/Driver/Database/mysqli/Statement.php
-@@ -91,7 +91,25 @@ public function execute($args = [], $options = []) {
-         $converter = new NamedPlaceholderConverter();
-         $converter->parse($this->queryString, $args);
-         [$convertedQueryString, $args] = [$converter->getConvertedSQL(), $converter->getConvertedParameters()];
--        $this->clientStatement = $this->clientConnection->prepare($convertedQueryString);
-+        if ($this->connection->getConnectionOptions()['use_prepared_statements']) {
-+          $this->clientStatement = $this->clientConnection->prepare($convertedQueryString);
-+        }
-+        else {
-+          $args = array_map(
-+            fn (?string $arg): string => $arg === NULL ? 'NULL' : "'" . $this->clientConnection->real_escape_string($arg) . "'",
-+            $args,
-+          );
-+          preg_match_all('/(?<!\?)\?(?!\?)/', $convertedQueryString, $matches, \PREG_OFFSET_CAPTURE);
-+          $executableQueryString = '';
-+          $iStart = 0;
-+          $iArg = 0;
-+          foreach ($matches[0] as $match) {
-+            $iLength = $match[1] - $iStart;
-+            $executableQueryString .= substr($convertedQueryString, $iStart, $iLength) . $args[$iArg++];
-+            $iStart = $iStart + $iLength + 1;
-+          }
-+          $executableQueryString .= substr($convertedQueryString, $iStart);
-+        }
-       }
-       else {
-         // Transform the $args to positional.
-@@ -104,11 +122,19 @@ public function execute($args = [], $options = []) {
+-    parent::__construct($fetchMode, $fetchOptions);
++    parent::__construct($fetchMode, $fetchOptions, $valid);
+   }
  
-       // In mysqli, the results of the statement execution are returned in a
-       // different object than the statement itself.
--      $return = $this->getClientStatement()->execute($args);
-+      if ($this->connection->getConnectionOptions()['use_prepared_statements']) {
-+        $return = $this->getClientStatement()->execute($args);
-+        $result = $this->getClientStatement()->get_result();
-+      }
-+      else {
-+        assert(isset($executableQueryString));
-+        $result = $this->clientConnection->query($executableQueryString);
-+        $return = (bool) $result;
-+      }
-       $this->result = new Result(
-         $this->fetchMode,
-         $this->fetchOptions,
--        $this->getClientStatement()->get_result(),
-+        $result,
-         $this->clientConnection,
-       );
-       $this->markResultsetIterable($return);
-diff --git a/core/modules/mysqli/tests/src/Kernel/mysqli/PreparedStatementOptionTest.php b/core/modules/mysqli/tests/src/Kernel/mysqli/PreparedStatementOptionTest.php
-new file mode 100644
-index 00000000000..b9ccc6add7c
---- /dev/null
-+++ b/core/modules/mysqli/tests/src/Kernel/mysqli/PreparedStatementOptionTest.php
-@@ -0,0 +1,57 @@
-+<?php
-+
-+declare(strict_types=1);
-+
-+namespace Drupal\Tests\mysqli\Kernel\mysqli;
-+
-+use Drupal\Core\Database\Database;
-+use Drupal\KernelTests\Core\Database\DriverSpecificDatabaseTestBase;
-+use PHPUnit\Framework\Attributes\Group;
-+use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
-+use PHPUnit\Framework\Attributes\TestWith;
-+
-+/**
-+ * Tests for the use of prepared statements in mysqli.
-+ */
-+#[Group('Database')]
-+#[RunTestsInSeparateProcesses]
-+class PreparedStatementOptionTest extends DriverSpecificDatabaseTestBase {
+   /**
+@@ -53,6 +59,8 @@ public function rowCount(): ?int {
+    * {@inheritdoc}
+    */
+   public function setFetchMode(FetchAs $mode, array $fetchOptions): bool {
++    $this->fetchMode = $mode;
++    $this->fetchOptions = $fetchOptions;
+     return match ($mode) {
+       FetchAs::ClassObject => $this->clientSetFetchMode($mode, $fetchOptions['class'], $fetchOptions['constructor_args'] ?? NULL),
+       FetchAs::Column => $this->clientSetFetchMode($mode, $fetchOptions['column']),
+@@ -67,14 +75,22 @@ public function fetch(FetchAs $mode, array $fetchOptions): array|object|int|floa
+     if (!empty($fetchOptions)) {
+       $this->setFetchMode($mode, $fetchOptions);
+     }
+-    return $this->clientFetch($mode);
++    $row = $this->clientFetch($mode);
++    if ($row === FALSE) {
++      $this->markResultsetFetchingComplete();
++      return FALSE;
++    }
++    $this->setResultsetCurrentRow($row);
++    return $row;
+   }
+ 
+   /**
+    * {@inheritdoc}
+    */
+   public function fetchAll(FetchAs $mode, array $fetchOptions): array {
+-    return $this->clientFetchAll($mode, $fetchOptions['column'] ?? $fetchOptions['class'] ?? NULL, $fetchOptions['constructor_args'] ?? NULL);
++    $result = $this->clientFetchAll($mode, $fetchOptions['column'] ?? $fetchOptions['class'] ?? NULL, $fetchOptions['constructor_args'] ?? NULL);
++    $this->markResultsetFetchingComplete();
++    return $result;
+   }
+ 
+ }
+diff --git a/core/lib/Drupal/Core/Database/Statement/PdoTrait.php b/core/lib/Drupal/Core/Database/Statement/PdoTrait.php
+index 6f8cfd2288b..7f4eb20ce3f 100644
+--- a/core/lib/Drupal/Core/Database/Statement/PdoTrait.php
++++ b/core/lib/Drupal/Core/Database/Statement/PdoTrait.php
+@@ -103,12 +103,12 @@ protected function clientSetFetchMode(FetchAs $mode, int|string|null $columnOrCl
+     return match ($mode) {
+       FetchAs::Column => $this->getClientStatement()->setFetchMode(
+         \PDO::FETCH_COLUMN,
+-        $columnOrClass ?? $this->fetchOptions['column'],
++        $columnOrClass ?? $this->fetchOptions['column'] ?? 0,
+       ),
+       FetchAs::ClassObject => $this->getClientStatement()->setFetchMode(
+         \PDO::FETCH_CLASS,
+-        $columnOrClass ?? $this->fetchOptions['class'],
+-        $constructorArguments ?? $this->fetchOptions['constructor_args'],
++        $columnOrClass ?? $this->fetchOptions['class'] ?? \stdClass::class,
++        $constructorArguments ?? $this->fetchOptions['constructor_args'] ?? [],
+       ),
+       default => $this->getClientStatement()->setFetchMode(
+         $this->fetchAsToPdo($mode),
+@@ -209,12 +209,12 @@ protected function clientFetchAll(?FetchAs $mode = NULL, int|string|null $column
+     return match ($mode) {
+       FetchAs::Column => $this->getClientStatement()->fetchAll(
+         \PDO::FETCH_COLUMN,
+-        $columnOrClass ?? $this->fetchOptions['column'],
++        $columnOrClass ?? $this->fetchOptions['column'] ?? 0,
+       ),
+       FetchAs::ClassObject => $this->getClientStatement()->fetchAll(
+         \PDO::FETCH_CLASS,
+-        $columnOrClass ?? $this->fetchOptions['class'],
+-        $constructorArguments ?? $this->fetchOptions['constructor_args'],
++        $columnOrClass ?? $this->fetchOptions['class'] ?? \stdClass::class,
++        $constructorArguments ?? $this->fetchOptions['constructor_args'] ?? [],
+       ),
+       default => $this->getClientStatement()->fetchAll(
+         $this->fetchAsToPdo($mode ?? $this->fetchMode),
+diff --git a/core/lib/Drupal/Core/Database/Statement/PrefetchedResult.php b/core/lib/Drupal/Core/Database/Statement/PrefetchedResult.php
+index 89f095edfd8..79dbceb970e 100644
+--- a/core/lib/Drupal/Core/Database/Statement/PrefetchedResult.php
++++ b/core/lib/Drupal/Core/Database/Statement/PrefetchedResult.php
+@@ -8,6 +8,8 @@
+ 
+ /**
+  * Class for prefetched results of a data query language (DQL) statement.
++ *
++ * @phpstan-import-type FetchOptions from \Drupal\Core\Database\Statement\ResultBase
+  */
+ class PrefetchedResult extends ResultBase {
+ 
+@@ -28,20 +30,24 @@ class PrefetchedResult extends ResultBase {
+    *
+    * @param \Drupal\Core\Database\Statement\FetchAs $fetchMode
+    *   The fetch mode.
+-   * @param array{class: class-string, constructor_args: list<mixed>, column: int, cursor_orientation?: int, cursor_offset?: int} $fetchOptions
++   * @param FetchOptions $fetchOptions
+    *   The fetch options.
+    * @param array $data
+    *   The prefetched data, in FetchAs::Associative format.
+    * @param int|null $rowCount
+    *   The row count.
++   * @param bool $valid
++   *   TRUE if the statement's ::execute() call was successful, or FALSE on
++   *   failure.
+    */
+   public function __construct(
+     FetchAs $fetchMode,
+     array $fetchOptions,
+     protected array $data,
+     public readonly ?int $rowCount,
++    bool $valid,
+   ) {
+-    parent::__construct($fetchMode, $fetchOptions);
++    parent::__construct($fetchMode, $fetchOptions, $valid);
+     $this->columnNames = isset($this->data[0]) ? array_keys($this->data[0]) : [];
+     $this->currentRowIndex = -1;
+   }
+@@ -57,10 +63,8 @@ public function rowCount(): ?int {
+    * {@inheritdoc}
+    */
+   public function setFetchMode(FetchAs $mode, array $fetchOptions): bool {
+-    // We do not really need to do anything here, since calls to any of this
+-    // class' methods require an explicit fetch mode to be passed in, and we
+-    // have no longer an active client statement to which we may want to pass
+-    // the default fetch mode. Just return TRUE.
++    $this->fetchMode = $mode;
++    $this->fetchOptions = $fetchOptions;
+     return TRUE;
+   }
+ 
+@@ -71,11 +75,14 @@ public function fetch(FetchAs $mode, array $fetchOptions): array|object|int|floa
+     $this->currentRowIndex++;
+     if (!isset($this->data[$this->currentRowIndex])) {
+       $this->currentRowIndex = NULL;
++      $this->markResultsetFetchingComplete();
+       return FALSE;
+     }
+     $rowAssoc = $this->data[$this->currentRowIndex];
+     unset($this->data[$this->currentRowIndex]);
+-    return $this->assocToFetchMode($rowAssoc, $mode, $fetchOptions);
++    $row = $this->assocToFetchMode($rowAssoc, $mode, $fetchOptions);
++    $this->setResultsetCurrentRow($row);
++    return $row;
+   }
+ 
+   /**
+diff --git a/core/lib/Drupal/Core/Database/Statement/ResultBase.php b/core/lib/Drupal/Core/Database/Statement/ResultBase.php
+index af1b12a5653..4a54f87a930 100644
+--- a/core/lib/Drupal/Core/Database/Statement/ResultBase.php
++++ b/core/lib/Drupal/Core/Database/Statement/ResultBase.php
+@@ -4,27 +4,68 @@
+ 
+ namespace Drupal\Core\Database\Statement;
+ 
++use Drupal\Core\Database\DatabaseExceptionWrapper;
+ use Drupal\Core\Database\FetchModeTrait;
+ 
+ /**
+  * Base class for results of a data query language (DQL) statement.
++ *
++ * @phpstan-type FetchOptions array{'class'?: class-string, 'constructor_args'?: list<mixed>, 'column'?: int}
+  */
+-abstract class ResultBase {
++abstract class ResultBase implements \Iterator {
+ 
+   use FetchModeTrait;
+ 
++  /**
++   * Holds the default fetch mode.
++   */
++  // @phpcs:ignore Drupal.Commenting.VariableComment.Missing
++  public protected(set) FetchAs $fetchMode;
 +
 +  /**
-+   * Tests for the use of prepared statements in mysqli.
++   * Holds fetch options.
 +   *
-+   * @param bool $usePreparedStatements
-+   *   Whether or not to use prepared statements when querying.
++   * @var FetchOptions
 +   */
-+  #[TestWith([TRUE])]
-+  #[TestWith([FALSE])]
-+  public function testNoBlocksCreatedDuringConfigSync(bool $usePreparedStatements): void {
-+    // Create an additional connection with the 'use_prepared_statements'
-+    // option set to our testing.
-+    $connectionInfo = Database::getConnectionInfo();
-+    $connectionInfo['default']['use_prepared_statements'] = $usePreparedStatements;
-+    Database::addConnectionInfo('default', 'test', $connectionInfo['default']);
-+    $testConnection = Database::getConnection('test');
-+    $this->assertSame($usePreparedStatements, $testConnection->getConnectionOptions()['use_prepared_statements']);
++  // @phpcs:ignore Drupal.Commenting.VariableComment.Missing
++  public protected(set) array $fetchOptions;
 +
-+    // Taken below from InsertTest::testMultiInsert() to test non-trivial
-+    // queries.
-+    $num_records_before = (int) $testConnection->query('SELECT COUNT(*) FROM {test}')->fetchField();
-+    $query = $testConnection->insert('test');
-+    $query->fields(['name' => 'Larry', 'age' => '30']);
-+    $query->values(['age' => '31', 'name' => 'Curly']);
-+    $this->assertCount(2, $query);
-+    $query->values(['Moe', '32']);
-+    $this->assertCount(3, $query);
-+    $query->execute();
-+    $num_records_after = (int) $testConnection->query('SELECT COUNT(*) FROM {test}')->fetchField();
-+    $this->assertSame($num_records_before + 3, $num_records_after);
-+    $saved_age = $testConnection->query('SELECT [age] FROM {test} WHERE [name] = :name', [':name' => 'Larry'])->fetchField();
-+    $this->assertSame('30', $saved_age);
-+    $saved_age = $testConnection->query('SELECT [age] FROM {test} WHERE [name] = :name', [':name' => 'Curly'])->fetchField();
-+    $this->assertSame('31', $saved_age);
-+    $saved_age = $testConnection->query('SELECT [age] FROM {test} WHERE [name] = :name', [':name' => 'Moe'])->fetchField();
-+    $this->assertSame('32', $saved_age);
++  /**
++   * Traces if rows can be fetched from the resultset.
++   */
++  protected bool $isIterable = FALSE;
++
++  /**
++   * The current row, retrieved in the current fetch format.
++   */
++  protected mixed $resultsetRow = NULL;
++
++  /**
++   * The index of the current row.
++   *
++   * This keeps the index of rows fetched from the underlying statement. It is
++   * set to -1 when no rows have been fetched yet.
++   */
++  protected int $resultsetIndex = -1;
++
+   /**
+    * Constructor.
+    *
+    * @param \Drupal\Core\Database\Statement\FetchAs $fetchMode
+    *   The fetch mode.
+-   * @param array{class: class-string, constructor_args: list<mixed>, column: int, cursor_orientation?: int, cursor_offset?: int} $fetchOptions
++   * @param FetchOptions $fetchOptions
+    *   The fetch options.
++   * @param bool $valid
++   *   TRUE if the statement's ::execute() call was successful, or FALSE on
++   *   failure.
+    */
+   public function __construct(
+-    protected FetchAs $fetchMode,
+-    protected array $fetchOptions,
++    FetchAs $fetchMode,
++    array $fetchOptions,
++    bool $valid,
+   ) {
++    $this->markResultsetIterable($valid);
++    $this->setFetchMode($fetchMode, $fetchOptions);
+   }
+ 
+   /**
+@@ -44,7 +85,7 @@ abstract public function rowCount(): ?int;
+    *
+    * @param \Drupal\Core\Database\Statement\FetchAs $mode
+    *   One of the cases of the FetchAs enum.
+-   * @param array{class: class-string, constructor_args: list<mixed>, column: int, cursor_orientation?: int, cursor_offset?: int} $fetchOptions
++   * @param FetchOptions $fetchOptions
+    *   An array of fetch options.
+    *
+    * @return bool
+@@ -57,7 +98,7 @@ abstract public function setFetchMode(FetchAs $mode, array $fetchOptions): bool;
+    *
+    * @param \Drupal\Core\Database\Statement\FetchAs $mode
+    *   One of the cases of the FetchAs enum.
+-   * @param array{class?: class-string, constructor_args?: list<mixed>, column?: int, cursor_orientation?: int, cursor_offset?: int} $fetchOptions
++   * @param FetchOptions $fetchOptions
+    *   An array of fetch options.
+    *
+    * @return array|object|int|float|string|bool|null
+@@ -70,7 +111,7 @@ abstract public function fetch(FetchAs $mode, array $fetchOptions): array|object
+    *
+    * @param \Drupal\Core\Database\Statement\FetchAs $mode
+    *   One of the cases of the FetchAs enum.
+-   * @param array{class?: class-string, constructor_args?: list<mixed>, column?: int, cursor_orientation?: int, cursor_offset?: int} $fetchOptions
++   * @param FetchOptions $fetchOptions
+    *   An array of fetch options.
+    *
+    * @return array
+@@ -125,7 +166,7 @@ public function fetchAllKeyed(int $keyIndex = 0, int $valueIndex = 1): array {
+    *   or FetchAs::List the returned value with be an array of arrays. For any
+    *   other value it will be an array of objects. If not specified, defaults to
+    *   what is specified by setFetchMode().
+-   * @param array{class?: class-string, constructor_args?: list<mixed>, column?: int, cursor_orientation?: int, cursor_offset?: int} $fetchOptions
++   * @param FetchOptions $fetchOptions
+    *   An array of fetch options.
+    *
+    * @return array
+@@ -139,4 +180,107 @@ public function fetchAllAssoc(string $column, FetchAs $mode, array $fetchOptions
+     return $result;
+   }
+ 
++  /**
++   * Informs the iterator whether rows can be fetched from the resultset.
++   *
++   * @param bool $valid
++   *   The result of the execution of the client statement.
++   */
++  protected function markResultsetIterable(bool $valid): void {
++    $this->isIterable = $valid;
++    $this->resultsetRow = NULL;
++    if ($valid === TRUE) {
++      $this->resultsetIndex = -1;
++    }
 +  }
 +
-+}
-diff --git a/core/tests/Drupal/FunctionalTests/Installer/InstallerTestBase.php b/core/tests/Drupal/FunctionalTests/Installer/InstallerTestBase.php
-index 82c5d8e6b69..be346ca35b2 100644
---- a/core/tests/Drupal/FunctionalTests/Installer/InstallerTestBase.php
-+++ b/core/tests/Drupal/FunctionalTests/Installer/InstallerTestBase.php
-@@ -259,7 +259,10 @@ protected function setUpProfile() {
-   protected function setUpSettings() {
-     $parameters = $this->parameters['forms']['install_settings_form'];
-     $driver = $parameters['driver'];
--    unset($parameters[$driver]['dependencies']);
-+    unset(
-+      $parameters[$driver]['dependencies'],
-+      $parameters[$driver]['use_prepared_statements'],
-+    );
-     $edit = $this->translatePostValues($parameters);
-     $this->submitForm($edit, $this->translations['Save and continue']);
++  /**
++   * Sets the current resultset row for the iterator, and increments the key.
++   *
++   * @param mixed $row
++   *   The last row fetched from the client statement.
++   */
++  protected function setResultsetCurrentRow(mixed $row): void {
++    $this->resultsetRow = $row;
++    $this->resultsetIndex++;
++  }
++
++  /**
++   * Informs the iterator that no more rows can be fetched from the resultset.
++   */
++  protected function markResultsetFetchingComplete(): void {
++    $this->markResultsetIterable(FALSE);
++  }
++
++  /**
++   * Returns the current element.
++   *
++   * @see https://www.php.net/manual/en/iterator.current.php
++   *
++   * @internal This method should not be called directly.
++   */
++  public function current(): mixed {
++    return $this->resultsetRow;
++  }
++
++  /**
++   * Returns the key of the current element.
++   *
++   * @see https://www.php.net/manual/en/iterator.key.php
++   *
++   * @internal This method should not be called directly.
++   */
++  public function key(): mixed {
++    return $this->resultsetIndex;
++  }
++
++  /**
++   * Rewinds back to the first element of the Iterator.
++   *
++   * This is the first method called when starting a foreach loop. It will not
++   * be executed after foreach loops.
++   *
++   * @see https://www.php.net/manual/en/iterator.rewind.php
++   *
++   * @internal This method should not be called directly.
++   */
++  public function rewind(): void {
++    // Nothing to do: our DatabaseStatement can't be rewound. Error out when
++    // attempted.
++    if ($this->resultsetIndex >= 0) {
++      $this->markResultsetIterable(FALSE);
++      throw new DatabaseExceptionWrapper('Attempted rewinding a StatementInterface object when fetching has already started. Refactor your code to avoid rewinding statement objects.');
++    }
++  }
++
++  /**
++   * Moves the current position to the next element.
++   *
++   * This method is called after each foreach loop.
++   *
++   * @see https://www.php.net/manual/en/iterator.next.php
++   *
++   * @internal This method should not be called directly.
++   */
++  public function next(): void {
++    $this->fetch($this->fetchMode, $this->fetchOptions);
++  }
++
++  /**
++   * Checks if current position is valid.
++   *
++   * This method is called after ::rewind() and ::next() to check if the
++   * current position is valid.
++   *
++   * @see https://www.php.net/manual/en/iterator.valid.php
++   *
++   * @internal This method should not be called directly.
++   */
++  public function valid(): bool {
++    if ($this->isIterable && $this->resultsetIndex === -1) {
++      $this->fetch($this->fetchMode, $this->fetchOptions);
++    }
++    return $this->isIterable;
++  }
++
+ }
+diff --git a/core/lib/Drupal/Core/Database/Statement/StatementBase.php b/core/lib/Drupal/Core/Database/Statement/StatementBase.php
+index ecbb60e5f91..9a0c0dbaccb 100644
+--- a/core/lib/Drupal/Core/Database/Statement/StatementBase.php
++++ b/core/lib/Drupal/Core/Database/Statement/StatementBase.php
+@@ -11,7 +11,6 @@
+ use Drupal\Core\Database\FetchModeTrait;
+ use Drupal\Core\Database\RowCountException;
+ use Drupal\Core\Database\StatementInterface;
+-use Drupal\Core\Database\StatementIteratorTrait;
+ 
+ /**
+  * StatementInterface base implementation.
+@@ -34,7 +33,6 @@
+ abstract class StatementBase implements \Iterator, StatementInterface {
+ 
+   use FetchModeTrait;
+-  use StatementIteratorTrait;
+ 
+   /**
+    * The client database Statement object.
+@@ -50,6 +48,11 @@ abstract class StatementBase implements \Iterator, StatementInterface {
+ 
+   /**
+    * Holds the default fetch mode.
++   *
++   * @deprecated in drupal:42.1.0 and is removed from drupal:43.0.0. Use
++   *   ResultBase::setFetchMode() instead.
++   *
++   * @see https://www.drupal.org/node/7654123
+    */
+   protected FetchAs $fetchMode = FetchAs::Object;
+ 
+@@ -57,6 +60,11 @@ abstract class StatementBase implements \Iterator, StatementInterface {
+    * Holds fetch options.
+    *
+    * @var array{'class': class-string, 'constructor_args': list<mixed>, 'column': int}
++   *
++   * @deprecated in drupal:42.1.0 and is removed from drupal:43.0.0. Use
++   *   ResultBase::setFetchMode() instead.
++   *
++   * @see https://www.drupal.org/node/7654123
+    */
+   protected array $fetchOptions = [
+     'class' => 'stdClass',
+@@ -208,25 +216,24 @@ public function getQueryString() {
+    * {@inheritdoc}
+    */
+   public function setFetchMode(FetchAs $mode, string|int|null $a1 = NULL, array $a2 = []) {
+-    $this->fetchMode = $mode;
++    $fetchOptions = NULL;
+     switch ($mode) {
+       case FetchAs::ClassObject:
+-        $this->fetchOptions['class'] = $a1;
++        $fetchOptions['class'] = $a1;
+         if ($a2) {
+-          $this->fetchOptions['constructor_args'] = $a2;
++          $fetchOptions['constructor_args'] = $a2;
+         }
+         break;
+ 
+       case FetchAs::Column:
+-        $this->fetchOptions['column'] = $a1;
++        $fetchOptions['column'] = $a1;
+         break;
+ 
+     }
+ 
+-    // If the result object is missing, just do with the properties setting.
+     try {
+       if ($this->result) {
+-        return $this->result->setFetchMode($mode, $this->fetchOptions);
++        return $this->result->setFetchMode($mode, $fetchOptions ?? []);
+       }
+       return TRUE;
+     }
+@@ -239,35 +246,19 @@ public function setFetchMode(FetchAs $mode, string|int|null $a1 = NULL, array $a
+    * {@inheritdoc}
+    */
+   public function fetch(?FetchAs $mode = NULL) {
+-    $row = $this->result->fetch($mode ?? $this->fetchMode, $this->fetchOptions);
+-
+-    if ($row === FALSE) {
+-      $this->markResultsetFetchingComplete();
+-      return FALSE;
+-    }
+-
+-    $this->setResultsetCurrentRow($row);
+-    return $row;
++    return $this->result->fetch($mode ?? $this->result->fetchMode, $this->result->fetchOptions);
    }
+ 
+   /**
+    * {@inheritdoc}
+    */
+   public function fetchObject(?string $className = NULL, array $constructorArguments = []) {
+-    $row = $className === NULL ?
++    return $className === NULL ?
+       $this->result->fetch(FetchAs::Object, []) :
+       $this->result->fetch(FetchAs::ClassObject, [
+         'class' => $className,
+         'constructor_args' => $constructorArguments,
+       ]);
+-
+-    if ($row === FALSE) {
+-      $this->markResultsetFetchingComplete();
+-      return FALSE;
+-    }
+-
+-    $this->setResultsetCurrentRow($row);
+-    return $row;
+   }
+ 
+   /**
+@@ -281,34 +272,22 @@ public function fetchAssoc() {
+    * {@inheritdoc}
+    */
+   public function fetchField(int $index = 0) {
+-    $column = $this->result->fetch(FetchAs::Column, ['column' => $index]);
+-
+-    if ($column === FALSE) {
+-      $this->markResultsetFetchingComplete();
+-      return FALSE;
+-    }
+-
+-    $this->setResultsetCurrentRow($column);
+-    return $column;
++    return $this->result->fetch(FetchAs::Column, ['column' => $index]);
+   }
+ 
+   /**
+    * {@inheritdoc}
+    */
+   public function fetchAll(?FetchAs $mode = NULL, ?int $columnIndex = NULL, ?array $constructorArguments = NULL) {
+-    $fetchMode = $mode ?? $this->fetchMode;
++    $fetchOptions = NULL;
+     if (isset($columnIndex)) {
+-      $this->fetchOptions['column'] = $columnIndex;
++      $fetchOptions['column'] = $columnIndex;
+     }
+     if (isset($constructorArguments)) {
+-      $this->fetchOptions['constructor_args'] = $constructorArguments;
++      $fetchOptions['constructor_args'] = $constructorArguments;
+     }
+ 
+-    $return = $this->result->fetchAll($fetchMode, $this->fetchOptions);
+-
+-    $this->markResultsetFetchingComplete();
+-
+-    return $return;
++    return $this->result->fetchAll($mode ?? $this->result->fetchMode, $fetchOptions ?? $this->result->fetchOptions);
+   }
+ 
+   /**
+@@ -322,18 +301,14 @@ public function fetchCol(int $index = 0) {
+    * {@inheritdoc}
+    */
+   public function fetchAllAssoc(string $key, ?FetchAs $fetch = NULL) {
+-    $result = $this->result->fetchAllAssoc($key, $fetch ?? $this->fetchMode, $this->fetchOptions);
+-    $this->markResultsetFetchingComplete();
+-    return $result;
++    return $this->result->fetchAllAssoc($key, $fetch ?? $this->result->fetchMode, $this->result->fetchOptions);
+   }
+ 
+   /**
+    * {@inheritdoc}
+    */
+   public function fetchAllKeyed(int $keyIndex = 0, int $valueIndex = 1) {
+-    $result = $this->result->fetchAllKeyed($keyIndex, $valueIndex);
+-    $this->markResultsetFetchingComplete();
+-    return $result;
++    return $this->result->fetchAllKeyed($keyIndex, $valueIndex);
+   }
+ 
+   /**
+@@ -349,4 +324,67 @@ public function rowCount() {
+     }
+   }
+ 
++  /**
++   * Returns the current element.
++   *
++   * @see https://www.php.net/manual/en/iterator.current.php
++   *
++   * @internal This method should not be called directly.
++   */
++  public function current(): mixed {
++    return $this->result->current();
++  }
++
++  /**
++   * Returns the key of the current element.
++   *
++   * @see https://www.php.net/manual/en/iterator.key.php
++   *
++   * @internal This method should not be called directly.
++   */
++  public function key(): mixed {
++    return $this->result->key();
++  }
++
++  /**
++   * Rewinds back to the first element of the Iterator.
++   *
++   * This is the first method called when starting a foreach loop. It will not
++   * be executed after foreach loops.
++   *
++   * @see https://www.php.net/manual/en/iterator.rewind.php
++   *
++   * @internal This method should not be called directly.
++   */
++  public function rewind(): void {
++    $this->result->rewind();
++  }
++
++  /**
++   * Moves the current position to the next element.
++   *
++   * This method is called after each foreach loop.
++   *
++   * @see https://www.php.net/manual/en/iterator.next.php
++   *
++   * @internal This method should not be called directly.
++   */
++  public function next(): void {
++    $this->result->next();
++  }
++
++  /**
++   * Checks if current position is valid.
++   *
++   * This method is called after ::rewind() and ::next() to check if the
++   * current position is valid.
++   *
++   * @see https://www.php.net/manual/en/iterator.valid.php
++   *
++   * @internal This method should not be called directly.
++   */
++  public function valid(): bool {
++    return $this->result->valid();
++  }
++
+ }
+diff --git a/core/lib/Drupal/Core/Database/StatementIteratorTrait.php b/core/lib/Drupal/Core/Database/StatementIteratorTrait.php
+index bab319d03fd..3c19fafea03 100644
+--- a/core/lib/Drupal/Core/Database/StatementIteratorTrait.php
++++ b/core/lib/Drupal/Core/Database/StatementIteratorTrait.php
+@@ -7,6 +7,11 @@
+  *
+  * Implements the methods required by StatementInterface objects that implement
+  * the \Iterator interface.
++ *
++ * @deprecated in drupal:42.1.0 and is removed from drupal:43.0.0. Iteration
++ *   control is moved to ResultBase.
++ *
++ * @see https://www.drupal.org/node/7654123
+  */
+ trait StatementIteratorTrait {
+ 
+diff --git a/core/lib/Drupal/Core/Database/StatementPrefetchIterator.php b/core/lib/Drupal/Core/Database/StatementPrefetchIterator.php
+index 97940d2b924..b7cea608a64 100644
+--- a/core/lib/Drupal/Core/Database/StatementPrefetchIterator.php
++++ b/core/lib/Drupal/Core/Database/StatementPrefetchIterator.php
+@@ -3,7 +3,6 @@
+ namespace Drupal\Core\Database;
+ 
+ use Drupal\Core\Database\Statement\FetchAs;
+-use Drupal\Core\Database\Statement\PdoTrait;
+ use Drupal\Core\Database\Statement\PrefetchedResult;
+ use Drupal\Core\Database\Statement\StatementBase;
+ 
+@@ -16,8 +15,6 @@
+  */
+ class StatementPrefetchIterator extends StatementBase {
+ 
+-  use PdoTrait;
+-
+   /**
+    * Constructs a StatementPrefetchIterator object.
+    *
+@@ -72,40 +69,36 @@ public function execute($args = [], $options = []) {
+     // Prepare and execute the statement.
+     try {
+       $this->clientStatement = $this->getStatement($this->queryString, $args);
+-      $return = $this->clientExecute($args, $options);
++      $return = $this->getClientStatement()->execute($args);
+     }
+     catch (\Exception $e) {
+       $this->dispatchStatementExecutionFailureEvent($startEvent, $e);
+-      // @phpstan-ignore unset.possiblyHookedProperty
+-      unset($this->clientStatement);
++      $this->clientStatement = NULL;
+       throw $e;
+     }
+ 
+-    // Fetch all the data from the reply, in order to release any lock as soon
+-    // as possible. Then, destroy the client statement. See the documentation
+-    // of \Drupal\sqlite\Driver\Database\sqlite\Statement for an explanation.
+-    $this->result = new PrefetchedResult(
+-      $this->fetchMode,
+-      $this->fetchOptions,
+-      $this->clientFetchAll(FetchAs::Associative),
+-      $this->rowCountEnabled ? $this->clientRowCount() : NULL,
+-    );
+-    // @phpstan-ignore unset.possiblyHookedProperty
+-    unset($this->clientStatement);
+-    $this->markResultsetIterable($return);
+-
+     if (isset($options['fetch'])) {
+       if (is_string($options['fetch'])) {
+-        // Default to an object. Note: db fields will be added to the object
+-        // before the constructor is run. If you need to assign fields after
+-        // the constructor is run. See https://www.drupal.org/node/315092.
+-        $this->setFetchMode(FetchAs::ClassObject, $options['fetch']);
++        $fetchMode = FetchAs::ClassObject;
++        $fetchOptions = ['class' => $options['fetch']];
+       }
+       else {
+-        $this->setFetchMode($options['fetch']);
++        $fetchMode = $options['fetch'];
+       }
+     }
+ 
++    // Fetch all the data from the reply, in order to release any lock as soon
++    // as possible. Then, destroy the client statement. See the documentation
++    // of \Drupal\sqlite\Driver\Database\sqlite\Statement for an explanation.
++    $this->result = new PrefetchedResult(
++      $fetchMode ?? FetchAs::Object,
++      $fetchOptions ?? [],
++      $this->getClientStatement()->fetchAll(\PDO::FETCH_ASSOC),
++      $this->rowCountEnabled ? $this->getClientStatement()->rowCount() : NULL,
++      $return,
++    );
++    $this->clientStatement = NULL;
++
+     $this->dispatchStatementExecutionEndEvent($startEvent);
+ 
+     return $return;
+diff --git a/core/lib/Drupal/Core/Database/StatementWrapperIterator.php b/core/lib/Drupal/Core/Database/StatementWrapperIterator.php
+index 1b0648b6c86..ba2b0c51a10 100644
+--- a/core/lib/Drupal/Core/Database/StatementWrapperIterator.php
++++ b/core/lib/Drupal/Core/Database/StatementWrapperIterator.php
+@@ -4,7 +4,6 @@
+ 
+ use Drupal\Core\Database\Statement\FetchAs;
+ use Drupal\Core\Database\Statement\PdoResult;
+-use Drupal\Core\Database\Statement\PdoTrait;
+ use Drupal\Core\Database\Statement\StatementBase;
+ 
+ /**
+@@ -12,8 +11,6 @@
+  */
+ class StatementWrapperIterator extends StatementBase {
+ 
+-  use PdoTrait;
+-
+   /**
+    * Constructs a StatementWrapperIterator object.
+    *
+@@ -65,25 +62,27 @@ public function getClientStatement(): \PDOStatement {
+   public function execute($args = [], $options = []) {
+     assert(!isset($options['fetch']) || $options['fetch'] instanceof FetchAs || is_string($options['fetch']), 'The "fetch" option passed to execute() must contain a FetchAs enum case or a string. See https://www.drupal.org/node/3488338');
+ 
+-    if (isset($options['fetch'])) {
+-      if (is_string($options['fetch'])) {
+-        $this->setFetchMode(FetchAs::ClassObject, $options['fetch']);
+-      }
+-      else {
+-        $this->setFetchMode($options['fetch']);
+-      }
+-    }
+-
+     $startEvent = $this->dispatchStatementExecutionStartEvent($args ?? []);
+ 
+     try {
+-      $return = $this->clientExecute($args, $options);
++      $return = $this->getClientStatement()->execute($args);
++
++      if (isset($options['fetch'])) {
++        if (is_string($options['fetch'])) {
++          $fetchMode = FetchAs::ClassObject;
++          $fetchOptions = ['class' => $options['fetch']];
++        }
++        else {
++          $fetchMode = $options['fetch'];
++        }
++      }
++
+       $this->result = new PdoResult(
+-        $this->fetchMode,
+-        $this->fetchOptions,
++        $fetchMode ?? FetchAs::Object,
++        $fetchOptions ?? [],
+         $this->getClientStatement(),
++        $return,
+       );
+-      $this->markResultsetIterable($return);
+     }
+     catch (\Exception $e) {
+       $this->dispatchStatementExecutionFailureEvent($startEvent, $e);
+diff --git a/core/modules/mysqli/src/Driver/Database/mysqli/Result.php b/core/modules/mysqli/src/Driver/Database/mysqli/Result.php
+index 2c5e57c3aa8..11bf0f09de2 100644
+--- a/core/modules/mysqli/src/Driver/Database/mysqli/Result.php
++++ b/core/modules/mysqli/src/Driver/Database/mysqli/Result.php
+@@ -11,6 +11,8 @@
+ 
+ /**
+  * Class for mysqli-provided results of a data query language (DQL) statement.
++ *
++ * @phpstan-import-type FetchOptions from \Drupal\Core\Database\Statement\ResultBase
+  */
+ class Result extends ResultBase {
+ 
+@@ -21,20 +23,24 @@ class Result extends ResultBase {
+    *
+    * @param \Drupal\Core\Database\Statement\FetchAs $fetchMode
+    *   The fetch mode.
+-   * @param array{class: class-string, constructor_args: list<mixed>, column: int, cursor_orientation?: int, cursor_offset?: int} $fetchOptions
++   * @param FetchOptions $fetchOptions
+    *   The fetch options.
+    * @param \mysqli_result|false $mysqliResult
+    *   The MySQLi result object.
+    * @param \mysqli $mysqliConnection
+    *   Client database connection object.
++   * @param bool $valid
++   *   TRUE if the statement's ::execute() call was successful, or FALSE on
++   *   failure.
+    */
+   public function __construct(
+     FetchAs $fetchMode,
+     array $fetchOptions,
+     protected readonly \mysqli_result|false $mysqliResult,
+     protected readonly \mysqli $mysqliConnection,
++    bool $valid,
+   ) {
+-    parent::__construct($fetchMode, $fetchOptions);
++    parent::__construct($fetchMode, $fetchOptions, $valid && (bool) $mysqliResult);
+   }
+ 
+   /**
+@@ -70,6 +76,8 @@ public function rowCount(): ?int {
+    * {@inheritdoc}
+    */
+   public function setFetchMode(FetchAs $mode, array $fetchOptions): bool {
++    $this->fetchMode = $mode;
++    $this->fetchOptions = $fetchOptions;
+     // There are no methods to set fetch mode in \mysqli_result.
+     return TRUE;
+   }
+@@ -78,18 +86,25 @@ public function setFetchMode(FetchAs $mode, array $fetchOptions): bool {
+    * {@inheritdoc}
+    */
+   public function fetch(FetchAs $mode, array $fetchOptions): array|object|int|float|string|bool|NULL {
++    if ($this->mysqliResult === FALSE) {
++      return FALSE;
++    }
++
+     assert($this->mysqliResult instanceof \mysqli_result);
+ 
+     $mysqli_row = $this->mysqliResult->fetch_assoc();
+ 
+     if (!$mysqli_row) {
++      $this->markResultsetFetchingComplete();
+       return FALSE;
+     }
+ 
+     // Stringify all non-NULL column values.
+     $row = array_map(fn ($value) => $value === NULL ? NULL : (string) $value, $mysqli_row);
+ 
+-    return $this->assocToFetchMode($row, $mode, $fetchOptions);
++    $row = $this->assocToFetchMode($row, $mode, $fetchOptions);
++    $this->setResultsetCurrentRow($row);
++    return $row;
+   }
+ 
+ }
+diff --git a/core/modules/mysqli/src/Driver/Database/mysqli/Statement.php b/core/modules/mysqli/src/Driver/Database/mysqli/Statement.php
+index 24e8c83501c..a2ec5dd2426 100644
+--- a/core/modules/mysqli/src/Driver/Database/mysqli/Statement.php
++++ b/core/modules/mysqli/src/Driver/Database/mysqli/Statement.php
+@@ -69,15 +69,6 @@ public function getClientStatement(): \mysqli_stmt {
+    * {@inheritdoc}
+    */
+   public function execute($args = [], $options = []) {
+-    if (isset($options['fetch'])) {
+-      if (is_string($options['fetch'])) {
+-        $this->setFetchMode(FetchAs::ClassObject, $options['fetch']);
+-      }
+-      else {
+-        $this->setFetchMode($options['fetch']);
+-      }
+-    }
+-
+     $startEvent = $this->dispatchStatementExecutionStartEvent($args ?? []);
+ 
+     try {
+@@ -99,16 +90,26 @@ public function execute($args = [], $options = []) {
+         $args = $tmp;
+       }
+ 
++      if (isset($options['fetch'])) {
++        if (is_string($options['fetch'])) {
++          $fetchMode = FetchAs::ClassObject;
++          $fetchOptions = ['class' => $options['fetch']];
++        }
++        else {
++          $fetchMode = $options['fetch'];
++        }
++      }
++
+       // In mysqli, the results of the statement execution are returned in a
+       // different object than the statement itself.
+       $return = $this->getClientStatement()->execute($args);
+       $this->result = new Result(
+-        $this->fetchMode,
+-        $this->fetchOptions,
++        $fetchMode ?? FetchAs::Object,
++        $fetchOptions ?? [],
+         $this->getClientStatement()->get_result(),
+         $this->clientConnection,
++        $return,
+       );
+-      $this->markResultsetIterable($return);
+     }
+     catch (\Exception $e) {
+       $this->dispatchStatementExecutionFailureEvent($startEvent, $e);
+diff --git a/core/tests/Drupal/KernelTests/Core/Database/FetchTest.php b/core/tests/Drupal/KernelTests/Core/Database/FetchTest.php
+index 01ae800005d..f364c8c58fe 100644
+--- a/core/tests/Drupal/KernelTests/Core/Database/FetchTest.php
++++ b/core/tests/Drupal/KernelTests/Core/Database/FetchTest.php
+@@ -389,4 +389,15 @@ public function testRowCount(): void {
+     $this->assertTrue($exception, 'Exception was thrown');
+   }
+ 
++  /**
++   * Confirms that we can not fetch after a DML statement.
++   */
++  public function testFetchAfterInsertStatement(): void {
++    $statement = $this->connection->query("INSERT INTO {test} (name) VALUES ('test12345678')");
++    $this->assertInstanceOf(StatementInterface::class, $statement);
++    $x = $statement->fetch();
++    dump($x);
++    $this->assertFalse($x);
++  }
++
+ }
