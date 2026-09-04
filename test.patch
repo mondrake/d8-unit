@@ -225,14 +225,10 @@ index c9528e6254f..d1c176b7f99 100644
     * {@inheritdoc}
     */
 diff --git a/core/lib/Drupal/Core/Database/SchemaDefinition/Table.php b/core/lib/Drupal/Core/Database/SchemaDefinition/Table.php
-index 1b83f05a15d..8db90beba8a 100644
+index 7f1d79e9078..cceed09676c 100644
 --- a/core/lib/Drupal/Core/Database/SchemaDefinition/Table.php
 +++ b/core/lib/Drupal/Core/Database/SchemaDefinition/Table.php
-@@ -62,20 +62,61 @@ public function __construct(
-    * @throws \Drupal\Core\Database\Exception\SchemaDefinitionException
-    */
-   private function validate(): void {
--
+@@ -65,16 +65,45 @@ private function validate(): void {
      if ($this->columns && !Inspector::assertAllObjects($this->columns, Column::class)) {
        throw new SchemaDefinitionException("All members of the 'columns' argument of the '{$this->name}' Table must be Column objects");
      }
@@ -269,7 +265,7 @@ index 1b83f05a15d..8db90beba8a 100644
 +          throw new SchemaDefinitionException("Table '{$this->name}' specifies an index '{$index->name}' with undefined column(s): " . implode(', ', $invalidKeyColumnNames));
 +        }
 +      }
-     }
++    }
 +    if ($this->foreignKeys) {
 +      if (!Inspector::assertAllObjects($this->foreignKeys, ForeignKey::class)) {
 +        throw new SchemaDefinitionException("All members of the 'foreignKeys' argument of the '{$this->name}' Table must be ForeignKey objects");
@@ -280,8 +276,14 @@ index 1b83f05a15d..8db90beba8a 100644
 +          throw new SchemaDefinitionException("Table '{$this->name}' specifies a foreign key '{$foreignKey->name}' with undefined column(s): " . implode(', ', $invalidKeyColumnNames));
 +        }
 +      }
-+    }
-+  }
+     }
+-
+     // MariaDB and SQLite do not allow generated columns in the primary key.
+     if ($this->columns && $this->primaryKey) {
+       $generatedColumnNames = array_map(
+@@ -91,6 +120,19 @@ private function validate(): void {
+     }
+   }
  
 +  /**
 +   * Returns the names of the columns in the table.
@@ -294,9 +296,11 @@ index 1b83f05a15d..8db90beba8a 100644
 +      fn(Column $column): string => $column->name,
 +      $this->columns,
 +    );
-   }
- 
++  }
++
    /**
+    * {@inheritdoc}
+    */
 diff --git a/core/modules/mysql/src/Driver/Database/mysql/ExceptionHandler.php b/core/modules/mysql/src/Driver/Database/mysql/ExceptionHandler.php
 index de5a2296877..6a78934f289 100644
 --- a/core/modules/mysql/src/Driver/Database/mysql/ExceptionHandler.php
@@ -318,10 +322,10 @@ index de5a2296877..6a78934f289 100644
        },
        default => throw new DatabaseExceptionWrapper($message, 0, $exception),
 diff --git a/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php b/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php
-index 37a09406f5f..ef59530d41b 100644
+index c63eac5872e..c70003a105b 100644
 --- a/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php
 +++ b/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php
-@@ -762,6 +762,28 @@ public function indexExists($table, $name) {
+@@ -771,6 +771,28 @@ public function indexExists($table, $name) {
      return (bool) $this->connection->query("SELECT 1 FROM pg_indexes WHERE schemaname = :schema AND tablename = :table AND indexname = :index", $sql_params)->fetchField();
    }
  
@@ -351,10 +355,10 @@ index 37a09406f5f..ef59530d41b 100644
     * Helper function: check if a constraint (PK, FK, UK) exists.
     *
 diff --git a/core/modules/sqlite/src/Driver/Database/sqlite/Schema.php b/core/modules/sqlite/src/Driver/Database/sqlite/Schema.php
-index b447836c14b..38e4d05cde1 100644
+index 19558fb4ebd..4da287b9ea2 100644
 --- a/core/modules/sqlite/src/Driver/Database/sqlite/Schema.php
 +++ b/core/modules/sqlite/src/Driver/Database/sqlite/Schema.php
-@@ -395,7 +395,11 @@ public function addField($table, $field, $specification, $keys_new = []) {
+@@ -421,7 +421,11 @@ public function addField($table, $field, $specification, $keys_new = []) {
        }
  
        // Add the new indexes.
@@ -1020,18 +1024,18 @@ index 00000000000..b18970625e6
 +
 +}
 diff --git a/core/tests/Drupal/Tests/Core/Database/SchemaDefinitionTest.php b/core/tests/Drupal/Tests/Core/Database/SchemaDefinitionTest.php
-index a8b2aedadc5..1be04e7df8c 100644
+index af2e4ba2dba..996898c0cb2 100644
 --- a/core/tests/Drupal/Tests/Core/Database/SchemaDefinitionTest.php
 +++ b/core/tests/Drupal/Tests/Core/Database/SchemaDefinitionTest.php
-@@ -8,6 +8,7 @@
- use Drupal\Core\Database\SchemaDefinition\ColumnType;
- use Drupal\Core\Database\SchemaDefinition\FloatValue;
+@@ -10,6 +10,7 @@
  use Drupal\Core\Database\SchemaDefinition\ForeignKey;
+ use Drupal\Core\Database\SchemaDefinition\GeneratedColumnExpression;
+ use Drupal\Core\Database\SchemaDefinition\GeneratedColumnStorage;
 +use Drupal\Core\Database\SchemaDefinition\Index;
  use Drupal\Core\Database\SchemaDefinition\IntValue;
  use Drupal\Core\Database\SchemaDefinition\NullValue;
  use Drupal\Core\Database\SchemaDefinition\PrimaryKey;
-@@ -522,6 +523,30 @@ public function testInvalidPrimaryKeyForPartialLengthColumn(): void {
+@@ -568,6 +569,30 @@ public function testInvalidPrimaryKeyForPartialLengthColumn(): void {
      $this->assertInstanceOf(Table::class, $table);
    }
  
@@ -1062,7 +1066,7 @@ index a8b2aedadc5..1be04e7df8c 100644
    /**
     * Tests passing limited length columns to an unique key.
     */
-@@ -549,4 +574,90 @@ public function testInvalidUniqueKeyForPartialLengthColumn(): void {
+@@ -595,4 +620,90 @@ public function testInvalidUniqueKeyForPartialLengthColumn(): void {
      $this->assertInstanceOf(Table::class, $table);
    }
  
