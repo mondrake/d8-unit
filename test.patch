@@ -1,960 +1,1138 @@
-diff --git a/core/lib/Drupal/Core/Database/FetchModeTrait.php b/core/lib/Drupal/Core/Database/FetchModeTrait.php
-index 70bb994e2cb..137ad14992c 100644
---- a/core/lib/Drupal/Core/Database/FetchModeTrait.php
-+++ b/core/lib/Drupal/Core/Database/FetchModeTrait.php
-@@ -98,8 +98,8 @@ protected function assocToColumn(array $rowAssoc, array $columnNames, int $colum
-   protected function assocToFetchMode(array $rowAssoc, FetchAs $mode, array $fetchOptions): array|object|int|float|string|bool|NULL {
-     return match($mode) {
-       FetchAs::Associative => $rowAssoc,
--      FetchAs::ClassObject => $this->assocToClass($rowAssoc, $fetchOptions['class'], $fetchOptions['constructor_args']),
--      FetchAs::Column => $this->assocToColumn($rowAssoc, array_keys($rowAssoc), $fetchOptions['column']),
-+      FetchAs::ClassObject => $this->assocToClass($rowAssoc, $fetchOptions['class'] ?? \stdClass::class, $fetchOptions['constructor_args'] ?? []),
-+      FetchAs::Column => $this->assocToColumn($rowAssoc, array_keys($rowAssoc), $fetchOptions['column'] ?? 0),
-       FetchAs::List => $this->assocToNum($rowAssoc),
-       FetchAs::Object => $this->assocToObj($rowAssoc),
-     };
-diff --git a/core/lib/Drupal/Core/Database/Statement/PdoResult.php b/core/lib/Drupal/Core/Database/Statement/PdoResult.php
-index 20b0ae168cd..6c1ab487f27 100644
---- a/core/lib/Drupal/Core/Database/Statement/PdoResult.php
-+++ b/core/lib/Drupal/Core/Database/Statement/PdoResult.php
-@@ -6,6 +6,8 @@
- 
- /**
-  * Class for PDO-provided results of a data query language (DQL) statement.
-+ *
-+ * @phpstan-import-type FetchOptions from \Drupal\Core\Database\Statement\ResultBase
-  */
- class PdoResult extends ResultBase {
- 
-@@ -16,18 +18,22 @@ class PdoResult extends ResultBase {
-    *
-    * @param \Drupal\Core\Database\Statement\FetchAs $fetchMode
-    *   The fetch mode.
--   * @param array{class: class-string, constructor_args: list<mixed>, column: int, cursor_orientation?: int, cursor_offset?: int} $fetchOptions
-+   * @param FetchOptions $fetchOptions
-    *   The fetch options.
-    * @param \PDOStatement $clientStatement
-    *   The PDO Statement object. PDO does not provide a separate object for
-    *   results, se we need to fetch data from the Statement.
-+   * @param bool $valid
-+   *   TRUE if the statement's ::execute() call was successful, or FALSE on
-+   *   failure.
-    */
-   public function __construct(
-     FetchAs $fetchMode,
-     array $fetchOptions,
-     protected readonly \PDOStatement $clientStatement,
-+    bool $valid,
-   ) {
--    parent::__construct($fetchMode, $fetchOptions);
-+    parent::__construct($fetchMode, $fetchOptions, $valid);
-   }
- 
-   /**
-@@ -53,6 +59,8 @@ public function rowCount(): ?int {
-    * {@inheritdoc}
-    */
-   public function setFetchMode(FetchAs $mode, array $fetchOptions): bool {
-+    $this->fetchMode = $mode;
-+    $this->fetchOptions = $fetchOptions;
-     return match ($mode) {
-       FetchAs::ClassObject => $this->clientSetFetchMode($mode, $fetchOptions['class'], $fetchOptions['constructor_args'] ?? NULL),
-       FetchAs::Column => $this->clientSetFetchMode($mode, $fetchOptions['column']),
-@@ -67,14 +75,24 @@ public function fetch(FetchAs $mode, array $fetchOptions): array|object|int|floa
-     if (!empty($fetchOptions)) {
-       $this->setFetchMode($mode, $fetchOptions);
-     }
--    return $this->clientFetch($mode);
-+    $row = $this->clientFetch($mode);
-+    // PostgreSql returns a \stdClass object with no content when fetching on
-+    // a result from a DML statement.
-+    if ($row === FALSE || ($mode === FetchAs::Object && empty((array) $row))) {
-+      $this->markResultsetFetchingComplete();
-+      return FALSE;
-+    }
-+    $this->setResultsetCurrentRow($row);
-+    return $row;
-   }
- 
-   /**
-    * {@inheritdoc}
-    */
-   public function fetchAll(FetchAs $mode, array $fetchOptions): array {
--    return $this->clientFetchAll($mode, $fetchOptions['column'] ?? $fetchOptions['class'] ?? NULL, $fetchOptions['constructor_args'] ?? NULL);
-+    $result = $this->clientFetchAll($mode, $fetchOptions['column'] ?? $fetchOptions['class'] ?? NULL, $fetchOptions['constructor_args'] ?? NULL);
-+    $this->markResultsetFetchingComplete();
-+    return $result;
-   }
- 
- }
-diff --git a/core/lib/Drupal/Core/Database/Statement/PdoTrait.php b/core/lib/Drupal/Core/Database/Statement/PdoTrait.php
-index 6f8cfd2288b..7f4eb20ce3f 100644
---- a/core/lib/Drupal/Core/Database/Statement/PdoTrait.php
-+++ b/core/lib/Drupal/Core/Database/Statement/PdoTrait.php
-@@ -103,12 +103,12 @@ protected function clientSetFetchMode(FetchAs $mode, int|string|null $columnOrCl
-     return match ($mode) {
-       FetchAs::Column => $this->getClientStatement()->setFetchMode(
-         \PDO::FETCH_COLUMN,
--        $columnOrClass ?? $this->fetchOptions['column'],
-+        $columnOrClass ?? $this->fetchOptions['column'] ?? 0,
-       ),
-       FetchAs::ClassObject => $this->getClientStatement()->setFetchMode(
-         \PDO::FETCH_CLASS,
--        $columnOrClass ?? $this->fetchOptions['class'],
--        $constructorArguments ?? $this->fetchOptions['constructor_args'],
-+        $columnOrClass ?? $this->fetchOptions['class'] ?? \stdClass::class,
-+        $constructorArguments ?? $this->fetchOptions['constructor_args'] ?? [],
-       ),
-       default => $this->getClientStatement()->setFetchMode(
-         $this->fetchAsToPdo($mode),
-@@ -209,12 +209,12 @@ protected function clientFetchAll(?FetchAs $mode = NULL, int|string|null $column
-     return match ($mode) {
-       FetchAs::Column => $this->getClientStatement()->fetchAll(
-         \PDO::FETCH_COLUMN,
--        $columnOrClass ?? $this->fetchOptions['column'],
-+        $columnOrClass ?? $this->fetchOptions['column'] ?? 0,
-       ),
-       FetchAs::ClassObject => $this->getClientStatement()->fetchAll(
-         \PDO::FETCH_CLASS,
--        $columnOrClass ?? $this->fetchOptions['class'],
--        $constructorArguments ?? $this->fetchOptions['constructor_args'],
-+        $columnOrClass ?? $this->fetchOptions['class'] ?? \stdClass::class,
-+        $constructorArguments ?? $this->fetchOptions['constructor_args'] ?? [],
-       ),
-       default => $this->getClientStatement()->fetchAll(
-         $this->fetchAsToPdo($mode ?? $this->fetchMode),
-diff --git a/core/lib/Drupal/Core/Database/Statement/PrefetchedResult.php b/core/lib/Drupal/Core/Database/Statement/PrefetchedResult.php
-index 89f095edfd8..79dbceb970e 100644
---- a/core/lib/Drupal/Core/Database/Statement/PrefetchedResult.php
-+++ b/core/lib/Drupal/Core/Database/Statement/PrefetchedResult.php
-@@ -8,6 +8,8 @@
- 
- /**
-  * Class for prefetched results of a data query language (DQL) statement.
-+ *
-+ * @phpstan-import-type FetchOptions from \Drupal\Core\Database\Statement\ResultBase
-  */
- class PrefetchedResult extends ResultBase {
- 
-@@ -28,20 +30,24 @@ class PrefetchedResult extends ResultBase {
-    *
-    * @param \Drupal\Core\Database\Statement\FetchAs $fetchMode
-    *   The fetch mode.
--   * @param array{class: class-string, constructor_args: list<mixed>, column: int, cursor_orientation?: int, cursor_offset?: int} $fetchOptions
-+   * @param FetchOptions $fetchOptions
-    *   The fetch options.
-    * @param array $data
-    *   The prefetched data, in FetchAs::Associative format.
-    * @param int|null $rowCount
-    *   The row count.
-+   * @param bool $valid
-+   *   TRUE if the statement's ::execute() call was successful, or FALSE on
-+   *   failure.
-    */
-   public function __construct(
-     FetchAs $fetchMode,
-     array $fetchOptions,
-     protected array $data,
-     public readonly ?int $rowCount,
-+    bool $valid,
-   ) {
--    parent::__construct($fetchMode, $fetchOptions);
-+    parent::__construct($fetchMode, $fetchOptions, $valid);
-     $this->columnNames = isset($this->data[0]) ? array_keys($this->data[0]) : [];
-     $this->currentRowIndex = -1;
-   }
-@@ -57,10 +63,8 @@ public function rowCount(): ?int {
-    * {@inheritdoc}
-    */
-   public function setFetchMode(FetchAs $mode, array $fetchOptions): bool {
--    // We do not really need to do anything here, since calls to any of this
--    // class' methods require an explicit fetch mode to be passed in, and we
--    // have no longer an active client statement to which we may want to pass
--    // the default fetch mode. Just return TRUE.
-+    $this->fetchMode = $mode;
-+    $this->fetchOptions = $fetchOptions;
-     return TRUE;
-   }
- 
-@@ -71,11 +75,14 @@ public function fetch(FetchAs $mode, array $fetchOptions): array|object|int|floa
-     $this->currentRowIndex++;
-     if (!isset($this->data[$this->currentRowIndex])) {
-       $this->currentRowIndex = NULL;
-+      $this->markResultsetFetchingComplete();
-       return FALSE;
-     }
-     $rowAssoc = $this->data[$this->currentRowIndex];
-     unset($this->data[$this->currentRowIndex]);
--    return $this->assocToFetchMode($rowAssoc, $mode, $fetchOptions);
-+    $row = $this->assocToFetchMode($rowAssoc, $mode, $fetchOptions);
-+    $this->setResultsetCurrentRow($row);
-+    return $row;
-   }
- 
-   /**
-diff --git a/core/lib/Drupal/Core/Database/Statement/ResultBase.php b/core/lib/Drupal/Core/Database/Statement/ResultBase.php
-index af1b12a5653..4a54f87a930 100644
---- a/core/lib/Drupal/Core/Database/Statement/ResultBase.php
-+++ b/core/lib/Drupal/Core/Database/Statement/ResultBase.php
-@@ -4,27 +4,68 @@
- 
- namespace Drupal\Core\Database\Statement;
- 
-+use Drupal\Core\Database\DatabaseExceptionWrapper;
- use Drupal\Core\Database\FetchModeTrait;
- 
- /**
-  * Base class for results of a data query language (DQL) statement.
-+ *
-+ * @phpstan-type FetchOptions array{'class'?: class-string, 'constructor_args'?: list<mixed>, 'column'?: int}
-  */
--abstract class ResultBase {
-+abstract class ResultBase implements \Iterator {
- 
-   use FetchModeTrait;
- 
-+  /**
-+   * Holds the default fetch mode.
-+   */
-+  // @phpcs:ignore Drupal.Commenting.VariableComment.Missing
-+  public protected(set) FetchAs $fetchMode;
+diff --git a/core/lib/Drupal/Core/Database/Exception/SchemaTablePrimaryKeyException.php b/core/lib/Drupal/Core/Database/Exception/SchemaTablePrimaryKeyException.php
+new file mode 100644
+index 00000000000..879cf2d03fb
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/Exception/SchemaTablePrimaryKeyException.php
+@@ -0,0 +1,12 @@
++<?php
 +
-+  /**
-+   * Holds fetch options.
-+   *
-+   * @var FetchOptions
-+   */
-+  // @phpcs:ignore Drupal.Commenting.VariableComment.Missing
-+  public protected(set) array $fetchOptions;
++namespace Drupal\Core\Database\Exception;
 +
-+  /**
-+   * Traces if rows can be fetched from the resultset.
-+   */
-+  protected bool $isIterable = FALSE;
++use Drupal\Core\Database\DatabaseException;
++use Drupal\Core\Database\SchemaException;
 +
-+  /**
-+   * The current row, retrieved in the current fetch format.
-+   */
-+  protected mixed $resultsetRow = NULL;
-+
-+  /**
-+   * The index of the current row.
-+   *
-+   * This keeps the index of rows fetched from the underlying statement. It is
-+   * set to -1 when no rows have been fetched yet.
-+   */
-+  protected int $resultsetIndex = -1;
-+
-   /**
-    * Constructor.
-    *
-    * @param \Drupal\Core\Database\Statement\FetchAs $fetchMode
-    *   The fetch mode.
--   * @param array{class: class-string, constructor_args: list<mixed>, column: int, cursor_orientation?: int, cursor_offset?: int} $fetchOptions
-+   * @param FetchOptions $fetchOptions
-    *   The fetch options.
-+   * @param bool $valid
-+   *   TRUE if the statement's ::execute() call was successful, or FALSE on
-+   *   failure.
-    */
-   public function __construct(
--    protected FetchAs $fetchMode,
--    protected array $fetchOptions,
-+    FetchAs $fetchMode,
-+    array $fetchOptions,
-+    bool $valid,
-   ) {
-+    $this->markResultsetIterable($valid);
-+    $this->setFetchMode($fetchMode, $fetchOptions);
-   }
++/**
++ * Exception thrown for primary key related errors.
++ */
++class SchemaTablePrimaryKeyException extends SchemaException implements DatabaseException {
++}
+diff --git a/core/lib/Drupal/Core/Database/Schema.php b/core/lib/Drupal/Core/Database/Schema.php
+index d01f15558dc..44680ee4e7a 100644
+--- a/core/lib/Drupal/Core/Database/Schema.php
++++ b/core/lib/Drupal/Core/Database/Schema.php
+@@ -2,6 +2,7 @@
  
-   /**
-@@ -44,7 +85,7 @@ abstract public function rowCount(): ?int;
-    *
-    * @param \Drupal\Core\Database\Statement\FetchAs $mode
-    *   One of the cases of the FetchAs enum.
--   * @param array{class: class-string, constructor_args: list<mixed>, column: int, cursor_orientation?: int, cursor_offset?: int} $fetchOptions
-+   * @param FetchOptions $fetchOptions
-    *   An array of fetch options.
-    *
-    * @return bool
-@@ -57,7 +98,7 @@ abstract public function setFetchMode(FetchAs $mode, array $fetchOptions): bool;
-    *
-    * @param \Drupal\Core\Database\Statement\FetchAs $mode
-    *   One of the cases of the FetchAs enum.
--   * @param array{class?: class-string, constructor_args?: list<mixed>, column?: int, cursor_orientation?: int, cursor_offset?: int} $fetchOptions
-+   * @param FetchOptions $fetchOptions
-    *   An array of fetch options.
-    *
-    * @return array|object|int|float|string|bool|null
-@@ -70,7 +111,7 @@ abstract public function fetch(FetchAs $mode, array $fetchOptions): array|object
-    *
-    * @param \Drupal\Core\Database\Statement\FetchAs $mode
-    *   One of the cases of the FetchAs enum.
--   * @param array{class?: class-string, constructor_args?: list<mixed>, column?: int, cursor_orientation?: int, cursor_offset?: int} $fetchOptions
-+   * @param FetchOptions $fetchOptions
-    *   An array of fetch options.
-    *
-    * @return array
-@@ -125,7 +166,7 @@ public function fetchAllKeyed(int $keyIndex = 0, int $valueIndex = 1): array {
-    *   or FetchAs::List the returned value with be an array of arrays. For any
-    *   other value it will be an array of objects. If not specified, defaults to
-    *   what is specified by setFetchMode().
--   * @param array{class?: class-string, constructor_args?: list<mixed>, column?: int, cursor_orientation?: int, cursor_offset?: int} $fetchOptions
-+   * @param FetchOptions $fetchOptions
-    *   An array of fetch options.
-    *
-    * @return array
-@@ -139,4 +180,107 @@ public function fetchAllAssoc(string $column, FetchAs $mode, array $fetchOptions
-     return $result;
-   }
- 
-+  /**
-+   * Informs the iterator whether rows can be fetched from the resultset.
-+   *
-+   * @param bool $valid
-+   *   The result of the execution of the client statement.
-+   */
-+  protected function markResultsetIterable(bool $valid): void {
-+    $this->isIterable = $valid;
-+    $this->resultsetRow = NULL;
-+    if ($valid === TRUE) {
-+      $this->resultsetIndex = -1;
-+    }
-+  }
-+
-+  /**
-+   * Sets the current resultset row for the iterator, and increments the key.
-+   *
-+   * @param mixed $row
-+   *   The last row fetched from the client statement.
-+   */
-+  protected function setResultsetCurrentRow(mixed $row): void {
-+    $this->resultsetRow = $row;
-+    $this->resultsetIndex++;
-+  }
-+
-+  /**
-+   * Informs the iterator that no more rows can be fetched from the resultset.
-+   */
-+  protected function markResultsetFetchingComplete(): void {
-+    $this->markResultsetIterable(FALSE);
-+  }
-+
-+  /**
-+   * Returns the current element.
-+   *
-+   * @see https://www.php.net/manual/en/iterator.current.php
-+   *
-+   * @internal This method should not be called directly.
-+   */
-+  public function current(): mixed {
-+    return $this->resultsetRow;
-+  }
-+
-+  /**
-+   * Returns the key of the current element.
-+   *
-+   * @see https://www.php.net/manual/en/iterator.key.php
-+   *
-+   * @internal This method should not be called directly.
-+   */
-+  public function key(): mixed {
-+    return $this->resultsetIndex;
-+  }
-+
-+  /**
-+   * Rewinds back to the first element of the Iterator.
-+   *
-+   * This is the first method called when starting a foreach loop. It will not
-+   * be executed after foreach loops.
-+   *
-+   * @see https://www.php.net/manual/en/iterator.rewind.php
-+   *
-+   * @internal This method should not be called directly.
-+   */
-+  public function rewind(): void {
-+    // Nothing to do: our DatabaseStatement can't be rewound. Error out when
-+    // attempted.
-+    if ($this->resultsetIndex >= 0) {
-+      $this->markResultsetIterable(FALSE);
-+      throw new DatabaseExceptionWrapper('Attempted rewinding a StatementInterface object when fetching has already started. Refactor your code to avoid rewinding statement objects.');
-+    }
-+  }
-+
-+  /**
-+   * Moves the current position to the next element.
-+   *
-+   * This method is called after each foreach loop.
-+   *
-+   * @see https://www.php.net/manual/en/iterator.next.php
-+   *
-+   * @internal This method should not be called directly.
-+   */
-+  public function next(): void {
-+    $this->fetch($this->fetchMode, $this->fetchOptions);
-+  }
-+
-+  /**
-+   * Checks if current position is valid.
-+   *
-+   * This method is called after ::rewind() and ::next() to check if the
-+   * current position is valid.
-+   *
-+   * @see https://www.php.net/manual/en/iterator.valid.php
-+   *
-+   * @internal This method should not be called directly.
-+   */
-+  public function valid(): bool {
-+    if ($this->isIterable && $this->resultsetIndex === -1) {
-+      $this->fetch($this->fetchMode, $this->fetchOptions);
-+    }
-+    return $this->isIterable;
-+  }
-+
- }
-diff --git a/core/lib/Drupal/Core/Database/Statement/StatementBase.php b/core/lib/Drupal/Core/Database/Statement/StatementBase.php
-index ecbb60e5f91..9a0c0dbaccb 100644
---- a/core/lib/Drupal/Core/Database/Statement/StatementBase.php
-+++ b/core/lib/Drupal/Core/Database/Statement/StatementBase.php
-@@ -11,7 +11,6 @@
- use Drupal\Core\Database\FetchModeTrait;
- use Drupal\Core\Database\RowCountException;
- use Drupal\Core\Database\StatementInterface;
--use Drupal\Core\Database\StatementIteratorTrait;
- 
- /**
-  * StatementInterface base implementation.
-@@ -34,7 +33,6 @@
- abstract class StatementBase implements \Iterator, StatementInterface {
- 
-   use FetchModeTrait;
--  use StatementIteratorTrait;
- 
-   /**
-    * The client database Statement object.
-@@ -50,6 +48,11 @@ abstract class StatementBase implements \Iterator, StatementInterface {
- 
-   /**
-    * Holds the default fetch mode.
-+   *
-+   * @deprecated in drupal:42.1.0 and is removed from drupal:43.0.0. Use
-+   *   ResultBase::setFetchMode() instead.
-+   *
-+   * @see https://www.drupal.org/node/7654123
-    */
-   protected FetchAs $fetchMode = FetchAs::Object;
- 
-@@ -57,6 +60,11 @@ abstract class StatementBase implements \Iterator, StatementInterface {
-    * Holds fetch options.
-    *
-    * @var array{'class': class-string, 'constructor_args': list<mixed>, 'column': int}
-+   *
-+   * @deprecated in drupal:42.1.0 and is removed from drupal:43.0.0. Use
-+   *   ResultBase::setFetchMode() instead.
-+   *
-+   * @see https://www.drupal.org/node/7654123
-    */
-   protected array $fetchOptions = [
-     'class' => 'stdClass',
-@@ -208,25 +216,24 @@ public function getQueryString() {
-    * {@inheritdoc}
-    */
-   public function setFetchMode(FetchAs $mode, string|int|null $a1 = NULL, array $a2 = []) {
--    $this->fetchMode = $mode;
-+    $fetchOptions = NULL;
-     switch ($mode) {
-       case FetchAs::ClassObject:
--        $this->fetchOptions['class'] = $a1;
-+        $fetchOptions['class'] = $a1;
-         if ($a2) {
--          $this->fetchOptions['constructor_args'] = $a2;
-+          $fetchOptions['constructor_args'] = $a2;
-         }
-         break;
- 
-       case FetchAs::Column:
--        $this->fetchOptions['column'] = $a1;
-+        $fetchOptions['column'] = $a1;
-         break;
- 
-     }
- 
--    // If the result object is missing, just do with the properties setting.
-     try {
-       if ($this->result) {
--        return $this->result->setFetchMode($mode, $this->fetchOptions);
-+        return $this->result->setFetchMode($mode, $fetchOptions ?? []);
-       }
-       return TRUE;
-     }
-@@ -239,35 +246,19 @@ public function setFetchMode(FetchAs $mode, string|int|null $a1 = NULL, array $a
-    * {@inheritdoc}
-    */
-   public function fetch(?FetchAs $mode = NULL) {
--    $row = $this->result->fetch($mode ?? $this->fetchMode, $this->fetchOptions);
--
--    if ($row === FALSE) {
--      $this->markResultsetFetchingComplete();
--      return FALSE;
--    }
--
--    $this->setResultsetCurrentRow($row);
--    return $row;
-+    return $this->result->fetch($mode ?? $this->result->fetchMode, $this->result->fetchOptions);
-   }
- 
-   /**
-    * {@inheritdoc}
-    */
-   public function fetchObject(?string $className = NULL, array $constructorArguments = []) {
--    $row = $className === NULL ?
-+    return $className === NULL ?
-       $this->result->fetch(FetchAs::Object, []) :
-       $this->result->fetch(FetchAs::ClassObject, [
-         'class' => $className,
-         'constructor_args' => $constructorArguments,
-       ]);
--
--    if ($row === FALSE) {
--      $this->markResultsetFetchingComplete();
--      return FALSE;
--    }
--
--    $this->setResultsetCurrentRow($row);
--    return $row;
-   }
- 
-   /**
-@@ -281,34 +272,22 @@ public function fetchAssoc() {
-    * {@inheritdoc}
-    */
-   public function fetchField(int $index = 0) {
--    $column = $this->result->fetch(FetchAs::Column, ['column' => $index]);
--
--    if ($column === FALSE) {
--      $this->markResultsetFetchingComplete();
--      return FALSE;
--    }
--
--    $this->setResultsetCurrentRow($column);
--    return $column;
-+    return $this->result->fetch(FetchAs::Column, ['column' => $index]);
-   }
- 
-   /**
-    * {@inheritdoc}
-    */
-   public function fetchAll(?FetchAs $mode = NULL, ?int $columnIndex = NULL, ?array $constructorArguments = NULL) {
--    $fetchMode = $mode ?? $this->fetchMode;
-+    $fetchOptions = NULL;
-     if (isset($columnIndex)) {
--      $this->fetchOptions['column'] = $columnIndex;
-+      $fetchOptions['column'] = $columnIndex;
-     }
-     if (isset($constructorArguments)) {
--      $this->fetchOptions['constructor_args'] = $constructorArguments;
-+      $fetchOptions['constructor_args'] = $constructorArguments;
-     }
- 
--    $return = $this->result->fetchAll($fetchMode, $this->fetchOptions);
--
--    $this->markResultsetFetchingComplete();
--
--    return $return;
-+    return $this->result->fetchAll($mode ?? $this->result->fetchMode, $fetchOptions ?? $this->result->fetchOptions);
-   }
- 
-   /**
-@@ -322,18 +301,14 @@ public function fetchCol(int $index = 0) {
-    * {@inheritdoc}
-    */
-   public function fetchAllAssoc(string $key, ?FetchAs $fetch = NULL) {
--    $result = $this->result->fetchAllAssoc($key, $fetch ?? $this->fetchMode, $this->fetchOptions);
--    $this->markResultsetFetchingComplete();
--    return $result;
-+    return $this->result->fetchAllAssoc($key, $fetch ?? $this->result->fetchMode, $this->result->fetchOptions);
-   }
- 
-   /**
-    * {@inheritdoc}
-    */
-   public function fetchAllKeyed(int $keyIndex = 0, int $valueIndex = 1) {
--    $result = $this->result->fetchAllKeyed($keyIndex, $valueIndex);
--    $this->markResultsetFetchingComplete();
--    return $result;
-+    return $this->result->fetchAllKeyed($keyIndex, $valueIndex);
-   }
- 
-   /**
-@@ -349,4 +324,67 @@ public function rowCount() {
-     }
-   }
- 
-+  /**
-+   * Returns the current element.
-+   *
-+   * @see https://www.php.net/manual/en/iterator.current.php
-+   *
-+   * @internal This method should not be called directly.
-+   */
-+  public function current(): mixed {
-+    return $this->result->current();
-+  }
-+
-+  /**
-+   * Returns the key of the current element.
-+   *
-+   * @see https://www.php.net/manual/en/iterator.key.php
-+   *
-+   * @internal This method should not be called directly.
-+   */
-+  public function key(): mixed {
-+    return $this->result->key();
-+  }
-+
-+  /**
-+   * Rewinds back to the first element of the Iterator.
-+   *
-+   * This is the first method called when starting a foreach loop. It will not
-+   * be executed after foreach loops.
-+   *
-+   * @see https://www.php.net/manual/en/iterator.rewind.php
-+   *
-+   * @internal This method should not be called directly.
-+   */
-+  public function rewind(): void {
-+    $this->result->rewind();
-+  }
-+
-+  /**
-+   * Moves the current position to the next element.
-+   *
-+   * This method is called after each foreach loop.
-+   *
-+   * @see https://www.php.net/manual/en/iterator.next.php
-+   *
-+   * @internal This method should not be called directly.
-+   */
-+  public function next(): void {
-+    $this->result->next();
-+  }
-+
-+  /**
-+   * Checks if current position is valid.
-+   *
-+   * This method is called after ::rewind() and ::next() to check if the
-+   * current position is valid.
-+   *
-+   * @see https://www.php.net/manual/en/iterator.valid.php
-+   *
-+   * @internal This method should not be called directly.
-+   */
-+  public function valid(): bool {
-+    return $this->result->valid();
-+  }
-+
- }
-diff --git a/core/lib/Drupal/Core/Database/StatementIteratorTrait.php b/core/lib/Drupal/Core/Database/StatementIteratorTrait.php
-index bab319d03fd..3c19fafea03 100644
---- a/core/lib/Drupal/Core/Database/StatementIteratorTrait.php
-+++ b/core/lib/Drupal/Core/Database/StatementIteratorTrait.php
-@@ -7,6 +7,11 @@
-  *
-  * Implements the methods required by StatementInterface objects that implement
-  * the \Iterator interface.
-+ *
-+ * @deprecated in drupal:42.1.0 and is removed from drupal:43.0.0. Iteration
-+ *   control is moved to ResultBase.
-+ *
-+ * @see https://www.drupal.org/node/7654123
-  */
- trait StatementIteratorTrait {
- 
-diff --git a/core/lib/Drupal/Core/Database/StatementPrefetchIterator.php b/core/lib/Drupal/Core/Database/StatementPrefetchIterator.php
-index 97940d2b924..b7cea608a64 100644
---- a/core/lib/Drupal/Core/Database/StatementPrefetchIterator.php
-+++ b/core/lib/Drupal/Core/Database/StatementPrefetchIterator.php
-@@ -3,7 +3,6 @@
  namespace Drupal\Core\Database;
  
- use Drupal\Core\Database\Statement\FetchAs;
--use Drupal\Core\Database\Statement\PdoTrait;
- use Drupal\Core\Database\Statement\PrefetchedResult;
- use Drupal\Core\Database\Statement\StatementBase;
++use Drupal\Core\Database\Exception\SchemaTablePrimaryKeyException;
+ use Drupal\Core\Database\Query\PlaceholderInterface;
+ use Drupal\Core\Database\SchemaDefinition\Schema as SchemaDefinition;
+ use Drupal\Core\Database\SchemaDefinition\SchemaDefinitionType;
+@@ -462,6 +463,21 @@ abstract public function addUniqueKey($table, $name, $fields);
+    */
+   abstract public function dropUniqueKey($table, $name);
  
-@@ -16,8 +15,6 @@
-  */
- class StatementPrefetchIterator extends StatementBase {
- 
--  use PdoTrait;
--
++  /**
++   * Checks if a unique key exists in the given table.
++   *
++   * @param string $tableName
++   *   The name of the table in drupal (no prefixing).
++   * @param string $uniqueKeyName
++   *   The name of the key in drupal (no prefixing).
++   *
++   * @return bool
++   *   TRUE if the given key exists, otherwise FALSE.
++   */
++  public function uniqueKeyExists(string $tableName, string $uniqueKeyName): bool {
++    return $this->indexExists($tableName, $uniqueKeyName);
++  }
++
    /**
-    * Constructs a StatementPrefetchIterator object.
+    * Add an index.
     *
-@@ -72,40 +69,36 @@ public function execute($args = [], $options = []) {
-     // Prepare and execute the statement.
-     try {
-       $this->clientStatement = $this->getStatement($this->queryString, $args);
--      $return = $this->clientExecute($args, $options);
-+      $return = $this->getClientStatement()->execute($args);
-     }
-     catch (\Exception $e) {
-       $this->dispatchStatementExecutionFailureEvent($startEvent, $e);
--      // @phpstan-ignore unset.possiblyHookedProperty
--      unset($this->clientStatement);
-+      $this->clientStatement = NULL;
-       throw $e;
-     }
- 
--    // Fetch all the data from the reply, in order to release any lock as soon
--    // as possible. Then, destroy the client statement. See the documentation
--    // of \Drupal\sqlite\Driver\Database\sqlite\Statement for an explanation.
--    $this->result = new PrefetchedResult(
--      $this->fetchMode,
--      $this->fetchOptions,
--      $this->clientFetchAll(FetchAs::Associative),
--      $this->rowCountEnabled ? $this->clientRowCount() : NULL,
--    );
--    // @phpstan-ignore unset.possiblyHookedProperty
--    unset($this->clientStatement);
--    $this->markResultsetIterable($return);
--
-     if (isset($options['fetch'])) {
-       if (is_string($options['fetch'])) {
--        // Default to an object. Note: db fields will be added to the object
--        // before the constructor is run. If you need to assign fields after
--        // the constructor is run. See https://www.drupal.org/node/315092.
--        $this->setFetchMode(FetchAs::ClassObject, $options['fetch']);
-+        $fetchMode = FetchAs::ClassObject;
-+        $fetchOptions = ['class' => $options['fetch']];
-       }
-       else {
--        $this->setFetchMode($options['fetch']);
-+        $fetchMode = $options['fetch'];
-       }
-     }
- 
-+    // Fetch all the data from the reply, in order to release any lock as soon
-+    // as possible. Then, destroy the client statement. See the documentation
-+    // of \Drupal\sqlite\Driver\Database\sqlite\Statement for an explanation.
-+    $this->result = new PrefetchedResult(
-+      $fetchMode ?? FetchAs::Object,
-+      $fetchOptions ?? [],
-+      $this->getClientStatement()->fetchAll(\PDO::FETCH_ASSOC),
-+      $this->rowCountEnabled ? $this->getClientStatement()->rowCount() : NULL,
-+      $return,
-+    );
-+    $this->clientStatement = NULL;
-+
-     $this->dispatchStatementExecutionEndEvent($startEvent);
- 
-     return $return;
-diff --git a/core/lib/Drupal/Core/Database/StatementWrapperIterator.php b/core/lib/Drupal/Core/Database/StatementWrapperIterator.php
-index 1b0648b6c86..ba2b0c51a10 100644
---- a/core/lib/Drupal/Core/Database/StatementWrapperIterator.php
-+++ b/core/lib/Drupal/Core/Database/StatementWrapperIterator.php
-@@ -4,7 +4,6 @@
- 
- use Drupal\Core\Database\Statement\FetchAs;
- use Drupal\Core\Database\Statement\PdoResult;
--use Drupal\Core\Database\Statement\PdoTrait;
- use Drupal\Core\Database\Statement\StatementBase;
- 
- /**
-@@ -12,8 +11,6 @@
-  */
- class StatementWrapperIterator extends StatementBase {
- 
--  use PdoTrait;
--
-   /**
-    * Constructs a StatementWrapperIterator object.
-    *
-@@ -65,25 +62,27 @@ public function getClientStatement(): \PDOStatement {
-   public function execute($args = [], $options = []) {
-     assert(!isset($options['fetch']) || $options['fetch'] instanceof FetchAs || is_string($options['fetch']), 'The "fetch" option passed to execute() must contain a FetchAs enum case or a string. See https://www.drupal.org/node/3488338');
- 
--    if (isset($options['fetch'])) {
--      if (is_string($options['fetch'])) {
--        $this->setFetchMode(FetchAs::ClassObject, $options['fetch']);
--      }
--      else {
--        $this->setFetchMode($options['fetch']);
--      }
--    }
--
-     $startEvent = $this->dispatchStatementExecutionStartEvent($args ?? []);
- 
-     try {
--      $return = $this->clientExecute($args, $options);
-+      $return = $this->getClientStatement()->execute($args);
-+
-+      if (isset($options['fetch'])) {
-+        if (is_string($options['fetch'])) {
-+          $fetchMode = FetchAs::ClassObject;
-+          $fetchOptions = ['class' => $options['fetch']];
-+        }
-+        else {
-+          $fetchMode = $options['fetch'];
-+        }
-+      }
-+
-       $this->result = new PdoResult(
--        $this->fetchMode,
--        $this->fetchOptions,
-+        $fetchMode ?? FetchAs::Object,
-+        $fetchOptions ?? [],
-         $this->getClientStatement(),
-+        $return,
-       );
--      $this->markResultsetIterable($return);
-     }
-     catch (\Exception $e) {
-       $this->dispatchStatementExecutionFailureEvent($startEvent, $e);
-diff --git a/core/modules/mysqli/src/Driver/Database/mysqli/Result.php b/core/modules/mysqli/src/Driver/Database/mysqli/Result.php
-index 2c5e57c3aa8..11bf0f09de2 100644
---- a/core/modules/mysqli/src/Driver/Database/mysqli/Result.php
-+++ b/core/modules/mysqli/src/Driver/Database/mysqli/Result.php
-@@ -11,6 +11,8 @@
- 
- /**
-  * Class for mysqli-provided results of a data query language (DQL) statement.
-+ *
-+ * @phpstan-import-type FetchOptions from \Drupal\Core\Database\Statement\ResultBase
-  */
- class Result extends ResultBase {
- 
-@@ -21,20 +23,24 @@ class Result extends ResultBase {
-    *
-    * @param \Drupal\Core\Database\Statement\FetchAs $fetchMode
-    *   The fetch mode.
--   * @param array{class: class-string, constructor_args: list<mixed>, column: int, cursor_orientation?: int, cursor_offset?: int} $fetchOptions
-+   * @param FetchOptions $fetchOptions
-    *   The fetch options.
-    * @param \mysqli_result|false $mysqliResult
-    *   The MySQLi result object.
-    * @param \mysqli $mysqliConnection
-    *   Client database connection object.
-+   * @param bool $valid
-+   *   TRUE if the statement's ::execute() call was successful, or FALSE on
-+   *   failure.
-    */
-   public function __construct(
-     FetchAs $fetchMode,
-     array $fetchOptions,
-     protected readonly \mysqli_result|false $mysqliResult,
-     protected readonly \mysqli $mysqliConnection,
-+    bool $valid,
-   ) {
--    parent::__construct($fetchMode, $fetchOptions);
-+    parent::__construct($fetchMode, $fetchOptions, $valid && (bool) $mysqliResult);
-   }
- 
-   /**
-@@ -70,6 +76,8 @@ public function rowCount(): ?int {
-    * {@inheritdoc}
-    */
-   public function setFetchMode(FetchAs $mode, array $fetchOptions): bool {
-+    $this->fetchMode = $mode;
-+    $this->fetchOptions = $fetchOptions;
-     // There are no methods to set fetch mode in \mysqli_result.
-     return TRUE;
-   }
-@@ -78,18 +86,25 @@ public function setFetchMode(FetchAs $mode, array $fetchOptions): bool {
-    * {@inheritdoc}
-    */
-   public function fetch(FetchAs $mode, array $fetchOptions): array|object|int|float|string|bool|NULL {
-+    if ($this->mysqliResult === FALSE) {
-+      return FALSE;
-+    }
-+
-     assert($this->mysqliResult instanceof \mysqli_result);
- 
-     $mysqli_row = $this->mysqliResult->fetch_assoc();
- 
-     if (!$mysqli_row) {
-+      $this->markResultsetFetchingComplete();
-       return FALSE;
-     }
- 
-     // Stringify all non-NULL column values.
-     $row = array_map(fn ($value) => $value === NULL ? NULL : (string) $value, $mysqli_row);
- 
--    return $this->assocToFetchMode($row, $mode, $fetchOptions);
-+    $row = $this->assocToFetchMode($row, $mode, $fetchOptions);
-+    $this->setResultsetCurrentRow($row);
-+    return $row;
-   }
- 
- }
-diff --git a/core/modules/mysqli/src/Driver/Database/mysqli/Statement.php b/core/modules/mysqli/src/Driver/Database/mysqli/Statement.php
-index 24e8c83501c..a2ec5dd2426 100644
---- a/core/modules/mysqli/src/Driver/Database/mysqli/Statement.php
-+++ b/core/modules/mysqli/src/Driver/Database/mysqli/Statement.php
-@@ -69,15 +69,6 @@ public function getClientStatement(): \mysqli_stmt {
-    * {@inheritdoc}
-    */
-   public function execute($args = [], $options = []) {
--    if (isset($options['fetch'])) {
--      if (is_string($options['fetch'])) {
--        $this->setFetchMode(FetchAs::ClassObject, $options['fetch']);
--      }
--      else {
--        $this->setFetchMode($options['fetch']);
--      }
--    }
--
-     $startEvent = $this->dispatchStatementExecutionStartEvent($args ?? []);
- 
-     try {
-@@ -99,16 +90,26 @@ public function execute($args = [], $options = []) {
-         $args = $tmp;
-       }
- 
-+      if (isset($options['fetch'])) {
-+        if (is_string($options['fetch'])) {
-+          $fetchMode = FetchAs::ClassObject;
-+          $fetchOptions = ['class' => $options['fetch']];
-+        }
-+        else {
-+          $fetchMode = $options['fetch'];
-+        }
-+      }
-+
-       // In mysqli, the results of the statement execution are returned in a
-       // different object than the statement itself.
-       $return = $this->getClientStatement()->execute($args);
-       $this->result = new Result(
--        $this->fetchMode,
--        $this->fetchOptions,
-+        $fetchMode ?? FetchAs::Object,
-+        $fetchOptions ?? [],
-         $this->getClientStatement()->get_result(),
-         $this->clientConnection,
-+        $return,
-       );
--      $this->markResultsetIterable($return);
-     }
-     catch (\Exception $e) {
-       $this->dispatchStatementExecutionFailureEvent($startEvent, $e);
-diff --git a/core/tests/Drupal/KernelTests/Core/Database/FetchTest.php b/core/tests/Drupal/KernelTests/Core/Database/FetchTest.php
-index 01ae800005d..4b96c9415d6 100644
---- a/core/tests/Drupal/KernelTests/Core/Database/FetchTest.php
-+++ b/core/tests/Drupal/KernelTests/Core/Database/FetchTest.php
-@@ -389,4 +389,15 @@ public function testRowCount(): void {
-     $this->assertTrue($exception, 'Exception was thrown');
+@@ -666,6 +682,149 @@ final public function createTableFromDefinition(SchemaDefinitionType $schemaDefi
+     $this->createTable($table->name, $table->toArray());
    }
  
 +  /**
-+   * Confirms that we can not fetch after a DML statement.
++   * Adds a table column based on a schema definition.
++   *
++   * @param \Drupal\Core\Database\SchemaDefinition\Schema $targetSchema
++   *   The target Schema definition where the table is defined with the changed
++   *   column and all defined indexes.
++   * @param string $tableName
++   *   Name of the table.
++   * @param string $targetColumnName
++   *   The name of the column as defined in the target schema definition.
++   *
++   * @throws \Drupal\Core\Database\SchemaObjectDoesNotExistException
++   *   If the specified table or source field doesn't exist.
++   * @throws \Drupal\Core\Database\SchemaObjectExistsException
++   *   If the specified destination field already exists.
 +   */
-+  public function testFetchAfterInsertStatement(): void {
-+    $statement = $this->connection->query("INSERT INTO {test} (name) VALUES ('test12345678')");
-+    $this->assertInstanceOf(StatementInterface::class, $statement);
-+    $x = $statement->fetch();
-+    dump(print_r($x, TRUE));
-+    $this->assertFalse($x);
++  final public function addTableColumnFromDefinition(SchemaDefinition $targetSchema, string $tableName, string $targetColumnName): void {
++    $table = $targetSchema->getTableDefinition($tableName);
++
++    // Handles keys/indexes that are impacted by the addition.
++    // Remove existing current keys if in the target schema the added column
++    // is part of them.
++    foreach ($table->indexes ?? [] as $index) {
++      if (in_array($targetColumnName, $index->columnNames(), TRUE) && $this->indexExists($tableName, $index->name)) {
++        $this->dropIndex($tableName, $index->name);
++      }
++    }
++    foreach ($table->uniqueKeys ?? [] as $key) {
++      if (in_array($targetColumnName, $key->columnNames(), TRUE) && $this->uniqueKeyExists($tableName, $key->name)) {
++        $this->dropUniqueKey($tableName, $key->name);
++      }
++    }
++    if (in_array($targetColumnName, $table->primaryKey?->columnNames() ?? [], TRUE)) {
++      try {
++        $this->dropPrimaryKey($tableName);
++      }
++      catch (SchemaTablePrimaryKeyException) {
++        // It may not be possible to drop the primary key. For example, in
++        // MySQL primary keys based on a serial column.
++      }
++    }
++    // Add target keys that are needed.
++    $newKeys = [];
++    $hasPrimaryKey = $this->findPrimaryKeyColumns($tableName) !== [];
++    $needsPrimaryKey = (bool) $table->primaryKey;
++    if (!$hasPrimaryKey && $needsPrimaryKey) {
++      $newKeys['primary key'] = $table->primaryKey->toArray();
++    }
++    foreach ($table->uniqueKeys ?? [] as $key) {
++      if (!$this->uniqueKeyExists($tableName, $key->name)) {
++        $newKeys['unique keys'][$key->name] = $key->toArray();
++      }
++    }
++    foreach ($table->indexes ?? [] as $index) {
++      if (!$this->indexExists($tableName, $index->name)) {
++        $newKeys['indexes'][$index->name] = $index->toArray();
++      }
++    }
++
++    $tableAsArray = $table->toArray();
++    unset($tableAsArray['primary key'], $tableAsArray['unique keys'], $tableAsArray['indexes']);
++    $this->addField(
++      $tableName,
++      $targetColumnName,
++      $tableAsArray['fields'][$targetColumnName],
++      array_merge($tableAsArray, $newKeys),
++    );
++  }
++
++  /**
++   * Changes a table column to a target schema definition.
++   *
++   * @param \Drupal\Core\Database\SchemaDefinition\Schema $targetSchema
++   *   The target Schema definition where the table is defined with the changed
++   *   column and all defined indexes.
++   * @param string $tableName
++   *   Name of the table.
++   * @param string $targetColumnName
++   *   The name of the column as defined in the target schema definition.
++   * @param string|null $currentColumnName
++   *   The current name of the column in the table. Skip if the name does not
++   *   change.
++   *
++   * @throws \Drupal\Core\Database\SchemaObjectDoesNotExistException
++   *   If the specified table or source field doesn't exist.
++   * @throws \Drupal\Core\Database\SchemaObjectExistsException
++   *   If the specified destination field already exists.
++   */
++  final public function changeTableColumnFromDefinition(SchemaDefinition $targetSchema, string $tableName, string $targetColumnName, ?string $currentColumnName = NULL): void {
++    $table = $targetSchema->getTableDefinition($tableName);
++    $currentColumnName ??= $targetColumnName;
++
++    // Handles keys/indexes that are impacted by the change.
++    $currentKeys = $this->introspectIndexSchema($tableName);
++    // Remove current keys that include the column to be changed.
++    foreach ($currentKeys['indexes'] as $key => $data) {
++      if (in_array($currentColumnName, $data, TRUE)) {
++        $this->dropIndex($tableName, $key);
++      }
++    }
++    foreach ($currentKeys['unique keys'] as $key => $data) {
++      if (in_array($currentColumnName, $data, TRUE)) {
++        $this->dropUniqueKey($tableName, $key);
++      }
++    }
++    if (in_array($currentColumnName, $currentKeys['primary key'], TRUE)) {
++      try {
++        $this->dropPrimaryKey($tableName);
++      }
++      catch (SchemaTablePrimaryKeyException) {
++        // It may not be possible to drop the primary key. For example, in
++        // MySQL primary keys based on a serial column.
++      }
++    }
++    // Add target keys that are needed.
++    $newKeys = [];
++    $hasPrimaryKey = $this->findPrimaryKeyColumns($tableName) !== [];
++    $needsPrimaryKey = (bool) $table->primaryKey;
++    if (!$hasPrimaryKey && $needsPrimaryKey) {
++      $newKeys['primary key'] = $table->primaryKey->toArray();
++    }
++    foreach ($table->uniqueKeys ?? [] as $key) {
++      if (!$this->uniqueKeyExists($tableName, $key->name)) {
++        $newKeys['unique keys'][$key->name] = $key->toArray();
++      }
++    }
++    foreach ($table->indexes ?? [] as $index) {
++      if (!$this->indexExists($tableName, $index->name)) {
++        $newKeys['indexes'][$index->name] = $index->toArray();
++      }
++    }
++
++    $tableAsArray = $table->toArray();
++    unset($tableAsArray['primary key'], $tableAsArray['unique keys'], $tableAsArray['indexes']);
++    $this->changeField(
++      $tableName,
++      $currentColumnName,
++      $targetColumnName,
++      $tableAsArray['fields'][$targetColumnName],
++      array_merge($tableAsArray, $newKeys),
++    );
++  }
++
+   /**
+    * Create a new table from a Drupal array table definition.
+    *
+diff --git a/core/lib/Drupal/Core/Database/SchemaDefinition/KeyBase.php b/core/lib/Drupal/Core/Database/SchemaDefinition/KeyBase.php
+index c9528e6254f..d1c176b7f99 100644
+--- a/core/lib/Drupal/Core/Database/SchemaDefinition/KeyBase.php
++++ b/core/lib/Drupal/Core/Database/SchemaDefinition/KeyBase.php
+@@ -74,6 +74,19 @@ protected function buildKeyColumns(array $rawColumns, bool $limitedLengthAllowed
+     return $columns;
+   }
+ 
++  /**
++   * Returns the names of the columns in the key.
++   *
++   * @return list<string>
++   *   The names of the columns.
++   */
++  public function columnNames(): array {
++    return array_map(
++      fn(KeyColumn $keyColumn): string => $keyColumn->name,
++      $this->columns,
++    );
++  }
++
+   /**
+    * {@inheritdoc}
+    */
+diff --git a/core/lib/Drupal/Core/Database/SchemaDefinition/Table.php b/core/lib/Drupal/Core/Database/SchemaDefinition/Table.php
+index 1b83f05a15d..8db90beba8a 100644
+--- a/core/lib/Drupal/Core/Database/SchemaDefinition/Table.php
++++ b/core/lib/Drupal/Core/Database/SchemaDefinition/Table.php
+@@ -62,20 +62,61 @@ public function __construct(
+    * @throws \Drupal\Core\Database\Exception\SchemaDefinitionException
+    */
+   private function validate(): void {
+-
+     if ($this->columns && !Inspector::assertAllObjects($this->columns, Column::class)) {
+       throw new SchemaDefinitionException("All members of the 'columns' argument of the '{$this->name}' Table must be Column objects");
+     }
+-    if ($this->uniqueKeys && !Inspector::assertAllObjects($this->uniqueKeys, UniqueKey::class)) {
+-      throw new SchemaDefinitionException("All members of the 'uniqueKeys' argument of the '{$this->name}' Table must be UniqueKey objects");
++    if ($this->primaryKey) {
++      $invalidKeyColumnNames = array_diff($this->primaryKey->columnNames(), $this->columnNames());
++      if ($invalidKeyColumnNames) {
++        throw new SchemaDefinitionException("Table '{$this->name}' specifies a primary key with undefined column(s): " . implode(', ', $invalidKeyColumnNames));
++      }
+     }
+-    if ($this->indexes && !Inspector::assertAllObjects($this->indexes, Index::class)) {
+-      throw new SchemaDefinitionException("All members of the 'indexes' argument of the '{$this->name}' Table must be Index objects");
++    if ($this->uniqueKeys) {
++      if (!Inspector::assertAllObjects($this->uniqueKeys, UniqueKey::class)) {
++        throw new SchemaDefinitionException("All members of the 'uniqueKeys' argument of the '{$this->name}' Table must be UniqueKey objects");
++      }
++      foreach ($this->uniqueKeys as $uniqueKey) {
++        $invalidKeyColumnNames = array_diff($uniqueKey->columnNames(), $this->columnNames());
++        if ($invalidKeyColumnNames) {
++          throw new SchemaDefinitionException("Table '{$this->name}' specifies a unique key '{$uniqueKey->name}' with undefined column(s): " . implode(', ', $invalidKeyColumnNames));
++        }
++      }
+     }
+-    if ($this->foreignKeys && !Inspector::assertAllObjects($this->foreignKeys, ForeignKey::class)) {
+-      throw new SchemaDefinitionException("All members of the 'foreignKeys' argument of the '{$this->name}' Table must be ForeignKey objects");
++    if ($this->indexes) {
++      if (!Inspector::assertAllObjects($this->indexes, Index::class)) {
++        throw new SchemaDefinitionException("All members of the 'indexes' argument of the '{$this->name}' Table must be Index objects");
++      }
++      foreach ($this->indexes as $index) {
++        $invalidKeyColumnNames = array_diff($index->columnNames(), $this->columnNames());
++        if ($invalidKeyColumnNames) {
++          throw new SchemaDefinitionException("Table '{$this->name}' specifies an index '{$index->name}' with undefined column(s): " . implode(', ', $invalidKeyColumnNames));
++        }
++      }
+     }
++    if ($this->foreignKeys) {
++      if (!Inspector::assertAllObjects($this->foreignKeys, ForeignKey::class)) {
++        throw new SchemaDefinitionException("All members of the 'foreignKeys' argument of the '{$this->name}' Table must be ForeignKey objects");
++      }
++      foreach ($this->foreignKeys as $foreignKey) {
++        $invalidKeyColumnNames = array_diff($foreignKey->columnNames(), $this->columnNames());
++        if ($invalidKeyColumnNames) {
++          throw new SchemaDefinitionException("Table '{$this->name}' specifies a foreign key '{$foreignKey->name}' with undefined column(s): " . implode(', ', $invalidKeyColumnNames));
++        }
++      }
++    }
++  }
+ 
++  /**
++   * Returns the names of the columns in the table.
++   *
++   * @return list<string>
++   *   The names of the columns.
++   */
++  public function columnNames(): array {
++    return array_map(
++      fn(Column $column): string => $column->name,
++      $this->columns,
++    );
+   }
+ 
+   /**
+diff --git a/core/modules/mysql/src/Driver/Database/mysql/ExceptionHandler.php b/core/modules/mysql/src/Driver/Database/mysql/ExceptionHandler.php
+index de5a2296877..6a78934f289 100644
+--- a/core/modules/mysql/src/Driver/Database/mysql/ExceptionHandler.php
++++ b/core/modules/mysql/src/Driver/Database/mysql/ExceptionHandler.php
+@@ -8,6 +8,7 @@
+ use Drupal\Core\Database\Exception\SchemaPrimaryKeyMustBeDroppedException;
+ use Drupal\Core\Database\Exception\SchemaTableColumnSizeTooLargeException;
+ use Drupal\Core\Database\Exception\SchemaTableKeyTooLargeException;
++use Drupal\Core\Database\Exception\SchemaTablePrimaryKeyException;
+ use Drupal\Core\Database\IntegrityConstraintViolationException;
+ use Drupal\Core\Database\StatementInterface;
+ 
+@@ -91,6 +92,7 @@ protected function rethrowNormalizedException(
+       '42000' =>  match ($errorCode) {
+         1071 => throw new SchemaTableKeyTooLargeException($message, $code, $exception),
+         1074 => throw new SchemaTableColumnSizeTooLargeException($message, $code, $exception),
++        1075 => throw new SchemaTablePrimaryKeyException($message, $code, $exception),
+         default => throw new DatabaseExceptionWrapper($message, 0, $exception),
+       },
+       default => throw new DatabaseExceptionWrapper($message, 0, $exception),
+diff --git a/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php b/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php
+index 37a09406f5f..37f2f89950e 100644
+--- a/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php
++++ b/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php
+@@ -762,6 +762,13 @@ public function indexExists($table, $name) {
+     return (bool) $this->connection->query("SELECT 1 FROM pg_indexes WHERE schemaname = :schema AND tablename = :table AND indexname = :index", $sql_params)->fetchField();
+   }
+ 
++  /**
++   * {@inheritdoc}
++   */
++  public function uniqueKeyExists(string $tableName, string $uniqueKeyName): bool {
++    return $this->constraintExists($tableName, $uniqueKeyName . '__key');
++  }
++
+   /**
+    * Helper function: check if a constraint (PK, FK, UK) exists.
+    *
+diff --git a/core/modules/sqlite/src/Driver/Database/sqlite/Schema.php b/core/modules/sqlite/src/Driver/Database/sqlite/Schema.php
+index b447836c14b..38e4d05cde1 100644
+--- a/core/modules/sqlite/src/Driver/Database/sqlite/Schema.php
++++ b/core/modules/sqlite/src/Driver/Database/sqlite/Schema.php
+@@ -395,7 +395,11 @@ public function addField($table, $field, $specification, $keys_new = []) {
+       }
+ 
+       // Add the new indexes.
++      $tempUniqueKeys = $new_schema['unique keys'];
++      $tempIndexes = $new_schema['indexes'];
+       $new_schema = array_merge($new_schema, $keys_new);
++      $new_schema['unique keys'] = array_merge($new_schema['unique keys'], $tempUniqueKeys);
++      $new_schema['indexes'] = array_merge($new_schema['indexes'], $tempIndexes);
+ 
+       $this->alterTable($table, $old_schema, $new_schema, $mapping);
+     }
+diff --git a/core/tests/Drupal/KernelTests/Core/Database/SchemaOperationsFromDefinitionTest.php b/core/tests/Drupal/KernelTests/Core/Database/SchemaOperationsFromDefinitionTest.php
+new file mode 100644
+index 00000000000..2f59bb3c91d
+--- /dev/null
++++ b/core/tests/Drupal/KernelTests/Core/Database/SchemaOperationsFromDefinitionTest.php
+@@ -0,0 +1,645 @@
++<?php
++
++declare(strict_types=1);
++
++namespace Drupal\KernelTests\Core\Database;
++
++use Drupal\Core\Database\Schema;
++use Drupal\Core\Database\SchemaDefinition\Column;
++use Drupal\Core\Database\SchemaDefinition\ColumnSize;
++use Drupal\Core\Database\SchemaDefinition\Index;
++use Drupal\Core\Database\SchemaDefinition\IntValue;
++use Drupal\Core\Database\SchemaDefinition\PrimaryKey;
++use Drupal\Core\Database\SchemaDefinition\Schema as SchemaDefinition;
++use Drupal\Core\Database\SchemaDefinition\SchemaDefinitionType;
++use Drupal\Core\Database\SchemaDefinition\Table;
++use Drupal\Core\Database\SchemaDefinition\UniqueKey;
++use PHPUnit\Framework\Attributes\DataProvider;
++use PHPUnit\Framework\Attributes\Group;
++use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
++
++/**
++ * Tests schema operations involving the SchemaDefinition API.
++ */
++#[Group('Database')]
++#[RunTestsInSeparateProcesses]
++class SchemaOperationsFromDefinitionTest extends DatabaseTestBase {
++
++  /**
++   * Database schema instance.
++   */
++  protected Schema $schema;
++
++  /**
++   * {@inheritdoc}
++   */
++  protected function setUp(): void {
++    parent::setUp();
++    $this->schema = $this->connection->schema();
++  }
++
++  /**
++   * Tests creating a table from a schema definition.
++   */
++  public function testCreateTable(): void {
++    $tableName = 'test_from_definition';
++    $table = new Table(
++      name: $tableName,
++      description: 'Test table created from definition.',
++      columns: [
++        Column::serial(
++          name: 'id',
++        ),
++        Column::int(
++          name: 'age',
++          notNull: TRUE,
++          default: new IntValue(0),
++        ),
++        Column::varchar(
++          name: 'name',
++          length: 255,
++        ),
++      ],
++      primaryKey: new PrimaryKey(['id']),
++      uniqueKeys: [
++        new UniqueKey(name: 'ages', columns: ['age']),
++      ],
++      indexes: [
++        new Index(name: 'names_by_age', columns: ['name', 'age']),
++      ],
++    );
++
++    $schema = new SchemaDefinition(
++      type: SchemaDefinitionType::Test,
++      name: $tableName,
++      tables: [$table],
++    );
++
++    $this->schema->createSchemaFromDefinition($schema);
++
++    $this->assertTrue($this->schema->tableExists($tableName));
++    $this->assertTrue($this->schema->uniqueKeyExists($tableName, 'ages'));
++    $this->assertTrue($this->schema->indexExists($tableName, 'names_by_age'));
++  }
++
++  /**
++   * Initial schema for ::testAddTableColumn.
++   *
++   * @return \Drupal\Core\Database\SchemaDefinition\Schema
++   *   The schema.
++   */
++  protected function initialSchemaForAddTableColumn(string $tableName): SchemaDefinition {
++    $table = new Table(
++      name: $tableName,
++      description: 'Test table created from definition for column addition.',
++      columns: [
++        Column::serial(
++          name: 'id',
++        ),
++        Column::varchar(
++          name: 'name',
++          length: 255,
++        ),
++        Column::varchar(
++          name: 'job',
++          length: 255,
++        ),
++      ],
++      primaryKey: new PrimaryKey(['id']),
++      uniqueKeys: [
++        new UniqueKey(name: 'test_add_unique', columns: ['name', 'id']),
++        new UniqueKey(name: 'job_ids', columns: ['job', 'id']),
++      ],
++      indexes: [
++        new Index(name: 'test_add_index', columns: ['job', 'id']),
++        new Index(name: 'id_jobs', columns: ['id', 'job']),
++      ],
++    );
++
++    return new SchemaDefinition(
++      type: SchemaDefinitionType::Test,
++      name: $tableName,
++      tables: [$table],
++    );
++  }
++
++  /**
++   * Target schema for ::testAddTableColumn.
++   *
++   * @return \Drupal\Core\Database\SchemaDefinition\Schema
++   *   The schema.
++   */
++  protected function targetSchemaForTestAddTableColumn(string $tableName): SchemaDefinition {
++    $table = new Table(
++      name: $tableName,
++      description: 'Test table created from definition for column addition.',
++      columns: [
++        Column::serial(
++          name: 'id',
++        ),
++        Column::int(
++          name: 'age',
++          notNull: TRUE,
++          default: new IntValue(0),
++        ),
++        Column::varchar(
++          name: 'name',
++          length: 255,
++        ),
++        Column::varchar(
++          name: 'job',
++          length: 255,
++        ),
++      ],
++      primaryKey: new PrimaryKey(['id']),
++      uniqueKeys: [
++        new UniqueKey(name: 'ages', columns: ['age']),
++        new UniqueKey(name: 'job_ids', columns: ['job', 'id']),
++        new UniqueKey(name: 'test_add_unique', columns: ['name', 'id', 'age']),
++      ],
++      indexes: [
++        new Index(name: 'test_add_index', columns: ['job', 'id', 'age']),
++        new Index(name: 'id_jobs', columns: ['id', 'job']),
++        new Index(name: 'names_by_age', columns: ['name', 'age']),
++      ],
++    );
++
++    return new SchemaDefinition(
++      type: SchemaDefinitionType::Test,
++      name: $tableName,
++      tables: [$table],
++    );
++  }
++
++  /**
++   * Tests adding a column with specialized indexes.
++   *
++   * The $keys_new argument of addField() may contain index definition
++   * objects. By default, drivers only support regular indexes: GIN and GiST
++   * index definitions are skipped, and alternative indexes fall back to
++   * their regular index definition. Drivers supporting specialized indexes
++   * override this method.
++   */
++  public function testAddTableColumn(): void {
++    $tableName = 'test_add_table_column_from_definition';
++    $initialSchema = $this->initialSchemaForAddTableColumn($tableName);
++    $this->schema->createSchemaFromDefinition($initialSchema);
++
++    $this->assertTrue($this->schema->tableExists($tableName));
++    $this->assertFalse($this->schema->fieldExists($tableName, 'age'));
++    $method = new \ReflectionMethod($this->schema, 'findPrimaryKeyColumns');
++    $this->assertEquals(['id'], $method->invoke($this->schema, $tableName));
++    $this->assertFalse($this->schema->uniqueKeyExists($tableName, 'ages'));
++    $this->assertTrue($this->schema->uniqueKeyExists($tableName, 'job_ids'));
++    $this->assertTrue($this->schema->uniqueKeyExists($tableName, 'test_add_unique'));
++    $this->assertTrue($this->schema->indexExists($tableName, 'test_add_index'));
++    $this->assertTrue($this->schema->indexExists($tableName, 'id_jobs'));
++    $this->assertFalse($this->schema->indexExists($tableName, 'names_by_age'));
++
++    $targetSchema = $this->targetSchemaForTestAddTableColumn($tableName);
++    $this->schema->addTableColumnFromDefinition(
++      targetSchema: $targetSchema,
++      tableName: $tableName,
++      targetColumnName: 'age',
++    );
++
++    $this->assertTrue($this->schema->tableExists($tableName));
++    $this->assertTrue($this->schema->fieldExists($tableName, 'age'));
++    $method = new \ReflectionMethod($this->schema, 'findPrimaryKeyColumns');
++    $this->assertEquals(['id'], $method->invoke($this->schema, $tableName));
++    $this->assertTrue($this->schema->uniqueKeyExists($tableName, 'ages'));
++    $this->assertTrue($this->schema->uniqueKeyExists($tableName, 'job_ids'));
++    $this->assertTrue($this->schema->uniqueKeyExists($tableName, 'test_add_unique'));
++    $this->assertTrue($this->schema->indexExists($tableName, 'test_add_index'));
++    $this->assertTrue($this->schema->indexExists($tableName, 'id_jobs'));
++    $this->assertTrue($this->schema->indexExists($tableName, 'names_by_age'));
++  }
++
++  /**
++   * Initial schema for ::testChangeTableColumn.
++   *
++   * @return \Drupal\Core\Database\SchemaDefinition\Schema
++   *   The schema.
++   */
++  protected function initialSchemaForTestChangeTableColumn(string $tableName): SchemaDefinition {
++    $table = new Table(
++      name: $tableName,
++      description: 'Test table created from definition for column change.',
++      columns: [
++        Column::serial(
++          name: 'id',
++        ),
++        Column::int(
++          name: 'age',
++          notNull: TRUE,
++          default: new IntValue(0),
++        ),
++        Column::varchar(
++          name: 'name',
++          length: 255,
++        ),
++        Column::varchar(
++          name: 'job',
++          length: 255,
++        ),
++      ],
++      primaryKey: new PrimaryKey(['id']),
++      uniqueKeys: [
++        new UniqueKey(name: 'id_ages', columns: ['id', 'age']),
++        new UniqueKey(name: 'name_id', columns: ['name', 'id']),
++      ],
++      indexes: [
++        new Index(name: 'id_jobs_age', columns: ['id', 'job', 'age']),
++        new Index(name: 'job_id', columns: ['job', 'id']),
++      ],
++    );
++
++    return new SchemaDefinition(
++      type: SchemaDefinitionType::Test,
++      name: $tableName,
++      tables: [$table],
++    );
++  }
++
++  /**
++   * Target schema for ::testChangeTableColumn.
++   *
++   * @return \Drupal\Core\Database\SchemaDefinition\Schema
++   *   The schema.
++   */
++  protected function targetSchemaForTestChangeTableColumn(string $tableName): SchemaDefinition {
++    $table = new Table(
++      name: $tableName,
++      description: 'Test table created from definition for column change.',
++      columns: [
++        Column::serial(
++          name: 'id',
++        ),
++        Column::int(
++          name: 'age_new',
++          notNull: TRUE,
++          default: new IntValue(1),
++        ),
++        Column::varchar(
++          name: 'name',
++          length: 255,
++        ),
++        Column::varchar(
++          name: 'job',
++          length: 255,
++        ),
++      ],
++      primaryKey: new PrimaryKey(['id']),
++      uniqueKeys: [
++        new UniqueKey(name: 'id_age_new', columns: ['id', 'age_new']),
++        new UniqueKey(name: 'name_id', columns: ['name', 'id']),
++        new UniqueKey(name: 'ages_new', columns: ['age_new']),
++      ],
++      indexes: [
++        new Index(name: 'id_jobs_age_new', columns: ['id', 'job', 'age_new']),
++        new Index(name: 'job_id', columns: ['job', 'id']),
++        new Index(name: 'names_by_age_new', columns: ['name', 'age_new']),
++      ],
++    );
++
++    return new SchemaDefinition(
++      type: SchemaDefinitionType::Test,
++      name: $tableName,
++      tables: [$table],
++    );
++  }
++
++  /**
++   * Tests changing a column with specialized indexes.
++   */
++  public function testChangeTableColumn(): void {
++    $tableName = 'test_change_table_column_from_definition';
++    $initialSchema = $this->initialSchemaForTestChangeTableColumn($tableName);
++    $this->schema->createSchemaFromDefinition($initialSchema);
++
++    $this->assertTrue($this->schema->tableExists($tableName));
++    $this->assertTrue($this->schema->fieldExists($tableName, 'age'));
++    $this->assertFalse($this->schema->fieldExists($tableName, 'age_new'));
++    $method = new \ReflectionMethod($this->schema, 'findPrimaryKeyColumns');
++    $this->assertEquals(['id'], $method->invoke($this->schema, $tableName));
++    $this->assertTrue($this->schema->uniqueKeyExists($tableName, 'id_ages'));
++    $this->assertFalse($this->schema->uniqueKeyExists($tableName, 'id_age_new'));
++    $this->assertTrue($this->schema->uniqueKeyExists($tableName, 'name_id'));
++    $this->assertFalse($this->schema->uniqueKeyExists($tableName, 'ages_new'));
++    $this->assertTrue($this->schema->indexExists($tableName, 'id_jobs_age'));
++    $this->assertTrue($this->schema->indexExists($tableName, 'job_id'));
++    $this->assertFalse($this->schema->indexExists($tableName, 'names_by_age_new'));
++
++    $targetSchema = $this->targetSchemaForTestChangeTableColumn($tableName);
++    $this->schema->changeTableColumnFromDefinition(
++      targetSchema: $targetSchema,
++      tableName: $tableName,
++      currentColumnName: 'age',
++      targetColumnName: 'age_new',
++    );
++
++    $this->assertTrue($this->schema->tableExists($tableName));
++    $this->assertFalse($this->schema->fieldExists($tableName, 'age'));
++    $this->assertTrue($this->schema->fieldExists($tableName, 'age_new'));
++    $method = new \ReflectionMethod($this->schema, 'findPrimaryKeyColumns');
++    $this->assertEquals(['id'], $method->invoke($this->schema, $tableName));
++//    $this->assertFalse($this->schema->uniqueKeyExists($tableName, 'id_ages'));
++    $this->assertTrue($this->schema->uniqueKeyExists($tableName, 'id_age_new'));
++    $this->assertTrue($this->schema->uniqueKeyExists($tableName, 'name_id'));
++    $this->assertTrue($this->schema->uniqueKeyExists($tableName, 'ages_new'));
++    $this->assertTrue($this->schema->indexExists($tableName, 'id_jobs_age_new'));
++    $this->assertTrue($this->schema->indexExists($tableName, 'job_id'));
++    $this->assertTrue($this->schema->indexExists($tableName, 'names_by_age_new'));
++  }
++
++  /**
++   * Tests changing a column length via schema definition.
++   */
++  public function testChangeSerialColumnLength(): void {
++    $initialSchema = new SchemaDefinition(
++      type: SchemaDefinitionType::Test,
++      name: 'change_serial_to_big',
++      tables: [
++        new Table(
++          name: 'change_serial_to_big',
++          columns: [
++            Column::serial(
++              name: 'id',
++              description: 'Primary Key: Unique ID.',
++            ),
++            Column::text(
++              name: 'text',
++              description: 'A text column',
++            ),
++          ],
++          primaryKey: new PrimaryKey(['id']),
++        ),
++      ],
++    );
++    $this->schema->createSchemaFromDefinition($initialSchema);
++
++    // Increase the size of the column.
++    $targetSchema = new SchemaDefinition(
++      type: SchemaDefinitionType::Test,
++      name: 'change_serial_to_big',
++      tables: [
++        new Table(
++          name: 'change_serial_to_big',
++          columns: [
++            Column::serial(
++              name: 'id',
++              description: 'Primary Key: Unique ID.',
++              size: ColumnSize::Big,
++            ),
++            Column::text(
++              name: 'text',
++              description: 'A text column',
++            ),
++          ],
++          primaryKey: new PrimaryKey(['id']),
++        ),
++      ],
++    );
++    $this->schema->changeTableColumnFromDefinition(
++      targetSchema: $targetSchema,
++      tableName: 'change_serial_to_big',
++      targetColumnName: 'id',
++    );
++
++    $this->assertTrue($this->schema->fieldExists('change_serial_to_big', 'id'));
++
++    // Test if we can actually add a big int.
++    $id = $this->connection->insert('change_serial_to_big')->fields([
++      'id' => 21474836470,
++    ])->execute();
++
++    $id_two = $this->connection->insert('change_serial_to_big')->fields([
++      'text' => 'Testing for ID generation',
++    ])->execute();
++
++    $this->assertEquals($id + 1, $id_two);
++  }
++
++  /**
++   * Tests various schema changes' effect on the table's primary key.
++   *
++   * @param array $initial_primary_key
++   *   The initial primary key of the test table.
++   * @param array $renamed_primary_key
++   *   The primary key of the test table after renaming the test column.
++   */
++  #[DataProvider('providerTestChangePrimaryKey')]
++  public function testChangePrimaryKey(array $initial_primary_key, array $renamed_primary_key): void {
++    $table_name = 'test_table';
++    $find_primary_key_columns = new \ReflectionMethod(get_class($this->schema), 'findPrimaryKeyColumns');
++
++    // Test making the column the primary key of the table upon creation.
++    $table = new Table(
++      name: $table_name,
++      description: 'Test table created from definition.',
++      columns: [
++        Column::int(
++          name: 'test_column',
++          notNull: TRUE,
++        ),
++        Column::int(
++          name: 'other_test_column',
++          notNull: TRUE,
++        ),
++      ],
++      primaryKey: new PrimaryKey($initial_primary_key),
++    );
++    $schema = new SchemaDefinition(
++      type: SchemaDefinitionType::Test,
++      name: $table_name,
++      tables: [$table],
++    );
++
++    $this->schema->createSchemaFromDefinition($schema);
++    $this->assertTrue($this->schema->fieldExists($table_name, 'test_column'));
++    $this->assertEquals($initial_primary_key, $find_primary_key_columns->invoke($this->schema, $table_name));
++
++    // Change the column type and make sure the primary key stays in place.
++    $table = new Table(
++      name: $table_name,
++      description: 'Test table created from definition.',
++      columns: [
++        Column::varchar(
++          name: 'test_column',
++          length: 32,
++          notNull: TRUE,
++        ),
++        Column::int(
++          name: 'other_test_column',
++          notNull: TRUE,
++        ),
++      ],
++      primaryKey: new PrimaryKey($initial_primary_key),
++    );
++    $schema = new SchemaDefinition(
++      type: SchemaDefinitionType::Test,
++      name: $table_name,
++      tables: [$table],
++    );
++
++    $this->schema->changeTableColumnFromDefinition(
++      targetSchema: $schema,
++      tableName: $table_name,
++      targetColumnName: 'test_column',
++    );
++    $this->assertTrue($this->schema->fieldExists($table_name, 'test_column'));
++    $this->assertEquals($initial_primary_key, $find_primary_key_columns->invoke($this->schema, $table_name));
++
++    // Add some data and change the column type back, to make sure that changing
++    // the type leaves the primary key in place even with existing data.
++    $this->connection
++      ->insert($table_name)
++      ->fields(['test_column' => 1, 'other_test_column' => 2])
++      ->execute();
++
++    $table = new Table(
++      name: $table_name,
++      description: 'Test table created from definition.',
++      columns: [
++        Column::int(
++          name: 'test_column',
++          notNull: TRUE,
++        ),
++        Column::int(
++          name: 'other_test_column',
++          notNull: TRUE,
++        ),
++      ],
++      primaryKey: new PrimaryKey($initial_primary_key),
++    );
++    $schema = new SchemaDefinition(
++      type: SchemaDefinitionType::Test,
++      name: $table_name,
++      tables: [$table],
++    );
++
++    $this->schema->changeTableColumnFromDefinition(
++      targetSchema: $schema,
++      tableName: $table_name,
++      targetColumnName: 'test_column',
++    );
++    $this->assertTrue($this->schema->fieldExists($table_name, 'test_column'));
++    $this->assertEquals($initial_primary_key, $find_primary_key_columns->invoke($this->schema, $table_name));
++
++    // Make sure that adding the primary key is done as part of changing a
++    // column, as well, in case it is dropped explicitly before the change.
++    $this->schema->dropPrimaryKey($table_name);
++    $this->assertEquals([], $find_primary_key_columns->invoke($this->schema, $table_name));
++    $this->schema->changeTableColumnFromDefinition(
++      targetSchema: $schema,
++      tableName: $table_name,
++      targetColumnName: 'test_column',
++    );
++    $this->assertTrue($this->schema->fieldExists($table_name, 'test_column'));
++    $this->assertEquals($initial_primary_key, $find_primary_key_columns->invoke($this->schema, $table_name));
++
++    // Rename the column and make sure the primary key was updated.
++    $table = new Table(
++      name: $table_name,
++      description: 'Test table created from definition.',
++      columns: [
++        Column::int(
++          name: 'test_column_renamed',
++          notNull: TRUE,
++        ),
++        Column::int(
++          name: 'other_test_column',
++          notNull: TRUE,
++        ),
++      ],
++      primaryKey: new PrimaryKey($renamed_primary_key),
++    );
++    $schema = new SchemaDefinition(
++      type: SchemaDefinitionType::Test,
++      name: $table_name,
++      tables: [$table],
++    );
++
++    $this->schema->changeTableColumnFromDefinition(
++      targetSchema: $schema,
++      tableName: $table_name,
++      currentColumnName: 'test_column',
++      targetColumnName: 'test_column_renamed',
++    );
++    $this->assertTrue($this->schema->fieldExists($table_name, 'test_column_renamed'));
++    $this->assertEquals($renamed_primary_key, $find_primary_key_columns->invoke($this->schema, $table_name));
++
++    // Drop the column and make sure the primary key was dropped, as well.
++    $this->schema->dropField($table_name, 'test_column_renamed');
++    $this->assertFalse($this->schema->fieldExists($table_name, 'test_column_renamed'));
++    $this->assertEquals([], $find_primary_key_columns->invoke($this->schema, $table_name));
++
++    // Add the column again and make sure adding the primary key can be done at
++    // the same time.
++    $table = new Table(
++      name: $table_name,
++      description: 'Test table created from definition.',
++      columns: [
++        Column::int(
++          name: 'test_column',
++          default: new IntValue(0),
++          notNull: TRUE,
++        ),
++        Column::int(
++          name: 'other_test_column',
++          notNull: TRUE,
++        ),
++      ],
++      primaryKey: new PrimaryKey($initial_primary_key),
++    );
++    $schema = new SchemaDefinition(
++      type: SchemaDefinitionType::Test,
++      name: $table_name,
++      tables: [$table],
++    );
++    $this->schema->addTableColumnFromDefinition(
++      targetSchema: $schema,
++      tableName: $table_name,
++      targetColumnName: 'test_column',
++    );
++    $this->assertTrue($this->schema->fieldExists($table_name, 'test_column'));
++    $this->assertEquals($initial_primary_key, $find_primary_key_columns->invoke($this->schema, $table_name));
++
++    // Drop the column again and explicitly add a primary key.
++    $this->assertEquals($initial_primary_key, $find_primary_key_columns->invoke($this->schema, $table_name));
++    $this->schema->dropField($table_name, 'test_column');
++    $this->assertFalse($this->schema->fieldExists($table_name, 'test_column'));
++    $this->assertEquals([], $find_primary_key_columns->invoke($this->schema, $table_name));
++    $this->schema->addPrimaryKey($table_name, ['other_test_column']);
++    $this->assertEquals(['other_test_column'], $find_primary_key_columns->invoke($this->schema, $table_name));
++
++    // Test that adding a column with a primary key will work even with a
++    // pre-existing primary key.
++    $this->schema->addTableColumnFromDefinition(
++      targetSchema: $schema,
++      tableName: $table_name,
++      targetColumnName: 'test_column',
++    );
++    $this->assertTrue($this->schema->fieldExists($table_name, 'test_column'));
++    $this->assertEquals($initial_primary_key, $find_primary_key_columns->invoke($this->schema, $table_name));
++  }
++
++  /**
++   * Provides test cases for SchemaTest::testSchemaCreateTablePrimaryKey().
++   */
++  public static function providerTestChangePrimaryKey(): \Generator {
++    yield 'simple_primary_key' => [
++      'initial_primary_key' => ['test_column'],
++      'renamed_primary_key' => ['test_column_renamed'],
++    ];
++    yield 'composite_primary_key' => [
++      'initial_primary_key' => ['test_column', 'other_test_column'],
++      'renamed_primary_key' => ['test_column_renamed', 'other_test_column'],
++    ];
++    yield 'composite_primary_key_different_order' => [
++      'initial_primary_key' => ['other_test_column', 'test_column'],
++      'renamed_primary_key' => ['other_test_column', 'test_column_renamed'],
++    ];
++  }
++
++}
+diff --git a/core/tests/Drupal/Tests/Core/Database/SchemaDefinitionTest.php b/core/tests/Drupal/Tests/Core/Database/SchemaDefinitionTest.php
+index a8b2aedadc5..1be04e7df8c 100644
+--- a/core/tests/Drupal/Tests/Core/Database/SchemaDefinitionTest.php
++++ b/core/tests/Drupal/Tests/Core/Database/SchemaDefinitionTest.php
+@@ -8,6 +8,7 @@
+ use Drupal\Core\Database\SchemaDefinition\ColumnType;
+ use Drupal\Core\Database\SchemaDefinition\FloatValue;
+ use Drupal\Core\Database\SchemaDefinition\ForeignKey;
++use Drupal\Core\Database\SchemaDefinition\Index;
+ use Drupal\Core\Database\SchemaDefinition\IntValue;
+ use Drupal\Core\Database\SchemaDefinition\NullValue;
+ use Drupal\Core\Database\SchemaDefinition\PrimaryKey;
+@@ -522,6 +523,30 @@ public function testInvalidPrimaryKeyForPartialLengthColumn(): void {
+     $this->assertInstanceOf(Table::class, $table);
+   }
+ 
++  /**
++   * Tests passing invalid columns to primary key.
++   */
++  public function testInvalidColumnsInPrimaryKey(): void {
++    $this->expectException(SchemaDefinitionException::class);
++    $this->expectExceptionMessage('Table \'test\' specifies a primary key with undefined column(s): boo');
++    $table = new Table(
++      name: 'test',
++      columns: [
++        Column::text(
++          name: 'id',
++          length: 40,
++          default: new StringValue('foo'),
++        ),
++        Column::int(
++          name: 'test_column',
++          notNull: TRUE,
++        ),
++      ],
++      primaryKey: new PrimaryKey(['id', 'boo']),
++    );
++    $this->assertInstanceOf(Table::class, $table);
++  }
++
+   /**
+    * Tests passing limited length columns to an unique key.
+    */
+@@ -549,4 +574,90 @@ public function testInvalidUniqueKeyForPartialLengthColumn(): void {
+     $this->assertInstanceOf(Table::class, $table);
+   }
+ 
++  /**
++   * Tests passing invalid columns to a unique key.
++   */
++  public function testInvalidColumnsInUniqueKey(): void {
++    $this->expectException(SchemaDefinitionException::class);
++    $this->expectExceptionMessage('Table \'test\' specifies a unique key \'id_boo\' with undefined column(s): boo');
++    $table = new Table(
++      name: 'test',
++      columns: [
++        Column::text(
++          name: 'id',
++          length: 40,
++          default: new StringValue('foo'),
++        ),
++        Column::int(
++          name: 'test_column',
++          notNull: TRUE,
++        ),
++      ],
++      primaryKey: new PrimaryKey(['id']),
++      uniqueKeys: [
++        new UniqueKey(name: 'id_boo', columns: ['id', 'boo']),
++      ],
++    );
++    $this->assertInstanceOf(Table::class, $table);
++  }
++
++  /**
++   * Tests passing invalid columns to a unique key.
++   */
++  public function testInvalidColumnsInIndex(): void {
++    $this->expectException(SchemaDefinitionException::class);
++    $this->expectExceptionMessage('Table \'test\' specifies an index \'id_boo\' with undefined column(s): boo');
++    $table = new Table(
++      name: 'test',
++      columns: [
++        Column::text(
++          name: 'id',
++          length: 40,
++          default: new StringValue('foo'),
++        ),
++        Column::int(
++          name: 'test_column',
++          notNull: TRUE,
++        ),
++      ],
++      primaryKey: new PrimaryKey(['id']),
++      indexes: [
++        new Index(name: 'id_boo', columns: ['id', 'boo']),
++      ],
++    );
++    $this->assertInstanceOf(Table::class, $table);
++  }
++
++  /**
++   * Tests passing invalid columns to a unique key.
++   */
++  public function testInvalidColumnsInForeignKey(): void {
++    $this->expectException(SchemaDefinitionException::class);
++    $this->expectExceptionMessage('Table \'test\' specifies a foreign key \'id_boo\' with undefined column(s): boo');
++    $table = new Table(
++      name: 'test',
++      columns: [
++        Column::text(
++          name: 'id',
++          length: 40,
++          default: new StringValue('foo'),
++        ),
++        Column::int(
++          name: 'test_column',
++          notNull: TRUE,
++        ),
++      ],
++      primaryKey: new PrimaryKey(['id']),
++      foreignKeys: [
++        new ForeignKey(
++          name: 'id_boo',
++          foreignTable: 'test_boo',
++          columns: ['id', 'boo'],
++          foreignColumns: ['id', 'boo'],
++        ),
++      ],
++    );
++    $this->assertInstanceOf(Table::class, $table);
 +  }
 +
  }
