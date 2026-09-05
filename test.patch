@@ -17,7 +17,7 @@ index 00000000000..879cf2d03fb
 +class SchemaTablePrimaryKeyException extends SchemaException implements DatabaseException {
 +}
 diff --git a/core/lib/Drupal/Core/Database/Schema.php b/core/lib/Drupal/Core/Database/Schema.php
-index d01f15558dc..b03d8e95e60 100644
+index d01f15558dc..2c58f2c4e08 100644
 --- a/core/lib/Drupal/Core/Database/Schema.php
 +++ b/core/lib/Drupal/Core/Database/Schema.php
 @@ -2,6 +2,7 @@
@@ -50,7 +50,7 @@ index d01f15558dc..b03d8e95e60 100644
    /**
     * Add an index.
     *
-@@ -666,6 +682,152 @@ final public function createTableFromDefinition(SchemaDefinitionType $schemaDefi
+@@ -666,6 +682,178 @@ final public function createTableFromDefinition(SchemaDefinitionType $schemaDefi
      $this->createTable($table->name, $table->toArray());
    }
  
@@ -64,13 +64,36 @@ index d01f15558dc..b03d8e95e60 100644
 +   *   Name of the table.
 +   * @param string $targetColumnName
 +   *   The name of the column as defined in the target schema definition.
++   * @param Expression|null $initializationExpression
++   *   (optional) An expression to be used to initialize the newly added
++   *   column. This is most useful for creating NOT NULL columns with no
++   *   default value in existing tables. If not specified, the column will be
++   *   initialized to the default value indicated in the schema definition (if
++   *   present).
++   *   Examples:
++   *   @code
++   *     new Expression('[age]')
++   *   @endcode
++   *   copies the content of the 'age' column to the new column;
++   *   @code
++   *     new Expression(':initial_value', [':initial_value' => 10])
++   *   @endcode
++   *   sets the new column's values to 10 for all rows;
++   *   @code
++   *     new Expression(
++   *       'COALESCE([age], :fallback_value)',
++   *       [':fallback_value' => 59],
++   *     )
++   *   @endcode
++   *   copies the content of the 'age' column to the new column, falling back
++   *   to the value 59 if the 'age' column of a row is missing.
 +   *
 +   * @throws \Drupal\Core\Database\SchemaObjectDoesNotExistException
 +   *   If the specified table or source field doesn't exist.
 +   * @throws \Drupal\Core\Database\SchemaObjectExistsException
 +   *   If the specified destination field already exists.
 +   */
-+  final public function addTableColumnFromDefinition(SchemaDefinition $targetSchema, string $tableName, string $targetColumnName): void {
++  final public function addTableColumnFromDefinition(SchemaDefinition $targetSchema, string $tableName, string $targetColumnName, ?Expression $initializationExpression = NULL): void {
 +    $table = $targetSchema->getTableDefinition($tableName);
 +
 +    // Handles keys/indexes that are impacted by the addition.
@@ -115,6 +138,9 @@ index d01f15558dc..b03d8e95e60 100644
 +
 +    $tableAsArray = $table->toArray();
 +    unset($tableAsArray['primary key'], $tableAsArray['unique keys'], $tableAsArray['indexes']);
++    if ($initializationExpression) {
++      $tableAsArray['fields'][$targetColumnName]['initialization_expression'] = $initializationExpression;
++    }
 +    $this->addField(
 +      $tableName,
 +      $targetColumnName,
@@ -148,7 +174,7 @@ index d01f15558dc..b03d8e95e60 100644
 +
 +    // Handles keys/indexes that are impacted by the change.
 +    $currentKeys = $this->introspectIndexSchema($tableName);
-+if ($tableName=='change_column') dump ($currentKeys);
++if ($tableName === 'test_change_table_column_from_definition') dump($currentKeys);
 +    // Remove current keys that include the column to be changed.
 +    foreach ($currentKeys['indexes'] as $key => $data) {
 +      if (in_array($currentColumnName, $data, TRUE)) {
@@ -169,7 +195,7 @@ index d01f15558dc..b03d8e95e60 100644
 +        // MySQL primary keys based on a serial column.
 +      }
 +    }
-+if ($tableName=='change_column') dump ($this->introspectIndexSchema($tableName));
++if ($tableName === 'test_change_table_column_from_definition') dump($this->introspectIndexSchema($tableName));
 +    // Add target keys that are needed.
 +    $newKeys = [];
 +    $hasPrimaryKey = $this->findPrimaryKeyColumns($tableName) !== [];
@@ -190,7 +216,6 @@ index d01f15558dc..b03d8e95e60 100644
 +
 +    $tableAsArray = $table->toArray();
 +    unset($tableAsArray['primary key'], $tableAsArray['unique keys'], $tableAsArray['indexes']);
-+if ($tableName=='change_column') dump ($tableAsArray);
 +    $this->changeField(
 +      $tableName,
 +      $currentColumnName,
@@ -198,6 +223,7 @@ index d01f15558dc..b03d8e95e60 100644
 +      $tableAsArray['fields'][$targetColumnName],
 +      array_merge($tableAsArray, $newKeys),
 +    );
++if ($tableName === 'test_change_table_column_from_definition') dump($this->introspectIndexSchema($tableName));
 +  }
 +
    /**
@@ -324,11 +350,39 @@ index de5a2296877..6a78934f289 100644
          default => throw new DatabaseExceptionWrapper($message, 0, $exception),
        },
        default => throw new DatabaseExceptionWrapper($message, 0, $exception),
+diff --git a/core/modules/mysql/src/Driver/Database/mysql/Schema.php b/core/modules/mysql/src/Driver/Database/mysql/Schema.php
+index c623f076251..a03c26ab811 100644
+--- a/core/modules/mysql/src/Driver/Database/mysql/Schema.php
++++ b/core/modules/mysql/src/Driver/Database/mysql/Schema.php
+@@ -479,6 +479,11 @@ public function addField($table, $field, $spec, $keys_new = []) {
+         ->fields([$field => $spec['initial']])
+         ->execute();
+     }
++    elseif (isset($spec['initialization_expression'])) {
++      $this->connection->update($table)
++        ->expression($field, $spec['initialization_expression']->expression, $spec['initialization_expression']->arguments)
++        ->execute();
++    }
+     if ($fix_null) {
+       $spec['not null'] = TRUE;
+       $this->changeField($table, $field, $field, $spec);
 diff --git a/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php b/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php
-index c63eac5872e..48ca2ae2062 100644
+index c63eac5872e..ba093bd8d6a 100644
 --- a/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php
 +++ b/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php
-@@ -771,6 +771,31 @@ public function indexExists($table, $name) {
+@@ -709,6 +709,11 @@ public function addField($table, $field, $spec, $new_keys = []) {
+         ->fields([$field => $spec['initial']])
+         ->execute();
+     }
++    elseif (isset($spec['initialization_expression'])) {
++      $this->connection->update($table)
++        ->expression($field, $spec['initialization_expression']->expression, $spec['initialization_expression']->arguments)
++        ->execute();
++    }
+     if ($fix_null) {
+       $this->executeDdlStatement("ALTER TABLE {" . $table . "} ALTER $field SET NOT NULL");
+     }
+@@ -771,6 +776,13 @@ public function indexExists($table, $name) {
      return (bool) $this->connection->query("SELECT 1 FROM pg_indexes WHERE schemaname = :schema AND tablename = :table AND indexname = :index", $sql_params)->fetchField();
    }
  
@@ -336,31 +390,13 @@ index c63eac5872e..48ca2ae2062 100644
 +   * {@inheritdoc}
 +   */
 +  public function uniqueKeyExists(string $tableName, string $uniqueKeyName): bool {
-+/*
-+            INNER JOIN pg_catalog.pg_class rel
-+                       ON rel.oid = con.conrelid
-+            INNER JOIN pg_catalog.pg_namespace nsp
-+                       ON nsp.oid = connamespace
-+       WHERE rel.relname = '{$tt}'
-+*/
-+global $xxx;
-+$tt = $this->connection->getPrefix() . $tableName;
-+if ($xxx) { dump($this->connection->query(<<<'EOD'
-+SELECT *
-+       FROM pg_catalog.pg_constraint con
-+            INNER JOIN pg_catalog.pg_class ind
-+                       ON ind.oid = con.conindid
-+       WHERE con.conname LIKE '%change_column%';
-+EOD
-+)->fetchAll());
-+}
 +    return $this->constraintExists($tableName, $uniqueKeyName . '__key');
 +  }
 +
    /**
     * Helper function: check if a constraint (PK, FK, UK) exists.
     *
-@@ -862,11 +887,20 @@ public function addUniqueKey($table, $name, $fields) {
+@@ -862,11 +874,20 @@ public function addUniqueKey($table, $name, $fields) {
     * {@inheritdoc}
     */
    public function dropUniqueKey($table, $name) {
@@ -384,11 +420,47 @@ index c63eac5872e..48ca2ae2062 100644
      $this->resetTableInformation($table);
      return TRUE;
    }
+@@ -890,11 +911,20 @@ public function addIndex($table, $name, $fields, array $spec) {
+    * {@inheritdoc}
+    */
+   public function dropIndex($table, $name) {
+-    if (!$this->indexExists($table, $name)) {
+-      return FALSE;
++    // If we have a $name argument that ends with '__idx' we are dropping an
++    // index whose name was already processed (most likely resulting from a
++    // schema introspection.
++    if (str_ends_with($name, '__idx')) {
++      $identifier = $name;
++    }
++    else {
++      if (!$this->indexExists($table, $name)) {
++        return FALSE;
++      }
++      $identifier = $this->ensureIdentifiersLength($table, $name, 'idx');
+     }
+ 
+-    $this->executeDdlStatement('DROP INDEX ' . $this->defaultSchema . '.' . $this->ensureIdentifiersLength($table, $name, 'idx'));
++    $this->executeDdlStatement('DROP INDEX ' . $this->defaultSchema . '.' . $identifier);
+     $this->resetTableInformation($table);
+     return TRUE;
+   }
 diff --git a/core/modules/sqlite/src/Driver/Database/sqlite/Schema.php b/core/modules/sqlite/src/Driver/Database/sqlite/Schema.php
-index 19558fb4ebd..4da287b9ea2 100644
+index 19558fb4ebd..3451da02ae8 100644
 --- a/core/modules/sqlite/src/Driver/Database/sqlite/Schema.php
 +++ b/core/modules/sqlite/src/Driver/Database/sqlite/Schema.php
-@@ -421,7 +421,11 @@ public function addField($table, $field, $specification, $keys_new = []) {
+@@ -415,13 +415,23 @@ public function addField($table, $field, $specification, $keys_new = []) {
+           'arguments' => [':new_field_initial' => $specification['initial']],
+         ];
+       }
++      elseif (isset($specification['initialization_expression'])) {
++        $mapping[$field] = [
++          'expression' => $specification['initialization_expression']->expression,
++          'arguments' => $specification['initialization_expression']->arguments,
++        ];
++      }
+       else {
+         // Else use the default of the field.
+         $mapping[$field] = NULL;
        }
  
        // Add the new indexes.
@@ -402,21 +474,23 @@ index 19558fb4ebd..4da287b9ea2 100644
      }
 diff --git a/core/tests/Drupal/KernelTests/Core/Database/SchemaOperationsFromDefinitionTest.php b/core/tests/Drupal/KernelTests/Core/Database/SchemaOperationsFromDefinitionTest.php
 new file mode 100644
-index 00000000000..b18970625e6
+index 00000000000..7be53ad6457
 --- /dev/null
 +++ b/core/tests/Drupal/KernelTests/Core/Database/SchemaOperationsFromDefinitionTest.php
-@@ -0,0 +1,647 @@
+@@ -0,0 +1,867 @@
 +<?php
 +
 +declare(strict_types=1);
 +
 +namespace Drupal\KernelTests\Core\Database;
 +
++use Drupal\Core\Database\Expression;
 +use Drupal\Core\Database\Schema;
 +use Drupal\Core\Database\SchemaDefinition\Column;
 +use Drupal\Core\Database\SchemaDefinition\ColumnSize;
 +use Drupal\Core\Database\SchemaDefinition\Index;
 +use Drupal\Core\Database\SchemaDefinition\IntValue;
++use Drupal\Core\Database\SchemaDefinition\NullValue;
 +use Drupal\Core\Database\SchemaDefinition\PrimaryKey;
 +use Drupal\Core\Database\SchemaDefinition\Schema as SchemaDefinition;
 +use Drupal\Core\Database\SchemaDefinition\SchemaDefinitionType;
@@ -537,7 +611,7 @@ index 00000000000..b18970625e6
 +   * @return \Drupal\Core\Database\SchemaDefinition\Schema
 +   *   The schema.
 +   */
-+  protected function targetSchemaForTestAddTableColumn(string $tableName): SchemaDefinition {
++  protected function targetSchemaForTestAddTableColumnStep1(string $tableName): SchemaDefinition {
 +    $table = new Table(
 +      name: $tableName,
 +      description: 'Test table created from definition for column addition.',
@@ -548,7 +622,7 @@ index 00000000000..b18970625e6
 +        Column::int(
 +          name: 'age',
 +          notNull: TRUE,
-+          default: new IntValue(0),
++          default: new IntValue(42),
 +        ),
 +        Column::varchar(
 +          name: 'name',
@@ -561,7 +635,180 @@ index 00000000000..b18970625e6
 +      ],
 +      primaryKey: new PrimaryKey(['id']),
 +      uniqueKeys: [
-+        new UniqueKey(name: 'ages', columns: ['age']),
++        new UniqueKey(name: 'ages', columns: ['age', 'id']),
++        new UniqueKey(name: 'job_ids', columns: ['job', 'id']),
++        new UniqueKey(name: 'test_add_unique', columns: ['name', 'id', 'age']),
++      ],
++      indexes: [
++        new Index(name: 'test_add_index', columns: ['job', 'id', 'age']),
++        new Index(name: 'id_jobs', columns: ['id', 'job']),
++        new Index(name: 'names_by_age', columns: ['name', 'age']),
++      ],
++    );
++
++    return new SchemaDefinition(
++      type: SchemaDefinitionType::Test,
++      name: $tableName,
++      tables: [$table],
++    );
++  }
++
++  /**
++   * Target schema for ::testAddTableColumn.
++   *
++   * @return \Drupal\Core\Database\SchemaDefinition\Schema
++   *   The schema.
++   */
++  protected function targetSchemaForTestAddTableColumnStep2(string $tableName): SchemaDefinition {
++    $table = new Table(
++      name: $tableName,
++      description: 'Test table created from definition for column addition.',
++      columns: [
++        Column::serial(
++          name: 'id',
++        ),
++        Column::int(
++          name: 'age',
++          notNull: TRUE,
++          default: new IntValue(42),
++        ),
++        Column::varchar(
++          name: 'name',
++          length: 255,
++        ),
++        Column::varchar(
++          name: 'job',
++          length: 255,
++        ),
++        Column::int(
++          name: 'age_2',
++          notNull: FALSE,
++          default: new NullValue(),
++        ),
++      ],
++      primaryKey: new PrimaryKey(['id']),
++      uniqueKeys: [
++        new UniqueKey(name: 'ages', columns: ['age', 'id']),
++        new UniqueKey(name: 'job_ids', columns: ['job', 'id']),
++        new UniqueKey(name: 'test_add_unique', columns: ['name', 'id', 'age']),
++      ],
++      indexes: [
++        new Index(name: 'test_add_index', columns: ['job', 'id', 'age']),
++        new Index(name: 'id_jobs', columns: ['id', 'job']),
++        new Index(name: 'names_by_age', columns: ['name', 'age']),
++      ],
++    );
++
++    return new SchemaDefinition(
++      type: SchemaDefinitionType::Test,
++      name: $tableName,
++      tables: [$table],
++    );
++  }
++
++  /**
++   * Target schema for ::testAddTableColumn.
++   *
++   * @return \Drupal\Core\Database\SchemaDefinition\Schema
++   *   The schema.
++   */
++  protected function targetSchemaForTestAddTableColumnStep3(string $tableName): SchemaDefinition {
++    $table = new Table(
++      name: $tableName,
++      description: 'Test table created from definition for column addition.',
++      columns: [
++        Column::serial(
++          name: 'id',
++        ),
++        Column::int(
++          name: 'age',
++          notNull: TRUE,
++          default: new IntValue(42),
++        ),
++        Column::varchar(
++          name: 'name',
++          length: 255,
++        ),
++        Column::varchar(
++          name: 'job',
++          length: 255,
++        ),
++        Column::int(
++          name: 'age_2',
++          notNull: FALSE,
++          default: new NullValue(),
++        ),
++        Column::int(
++          name: 'age_3',
++          notNull: FALSE,
++          default: new NullValue(),
++        ),
++      ],
++      primaryKey: new PrimaryKey(['id']),
++      uniqueKeys: [
++        new UniqueKey(name: 'ages', columns: ['age', 'id']),
++        new UniqueKey(name: 'job_ids', columns: ['job', 'id']),
++        new UniqueKey(name: 'test_add_unique', columns: ['name', 'id', 'age']),
++      ],
++      indexes: [
++        new Index(name: 'test_add_index', columns: ['job', 'id', 'age']),
++        new Index(name: 'id_jobs', columns: ['id', 'job']),
++        new Index(name: 'names_by_age', columns: ['name', 'age']),
++      ],
++    );
++
++    return new SchemaDefinition(
++      type: SchemaDefinitionType::Test,
++      name: $tableName,
++      tables: [$table],
++    );
++  }
++
++  /**
++   * Target schema for ::testAddTableColumn.
++   *
++   * @return \Drupal\Core\Database\SchemaDefinition\Schema
++   *   The schema.
++   */
++  protected function targetSchemaForTestAddTableColumnStep4(string $tableName): SchemaDefinition {
++    $table = new Table(
++      name: $tableName,
++      description: 'Test table created from definition for column addition.',
++      columns: [
++        Column::serial(
++          name: 'id',
++        ),
++        Column::int(
++          name: 'age',
++          notNull: TRUE,
++          default: new IntValue(42),
++        ),
++        Column::varchar(
++          name: 'name',
++          length: 255,
++        ),
++        Column::varchar(
++          name: 'job',
++          length: 255,
++        ),
++        Column::int(
++          name: 'age_2',
++          notNull: FALSE,
++          default: new NullValue(),
++        ),
++        Column::int(
++          name: 'age_3',
++          notNull: FALSE,
++          default: new NullValue(),
++        ),
++        Column::int(
++          name: 'age_4',
++          notNull: TRUE,
++        ),
++      ],
++      primaryKey: new PrimaryKey(['id']),
++      uniqueKeys: [
++        new UniqueKey(name: 'ages', columns: ['age', 'id']),
 +        new UniqueKey(name: 'job_ids', columns: ['job', 'id']),
 +        new UniqueKey(name: 'test_add_unique', columns: ['name', 'id', 'age']),
 +      ],
@@ -604,9 +851,18 @@ index 00000000000..b18970625e6
 +    $this->assertTrue($this->schema->indexExists($tableName, 'id_jobs'));
 +    $this->assertFalse($this->schema->indexExists($tableName, 'names_by_age'));
 +
-+    $targetSchema = $this->targetSchemaForTestAddTableColumn($tableName);
++    $this->connection->insert($tableName)->fields([
++      'name' => 'Richard',
++      'job' => 'Mark Antony',
++    ])->execute();
++    $this->connection->insert($tableName)->fields([
++      'name' => 'Liz',
++      'job' => 'Cleopatra',
++    ])->execute();
++
++    // Add the 'age' column, no initialization, defaults to '42'.
 +    $this->schema->addTableColumnFromDefinition(
-+      targetSchema: $targetSchema,
++      targetSchema: $this->targetSchemaForTestAddTableColumnStep1($tableName),
 +      tableName: $tableName,
 +      targetColumnName: 'age',
 +    );
@@ -621,6 +877,44 @@ index 00000000000..b18970625e6
 +    $this->assertTrue($this->schema->indexExists($tableName, 'test_add_index'));
 +    $this->assertTrue($this->schema->indexExists($tableName, 'id_jobs'));
 +    $this->assertTrue($this->schema->indexExists($tableName, 'names_by_age'));
++
++    $this->assertSame(['42', '42'], $this->connection->query("SELECT [age] FROM {{$tableName}}")->fetchCol());
++
++    // Add the 'age_2' column, initialize to copy from 'age'.
++    $this->schema->addTableColumnFromDefinition(
++      targetSchema: $this->targetSchemaForTestAddTableColumnStep2($tableName),
++      tableName: $tableName,
++      targetColumnName: 'age_2',
++      initializationExpression: new Expression('[age]'),
++    );
++
++    $this->assertSame(['42', '42'], $this->connection->query("SELECT [age_2] FROM {{$tableName}}")->fetchCol());
++
++    // Add the 'age_3' column, initialize to '10'.
++    $this->schema->addTableColumnFromDefinition(
++      targetSchema: $this->targetSchemaForTestAddTableColumnStep3($tableName),
++      tableName: $tableName,
++      targetColumnName: 'age_3',
++      initializationExpression: new Expression(':initial_value', [':initial_value' => 10]),
++    );
++
++    $this->assertSame(['10', '10'], $this->connection->query("SELECT [age_3] FROM {{$tableName}}")->fetchCol());
++
++    $this->connection->insert($tableName)->fields([
++      'name' => 'Rex',
++      'job' => 'Julius Caesar',
++      'age' => 15,
++    ])->execute();
++
++    // Add the 'age_4' column, initialize to copy from 'age_3' or 59 if NULL.
++    $this->schema->addTableColumnFromDefinition(
++      targetSchema: $this->targetSchemaForTestAddTableColumnStep4($tableName),
++      tableName: $tableName,
++      targetColumnName: 'age_4',
++      initializationExpression: new Expression('COALESCE([age_3], :fallback_value)', [':fallback_value' => 59]),
++    );
++
++    $this->assertSame(['10', '10', '59'], $this->connection->query("SELECT [age_4] FROM {{$tableName}}")->fetchCol());
 +  }
 +
 +  /**
@@ -721,7 +1015,7 @@ index 00000000000..b18970625e6
 +   * Tests changing a column with specialized indexes.
 +   */
 +  public function testChangeTableColumn(): void {
-+    $tableName = 'change_column';
++    $tableName = 'test_change_table_column_from_definition';
 +    $initialSchema = $this->initialSchemaForTestChangeTableColumn($tableName);
 +    $this->schema->createSchemaFromDefinition($initialSchema);
 +
@@ -751,9 +1045,7 @@ index 00000000000..b18970625e6
 +    $this->assertTrue($this->schema->fieldExists($tableName, 'age_new'));
 +    $method = new \ReflectionMethod($this->schema, 'findPrimaryKeyColumns');
 +    $this->assertEquals(['id'], $method->invoke($this->schema, $tableName));
-+global $xxx; $xxx = TRUE;
 +    $this->assertFalse($this->schema->uniqueKeyExists($tableName, 'id_ages'));
-+$xxx = FALSE;
 +    $this->assertTrue($this->schema->uniqueKeyExists($tableName, 'id_age_new'));
 +    $this->assertTrue($this->schema->uniqueKeyExists($tableName, 'name_id'));
 +    $this->assertTrue($this->schema->uniqueKeyExists($tableName, 'ages_new'));
