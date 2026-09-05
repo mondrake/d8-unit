@@ -17,7 +17,7 @@ index 00000000000..879cf2d03fb
 +class SchemaTablePrimaryKeyException extends SchemaException implements DatabaseException {
 +}
 diff --git a/core/lib/Drupal/Core/Database/Schema.php b/core/lib/Drupal/Core/Database/Schema.php
-index d01f15558dc..9ac364838b4 100644
+index d01f15558dc..6fffc92f9c7 100644
 --- a/core/lib/Drupal/Core/Database/Schema.php
 +++ b/core/lib/Drupal/Core/Database/Schema.php
 @@ -2,6 +2,7 @@
@@ -50,7 +50,7 @@ index d01f15558dc..9ac364838b4 100644
    /**
     * Add an index.
     *
-@@ -666,6 +682,177 @@ final public function createTableFromDefinition(SchemaDefinitionType $schemaDefi
+@@ -666,6 +682,200 @@ final public function createTableFromDefinition(SchemaDefinitionType $schemaDefi
      $this->createTable($table->name, $table->toArray());
    }
  
@@ -94,7 +94,17 @@ index d01f15558dc..9ac364838b4 100644
 +   *   If the specified destination field already exists.
 +   */
 +  final public function addTableColumnFromDefinition(SchemaDefinition $targetSchema, string $tableName, string $targetColumnName, ?Expression $initializationExpression = NULL): void {
++    if (!$this->tableExists($tableName)) {
++      throw new SchemaObjectDoesNotExistException("Cannot add column '$tableName.$targetColumnName': table doesn't exist.");
++    }
++    if ($this->fieldExists($tableName, $targetColumnName)) {
++      throw new SchemaObjectExistsException("Cannot add column '$tableName.$targetColumnName': column already exists.");
++    }
++
 +    $table = $targetSchema->getTableDefinition($tableName);
++    if (!in_array($targetColumnName, $table->columnNames())) {
++      throw new SchemaException("Cannot add column '$tableName.$targetColumnName': column is not defined in the schema.");
++    }
 +
 +    // Handles keys/indexes that are impacted by the addition.
 +    // Remove existing current keys if in the target schema the added column
@@ -169,8 +179,21 @@ index d01f15558dc..9ac364838b4 100644
 +   *   If the specified destination field already exists.
 +   */
 +  final public function changeTableColumnFromDefinition(SchemaDefinition $targetSchema, string $tableName, string $targetColumnName, ?string $currentColumnName = NULL): void {
-+    $table = $targetSchema->getTableDefinition($tableName);
 +    $currentColumnName ??= $targetColumnName;
++    if (!$this->tableExists($tableName)) {
++      throw new SchemaObjectDoesNotExistException("Cannot change the definition of column '$tableName.$currentColumnName': table doesn't exist.");
++    }
++    if (!$this->fieldExists($tableName, $currentColumnName)) {
++      throw new SchemaObjectDoesNotExistException("Cannot change the definition of column '$tableName.$currentColumnName': column doesn't exist.");
++    }
++    if (($currentColumnName != $targetColumnName) && $this->fieldExists($tableName, $targetColumnName)) {
++      throw new SchemaObjectExistsException("Cannot rename column '$tableName.$currentColumnName' to '$targetColumnName': target column already exists.");
++    }
++
++    $table = $targetSchema->getTableDefinition($tableName);
++    if (!in_array($targetColumnName, $table->columnNames())) {
++      throw new SchemaException("Cannot handle changes to column '$tableName.$currentColumnName': the target column '$targetColumnName' is not defined in the schema.");
++    }
 +
 +    // Handles keys/indexes that are impacted by the change.
 +    $currentKeys = $this->introspectIndexSchema($tableName);
@@ -378,7 +401,7 @@ index c623f076251..a03c26ab811 100644
        $spec['not null'] = TRUE;
        $this->changeField($table, $field, $field, $spec);
 diff --git a/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php b/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php
-index c63eac5872e..a003f1a640b 100644
+index c63eac5872e..d2553660c0d 100644
 --- a/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php
 +++ b/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php
 @@ -709,6 +709,11 @@ public function addField($table, $field, $spec, $new_keys = []) {
@@ -407,7 +430,7 @@ index c63eac5872e..a003f1a640b 100644
    /**
     * Helper function: check if a constraint (PK, FK, UK) exists.
     *
-@@ -862,11 +874,20 @@ public function addUniqueKey($table, $name, $fields) {
+@@ -862,11 +874,18 @@ public function addUniqueKey($table, $name, $fields) {
     * {@inheritdoc}
     */
    public function dropUniqueKey($table, $name) {
@@ -417,21 +440,20 @@ index c63eac5872e..a003f1a640b 100644
 +    // whose name was already processed (most likely resulting from a schema
 +    // introspection.
 +    if (str_ends_with($name, '_key')) {
-+      $identifier = $name;
++      $this->executeDdlStatement('ALTER TABLE {' . $table . '} DROP CONSTRAINT "' . $name . '"');
 +    }
 +    else {
 +      if (!$this->constraintExists($table, $name . '__key')) {
 +        return FALSE;
 +      }
-+      $identifier = $this->ensureIdentifiersLength($table, $name, 'key');
++      $this->executeDdlStatement('ALTER TABLE {' . $table . '} DROP CONSTRAINT ' . $this->ensureIdentifiersLength($table, $name, 'key'));
      }
- 
+-
 -    $this->executeDdlStatement('ALTER TABLE {' . $table . '} DROP CONSTRAINT ' . $this->ensureIdentifiersLength($table, $name, 'key'));
-+    $this->executeDdlStatement('ALTER TABLE {' . $table . '} DROP CONSTRAINT ' . $identifier);
      $this->resetTableInformation($table);
      return TRUE;
    }
-@@ -890,11 +911,20 @@ public function addIndex($table, $name, $fields, array $spec) {
+@@ -890,11 +909,19 @@ public function addIndex($table, $name, $fields, array $spec) {
     * {@inheritdoc}
     */
    public function dropIndex($table, $name) {
@@ -442,16 +464,16 @@ index c63eac5872e..a003f1a640b 100644
 +    // schema introspection.
 +    if (str_ends_with($name, '_idx')) {
 +      $identifier = $name;
++      $this->executeDdlStatement('DROP INDEX ' . $this->defaultSchema . '."' . name . '"');
 +    }
 +    else {
 +      if (!$this->indexExists($table, $name)) {
 +        return FALSE;
 +      }
-+      $identifier = $this->ensureIdentifiersLength($table, $name, 'idx');
++      $this->executeDdlStatement('DROP INDEX ' . $this->defaultSchema . '.' . $this->ensureIdentifiersLength($table, $name, 'idx'));
      }
- 
+-
 -    $this->executeDdlStatement('DROP INDEX ' . $this->defaultSchema . '.' . $this->ensureIdentifiersLength($table, $name, 'idx'));
-+    $this->executeDdlStatement('DROP INDEX ' . $this->defaultSchema . '.' . $identifier);
      $this->resetTableInformation($table);
      return TRUE;
    }
