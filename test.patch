@@ -1,1420 +1,1818 @@
-diff --git a/core/lib/Drupal/Core/Database/Exception/SchemaTablePrimaryKeyException.php b/core/lib/Drupal/Core/Database/Exception/SchemaTablePrimaryKeyException.php
+diff --git a/core/lib/Drupal/Core/Database/Connection.php b/core/lib/Drupal/Core/Database/Connection.php
+index 891df83cec7..b6f894f77e3 100644
+--- a/core/lib/Drupal/Core/Database/Connection.php
++++ b/core/lib/Drupal/Core/Database/Connection.php
+@@ -1531,7 +1531,7 @@ public function isEventEnabled(string $eventName): bool {
+   /**
+    * Enables database API events dispatching.
+    *
+-   * @param string[] $eventNames
++   * @param list<class-string<\Drupal\Core\Database\Event\DatabaseEvent>> $eventNames
+    *   A list of database events to be enabled.
+    *
+    * @return static
+@@ -1539,6 +1539,7 @@ public function isEventEnabled(string $eventName): bool {
+   public function enableEvents(array $eventNames): static {
+     foreach ($eventNames as $eventName) {
+       assert(class_exists($eventName), "Event class {$eventName} does not exist");
++      assert(is_a($eventName, DatabaseEvent::class, TRUE), "Event class {$eventName} is not a valid database event class");
+       $this->enabledEvents[$eventName] = TRUE;
+     }
+     return $this;
+@@ -1547,7 +1548,7 @@ public function enableEvents(array $eventNames): static {
+   /**
+    * Disables database API events dispatching.
+    *
+-   * @param string[] $eventNames
++   * @param list<class-string<\Drupal\Core\Database\Event\DatabaseEvent>> $eventNames
+    *   A list of database events to be disabled.
+    *
+    * @return static
+@@ -1555,6 +1556,7 @@ public function enableEvents(array $eventNames): static {
+   public function disableEvents(array $eventNames): static {
+     foreach ($eventNames as $eventName) {
+       assert(class_exists($eventName), "Event class {$eventName} does not exist");
++      assert(is_a($eventName, DatabaseEvent::class, TRUE), "Event class {$eventName} is not a valid database event class");
+       $this->enabledEvents[$eventName] = FALSE;
+     }
+     return $this;
+diff --git a/core/lib/Drupal/Core/Database/Event/StatementExecutionEndEvent.php b/core/lib/Drupal/Core/Database/Event/StatementExecutionEndEvent.php
+index 30718843d6c..8b3a03d0a69 100644
+--- a/core/lib/Drupal/Core/Database/Event/StatementExecutionEndEvent.php
++++ b/core/lib/Drupal/Core/Database/Event/StatementExecutionEndEvent.php
+@@ -28,6 +28,10 @@ class StatementExecutionEndEvent extends DatabaseEvent {
+    *   called.
+    * @param float $startTime
+    *   The time of the statement execution start.
++   * @param string|null $transactionId
++   *   The current transaction ID if active.
++   * @param string|null $transactionName
++   *   The current transaction name if active.
+    */
+   public function __construct(
+     public readonly int $statementObjectId,
+@@ -37,6 +41,8 @@ public function __construct(
+     public readonly array $args,
+     public readonly array $caller,
+     public readonly float $startTime,
++    public readonly ?string $transactionId = NULL,
++    public readonly ?string $transactionName = NULL,
+   ) {
+     parent::__construct();
+   }
+diff --git a/core/lib/Drupal/Core/Database/Event/StatementExecutionFailureEvent.php b/core/lib/Drupal/Core/Database/Event/StatementExecutionFailureEvent.php
+index 682e59f2389..092cf2e6879 100644
+--- a/core/lib/Drupal/Core/Database/Event/StatementExecutionFailureEvent.php
++++ b/core/lib/Drupal/Core/Database/Event/StatementExecutionFailureEvent.php
+@@ -34,6 +34,10 @@ class StatementExecutionFailureEvent extends StatementExecutionEndEvent {
+    *   The code of the exception that was thrown.
+    * @param string $exceptionMessage
+    *   The message of the exception that was thrown.
++   * @param string|null $transactionId
++   *   The current transaction ID if active.
++   * @param string|null $transactionName
++   *   The current transaction name if active.
+    */
+   public function __construct(
+     int $statementObjectId,
+@@ -46,8 +50,10 @@ public function __construct(
+     public readonly string $exceptionClass,
+     public readonly int|string $exceptionCode,
+     public readonly string $exceptionMessage,
++    ?string $transactionId = NULL,
++    ?string $transactionName = NULL,
+   ) {
+-    parent::__construct($statementObjectId, $key, $target, $queryString, $args, $caller, $startTime);
++    parent::__construct($statementObjectId, $key, $target, $queryString, $args, $caller, $startTime, $transactionId, $transactionName);
+   }
+ 
+ }
+diff --git a/core/lib/Drupal/Core/Database/Event/StatementExecutionStartEvent.php b/core/lib/Drupal/Core/Database/Event/StatementExecutionStartEvent.php
+index 010f810966a..760ba6ec2d0 100644
+--- a/core/lib/Drupal/Core/Database/Event/StatementExecutionStartEvent.php
++++ b/core/lib/Drupal/Core/Database/Event/StatementExecutionStartEvent.php
+@@ -26,6 +26,10 @@ class StatementExecutionStartEvent extends DatabaseEvent {
+    * @param array $caller
+    *   A normalized debug backtrace entry representing the last non-db method
+    *   called.
++   * @param string|null $transactionId
++   *   The current transaction ID if active.
++   * @param string|null $transactionName
++   *   The current transaction name if active.
+    */
+   public function __construct(
+     public readonly int $statementObjectId,
+@@ -34,6 +38,8 @@ public function __construct(
+     public readonly string $queryString,
+     public readonly array $args,
+     public readonly array $caller,
++    public readonly ?string $transactionId = NULL,
++    public readonly ?string $transactionName = NULL,
+   ) {
+     parent::__construct();
+   }
+diff --git a/core/lib/Drupal/Core/Database/Event/TransactionAutoCommitEvent.php b/core/lib/Drupal/Core/Database/Event/TransactionAutoCommitEvent.php
 new file mode 100644
-index 00000000000..879cf2d03fb
+index 00000000000..7f1bdcaf0c7
 --- /dev/null
-+++ b/core/lib/Drupal/Core/Database/Exception/SchemaTablePrimaryKeyException.php
-@@ -0,0 +1,12 @@
++++ b/core/lib/Drupal/Core/Database/Event/TransactionAutoCommitEvent.php
+@@ -0,0 +1,18 @@
 +<?php
 +
-+namespace Drupal\Core\Database\Exception;
++declare(strict_types=1);
 +
-+use Drupal\Core\Database\DatabaseException;
-+use Drupal\Core\Database\SchemaException;
++namespace Drupal\Core\Database\Event;
 +
 +/**
-+ * Exception thrown for primary key related errors.
++ * Emitted when an automatic commit is detected.
++ *
++ * In some cases the active transaction is automatically committed by the
++ * database server when a DDL statement is executed during a transaction
++ * (for example, MySQL). In such cases we emit this event to notify that a
++ * commit occurred while the Drupal transaction is still active. A normal
++ * TransactionCommitEvent is emitted later once the Drupal transaction is
++ * committed.
 + */
-+class SchemaTablePrimaryKeyException extends SchemaException implements DatabaseException {
++final class TransactionAutoCommitEvent extends TransactionEventBase {
 +}
-diff --git a/core/lib/Drupal/Core/Database/Schema.php b/core/lib/Drupal/Core/Database/Schema.php
-index d01f15558dc..6fffc92f9c7 100644
---- a/core/lib/Drupal/Core/Database/Schema.php
-+++ b/core/lib/Drupal/Core/Database/Schema.php
-@@ -2,6 +2,7 @@
- 
- namespace Drupal\Core\Database;
- 
-+use Drupal\Core\Database\Exception\SchemaTablePrimaryKeyException;
- use Drupal\Core\Database\Query\PlaceholderInterface;
- use Drupal\Core\Database\SchemaDefinition\Schema as SchemaDefinition;
- use Drupal\Core\Database\SchemaDefinition\SchemaDefinitionType;
-@@ -462,6 +463,21 @@ abstract public function addUniqueKey($table, $name, $fields);
-    */
-   abstract public function dropUniqueKey($table, $name);
- 
+diff --git a/core/lib/Drupal/Core/Database/Event/TransactionBeginEvent.php b/core/lib/Drupal/Core/Database/Event/TransactionBeginEvent.php
+new file mode 100644
+index 00000000000..fd8801bdbd4
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/Event/TransactionBeginEvent.php
+@@ -0,0 +1,11 @@
++<?php
++
++declare(strict_types=1);
++
++namespace Drupal\Core\Database\Event;
++
++/**
++ * Represents the beginning of a transaction.
++ */
++final class TransactionBeginEvent extends TransactionEventBase {
++}
+diff --git a/core/lib/Drupal/Core/Database/Event/TransactionBeginFailureEvent.php b/core/lib/Drupal/Core/Database/Event/TransactionBeginFailureEvent.php
+new file mode 100644
+index 00000000000..d8416f7d795
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/Event/TransactionBeginFailureEvent.php
+@@ -0,0 +1,11 @@
++<?php
++
++declare(strict_types=1);
++
++namespace Drupal\Core\Database\Event;
++
++/**
++ * Represents the failed start of a transaction.
++ */
++final class TransactionBeginFailureEvent extends TransactionFailureEventBase {
++}
+diff --git a/core/lib/Drupal/Core/Database/Event/TransactionCommitEvent.php b/core/lib/Drupal/Core/Database/Event/TransactionCommitEvent.php
+new file mode 100644
+index 00000000000..e95cf6c57f5
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/Event/TransactionCommitEvent.php
+@@ -0,0 +1,11 @@
++<?php
++
++declare(strict_types=1);
++
++namespace Drupal\Core\Database\Event;
++
++/**
++ * Represents the commit of a transaction.
++ */
++final class TransactionCommitEvent extends TransactionCommitOrReleaseEventBase {
++}
+diff --git a/core/lib/Drupal/Core/Database/Event/TransactionCommitFailureEvent.php b/core/lib/Drupal/Core/Database/Event/TransactionCommitFailureEvent.php
+new file mode 100644
+index 00000000000..801f0d0bc4e
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/Event/TransactionCommitFailureEvent.php
+@@ -0,0 +1,11 @@
++<?php
++
++declare(strict_types=1);
++
++namespace Drupal\Core\Database\Event;
++
++/**
++ * Represents the failed commit of a transaction.
++ */
++final class TransactionCommitFailureEvent extends TransactionCommitOrReleaseFailureEventBase {
++}
+diff --git a/core/lib/Drupal/Core/Database/Event/TransactionCommitOrReleaseEventBase.php b/core/lib/Drupal/Core/Database/Event/TransactionCommitOrReleaseEventBase.php
+new file mode 100644
+index 00000000000..a331f542a13
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/Event/TransactionCommitOrReleaseEventBase.php
+@@ -0,0 +1,48 @@
++<?php
++
++declare(strict_types=1);
++
++namespace Drupal\Core\Database\Event;
++
++use Drupal\Core\Database\Transaction\ClientConnectionTransactionState;
++use Drupal\Core\Database\Transaction\CommitType;
++
++/**
++ * Represents the commit of a transaction.
++ */
++abstract class TransactionCommitOrReleaseEventBase extends TransactionEventBase {
++
 +  /**
-+   * Checks if a unique key exists in the given table.
++   * Constructor.
 +   *
-+   * @param string $tableName
-+   *   The name of the table in drupal (no prefixing).
-+   * @param string $uniqueKeyName
-+   *   The name of the key in drupal (no prefixing).
++   * See 'Customizing database settings' in settings.php for an explanation of
++   * the $key and $target connection values.
 +   *
-+   * @return bool
-+   *   TRUE if the given key exists, otherwise FALSE.
++   * @param string $key
++   *   The database connection key.
++   * @param string $target
++   *   The database connection target.
++   * @param string $id
++   *   The ID of the transaction.
++   * @param string $name
++   *   The name of the transaction.
++   * @param \Drupal\Core\Database\Transaction\ClientConnectionTransactionState $transactionState
++   *   The state of the client transaction.
++   * @param array $stackItems
++   *   The current transaction stack items.
++   * @param \Drupal\Core\Database\Transaction\CommitType $type
++   *   The type of commit.
 +   */
-+  public function uniqueKeyExists(string $tableName, string $uniqueKeyName): bool {
-+    return $this->indexExists($tableName, $uniqueKeyName);
++  public function __construct(
++    string $key,
++    string $target,
++    string $id,
++    string $name,
++    ClientConnectionTransactionState $transactionState,
++    array $stackItems,
++    public readonly CommitType $type,
++  ) {
++    parent::__construct($key, $target, $id, $name, $transactionState, $stackItems);
 +  }
 +
-   /**
-    * Add an index.
-    *
-@@ -666,6 +682,200 @@ final public function createTableFromDefinition(SchemaDefinitionType $schemaDefi
-     $this->createTable($table->name, $table->toArray());
++}
+diff --git a/core/lib/Drupal/Core/Database/Event/TransactionCommitOrReleaseFailureEventBase.php b/core/lib/Drupal/Core/Database/Event/TransactionCommitOrReleaseFailureEventBase.php
+new file mode 100644
+index 00000000000..bfd358d1b45
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/Event/TransactionCommitOrReleaseFailureEventBase.php
+@@ -0,0 +1,54 @@
++<?php
++
++declare(strict_types=1);
++
++namespace Drupal\Core\Database\Event;
++
++use Drupal\Core\Database\Transaction\ClientConnectionTransactionState;
++use Drupal\Core\Database\Transaction\CommitType;
++
++/**
++ * Base class for database transaction commit failure events.
++ */
++abstract class TransactionCommitOrReleaseFailureEventBase extends TransactionFailureEventBase {
++
++  /**
++   * Constructor.
++   *
++   * See 'Customizing database settings' in settings.php for an explanation of
++   * the $key and $target connection values.
++   *
++   * @param string $key
++   *   The database connection key.
++   * @param string $target
++   *   The database connection target.
++   * @param string $id
++   *   The ID of the transaction.
++   * @param string $name
++   *   The name of the transaction.
++   * @param \Drupal\Core\Database\Transaction\ClientConnectionTransactionState $transactionState
++   *   The state of the client transaction.
++   * @param array $stackItems
++   *   The current transaction stack items.
++   * @param class-string $className
++   *   The fully qualified class name of the exception.
++   * @param string $message
++   *   The message of the exception.
++   * @param \Drupal\Core\Database\Transaction\CommitType $type
++   *   The type of commit.
++   */
++  public function __construct(
++    string $key,
++    string $target,
++    string $id,
++    string $name,
++    ClientConnectionTransactionState $transactionState,
++    array $stackItems,
++    string $className,
++    string $message,
++    public readonly CommitType $type,
++  ) {
++    parent::__construct($key, $target, $id, $name, $transactionState, $stackItems, $className, $message);
++  }
++
++}
+diff --git a/core/lib/Drupal/Core/Database/Event/TransactionEvent.php b/core/lib/Drupal/Core/Database/Event/TransactionEvent.php
+new file mode 100644
+index 00000000000..bde3845f886
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/Event/TransactionEvent.php
+@@ -0,0 +1,37 @@
++<?php
++
++declare(strict_types=1);
++
++namespace Drupal\Core\Database\Event;
++
++/**
++ * Enumeration of the transaction related database events.
++ */
++enum TransactionEvent: string {
++
++  case Begin = TransactionBeginEvent::class;
++  case BeginFailure = TransactionBeginFailureEvent::class;
++  case Commit = TransactionCommitEvent::class;
++  case CommitFailure = TransactionCommitFailureEvent::class;
++  case ReleaseSavepoint = TransactionReleaseSavepointEvent::class;
++  case ReleaseSavepointFailure = TransactionReleaseSavepointFailureEvent::class;
++  case Rollback = TransactionRollbackEvent::class;
++  case RollbackFailure = TransactionRollbackFailureEvent::class;
++  case RollbackToSavepoint = TransactionRollbackToSavepointEvent::class;
++  case RollbackToSavepointFailure = TransactionRollbackToSavepointFailureEvent::class;
++  case Savepoint = TransactionSavepointEvent::class;
++  case SavepointFailure = TransactionSavepointFailureEvent::class;
++
++  case AutoCommit = TransactionAutoCommitEvent::class;
++
++  /**
++   * Returns an array with all transaction related event classes.
++   *
++   * @return list<class-string<\Drupal\Core\Database\Event\TransactionEventBase>>
++   *   An array with all transaction related event classes.
++   */
++  public static function all(): array {
++    return array_map(fn(self $case) => $case->value, self::cases());
++  }
++
++}
+diff --git a/core/lib/Drupal/Core/Database/Event/TransactionEventBase.php b/core/lib/Drupal/Core/Database/Event/TransactionEventBase.php
+new file mode 100644
+index 00000000000..51f5b9b18ac
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/Event/TransactionEventBase.php
+@@ -0,0 +1,44 @@
++<?php
++
++declare(strict_types=1);
++
++namespace Drupal\Core\Database\Event;
++
++use Drupal\Core\Database\Transaction\ClientConnectionTransactionState;
++
++/**
++ * Base class for database transaction events.
++ */
++abstract class TransactionEventBase extends DatabaseEvent {
++
++  /**
++   * Constructor.
++   *
++   * See 'Customizing database settings' in settings.php for an explanation of
++   * the $key and $target connection values.
++   *
++   * @param string $key
++   *   The database connection key.
++   * @param string $target
++   *   The database connection target.
++   * @param string $id
++   *   The ID of the transaction.
++   * @param string $name
++   *   The name of the transaction.
++   * @param \Drupal\Core\Database\Transaction\ClientConnectionTransactionState $transactionState
++   *   The state of the client transaction.
++   * @param array $stackItems
++   *   The current transaction stack items.
++   */
++  public function __construct(
++    public readonly string $key,
++    public readonly string $target,
++    public readonly string $id,
++    public readonly string $name,
++    public readonly ClientConnectionTransactionState $transactionState,
++    public readonly array $stackItems,
++  ) {
++    parent::__construct();
++  }
++
++}
+diff --git a/core/lib/Drupal/Core/Database/Event/TransactionFailureEventBase.php b/core/lib/Drupal/Core/Database/Event/TransactionFailureEventBase.php
+new file mode 100644
+index 00000000000..dc526c52792
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/Event/TransactionFailureEventBase.php
+@@ -0,0 +1,50 @@
++<?php
++
++declare(strict_types=1);
++
++namespace Drupal\Core\Database\Event;
++
++use Drupal\Core\Database\Transaction\ClientConnectionTransactionState;
++
++/**
++ * Base class for database transaction failure events.
++ */
++abstract class TransactionFailureEventBase extends TransactionEventBase {
++
++  /**
++   * Constructor.
++   *
++   * See 'Customizing database settings' in settings.php for an explanation of
++   * the $key and $target connection values.
++   *
++   * @param string $key
++   *   The database connection key.
++   * @param string $target
++   *   The database connection target.
++   * @param string $id
++   *   The ID of the transaction.
++   * @param string $name
++   *   The name of the transaction.
++   * @param \Drupal\Core\Database\Transaction\ClientConnectionTransactionState $transactionState
++   *   The state of the client transaction.
++   * @param array $stackItems
++   *   The current transaction stack items.
++   * @param class-string $className
++   *   The fully qualified class name of the exception.
++   * @param string $message
++   *   The message of the exception.
++   */
++  public function __construct(
++    string $key,
++    string $target,
++    string $id,
++    string $name,
++    ClientConnectionTransactionState $transactionState,
++    array $stackItems,
++    public readonly string $className,
++    public readonly string $message,
++  ) {
++    parent::__construct($key, $target, $id, $name, $transactionState, $stackItems);
++  }
++
++}
+diff --git a/core/lib/Drupal/Core/Database/Event/TransactionReleaseSavepointEvent.php b/core/lib/Drupal/Core/Database/Event/TransactionReleaseSavepointEvent.php
+new file mode 100644
+index 00000000000..61d61710da2
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/Event/TransactionReleaseSavepointEvent.php
+@@ -0,0 +1,11 @@
++<?php
++
++declare(strict_types=1);
++
++namespace Drupal\Core\Database\Event;
++
++/**
++ * Represents a savepoint release.
++ */
++final class TransactionReleaseSavepointEvent extends TransactionCommitOrReleaseEventBase {
++}
+diff --git a/core/lib/Drupal/Core/Database/Event/TransactionReleaseSavepointFailureEvent.php b/core/lib/Drupal/Core/Database/Event/TransactionReleaseSavepointFailureEvent.php
+new file mode 100644
+index 00000000000..df0367bcfdc
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/Event/TransactionReleaseSavepointFailureEvent.php
+@@ -0,0 +1,11 @@
++<?php
++
++declare(strict_types=1);
++
++namespace Drupal\Core\Database\Event;
++
++/**
++ * Represents a failed savepoint release.
++ */
++final class TransactionReleaseSavepointFailureEvent extends TransactionCommitOrReleaseFailureEventBase {
++}
+diff --git a/core/lib/Drupal/Core/Database/Event/TransactionRollbackEvent.php b/core/lib/Drupal/Core/Database/Event/TransactionRollbackEvent.php
+new file mode 100644
+index 00000000000..3f64c0d0e89
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/Event/TransactionRollbackEvent.php
+@@ -0,0 +1,11 @@
++<?php
++
++declare(strict_types=1);
++
++namespace Drupal\Core\Database\Event;
++
++/**
++ * Represents the rollback of a transaction.
++ */
++final class TransactionRollbackEvent extends TransactionEventBase {
++}
+diff --git a/core/lib/Drupal/Core/Database/Event/TransactionRollbackFailureEvent.php b/core/lib/Drupal/Core/Database/Event/TransactionRollbackFailureEvent.php
+new file mode 100644
+index 00000000000..6b1c7d59cbd
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/Event/TransactionRollbackFailureEvent.php
+@@ -0,0 +1,11 @@
++<?php
++
++declare(strict_types=1);
++
++namespace Drupal\Core\Database\Event;
++
++/**
++ * Represents the failed rollback of a transaction.
++ */
++final class TransactionRollbackFailureEvent extends TransactionFailureEventBase {
++}
+diff --git a/core/lib/Drupal/Core/Database/Event/TransactionRollbackToSavepointEvent.php b/core/lib/Drupal/Core/Database/Event/TransactionRollbackToSavepointEvent.php
+new file mode 100644
+index 00000000000..2c5be72e257
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/Event/TransactionRollbackToSavepointEvent.php
+@@ -0,0 +1,11 @@
++<?php
++
++declare(strict_types=1);
++
++namespace Drupal\Core\Database\Event;
++
++/**
++ * Represents the rollback of a transaction to a savepoint.
++ */
++final class TransactionRollbackToSavepointEvent extends TransactionEventBase {
++}
+diff --git a/core/lib/Drupal/Core/Database/Event/TransactionRollbackToSavepointFailureEvent.php b/core/lib/Drupal/Core/Database/Event/TransactionRollbackToSavepointFailureEvent.php
+new file mode 100644
+index 00000000000..9c17ee84d68
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/Event/TransactionRollbackToSavepointFailureEvent.php
+@@ -0,0 +1,11 @@
++<?php
++
++declare(strict_types=1);
++
++namespace Drupal\Core\Database\Event;
++
++/**
++ * Represents the failed rollback of a transaction to a savepoint.
++ */
++final class TransactionRollbackToSavepointFailureEvent extends TransactionFailureEventBase {
++}
+diff --git a/core/lib/Drupal/Core/Database/Event/TransactionSavepointEvent.php b/core/lib/Drupal/Core/Database/Event/TransactionSavepointEvent.php
+new file mode 100644
+index 00000000000..b3109980fbb
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/Event/TransactionSavepointEvent.php
+@@ -0,0 +1,11 @@
++<?php
++
++declare(strict_types=1);
++
++namespace Drupal\Core\Database\Event;
++
++/**
++ * Represents the activation of a transaction savepoint.
++ */
++final class TransactionSavepointEvent extends TransactionEventBase {
++}
+diff --git a/core/lib/Drupal/Core/Database/Event/TransactionSavepointFailureEvent.php b/core/lib/Drupal/Core/Database/Event/TransactionSavepointFailureEvent.php
+new file mode 100644
+index 00000000000..e2b73189fa7
+--- /dev/null
++++ b/core/lib/Drupal/Core/Database/Event/TransactionSavepointFailureEvent.php
+@@ -0,0 +1,11 @@
++<?php
++
++declare(strict_types=1);
++
++namespace Drupal\Core\Database\Event;
++
++/**
++ * Represents the failed start of a savepoint.
++ */
++final class TransactionSavepointFailureEvent extends TransactionFailureEventBase {
++}
+diff --git a/core/lib/Drupal/Core/Database/Statement/StatementBase.php b/core/lib/Drupal/Core/Database/Statement/StatementBase.php
+index ecbb60e5f91..8138f6423f0 100644
+--- a/core/lib/Drupal/Core/Database/Statement/StatementBase.php
++++ b/core/lib/Drupal/Core/Database/Statement/StatementBase.php
+@@ -144,7 +144,9 @@ protected function dispatchStatementExecutionStartEvent(array $args): ?Statement
+         $this->connection->getTarget(),
+         $this->getQueryString(),
+         $args,
+-        $this->connection->findCallerFromDebugBacktrace()
++        $this->connection->findCallerFromDebugBacktrace(),
++        $this->connection->transactionManager()->currentTransactionId(),
++        $this->connection->transactionManager()->currentTransactionName(),
+       );
+       $this->connection->dispatchEvent($startEvent);
+       return $startEvent;
+@@ -167,7 +169,9 @@ protected function dispatchStatementExecutionEndEvent(?StatementExecutionStartEv
+         $startEvent->queryString,
+         $startEvent->args,
+         $startEvent->caller,
+-        $startEvent->time
++        $startEvent->time,
++        $startEvent->transactionId,
++        $startEvent->transactionName,
+       ));
+     }
    }
- 
-+  /**
-+   * Adds a table column based on a schema definition.
-+   *
-+   * @param \Drupal\Core\Database\SchemaDefinition\Schema $targetSchema
-+   *   The target Schema definition where the table is defined with the changed
-+   *   column and all defined indexes.
-+   * @param string $tableName
-+   *   Name of the table.
-+   * @param string $targetColumnName
-+   *   The name of the column as defined in the target schema definition.
-+   * @param Expression|null $initializationExpression
-+   *   (optional) An expression to be used to initialize the newly added
-+   *   column. This is most useful for creating NOT NULL columns with no
-+   *   default value in existing tables. If not specified, the column will be
-+   *   initialized to the default value indicated in the schema definition (if
-+   *   present).
-+   *   Examples:
-+   *   @code
-+   *     new Expression('[age]')
-+   *   @endcode
-+   *   copies the content of the 'age' column to the new column;
-+   *   @code
-+   *     new Expression(':initial_value', [':initial_value' => 10])
-+   *   @endcode
-+   *   sets the new column's values to 10 for all rows;
-+   *   @code
-+   *     new Expression(
-+   *       'COALESCE([age], :fallback_value)',
-+   *       [':fallback_value' => 59],
-+   *     )
-+   *   @endcode
-+   *   copies the content of the 'age' column to the new column, falling back
-+   *   to the value 59 if the 'age' column of a row is missing.
-+   *
-+   * @throws \Drupal\Core\Database\SchemaObjectDoesNotExistException
-+   *   If the specified table or source field doesn't exist.
-+   * @throws \Drupal\Core\Database\SchemaObjectExistsException
-+   *   If the specified destination field already exists.
-+   */
-+  final public function addTableColumnFromDefinition(SchemaDefinition $targetSchema, string $tableName, string $targetColumnName, ?Expression $initializationExpression = NULL): void {
-+    if (!$this->tableExists($tableName)) {
-+      throw new SchemaObjectDoesNotExistException("Cannot add column '$tableName.$targetColumnName': table doesn't exist.");
-+    }
-+    if ($this->fieldExists($tableName, $targetColumnName)) {
-+      throw new SchemaObjectExistsException("Cannot add column '$tableName.$targetColumnName': column already exists.");
-+    }
-+
-+    $table = $targetSchema->getTableDefinition($tableName);
-+    if (!in_array($targetColumnName, $table->columnNames())) {
-+      throw new SchemaException("Cannot add column '$tableName.$targetColumnName': column is not defined in the schema.");
-+    }
-+
-+    // Handles keys/indexes that are impacted by the addition.
-+    // Remove existing current keys if in the target schema the added column
-+    // is part of them.
-+    foreach ($table->indexes ?? [] as $index) {
-+      if (in_array($targetColumnName, $index->columnNames(), TRUE) && $this->indexExists($tableName, $index->name)) {
-+        $this->dropIndex($tableName, $index->name);
-+      }
-+    }
-+    foreach ($table->uniqueKeys ?? [] as $key) {
-+      if (in_array($targetColumnName, $key->columnNames(), TRUE) && $this->uniqueKeyExists($tableName, $key->name)) {
-+        $this->dropUniqueKey($tableName, $key->name);
-+      }
-+    }
-+    if (in_array($targetColumnName, $table->primaryKey?->columnNames() ?? [], TRUE)) {
-+      try {
-+        $this->dropPrimaryKey($tableName);
-+      }
-+      catch (SchemaTablePrimaryKeyException) {
-+        // It may not be possible to drop the primary key. For example, in
-+        // MySQL primary keys based on a serial column.
-+      }
-+    }
-+    // Add target keys that are needed.
-+    $newKeys = [];
-+    $hasPrimaryKey = $this->findPrimaryKeyColumns($tableName) !== [];
-+    $needsPrimaryKey = (bool) $table->primaryKey;
-+    if (!$hasPrimaryKey && $needsPrimaryKey) {
-+      $newKeys['primary key'] = $table->primaryKey->toArray();
-+    }
-+    foreach ($table->uniqueKeys ?? [] as $key) {
-+      if (!$this->uniqueKeyExists($tableName, $key->name)) {
-+        $newKeys['unique keys'][$key->name] = $key->toArray();
-+      }
-+    }
-+    foreach ($table->indexes ?? [] as $index) {
-+      if (!$this->indexExists($tableName, $index->name)) {
-+        $newKeys['indexes'][$index->name] = $index->toArray();
-+      }
-+    }
-+
-+    $tableAsArray = $table->toArray();
-+    unset($tableAsArray['primary key'], $tableAsArray['unique keys'], $tableAsArray['indexes']);
-+    if ($initializationExpression) {
-+      $tableAsArray['fields'][$targetColumnName]['initialization_expression'] = $initializationExpression;
-+    }
-+    $this->addField(
-+      $tableName,
-+      $targetColumnName,
-+      $tableAsArray['fields'][$targetColumnName],
-+      array_merge($tableAsArray, $newKeys),
-+    );
-+  }
-+
-+  /**
-+   * Changes a table column to a target schema definition.
-+   *
-+   * @param \Drupal\Core\Database\SchemaDefinition\Schema $targetSchema
-+   *   The target Schema definition where the table is defined with the changed
-+   *   column and all defined indexes.
-+   * @param string $tableName
-+   *   Name of the table.
-+   * @param string $targetColumnName
-+   *   The name of the column as defined in the target schema definition.
-+   * @param string|null $currentColumnName
-+   *   The current name of the column in the table. Skip if the name does not
-+   *   change.
-+   *
-+   * @throws \Drupal\Core\Database\SchemaObjectDoesNotExistException
-+   *   If the specified table or source field doesn't exist.
-+   * @throws \Drupal\Core\Database\SchemaObjectExistsException
-+   *   If the specified destination field already exists.
-+   */
-+  final public function changeTableColumnFromDefinition(SchemaDefinition $targetSchema, string $tableName, string $targetColumnName, ?string $currentColumnName = NULL): void {
-+    $currentColumnName ??= $targetColumnName;
-+    if (!$this->tableExists($tableName)) {
-+      throw new SchemaObjectDoesNotExistException("Cannot change the definition of column '$tableName.$currentColumnName': table doesn't exist.");
-+    }
-+    if (!$this->fieldExists($tableName, $currentColumnName)) {
-+      throw new SchemaObjectDoesNotExistException("Cannot change the definition of column '$tableName.$currentColumnName': column doesn't exist.");
-+    }
-+    if (($currentColumnName != $targetColumnName) && $this->fieldExists($tableName, $targetColumnName)) {
-+      throw new SchemaObjectExistsException("Cannot rename column '$tableName.$currentColumnName' to '$targetColumnName': target column already exists.");
-+    }
-+
-+    $table = $targetSchema->getTableDefinition($tableName);
-+    if (!in_array($targetColumnName, $table->columnNames())) {
-+      throw new SchemaException("Cannot handle changes to column '$tableName.$currentColumnName': the target column '$targetColumnName' is not defined in the schema.");
-+    }
-+
-+    // Handles keys/indexes that are impacted by the change.
-+    $currentKeys = $this->introspectIndexSchema($tableName);
-+if ($tableName === 'test_change_table_column_with_definition_very_long') dump($currentKeys);
-+    // Remove current keys that include the column to be changed.
-+    foreach ($currentKeys['indexes'] as $key => $data) {
-+      if (in_array($currentColumnName, $data, TRUE)) {
-+        $this->dropIndex($tableName, $key);
-+      }
-+    }
-+    foreach ($currentKeys['unique keys'] as $key => $data) {
-+      if (in_array($currentColumnName, $data, TRUE)) {
-+        $this->dropUniqueKey($tableName, $key);
-+      }
-+    }
-+    if (in_array($currentColumnName, $currentKeys['primary key'], TRUE)) {
-+      try {
-+        $this->dropPrimaryKey($tableName);
-+      }
-+      catch (SchemaTablePrimaryKeyException) {
-+        // It may not be possible to drop the primary key. For example, in
-+        // MySQL primary keys based on a serial column.
-+      }
-+    }
-+    // Add target keys that are needed.
-+if ($tableName === 'test_change_table_column_with_definition_very_long') dump($this->introspectIndexSchema($tableName));
-+    $newKeys = [];
-+    $hasPrimaryKey = $this->findPrimaryKeyColumns($tableName) !== [];
-+    $needsPrimaryKey = (bool) $table->primaryKey;
-+    if (!$hasPrimaryKey && $needsPrimaryKey) {
-+      $newKeys['primary key'] = $table->primaryKey->toArray();
-+    }
-+    foreach ($table->uniqueKeys ?? [] as $key) {
-+      if (!$this->uniqueKeyExists($tableName, $key->name)) {
-+        $newKeys['unique keys'][$key->name] = $key->toArray();
-+      }
-+    }
-+    foreach ($table->indexes ?? [] as $index) {
-+      if (!$this->indexExists($tableName, $index->name)) {
-+        $newKeys['indexes'][$index->name] = $index->toArray();
-+      }
-+    }
-+
-+    $tableAsArray = $table->toArray();
-+    unset($tableAsArray['primary key'], $tableAsArray['unique keys'], $tableAsArray['indexes']);
-+    $this->changeField(
-+      $tableName,
-+      $currentColumnName,
-+      $targetColumnName,
-+      $tableAsArray['fields'][$targetColumnName],
-+      array_merge($tableAsArray, $newKeys),
-+    );
-+  }
-+
-   /**
-    * Create a new table from a Drupal array table definition.
-    *
-diff --git a/core/lib/Drupal/Core/Database/SchemaDefinition/KeyBase.php b/core/lib/Drupal/Core/Database/SchemaDefinition/KeyBase.php
-index c9528e6254f..d1c176b7f99 100644
---- a/core/lib/Drupal/Core/Database/SchemaDefinition/KeyBase.php
-+++ b/core/lib/Drupal/Core/Database/SchemaDefinition/KeyBase.php
-@@ -74,6 +74,19 @@ protected function buildKeyColumns(array $rawColumns, bool $limitedLengthAllowed
-     return $columns;
+@@ -193,6 +197,8 @@ protected function dispatchStatementExecutionFailureEvent(?StatementExecutionSta
+         get_class($e),
+         $e->getCode(),
+         $e->getMessage(),
++        $startEvent->transactionId,
++        $startEvent->transactionName,
+       ));
+     }
    }
+diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
+index a3e76696c54..72aae1eb57a 100644
+--- a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
++++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerBase.php
+@@ -5,6 +5,20 @@
+ namespace Drupal\Core\Database\Transaction;
  
+ use Drupal\Core\Database\Connection;
++use Drupal\Core\Database\Event\TransactionAutoCommitEvent;
++use Drupal\Core\Database\Event\TransactionBeginEvent;
++use Drupal\Core\Database\Event\TransactionBeginFailureEvent;
++use Drupal\Core\Database\Event\TransactionCommitEvent;
++use Drupal\Core\Database\Event\TransactionCommitFailureEvent;
++use Drupal\Core\Database\Event\TransactionEvent;
++use Drupal\Core\Database\Event\TransactionReleaseSavepointEvent;
++use Drupal\Core\Database\Event\TransactionReleaseSavepointFailureEvent;
++use Drupal\Core\Database\Event\TransactionRollbackEvent;
++use Drupal\Core\Database\Event\TransactionRollbackFailureEvent;
++use Drupal\Core\Database\Event\TransactionRollbackToSavepointEvent;
++use Drupal\Core\Database\Event\TransactionRollbackToSavepointFailureEvent;
++use Drupal\Core\Database\Event\TransactionSavepointEvent;
++use Drupal\Core\Database\Event\TransactionSavepointFailureEvent;
+ use Drupal\Core\Database\Transaction;
+ use Drupal\Core\Database\TransactionCommitFailedException;
+ use Drupal\Core\Database\TransactionException;
+@@ -194,6 +208,7 @@ public function commitAll(): void {
+     if ($this->stackDepth() !== 0) {
+       @trigger_error('Committing transactions via ' . __METHOD__ . '() is deprecated in drupal:11.5.0 and is removed from drupal:13.0.0. There is no replacement. See https://www.drupal.org/node/3524461', E_USER_DEPRECATED);
+     }
++    $this->connection->disableEvents(TransactionEvent::all());
+     foreach (array_reverse($this->stack()) as $id => $item) {
+       $this->unpile($item->name, $id);
+     }
+@@ -265,12 +280,23 @@ protected function dumpStackItemsAsString(): string {
+     if ($this->stack() === []) {
+       return '*** empty ***';
+     }
++    return implode(' > ', $this->stackItemsAsArray());
++  }
+ 
+-    $temp = [];
+-    foreach ($this->stack() as $id => $item) {
+-      $temp[] = $id . '\\' . $item->name;
+-    }
+-    return implode(' > ', $temp);
 +  /**
-+   * Returns the names of the columns in the key.
++   * Produces an array representation of the stack items.
++   *
++   * Drivers should not override this method unless they also override the
++   * $stack property.
 +   *
 +   * @return list<string>
-+   *   The names of the columns.
++   *   The array of stack items represented like id\name.
 +   */
-+  public function columnNames(): array {
-+    return array_map(
-+      fn(KeyColumn $keyColumn): string => $keyColumn->name,
-+      $this->columns,
++  protected function stackItemsAsArray(): array {
++    return array_map(fn(string $id, StackItem $item): string => $id . '\\' . $item->name,
++      array_keys($this->stack()),
++      array_values($this->stack()),
 +    );
-+  }
-+
-   /**
-    * {@inheritdoc}
-    */
-diff --git a/core/lib/Drupal/Core/Database/SchemaDefinition/Table.php b/core/lib/Drupal/Core/Database/SchemaDefinition/Table.php
-index 7f1d79e9078..cceed09676c 100644
---- a/core/lib/Drupal/Core/Database/SchemaDefinition/Table.php
-+++ b/core/lib/Drupal/Core/Database/SchemaDefinition/Table.php
-@@ -65,16 +65,45 @@ private function validate(): void {
-     if ($this->columns && !Inspector::assertAllObjects($this->columns, Column::class)) {
-       throw new SchemaDefinitionException("All members of the 'columns' argument of the '{$this->name}' Table must be Column objects");
-     }
--    if ($this->uniqueKeys && !Inspector::assertAllObjects($this->uniqueKeys, UniqueKey::class)) {
--      throw new SchemaDefinitionException("All members of the 'uniqueKeys' argument of the '{$this->name}' Table must be UniqueKey objects");
-+    if ($this->primaryKey) {
-+      $invalidKeyColumnNames = array_diff($this->primaryKey->columnNames(), $this->columnNames());
-+      if ($invalidKeyColumnNames) {
-+        throw new SchemaDefinitionException("Table '{$this->name}' specifies a primary key with undefined column(s): " . implode(', ', $invalidKeyColumnNames));
-+      }
-     }
--    if ($this->indexes && !Inspector::assertAllObjects($this->indexes, Index::class)) {
--      throw new SchemaDefinitionException("All members of the 'indexes' argument of the '{$this->name}' Table must be Index objects");
-+    if ($this->uniqueKeys) {
-+      if (!Inspector::assertAllObjects($this->uniqueKeys, UniqueKey::class)) {
-+        throw new SchemaDefinitionException("All members of the 'uniqueKeys' argument of the '{$this->name}' Table must be UniqueKey objects");
-+      }
-+      foreach ($this->uniqueKeys as $uniqueKey) {
-+        $invalidKeyColumnNames = array_diff($uniqueKey->columnNames(), $this->columnNames());
-+        if ($invalidKeyColumnNames) {
-+          throw new SchemaDefinitionException("Table '{$this->name}' specifies a unique key '{$uniqueKey->name}' with undefined column(s): " . implode(', ', $invalidKeyColumnNames));
-+        }
-+      }
-     }
--    if ($this->foreignKeys && !Inspector::assertAllObjects($this->foreignKeys, ForeignKey::class)) {
--      throw new SchemaDefinitionException("All members of the 'foreignKeys' argument of the '{$this->name}' Table must be ForeignKey objects");
-+    if ($this->indexes) {
-+      if (!Inspector::assertAllObjects($this->indexes, Index::class)) {
-+        throw new SchemaDefinitionException("All members of the 'indexes' argument of the '{$this->name}' Table must be Index objects");
-+      }
-+      foreach ($this->indexes as $index) {
-+        $invalidKeyColumnNames = array_diff($index->columnNames(), $this->columnNames());
-+        if ($invalidKeyColumnNames) {
-+          throw new SchemaDefinitionException("Table '{$this->name}' specifies an index '{$index->name}' with undefined column(s): " . implode(', ', $invalidKeyColumnNames));
-+        }
-+      }
-+    }
-+    if ($this->foreignKeys) {
-+      if (!Inspector::assertAllObjects($this->foreignKeys, ForeignKey::class)) {
-+        throw new SchemaDefinitionException("All members of the 'foreignKeys' argument of the '{$this->name}' Table must be ForeignKey objects");
-+      }
-+      foreach ($this->foreignKeys as $foreignKey) {
-+        $invalidKeyColumnNames = array_diff($foreignKey->columnNames(), $this->columnNames());
-+        if ($invalidKeyColumnNames) {
-+          throw new SchemaDefinitionException("Table '{$this->name}' specifies a foreign key '{$foreignKey->name}' with undefined column(s): " . implode(', ', $invalidKeyColumnNames));
-+        }
-+      }
-     }
--
-     // MariaDB and SQLite do not allow generated columns in the primary key.
-     if ($this->columns && $this->primaryKey) {
-       $generatedColumnNames = array_map(
-@@ -91,6 +120,19 @@ private function validate(): void {
-     }
    }
  
-+  /**
-+   * Returns the names of the columns in the table.
-+   *
-+   * @return list<string>
-+   *   The names of the columns.
-+   */
-+  public function columnNames(): array {
-+    return array_map(
-+      fn(Column $column): string => $column->name,
-+      $this->columns,
-+    );
-+  }
-+
    /**
-    * {@inheritdoc}
-    */
-diff --git a/core/lib/Drupal/Core/Database/StatementWrapperIterator.php b/core/lib/Drupal/Core/Database/StatementWrapperIterator.php
-index 1b0648b6c86..36d36775b20 100644
---- a/core/lib/Drupal/Core/Database/StatementWrapperIterator.php
-+++ b/core/lib/Drupal/Core/Database/StatementWrapperIterator.php
-@@ -77,6 +77,7 @@ public function execute($args = [], $options = []) {
-     $startEvent = $this->dispatchStatementExecutionStartEvent($args ?? []);
- 
-     try {
-+global $xxx; if ($xxx) dump([$this->queryString, $args, $options]);
-       $return = $this->clientExecute($args, $options);
-       $this->result = new PdoResult(
-         $this->fetchMode,
-diff --git a/core/modules/mysql/src/Driver/Database/mysql/ExceptionHandler.php b/core/modules/mysql/src/Driver/Database/mysql/ExceptionHandler.php
-index de5a2296877..6a78934f289 100644
---- a/core/modules/mysql/src/Driver/Database/mysql/ExceptionHandler.php
-+++ b/core/modules/mysql/src/Driver/Database/mysql/ExceptionHandler.php
-@@ -8,6 +8,7 @@
- use Drupal\Core\Database\Exception\SchemaPrimaryKeyMustBeDroppedException;
- use Drupal\Core\Database\Exception\SchemaTableColumnSizeTooLargeException;
- use Drupal\Core\Database\Exception\SchemaTableKeyTooLargeException;
-+use Drupal\Core\Database\Exception\SchemaTablePrimaryKeyException;
- use Drupal\Core\Database\IntegrityConstraintViolationException;
- use Drupal\Core\Database\StatementInterface;
- 
-@@ -91,6 +92,7 @@ protected function rethrowNormalizedException(
-       '42000' =>  match ($errorCode) {
-         1071 => throw new SchemaTableKeyTooLargeException($message, $code, $exception),
-         1074 => throw new SchemaTableColumnSizeTooLargeException($message, $code, $exception),
-+        1075 => throw new SchemaTablePrimaryKeyException($message, $code, $exception),
-         default => throw new DatabaseExceptionWrapper($message, 0, $exception),
-       },
-       default => throw new DatabaseExceptionWrapper($message, 0, $exception),
-diff --git a/core/modules/mysql/src/Driver/Database/mysql/Schema.php b/core/modules/mysql/src/Driver/Database/mysql/Schema.php
-index c623f076251..a03c26ab811 100644
---- a/core/modules/mysql/src/Driver/Database/mysql/Schema.php
-+++ b/core/modules/mysql/src/Driver/Database/mysql/Schema.php
-@@ -479,6 +479,11 @@ public function addField($table, $field, $spec, $keys_new = []) {
-         ->fields([$field => $spec['initial']])
-         ->execute();
-     }
-+    elseif (isset($spec['initialization_expression'])) {
-+      $this->connection->update($table)
-+        ->expression($field, $spec['initialization_expression']->expression, $spec['initialization_expression']->arguments)
-+        ->execute();
-+    }
-     if ($fix_null) {
-       $spec['not null'] = TRUE;
-       $this->changeField($table, $field, $field, $spec);
-diff --git a/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php b/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php
-index c63eac5872e..17d3cf7e97c 100644
---- a/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php
-+++ b/core/modules/pgsql/src/Driver/Database/pgsql/Schema.php
-@@ -709,6 +709,11 @@ public function addField($table, $field, $spec, $new_keys = []) {
-         ->fields([$field => $spec['initial']])
-         ->execute();
-     }
-+    elseif (isset($spec['initialization_expression'])) {
-+      $this->connection->update($table)
-+        ->expression($field, $spec['initialization_expression']->expression, $spec['initialization_expression']->arguments)
-+        ->execute();
-+    }
-     if ($fix_null) {
-       $this->executeDdlStatement("ALTER TABLE {" . $table . "} ALTER $field SET NOT NULL");
-     }
-@@ -771,6 +776,13 @@ public function indexExists($table, $name) {
-     return (bool) $this->connection->query("SELECT 1 FROM pg_indexes WHERE schemaname = :schema AND tablename = :table AND indexname = :index", $sql_params)->fetchField();
+@@ -280,6 +306,20 @@ public function inTransaction(): bool {
+     return (bool) $this->stackDepth() && $this->getConnectionTransactionState() === ClientConnectionTransactionState::Active;
    }
  
 +  /**
 +   * {@inheritdoc}
 +   */
-+  public function uniqueKeyExists(string $tableName, string $uniqueKeyName): bool {
-+    return $this->constraintExists($tableName, $uniqueKeyName . '__key');
++  public function currentTransactionId(): ?string {
++    return $this->inTransaction() ? array_key_last($this->stack) : NULL;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function currentTransactionName(): ?string {
++    return $this->inTransaction() ? array_last($this->stack)->name : NULL;
 +  }
 +
    /**
-    * Helper function: check if a constraint (PK, FK, UK) exists.
+    * {@inheritdoc}
+    */
+@@ -317,9 +357,31 @@ public function push(string $name = ''): Transaction {
+           $this->rootId = $id;
+           $this->isAutoCommitted = FALSE;
+         }
++        if ($this->connection->isEventEnabled(TransactionBeginEvent::class)) {
++          $this->connection->dispatchEvent(new TransactionBeginEvent(
++            $this->connection->getKey(),
++            $this->connection->getTarget(),
++            $id,
++            $name,
++            $this->getConnectionTransactionState(),
++            $this->stackItemsAsArray(),
++          ));
++        }
+       }
+       catch (TransactionException $e) {
+         $this->setConnectionTransactionState(ClientConnectionTransactionState::Idle);
++        if ($this->connection->isEventEnabled(TransactionBeginFailureEvent::class)) {
++          $this->connection->dispatchEvent(new TransactionBeginFailureEvent(
++            $this->connection->getKey(),
++            $this->connection->getTarget(),
++            $id,
++            $name,
++            $this->getConnectionTransactionState(),
++            $this->stackItemsAsArray(),
++            get_class($e),
++            $e->getMessage(),
++          ));
++        }
+         throw $e;
+       }
+     }
+@@ -330,10 +392,32 @@ public function push(string $name = ''): Transaction {
+       try {
+         $this->addClientSavepoint($name);
+         $this->addStackItem($id, new StackItem($name, StackItemType::Savepoint));
++        if ($this->connection->isEventEnabled(TransactionSavepointEvent::class)) {
++          $this->connection->dispatchEvent(new TransactionSavepointEvent(
++            $this->connection->getKey(),
++            $this->connection->getTarget(),
++            $id,
++            $name,
++            $this->getConnectionTransactionState(),
++            $this->stackItemsAsArray(),
++          ));
++        }
+       }
+       catch (TransactionException $e) {
+         $this->setConnectionTransactionState(ClientConnectionTransactionState::Idle);
+         $this->voidClientTransaction();
++        if ($this->connection->isEventEnabled(TransactionSavepointFailureEvent::class)) {
++          $this->connection->dispatchEvent(new TransactionSavepointFailureEvent(
++            $this->connection->getKey(),
++            $this->connection->getTarget(),
++            $id,
++            $name,
++            $this->getConnectionTransactionState(),
++            $this->stackItemsAsArray(),
++            get_class($e),
++            $e->getMessage(),
++          ));
++        }
+         throw $e;
+       }
+     }
+@@ -353,6 +437,17 @@ public function purge(string $name, string $id): void {
+     // can process the post transaction callbacks.
+     if (!isset($this->stack()[$id]) && isset($this->voidedItems[$id]) && $this->rootId === $id) {
+       if ($this->isAutoCommitted) {
++        if ($this->connection->isEventEnabled(TransactionCommitEvent::class)) {
++          $this->connection->dispatchEvent(new TransactionCommitEvent(
++            $this->connection->getKey(),
++            $this->connection->getTarget(),
++            $id,
++            $name,
++            $this->getConnectionTransactionState(),
++            $this->stackItemsAsArray(),
++            CommitType::AutomaticUponDDL,
++          ));
++        }
+         $this->isAutoCommitted = FALSE;
+       }
+       $this->processPostTransactionCallbacks();
+@@ -395,12 +490,24 @@ public function purge(string $name, string $id): void {
+    */
+   public function unpile(string $name, string $id): void {
+     // If the transaction was voided, we cannot unpile. Skip but trigger a user
+-    // warning if requested.
++    // warning if requested. If an autocommit happened, emit the
++    // TransactionCommitEvent.
+     if ($this->getConnectionTransactionState() === ClientConnectionTransactionState::Voided) {
+       if ($this->triggerWarningWhenUnpilingOnVoidTransaction) {
+         trigger_error('Transaction::commitOrRelease() was not processed because a prior execution of a DDL statement already committed the transaction.', E_USER_WARNING);
+       }
+       if ($this->isAutoCommitted) {
++        if ($this->connection->isEventEnabled(TransactionCommitEvent::class)) {
++          $this->connection->dispatchEvent(new TransactionCommitEvent(
++            $this->connection->getKey(),
++            $this->connection->getTarget(),
++            $id,
++            $name,
++            $this->getConnectionTransactionState(),
++            $this->stackItemsAsArray(),
++            CommitType::AutomaticUponDDL,
++          ));
++        }
+         $this->isAutoCommitted = FALSE;
+       }
+       return;
+@@ -466,10 +573,34 @@ protected function commit(string $name, string $id, ?CommitType $commitType = NU
+           throw new TransactionCommitFailedException("Release savepoint $name failed");
+         }
+         $this->removeStackItem($id);
++        if ($this->connection->isEventEnabled(TransactionReleaseSavepointEvent::class)) {
++          $this->connection->dispatchEvent(new TransactionReleaseSavepointEvent(
++            $this->connection->getKey(),
++            $this->connection->getTarget(),
++            $id,
++            $name,
++            $this->getConnectionTransactionState(),
++            $this->stackItemsAsArray(),
++            $commitType,
++          ));
++        }
+       }
+       catch (TransactionCommitFailedException $e) {
+         $this->setConnectionTransactionState(ClientConnectionTransactionState::CommitFailed);
+         $this->voidClientTransaction();
++        if ($this->connection->isEventEnabled(TransactionReleaseSavepointFailureEvent::class)) {
++          $this->connection->dispatchEvent(new TransactionReleaseSavepointFailureEvent(
++            $this->connection->getKey(),
++            $this->connection->getTarget(),
++            $id,
++            $name,
++            $this->getConnectionTransactionState(),
++            $this->stackItemsAsArray(),
++            get_class($e),
++            $e->getMessage(),
++            $commitType,
++          ));
++        }
+         throw $e;
+       }
+     }
+@@ -479,9 +610,33 @@ protected function commit(string $name, string $id, ?CommitType $commitType = NU
+       try {
+         $this->processRootCommit();
+         $this->voidStackItem($id);
++        if ($this->connection->isEventEnabled(TransactionCommitEvent::class)) {
++          $this->connection->dispatchEvent(new TransactionCommitEvent(
++            $this->connection->getKey(),
++            $this->connection->getTarget(),
++            $id,
++            $name,
++            $this->getConnectionTransactionState(),
++            $this->stackItemsAsArray(),
++            $commitType,
++          ));
++        }
+       }
+       catch (TransactionCommitFailedException $e) {
+         $this->voidClientTransaction();
++        if ($this->connection->isEventEnabled(TransactionCommitFailureEvent::class)) {
++          $this->connection->dispatchEvent(new TransactionCommitFailureEvent(
++            $this->connection->getKey(),
++            $this->connection->getTarget(),
++            $id,
++            $name,
++            $this->getConnectionTransactionState(),
++            $this->stackItemsAsArray(),
++            get_class($e),
++            $e->getMessage(),
++            $commitType,
++          ));
++        }
+         throw $e;
+       }
+     }
+@@ -501,6 +656,18 @@ public function rollback(string $name, string $id): void {
+     if ($this->getConnectionTransactionState() === ClientConnectionTransactionState::Voided) {
+       $this->setConnectionTransactionState(ClientConnectionTransactionState::RollbackFailed);
+       $message = 'Transaction::rollBack() failed because of a prior execution of a DDL statement.';
++      if ($this->connection->isEventEnabled(TransactionRollbackFailureEvent::class)) {
++        $this->connection->dispatchEvent(new TransactionRollbackFailureEvent(
++          $this->connection->getKey(),
++          $this->connection->getTarget(),
++          $id,
++          $name,
++          $this->getConnectionTransactionState(),
++          $this->stackItemsAsArray(),
++          get_class($this),
++          $message,
++        ));
++      }
+       trigger_error($message, E_USER_WARNING);
+       return;
+     }
+@@ -517,19 +684,55 @@ public function rollback(string $name, string $id): void {
+         // transaction is not a root one. Then, release the savepoint too. The
+         // client connection remains active.
+         try {
+-          if (!$this->rollbackClientSavepoint($name)) {
+-            throw new TransactionException("Rollback to savepoint $name failed");
+-          }
+-          if (!$this->releaseClientSavepoint($name)) {
+-            throw new TransactionException("Release savepoint $name failed");
+-          }
++          $this->rollbackClientSavepoint($name);
++          $this->releaseClientSavepoint($name);
+           // The Transaction object remains open, and when it will get
+           // destructed no commit should happen. Void the stack item.
+           $this->voidStackItem($id);
++          if ($this->connection->isEventEnabled(TransactionRollbackToSavepointEvent::class)) {
++            $this->connection->dispatchEvent(new TransactionRollbackToSavepointEvent(
++              $this->connection->getKey(),
++              $this->connection->getTarget(),
++              $id,
++              $name,
++              $this->getConnectionTransactionState(),
++              $this->stackItemsAsArray(),
++            ));
++          }
++        }
++        catch (TransactionCommitFailedException $e) {
++          $this->setConnectionTransactionState(ClientConnectionTransactionState::RollbackFailed);
++          $this->voidClientTransaction();
++          if ($this->connection->isEventEnabled(TransactionReleaseSavepointFailureEvent::class)) {
++            $this->connection->dispatchEvent(new TransactionReleaseSavepointFailureEvent(
++              $this->connection->getKey(),
++              $this->connection->getTarget(),
++              $id,
++              $name,
++              $this->getConnectionTransactionState(),
++              $this->stackItemsAsArray(),
++              get_class($e),
++              $e->getMessage(),
++              CommitType::Explicit,
++            ));
++          }
++          throw $e;
+         }
+         catch (TransactionException $e) {
+           $this->setConnectionTransactionState(ClientConnectionTransactionState::RollbackFailed);
+           $this->voidClientTransaction();
++          if ($this->connection->isEventEnabled(TransactionRollbackToSavepointFailureEvent::class)) {
++            $this->connection->dispatchEvent(new TransactionRollbackToSavepointFailureEvent(
++              $this->connection->getKey(),
++              $this->connection->getTarget(),
++              $id,
++              $name,
++              $this->getConnectionTransactionState(),
++              $this->stackItemsAsArray(),
++              get_class($e),
++              $e->getMessage(),
++            ));
++          }
+           throw $e;
+         }
+       }
+@@ -541,9 +744,31 @@ public function rollback(string $name, string $id): void {
+           // The Transaction object remains open, and when it will get
+           // destructed no commit should happen. Void the stack item.
+           $this->voidStackItem($id);
++          if ($this->connection->isEventEnabled(TransactionRollbackEvent::class)) {
++            $this->connection->dispatchEvent(new TransactionRollbackEvent(
++              $this->connection->getKey(),
++              $this->connection->getTarget(),
++              $id,
++              $name,
++              $this->getConnectionTransactionState(),
++              $this->stackItemsAsArray(),
++            ));
++          }
+         }
+         catch (TransactionException $e) {
+           $this->voidClientTransaction();
++          if ($this->connection->isEventEnabled(TransactionRollbackFailureEvent::class)) {
++            $this->connection->dispatchEvent(new TransactionRollbackFailureEvent(
++              $this->connection->getKey(),
++              $this->connection->getTarget(),
++              $id,
++              $name,
++              $this->getConnectionTransactionState(),
++              $this->stackItemsAsArray(),
++              get_class($e),
++              $e->getMessage(),
++            ));
++          }
+           throw $e;
+         }
+       }
+@@ -798,6 +1023,18 @@ public function voidClientTransaction(): void {
+    * {@inheritdoc}
+    */
+   public function handleAutomaticCommit(): void {
++    if ($this->connection->isEventEnabled(TransactionAutoCommitEvent::class)) {
++      $i = array_key_first($this->stack);
++      assert($this->stack[$i]->type === StackItemType::Root);
++      $this->connection->dispatchEvent(new TransactionAutoCommitEvent(
++        $this->connection->getKey(),
++        $this->connection->getTarget(),
++        $i,
++        $this->stack[$i]->name,
++        $this->getConnectionTransactionState(),
++        $this->stackItemsAsArray(),
++      ));
++    }
+     $this->voidClientTransaction();
+     $this->isAutoCommitted = TRUE;
+   }
+diff --git a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php
+index 6e1110ee08c..6fff00e6856 100644
+--- a/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php
++++ b/core/lib/Drupal/Core/Database/Transaction/TransactionManagerInterface.php
+@@ -19,6 +19,22 @@ interface TransactionManagerInterface {
+    */
+   public function inTransaction(): bool;
+ 
++  /**
++   * Gets the current transaction id.
++   *
++   * @return string|null
++   *   The current transaction id.
++   */
++  public function currentTransactionId(): ?string;
++
++  /**
++   * Gets the current transaction name.
++   *
++   * @return string|null
++   *   The current transaction name.
++   */
++  public function currentTransactionName(): ?string;
++
+   /**
+    * Checks if a named Drupal transaction is active.
     *
-@@ -862,11 +874,18 @@ public function addUniqueKey($table, $name, $fields) {
+diff --git a/core/modules/system/tests/modules/database_test/database_test.services.yml b/core/modules/system/tests/modules/database_test/database_test.services.yml
+index a4211a5bec1..ea8a1ebe872 100644
+--- a/core/modules/system/tests/modules/database_test/database_test.services.yml
++++ b/core/modules/system/tests/modules/database_test/database_test.services.yml
+@@ -1,5 +1,6 @@
+ services:
+   _defaults:
++    autowire: true
+     autoconfigure: true
+   # A test subscriber for the database API events.
+   Drupal\database_test\EventSubscriber\DatabaseEventSubscriber: ~
+diff --git a/core/modules/system/tests/modules/database_test/src/EventSubscriber/DatabaseEventSubscriber.php b/core/modules/system/tests/modules/database_test/src/EventSubscriber/DatabaseEventSubscriber.php
+index 029d6ee5a31..b420e8c20cf 100644
+--- a/core/modules/system/tests/modules/database_test/src/EventSubscriber/DatabaseEventSubscriber.php
++++ b/core/modules/system/tests/modules/database_test/src/EventSubscriber/DatabaseEventSubscriber.php
+@@ -7,6 +7,16 @@
+ use Drupal\Core\Database\Event\StatementExecutionEndEvent;
+ use Drupal\Core\Database\Event\StatementExecutionFailureEvent;
+ use Drupal\Core\Database\Event\StatementExecutionStartEvent;
++use Drupal\Core\Database\Event\TransactionAutoCommitEvent;
++use Drupal\Core\Database\Event\TransactionBeginEvent;
++use Drupal\Core\Database\Event\TransactionCommitEvent;
++use Drupal\Core\Database\Event\TransactionReleaseSavepointEvent;
++use Drupal\Core\Database\Event\TransactionRollbackEvent;
++use Drupal\Core\Database\Event\TransactionRollbackFailureEvent;
++use Drupal\Core\Database\Event\TransactionRollbackToSavepointEvent;
++use Drupal\Core\Database\Event\TransactionSavepointEvent;
++use Drupal\Core\KeyValueStore\KeyValueFactoryInterface;
++use Symfony\Component\DependencyInjection\Attribute\Autowire;
+ use Symfony\Component\EventDispatcher\EventSubscriberInterface;
+ 
+ /**
+@@ -34,14 +44,28 @@ class DatabaseEventSubscriber implements EventSubscriberInterface {
+    */
+   public array $statementIdsInExecution = [];
+ 
++  public function __construct(
++    #[Autowire(service: 'keyvalue')]
++    protected KeyValueFactoryInterface $keyValue,
++  ) {
++  }
++
+   /**
     * {@inheritdoc}
     */
-   public function dropUniqueKey($table, $name) {
--    if (!$this->constraintExists($table, $name . '__key')) {
--      return FALSE;
-+    // If we have a $name argument that ends with '_key' we are dropping a key
-+    // whose name was already processed (most likely resulting from a schema
-+    // introspection.
-+    if (str_ends_with($name, '_key')) {
-+      $this->executeDdlStatement('ALTER TABLE {' . $table . '} DROP CONSTRAINT "' . $name . '"');
-+    }
-+    else {
-+      if (!$this->constraintExists($table, $name . '__key')) {
-+        return FALSE;
-+      }
-+      $this->executeDdlStatement('ALTER TABLE {' . $table . '} DROP CONSTRAINT ' . $this->ensureIdentifiersLength($table, $name, 'key'));
-     }
--
--    $this->executeDdlStatement('ALTER TABLE {' . $table . '} DROP CONSTRAINT ' . $this->ensureIdentifiersLength($table, $name, 'key'));
-     $this->resetTableInformation($table);
-     return TRUE;
+   public static function getSubscribedEvents(): array {
+     return [
+-      StatementExecutionStartEvent::class => 'onStatementExecutionStart',
+       StatementExecutionEndEvent::class => 'onStatementExecutionEnd',
+       StatementExecutionFailureEvent::class => 'onStatementExecutionFailure',
++      StatementExecutionStartEvent::class => 'onStatementExecutionStart',
++      TransactionAutoCommitEvent::class => 'onTransactionAutoCommit',
++      TransactionBeginEvent::class => 'onTransactionBegin',
++      TransactionCommitEvent::class => 'onTransactionCommit',
++      TransactionReleaseSavepointEvent::class => 'onTransactionReleaseSavepoint',
++      TransactionRollbackEvent::class => 'onTransactionRollback',
++      TransactionRollbackFailureEvent::class => 'onTransactionRollbackFailureEvent',
++      TransactionRollbackToSavepointEvent::class => 'onTransactionRollbackToSavepoint',
++      TransactionSavepointEvent::class => 'onTransactionSavepoint',
+     ];
    }
-@@ -890,11 +909,19 @@ public function addIndex($table, $name, $fields, array $spec) {
-    * {@inheritdoc}
-    */
-   public function dropIndex($table, $name) {
--    if (!$this->indexExists($table, $name)) {
--      return FALSE;
-+    // If we have a $name argument that ends with '_idx' we are dropping an
-+    // index whose name was already processed (most likely resulting from a
-+    // schema introspection.
-+    if (str_ends_with($name, '_idx')) {
-+      $identifier = $name;
-+      $this->executeDdlStatement('DROP INDEX ' . $this->defaultSchema . '."' . $name . '"');
-+    }
-+    else {
-+      if (!$this->indexExists($table, $name)) {
-+        return FALSE;
-+      }
-+      $this->executeDdlStatement('DROP INDEX ' . $this->defaultSchema . '.' . $this->ensureIdentifiersLength($table, $name, 'idx'));
-     }
--
--    $this->executeDdlStatement('DROP INDEX ' . $this->defaultSchema . '.' . $this->ensureIdentifiersLength($table, $name, 'idx'));
-     $this->resetTableInformation($table);
-     return TRUE;
+ 
+@@ -78,4 +102,84 @@ public function onStatementExecutionFailure(StatementExecutionFailureEvent $even
+     $this->countStatementFailures++;
    }
-diff --git a/core/modules/sqlite/src/Driver/Database/sqlite/Schema.php b/core/modules/sqlite/src/Driver/Database/sqlite/Schema.php
-index 19558fb4ebd..3451da02ae8 100644
---- a/core/modules/sqlite/src/Driver/Database/sqlite/Schema.php
-+++ b/core/modules/sqlite/src/Driver/Database/sqlite/Schema.php
-@@ -415,13 +415,23 @@ public function addField($table, $field, $specification, $keys_new = []) {
-           'arguments' => [':new_field_initial' => $specification['initial']],
-         ];
-       }
-+      elseif (isset($specification['initialization_expression'])) {
-+        $mapping[$field] = [
-+          'expression' => $specification['initialization_expression']->expression,
-+          'arguments' => $specification['initialization_expression']->arguments,
-+        ];
-+      }
-       else {
-         // Else use the default of the field.
-         $mapping[$field] = NULL;
-       }
  
-       // Add the new indexes.
-+      $tempUniqueKeys = $new_schema['unique keys'];
-+      $tempIndexes = $new_schema['indexes'];
-       $new_schema = array_merge($new_schema, $keys_new);
-+      $new_schema['unique keys'] = array_merge($new_schema['unique keys'], $tempUniqueKeys);
-+      $new_schema['indexes'] = array_merge($new_schema['indexes'], $tempIndexes);
- 
-       $this->alterTable($table, $old_schema, $new_schema, $mapping);
-     }
-diff --git a/core/tests/Drupal/KernelTests/Core/Database/SchemaOperationsFromDefinitionTest.php b/core/tests/Drupal/KernelTests/Core/Database/SchemaOperationsFromDefinitionTest.php
++  /**
++   * Subscribes to a TransactionBeginEvent.
++   *
++   * @param \Drupal\Core\Database\Event\TransactionBeginEvent $event
++   *   The transaction event.
++   */
++  public function onTransactionBegin(TransactionBeginEvent $event): void {
++    $this->keyValue->get('TransactionEventTest')->set('event_data', get_class($event) . ' ' . $event->key . ' ' . $event->target . ' ' . $event->id . '\\' . $event->name);
++  }
++
++  /**
++   * Subscribes to a TransactionSavepointEvent.
++   *
++   * @param \Drupal\Core\Database\Event\TransactionSavepointEvent $event
++   *   The transaction event.
++   */
++  public function onTransactionSavepoint(TransactionSavepointEvent $event): void {
++    $this->keyValue->get('TransactionEventTest')->set('event_data', get_class($event) . ' ' . $event->key . ' ' . $event->target . ' ' . $event->id . '\\' . $event->name . ' stack: ' . implode(' > ', $event->stackItems));
++  }
++
++  /**
++   * Subscribes to a TransactionAutoCommitEvent.
++   *
++   * @param \Drupal\Core\Database\Event\TransactionAutoCommitEvent $event
++   *   The transaction event.
++   */
++  public function onTransactionAutoCommit(TransactionAutoCommitEvent $event): void {
++    $this->keyValue->get('TransactionEventTest')->set('event_data', get_class($event) . ' ' . $event->key . ' ' . $event->target . ' ' . $event->id . '\\' . $event->name);
++  }
++
++  /**
++   * Subscribes to a TransactionCommitEvent.
++   *
++   * @param \Drupal\Core\Database\Event\TransactionCommitEvent $event
++   *   The transaction event.
++   */
++  public function onTransactionCommit(TransactionCommitEvent $event): void {
++    $this->keyValue->get('TransactionEventTest')->set('event_data', get_class($event) . ' ' . $event->key . ' ' . $event->target . ' ' . $event->id . '\\' . $event->name . ' commit-type: ' . $event->type->name);
++  }
++
++  /**
++   * Subscribes to a TransactionReleaseSavepointEvent.
++   *
++   * @param \Drupal\Core\Database\Event\TransactionReleaseSavepointEvent $event
++   *   The transaction event.
++   */
++  public function onTransactionReleaseSavepoint(TransactionReleaseSavepointEvent $event): void {
++    $this->keyValue->get('TransactionEventTest')->set('event_data', get_class($event) . ' ' . $event->key . ' ' . $event->target . ' ' . $event->id . '\\' . $event->name . ' stack: ' . implode(' > ', $event->stackItems));
++  }
++
++  /**
++   * Subscribes to a TransactionRollbackEvent.
++   *
++   * @param \Drupal\Core\Database\Event\TransactionRollbackEvent $event
++   *   The transaction event.
++   */
++  public function onTransactionRollback(TransactionRollbackEvent $event): void {
++    $this->keyValue->get('TransactionEventTest')->set('event_data', get_class($event) . ' ' . $event->key . ' ' . $event->target . ' ' . $event->id . '\\' . $event->name);
++  }
++
++  /**
++   * Subscribes to a TransactionRollbackFailureEvent.
++   *
++   * @param \Drupal\Core\Database\Event\TransactionRollbackFailureEvent $event
++   *   The transaction event.
++   */
++  public function onTransactionRollbackFailureEvent(TransactionRollbackFailureEvent $event): void {
++    $this->keyValue->get('TransactionEventTest')->set('event_data', get_class($event) . ' ' . $event->key . ' ' . $event->target . ' ' . $event->id . '\\' . $event->name . ' ' . $event->className . ' ' . $event->message);
++  }
++
++  /**
++   * Subscribes to a TransactionRollbackToSavepointEvent.
++   *
++   * @param \Drupal\Core\Database\Event\TransactionRollbackToSavepointEvent $event
++   *   The transaction event.
++   */
++  public function onTransactionRollbackToSavepoint(TransactionRollbackToSavepointEvent $event): void {
++    $this->keyValue->get('TransactionEventTest')->set('event_data', get_class($event) . ' ' . $event->key . ' ' . $event->target . ' ' . $event->id . '\\' . $event->name . ' stack: ' . implode(' > ', $event->stackItems));
++  }
++
+ }
+diff --git a/core/tests/Drupal/KernelTests/Core/Database/TransactionEventTest.php b/core/tests/Drupal/KernelTests/Core/Database/TransactionEventTest.php
 new file mode 100644
-index 00000000000..85d8a3d6488
+index 00000000000..a527a67d006
 --- /dev/null
-+++ b/core/tests/Drupal/KernelTests/Core/Database/SchemaOperationsFromDefinitionTest.php
-@@ -0,0 +1,773 @@
++++ b/core/tests/Drupal/KernelTests/Core/Database/TransactionEventTest.php
+@@ -0,0 +1,199 @@
 +<?php
 +
 +declare(strict_types=1);
 +
 +namespace Drupal\KernelTests\Core\Database;
 +
-+use Drupal\Core\Database\Expression;
-+use Drupal\Core\Database\Schema;
-+use Drupal\Core\Database\Statement\FetchAs;
-+use Drupal\Core\Database\SchemaDefinition\Column;
-+use Drupal\Core\Database\SchemaDefinition\ColumnSize;
-+use Drupal\Core\Database\SchemaDefinition\Index;
-+use Drupal\Core\Database\SchemaDefinition\IntValue;
-+use Drupal\Core\Database\SchemaDefinition\NullValue;
-+use Drupal\Core\Database\SchemaDefinition\PrimaryKey;
-+use Drupal\Core\Database\SchemaDefinition\Schema as SchemaDefinition;
-+use Drupal\Core\Database\SchemaDefinition\SchemaDefinitionType;
-+use Drupal\Core\Database\SchemaDefinition\Table;
-+use Drupal\Core\Database\SchemaDefinition\UniqueKey;
-+use PHPUnit\Framework\Attributes\DataProvider;
++use Drupal\Core\Database\Event\TransactionEvent;
 +use PHPUnit\Framework\Attributes\Group;
++use PHPUnit\Framework\Attributes\IgnoreDeprecations;
 +use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 +
 +/**
-+ * Tests schema operations involving the SchemaDefinition API.
++ * Tests the Transaction events.
 + */
 +#[Group('Database')]
 +#[RunTestsInSeparateProcesses]
-+class SchemaOperationsFromDefinitionTest extends DatabaseTestBase {
-+
-+  /**
-+   * Database schema instance.
-+   */
-+  protected Schema $schema;
++class TransactionEventTest extends DatabaseTestBase {
 +
 +  /**
 +   * {@inheritdoc}
 +   */
 +  protected function setUp(): void {
 +    parent::setUp();
-+    $this->schema = $this->connection->schema();
++    $this->connection->enableEvents(TransactionEvent::all());
 +  }
 +
 +  /**
-+   * Tests creating a table from a schema definition.
++   * Tests transaction beginning.
 +   */
-+  public function testCreateTable(): void {
-+    $tableName = 'test_from_definition';
-+    $table = new Table(
-+      name: $tableName,
-+      description: 'Test table created from definition.',
-+      columns: [
-+        Column::serial(
-+          name: 'id',
-+        ),
-+        Column::int(
-+          name: 'age',
-+          notNull: TRUE,
-+          default: new IntValue(0),
-+        ),
-+        Column::varchar(
-+          name: 'name',
-+          length: 255,
-+        ),
-+      ],
-+      primaryKey: new PrimaryKey(['id']),
-+      uniqueKeys: [
-+        new UniqueKey(name: 'ages', columns: ['age']),
-+      ],
-+      indexes: [
-+        new Index(name: 'names_by_age', columns: ['name', 'age']),
-+      ],
-+    );
-+
-+    $schema = new SchemaDefinition(
-+      type: SchemaDefinitionType::Test,
-+      name: $tableName,
-+      tables: [$table],
-+    );
-+
-+    $this->schema->createSchemaFromDefinition($schema);
-+
-+    $this->assertTrue($this->schema->tableExists($tableName));
-+    $this->assertTrue($this->schema->uniqueKeyExists($tableName, 'ages'));
-+    $this->assertTrue($this->schema->indexExists($tableName, 'names_by_age'));
++  public function testTransactionBegin(): void {
++    $tx = $this->connection->startTransaction();
++    $this->assertMatchesRegularExpression("/^.*TransactionBeginEvent default default .*\\\\drupal_transaction$/", \Drupal::keyValue('TransactionEventTest')->get('event_data'));
++    $tx->commitOrRelease();
 +  }
 +
 +  /**
-+   * Initial schema for ::testAddTableColumn.
-+   *
-+   * @return \Drupal\Core\Database\SchemaDefinition\Schema
-+   *   The schema.
++   * Tests adding a savepoint.
 +   */
-+  protected function initialSchemaForAddTableColumn(string $tableName, array $columns): SchemaDefinition {
-+    $table = new Table(
-+      name: $tableName,
-+      description: 'Test table created from definition for column addition.',
-+      columns: $columns,
-+      primaryKey: new PrimaryKey(['id']),
-+      uniqueKeys: [
-+        new UniqueKey(name: 'test_add_unique', columns: ['name', 'id']),
-+        new UniqueKey(name: 'job_ids', columns: ['job', 'id']),
-+      ],
-+      indexes: [
-+        new Index(name: 'test_add_index', columns: ['job', 'id']),
-+        new Index(name: 'id_jobs', columns: ['id', 'job']),
-+      ],
-+    );
-+
-+    return new SchemaDefinition(
-+      type: SchemaDefinitionType::Test,
-+      name: $tableName,
-+      tables: [$table],
-+    );
++  public function testTransactionSavepoint(): void {
++    $tx = $this->connection->startTransaction();
++    $savepoint = $this->connection->startTransaction();
++    $this->assertMatchesRegularExpression("/^.*TransactionSavepointEvent default default .*\\\\savepoint_1 stack: .*\\\\drupal_transaction > .*\\\\savepoint_1$/", \Drupal::keyValue('TransactionEventTest')->get('event_data'));
++    $savepoint->commitOrRelease();
++    $tx->commitOrRelease();
 +  }
 +
 +  /**
-+   * Target schema for ::testAddTableColumn.
-+   *
-+   * @return \Drupal\Core\Database\SchemaDefinition\Schema
-+   *   The schema.
++   * Tests committing a transaction.
 +   */
-+  protected function targetSchemaForTestAddTableColumn(string $tableName, array $columns): SchemaDefinition {
-+    $table = new Table(
-+      name: $tableName,
-+      description: 'Test table created from definition for column addition.',
-+      columns: $columns,
-+      primaryKey: new PrimaryKey(['id']),
-+      uniqueKeys: [
-+        new UniqueKey(name: 'ages', columns: ['age', 'id']),
-+        new UniqueKey(name: 'job_ids', columns: ['job', 'id']),
-+        new UniqueKey(name: 'test_add_unique', columns: ['name', 'id', 'age']),
-+      ],
-+      indexes: [
-+        new Index(name: 'test_add_index', columns: ['job', 'id', 'age']),
-+        new Index(name: 'id_jobs', columns: ['id', 'job']),
-+        new Index(name: 'names_by_age', columns: ['name', 'age']),
-+      ],
-+    );
-+
-+    return new SchemaDefinition(
-+      type: SchemaDefinitionType::Test,
-+      name: $tableName,
-+      tables: [$table],
-+    );
++  public function testTransactionCommit(): void {
++    $tx = $this->connection->startTransaction();
++    $tx->commitOrRelease();
++    $this->assertMatchesRegularExpression("/^.*TransactionCommitEvent default default .*\\\\drupal_transaction commit-type: Explicit$/", \Drupal::keyValue('TransactionEventTest')->get('event_data'));
 +  }
 +
 +  /**
-+   * Tests adding a column with specialized indexes.
-+   *
-+   * The $keys_new argument of addField() may contain index definition
-+   * objects. By default, drivers only support regular indexes: GIN and GiST
-+   * index definitions are skipped, and alternative indexes fall back to
-+   * their regular index definition. Drivers supporting specialized indexes
-+   * override this method.
++   * Tests implicitly committing a transaction via object destruction.
 +   */
-+  public function testAddTableColumn(): void {
-+    $tableName = 'test_add_table_column';
-+    $tableColumns = [
-+      Column::serial(
-+        name: 'id',
-+      ),
-+      Column::varchar(
-+        name: 'name',
-+        length: 255,
-+      ),
-+      Column::varchar(
-+        name: 'job',
-+        length: 255,
-+      ),
++  #[IgnoreDeprecations]
++  public function testTransactionImplicitCommit(): void {
++    $tx = $this->connection->startTransaction();
++    unset($tx);
++    $this->assertMatchesRegularExpression("/^.*TransactionCommitEvent default default .*\\\\drupal_transaction commit-type: ImplicitOnDestruct$/", \Drupal::keyValue('TransactionEventTest')->get('event_data'));
++  }
++
++  /**
++   * Tests committing a transaction after a savepoint was opened.
++   */
++  public function testTransactionCommitNested(): void {
++    $tx = $this->connection->startTransaction();
++    $savepoint = $this->connection->startTransaction('foo');
++    $tx->commitOrRelease();
++    $this->assertMatchesRegularExpression("/^.*TransactionCommitEvent default default .*\\\\drupal_transaction commit-type: Explicit$/", \Drupal::keyValue('TransactionEventTest')->get('event_data'));
++    unset($savepoint);
++  }
++
++  /**
++   * Tests DDL auto-commit - followed by implicit commit.
++   */
++  public function testImplicitCommitAfterAutoCommitOnDataDefinitionLanguageStatement(): void {
++    if ($this->connection->supportsTransactionalDDL()) {
++      $this->markTestSkipped('This test is only relevant for databases that do not support transactional DDL.');
++    }
++
++    $table = [
++      'fields' => [
++        'id' => [
++          'type' => 'serial',
++          'unsigned' => TRUE,
++          'not null' => TRUE,
++        ],
++      ],
++      'primary key' => ['id'],
 +    ];
-+    $initialSchema = $this->initialSchemaForAddTableColumn($tableName, $tableColumns);
-+    $this->schema->createSchemaFromDefinition($initialSchema);
 +
-+    $this->assertTrue($this->schema->tableExists($tableName));
-+    $this->assertFalse($this->schema->fieldExists($tableName, 'age'));
-+    $method = new \ReflectionMethod($this->schema, 'findPrimaryKeyColumns');
-+    $this->assertEquals(['id'], $method->invoke($this->schema, $tableName));
-+    $this->assertFalse($this->schema->uniqueKeyExists($tableName, 'ages'));
-+    $this->assertTrue($this->schema->uniqueKeyExists($tableName, 'job_ids'));
-+    $this->assertTrue($this->schema->uniqueKeyExists($tableName, 'test_add_unique'));
-+    $this->assertTrue($this->schema->indexExists($tableName, 'test_add_index'));
-+    $this->assertTrue($this->schema->indexExists($tableName, 'id_jobs'));
-+    $this->assertFalse($this->schema->indexExists($tableName, 'names_by_age'));
-+
-+    $this->connection->insert($tableName)->fields([
-+      'name' => 'Richard',
-+      'job' => 'General',
-+    ])->execute();
-+    $this->connection->insert($tableName)->fields([
-+      'name' => 'Liz',
-+      'job' => 'Pharaoh',
-+    ])->execute();
-+
-+    // Add the 'age' column, no initialization, defaults to '42'.
-+    $tableColumns[] = Column::int(
-+      name: 'age',
-+      notNull: TRUE,
-+      default: new IntValue(42),
-+    );
-+    $this->schema->addTableColumnFromDefinition(
-+      targetSchema: $this->targetSchemaForTestAddTableColumn($tableName, $tableColumns),
-+      tableName: $tableName,
-+      targetColumnName: 'age',
-+    );
-+
-+    $this->assertTrue($this->schema->tableExists($tableName));
-+    $this->assertTrue($this->schema->fieldExists($tableName, 'age'));
-+    $method = new \ReflectionMethod($this->schema, 'findPrimaryKeyColumns');
-+    $this->assertEquals(['id'], $method->invoke($this->schema, $tableName));
-+    $this->assertTrue($this->schema->uniqueKeyExists($tableName, 'ages'));
-+    $this->assertTrue($this->schema->uniqueKeyExists($tableName, 'job_ids'));
-+    $this->assertTrue($this->schema->uniqueKeyExists($tableName, 'test_add_unique'));
-+    $this->assertTrue($this->schema->indexExists($tableName, 'test_add_index'));
-+    $this->assertTrue($this->schema->indexExists($tableName, 'id_jobs'));
-+    $this->assertTrue($this->schema->indexExists($tableName, 'names_by_age'));
-+
-+    $this->assertSame([
-+      [
-+        'id' => "1",
-+        'name' => 'Richard',
-+        'job' => 'General',
-+        'age' => '42',
-+      ],
-+      [
-+        'id' => "2",
-+        'name' => 'Liz',
-+        'job' => 'Pharaoh',
-+        'age' => '42',
-+      ],
-+    ], $this->connection->query("SELECT * FROM {{$tableName}}")->fetchAll(FetchAs::Associative));
-+
-+    // Add the 'age_2' column, initialize to copy from 'age'.
-+    $tableColumns[] = Column::int(
-+      name: 'age_2',
-+      notNull: FALSE,
-+      default: new NullValue(),
-+    );
-+    $this->schema->addTableColumnFromDefinition(
-+      targetSchema: $this->targetSchemaForTestAddTableColumn($tableName, $tableColumns),
-+      tableName: $tableName,
-+      targetColumnName: 'age_2',
-+      initializationExpression: new Expression('[age]'),
-+    );
-+
-+    $this->assertSame([
-+      [
-+        'id' => "1",
-+        'name' => 'Richard',
-+        'job' => 'General',
-+        'age' => '42',
-+        'age_2' => '42',
-+      ],
-+      [
-+        'id' => "2",
-+        'name' => 'Liz',
-+        'job' => 'Pharaoh',
-+        'age' => '42',
-+        'age_2' => '42',
-+      ],
-+    ], $this->connection->query("SELECT * FROM {{$tableName}}")->fetchAll(FetchAs::Associative));
-+
-+    // Add the 'age_3' column, initialize to '10'.
-+    $tableColumns[] = Column::int(
-+      name: 'age_3',
-+      notNull: FALSE,
-+      default: new NullValue(),
-+    );
-+    $this->schema->addTableColumnFromDefinition(
-+      targetSchema: $this->targetSchemaForTestAddTableColumn($tableName, $tableColumns),
-+      tableName: $tableName,
-+      targetColumnName: 'age_3',
-+      initializationExpression: new Expression(':initial_value', [':initial_value' => 10]),
-+    );
-+
-+    $this->assertSame([
-+      [
-+        'id' => "1",
-+        'name' => 'Richard',
-+        'job' => 'General',
-+        'age' => '42',
-+        'age_2' => '42',
-+        'age_3' => '10',
-+      ],
-+      [
-+        'id' => "2",
-+        'name' => 'Liz',
-+        'job' => 'Pharaoh',
-+        'age' => '42',
-+        'age_2' => '42',
-+        'age_3' => '10',
-+      ],
-+    ], $this->connection->query("SELECT * FROM {{$tableName}}")->fetchAll(FetchAs::Associative));
-+
-+    $this->connection->insert($tableName)->fields([
-+      'name' => 'Rex',
-+      'job' => 'Imperator',
-+      'age' => 55,
-+    ])->execute();
-+
-+    // Add the 'age_4' column, initialize to copy from 'age_3' or 59 if NULL.
-+    $tableColumns[] = Column::int(
-+      name: 'age_4',
-+      notNull: TRUE,
-+    );
-+    $this->schema->addTableColumnFromDefinition(
-+      targetSchema: $this->targetSchemaForTestAddTableColumn($tableName, $tableColumns),
-+      tableName: $tableName,
-+      targetColumnName: 'age_4',
-+      initializationExpression: new Expression('COALESCE([age_3], :fallback_value)', [':fallback_value' => 59]),
-+    );
-+
-+    $this->assertSame([
-+      [
-+        'id' => "1",
-+        'name' => 'Richard',
-+        'job' => 'General',
-+        'age' => '42',
-+        'age_2' => '42',
-+        'age_3' => '10',
-+        'age_4' => '10',
-+      ],
-+      [
-+        'id' => "2",
-+        'name' => 'Liz',
-+        'job' => 'Pharaoh',
-+        'age' => '42',
-+        'age_2' => '42',
-+        'age_3' => '10',
-+        'age_4' => '10',
-+      ],
-+      [
-+        'id' => "3",
-+        'name' => 'Rex',
-+        'job' => 'Imperator',
-+        'age' => '55',
-+        'age_2' => NULL,
-+        'age_3' => NULL,
-+        'age_4' => '59',
-+      ],
-+    ], $this->connection->query("SELECT * FROM {{$tableName}}")->fetchAll(FetchAs::Associative));
++    $tx = $this->connection->startTransaction();
++    $this->connection->schema()->createTable('database_test_00', $table);
++    $this->assertMatchesRegularExpression("/^.*TransactionAutoCommitEvent default default .*\\\\drupal_transaction$/", \Drupal::keyValue('TransactionEventTest')->get('event_data'));
++    unset($tx);
++    $this->assertMatchesRegularExpression("/^.*TransactionCommitEvent default default .*\\\\drupal_transaction commit-type: AutomaticUponDDL$/", \Drupal::keyValue('TransactionEventTest')->get('event_data'));
 +  }
 +
 +  /**
-+   * Initial schema for ::testChangeTableColumn.
-+   *
-+   * @return \Drupal\Core\Database\SchemaDefinition\Schema
-+   *   The schema.
++   * Tests DDL auto-commit - followed by explicit commit.
 +   */
-+  protected function initialSchemaForTestChangeTableColumn(string $tableName): SchemaDefinition {
-+    $table = new Table(
-+      name: $tableName,
-+      description: 'Test table created from definition for column change.',
-+      columns: [
-+        Column::serial(
-+          name: 'id',
-+        ),
-+        Column::int(
-+          name: 'age',
-+          notNull: TRUE,
-+          default: new IntValue(0),
-+        ),
-+        Column::varchar(
-+          name: 'name',
-+          length: 255,
-+        ),
-+        Column::varchar(
-+          name: 'job',
-+          length: 255,
-+        ),
++  public function testExplicitCommitAfterAutoCommitOnDataDefinitionLanguageStatement(): void {
++    if ($this->connection->supportsTransactionalDDL()) {
++      $this->markTestSkipped('This test is only relevant for databases that do not support transactional DDL.');
++    }
++
++    $table = [
++      'fields' => [
++        'id' => [
++          'type' => 'serial',
++          'unsigned' => TRUE,
++          'not null' => TRUE,
++        ],
 +      ],
-+      primaryKey: new PrimaryKey(['id']),
-+      uniqueKeys: [
-+        new UniqueKey(name: 'id_ages', columns: ['id', 'age']),
-+        new UniqueKey(name: 'name_id', columns: ['name', 'id']),
-+      ],
-+      indexes: [
-+        new Index(name: 'id_jobs_age', columns: ['id', 'job', 'age']),
-+        new Index(name: 'job_id', columns: ['job', 'id']),
-+      ],
-+    );
-+
-+    return new SchemaDefinition(
-+      type: SchemaDefinitionType::Test,
-+      name: $tableName,
-+      tables: [$table],
-+    );
-+  }
-+
-+  /**
-+   * Target schema for ::testChangeTableColumn.
-+   *
-+   * @return \Drupal\Core\Database\SchemaDefinition\Schema
-+   *   The schema.
-+   */
-+  protected function targetSchemaForTestChangeTableColumn(string $tableName): SchemaDefinition {
-+    $table = new Table(
-+      name: $tableName,
-+      description: 'Test table created from definition for column change.',
-+      columns: [
-+        Column::serial(
-+          name: 'id',
-+        ),
-+        Column::int(
-+          name: 'age_new',
-+          notNull: TRUE,
-+          default: new IntValue(1),
-+        ),
-+        Column::varchar(
-+          name: 'name',
-+          length: 255,
-+        ),
-+        Column::varchar(
-+          name: 'job',
-+          length: 255,
-+        ),
-+      ],
-+      primaryKey: new PrimaryKey(['id']),
-+      uniqueKeys: [
-+        new UniqueKey(name: 'id_age_new', columns: ['id', 'age_new']),
-+        new UniqueKey(name: 'name_id', columns: ['name', 'id']),
-+        new UniqueKey(name: 'ages_new', columns: ['age_new']),
-+      ],
-+      indexes: [
-+        new Index(name: 'id_jobs_age_new', columns: ['id', 'job', 'age_new']),
-+        new Index(name: 'job_id', columns: ['job', 'id']),
-+        new Index(name: 'names_by_age_new', columns: ['name', 'age_new']),
-+      ],
-+    );
-+
-+    return new SchemaDefinition(
-+      type: SchemaDefinitionType::Test,
-+      name: $tableName,
-+      tables: [$table],
-+    );
-+  }
-+
-+  /**
-+   * Tests changing a column with specialized indexes.
-+   */
-+  public function testChangeTableColumn(): void {
-+    $tableName = 'test_change_table_column_with_definition_very_long';
-+    $initialSchema = $this->initialSchemaForTestChangeTableColumn($tableName);
-+    $this->schema->createSchemaFromDefinition($initialSchema);
-+
-+    $this->assertTrue($this->schema->tableExists($tableName));
-+    $this->assertTrue($this->schema->fieldExists($tableName, 'age'));
-+    $this->assertFalse($this->schema->fieldExists($tableName, 'age_new'));
-+    $method = new \ReflectionMethod($this->schema, 'findPrimaryKeyColumns');
-+    $this->assertEquals(['id'], $method->invoke($this->schema, $tableName));
-+    $this->assertTrue($this->schema->uniqueKeyExists($tableName, 'id_ages'));
-+    $this->assertFalse($this->schema->uniqueKeyExists($tableName, 'id_age_new'));
-+    $this->assertTrue($this->schema->uniqueKeyExists($tableName, 'name_id'));
-+    $this->assertFalse($this->schema->uniqueKeyExists($tableName, 'ages_new'));
-+    $this->assertTrue($this->schema->indexExists($tableName, 'id_jobs_age'));
-+    $this->assertTrue($this->schema->indexExists($tableName, 'job_id'));
-+    $this->assertFalse($this->schema->indexExists($tableName, 'names_by_age_new'));
-+
-+global $xxx; $xxx = TRUE;
-+    $targetSchema = $this->targetSchemaForTestChangeTableColumn($tableName);
-+    $this->schema->changeTableColumnFromDefinition(
-+      targetSchema: $targetSchema,
-+      tableName: $tableName,
-+      currentColumnName: 'age',
-+      targetColumnName: 'age_new',
-+    );
-+$xxx = FALSE;
-+
-+    $this->assertTrue($this->schema->tableExists($tableName));
-+    $this->assertFalse($this->schema->fieldExists($tableName, 'age'));
-+    $this->assertTrue($this->schema->fieldExists($tableName, 'age_new'));
-+    $method = new \ReflectionMethod($this->schema, 'findPrimaryKeyColumns');
-+    $this->assertEquals(['id'], $method->invoke($this->schema, $tableName));
-+    $this->assertFalse($this->schema->uniqueKeyExists($tableName, 'id_ages'));
-+    $this->assertTrue($this->schema->uniqueKeyExists($tableName, 'id_age_new'));
-+    $this->assertTrue($this->schema->uniqueKeyExists($tableName, 'name_id'));
-+    $this->assertTrue($this->schema->uniqueKeyExists($tableName, 'ages_new'));
-+    $this->assertTrue($this->schema->indexExists($tableName, 'id_jobs_age_new'));
-+    $this->assertTrue($this->schema->indexExists($tableName, 'job_id'));
-+    $this->assertTrue($this->schema->indexExists($tableName, 'names_by_age_new'));
-+  }
-+
-+  /**
-+   * Tests changing a column length via schema definition.
-+   */
-+  public function testChangeSerialColumnLength(): void {
-+    $initialSchema = new SchemaDefinition(
-+      type: SchemaDefinitionType::Test,
-+      name: 'change_serial_to_big',
-+      tables: [
-+        new Table(
-+          name: 'change_serial_to_big',
-+          columns: [
-+            Column::serial(
-+              name: 'id',
-+              description: 'Primary Key: Unique ID.',
-+            ),
-+            Column::text(
-+              name: 'text',
-+              description: 'A text column',
-+            ),
-+          ],
-+          primaryKey: new PrimaryKey(['id']),
-+        ),
-+      ],
-+    );
-+    $this->schema->createSchemaFromDefinition($initialSchema);
-+
-+    // Increase the size of the column.
-+    $targetSchema = new SchemaDefinition(
-+      type: SchemaDefinitionType::Test,
-+      name: 'change_serial_to_big',
-+      tables: [
-+        new Table(
-+          name: 'change_serial_to_big',
-+          columns: [
-+            Column::serial(
-+              name: 'id',
-+              description: 'Primary Key: Unique ID.',
-+              size: ColumnSize::Big,
-+            ),
-+            Column::text(
-+              name: 'text',
-+              description: 'A text column',
-+            ),
-+          ],
-+          primaryKey: new PrimaryKey(['id']),
-+        ),
-+      ],
-+    );
-+    $this->schema->changeTableColumnFromDefinition(
-+      targetSchema: $targetSchema,
-+      tableName: 'change_serial_to_big',
-+      targetColumnName: 'id',
-+    );
-+
-+    $this->assertTrue($this->schema->fieldExists('change_serial_to_big', 'id'));
-+
-+    // Test if we can actually add a big int.
-+    $id = $this->connection->insert('change_serial_to_big')->fields([
-+      'id' => 21474836470,
-+    ])->execute();
-+
-+    $id_two = $this->connection->insert('change_serial_to_big')->fields([
-+      'text' => 'Testing for ID generation',
-+    ])->execute();
-+
-+    $this->assertEquals($id + 1, $id_two);
-+  }
-+
-+  /**
-+   * Tests various schema changes' effect on the table's primary key.
-+   *
-+   * @param array $initial_primary_key
-+   *   The initial primary key of the test table.
-+   * @param array $renamed_primary_key
-+   *   The primary key of the test table after renaming the test column.
-+   */
-+  #[DataProvider('providerTestChangePrimaryKey')]
-+  public function testChangePrimaryKey(array $initial_primary_key, array $renamed_primary_key): void {
-+    $table_name = 'test_table';
-+    $find_primary_key_columns = new \ReflectionMethod(get_class($this->schema), 'findPrimaryKeyColumns');
-+
-+    // Test making the column the primary key of the table upon creation.
-+    $table = new Table(
-+      name: $table_name,
-+      description: 'Test table created from definition.',
-+      columns: [
-+        Column::int(
-+          name: 'test_column',
-+          notNull: TRUE,
-+        ),
-+        Column::int(
-+          name: 'other_test_column',
-+          notNull: TRUE,
-+        ),
-+      ],
-+      primaryKey: new PrimaryKey($initial_primary_key),
-+    );
-+    $schema = new SchemaDefinition(
-+      type: SchemaDefinitionType::Test,
-+      name: $table_name,
-+      tables: [$table],
-+    );
-+
-+    $this->schema->createSchemaFromDefinition($schema);
-+    $this->assertTrue($this->schema->fieldExists($table_name, 'test_column'));
-+    $this->assertEquals($initial_primary_key, $find_primary_key_columns->invoke($this->schema, $table_name));
-+
-+    // Change the column type and make sure the primary key stays in place.
-+    $table = new Table(
-+      name: $table_name,
-+      description: 'Test table created from definition.',
-+      columns: [
-+        Column::varchar(
-+          name: 'test_column',
-+          length: 32,
-+          notNull: TRUE,
-+        ),
-+        Column::int(
-+          name: 'other_test_column',
-+          notNull: TRUE,
-+        ),
-+      ],
-+      primaryKey: new PrimaryKey($initial_primary_key),
-+    );
-+    $schema = new SchemaDefinition(
-+      type: SchemaDefinitionType::Test,
-+      name: $table_name,
-+      tables: [$table],
-+    );
-+
-+    $this->schema->changeTableColumnFromDefinition(
-+      targetSchema: $schema,
-+      tableName: $table_name,
-+      targetColumnName: 'test_column',
-+    );
-+    $this->assertTrue($this->schema->fieldExists($table_name, 'test_column'));
-+    $this->assertEquals($initial_primary_key, $find_primary_key_columns->invoke($this->schema, $table_name));
-+
-+    // Add some data and change the column type back, to make sure that changing
-+    // the type leaves the primary key in place even with existing data.
-+    $this->connection
-+      ->insert($table_name)
-+      ->fields(['test_column' => 1, 'other_test_column' => 2])
-+      ->execute();
-+
-+    $table = new Table(
-+      name: $table_name,
-+      description: 'Test table created from definition.',
-+      columns: [
-+        Column::int(
-+          name: 'test_column',
-+          notNull: TRUE,
-+        ),
-+        Column::int(
-+          name: 'other_test_column',
-+          notNull: TRUE,
-+        ),
-+      ],
-+      primaryKey: new PrimaryKey($initial_primary_key),
-+    );
-+    $schema = new SchemaDefinition(
-+      type: SchemaDefinitionType::Test,
-+      name: $table_name,
-+      tables: [$table],
-+    );
-+
-+    $this->schema->changeTableColumnFromDefinition(
-+      targetSchema: $schema,
-+      tableName: $table_name,
-+      targetColumnName: 'test_column',
-+    );
-+    $this->assertTrue($this->schema->fieldExists($table_name, 'test_column'));
-+    $this->assertEquals($initial_primary_key, $find_primary_key_columns->invoke($this->schema, $table_name));
-+
-+    // Make sure that adding the primary key is done as part of changing a
-+    // column, as well, in case it is dropped explicitly before the change.
-+    $this->schema->dropPrimaryKey($table_name);
-+    $this->assertEquals([], $find_primary_key_columns->invoke($this->schema, $table_name));
-+    $this->schema->changeTableColumnFromDefinition(
-+      targetSchema: $schema,
-+      tableName: $table_name,
-+      targetColumnName: 'test_column',
-+    );
-+    $this->assertTrue($this->schema->fieldExists($table_name, 'test_column'));
-+    $this->assertEquals($initial_primary_key, $find_primary_key_columns->invoke($this->schema, $table_name));
-+
-+    // Rename the column and make sure the primary key was updated.
-+    $table = new Table(
-+      name: $table_name,
-+      description: 'Test table created from definition.',
-+      columns: [
-+        Column::int(
-+          name: 'test_column_renamed',
-+          notNull: TRUE,
-+        ),
-+        Column::int(
-+          name: 'other_test_column',
-+          notNull: TRUE,
-+        ),
-+      ],
-+      primaryKey: new PrimaryKey($renamed_primary_key),
-+    );
-+    $schema = new SchemaDefinition(
-+      type: SchemaDefinitionType::Test,
-+      name: $table_name,
-+      tables: [$table],
-+    );
-+
-+    $this->schema->changeTableColumnFromDefinition(
-+      targetSchema: $schema,
-+      tableName: $table_name,
-+      currentColumnName: 'test_column',
-+      targetColumnName: 'test_column_renamed',
-+    );
-+    $this->assertTrue($this->schema->fieldExists($table_name, 'test_column_renamed'));
-+    $this->assertEquals($renamed_primary_key, $find_primary_key_columns->invoke($this->schema, $table_name));
-+
-+    // Drop the column and make sure the primary key was dropped, as well.
-+    $this->schema->dropField($table_name, 'test_column_renamed');
-+    $this->assertFalse($this->schema->fieldExists($table_name, 'test_column_renamed'));
-+    $this->assertEquals([], $find_primary_key_columns->invoke($this->schema, $table_name));
-+
-+    // Add the column again and make sure adding the primary key can be done at
-+    // the same time.
-+    $table = new Table(
-+      name: $table_name,
-+      description: 'Test table created from definition.',
-+      columns: [
-+        Column::int(
-+          name: 'test_column',
-+          default: new IntValue(0),
-+          notNull: TRUE,
-+        ),
-+        Column::int(
-+          name: 'other_test_column',
-+          notNull: TRUE,
-+        ),
-+      ],
-+      primaryKey: new PrimaryKey($initial_primary_key),
-+    );
-+    $schema = new SchemaDefinition(
-+      type: SchemaDefinitionType::Test,
-+      name: $table_name,
-+      tables: [$table],
-+    );
-+    $this->schema->addTableColumnFromDefinition(
-+      targetSchema: $schema,
-+      tableName: $table_name,
-+      targetColumnName: 'test_column',
-+    );
-+    $this->assertTrue($this->schema->fieldExists($table_name, 'test_column'));
-+    $this->assertEquals($initial_primary_key, $find_primary_key_columns->invoke($this->schema, $table_name));
-+
-+    // Drop the column again and explicitly add a primary key.
-+    $this->assertEquals($initial_primary_key, $find_primary_key_columns->invoke($this->schema, $table_name));
-+    $this->schema->dropField($table_name, 'test_column');
-+    $this->assertFalse($this->schema->fieldExists($table_name, 'test_column'));
-+    $this->assertEquals([], $find_primary_key_columns->invoke($this->schema, $table_name));
-+    $this->schema->addPrimaryKey($table_name, ['other_test_column']);
-+    $this->assertEquals(['other_test_column'], $find_primary_key_columns->invoke($this->schema, $table_name));
-+
-+    // Test that adding a column with a primary key will work even with a
-+    // pre-existing primary key.
-+    $this->schema->addTableColumnFromDefinition(
-+      targetSchema: $schema,
-+      tableName: $table_name,
-+      targetColumnName: 'test_column',
-+    );
-+    $this->assertTrue($this->schema->fieldExists($table_name, 'test_column'));
-+    $this->assertEquals($initial_primary_key, $find_primary_key_columns->invoke($this->schema, $table_name));
-+  }
-+
-+  /**
-+   * Provides test cases for SchemaTest::testSchemaCreateTablePrimaryKey().
-+   */
-+  public static function providerTestChangePrimaryKey(): \Generator {
-+    yield 'simple_primary_key' => [
-+      'initial_primary_key' => ['test_column'],
-+      'renamed_primary_key' => ['test_column_renamed'],
++      'primary key' => ['id'],
 +    ];
-+    yield 'composite_primary_key' => [
-+      'initial_primary_key' => ['test_column', 'other_test_column'],
-+      'renamed_primary_key' => ['test_column_renamed', 'other_test_column'],
++
++    $tx = $this->connection->startTransaction();
++    $this->connection->schema()->createTable('database_test_00', $table);
++    $this->assertMatchesRegularExpression("/^.*TransactionAutoCommitEvent default default .*\\\\drupal_transaction$/", \Drupal::keyValue('TransactionEventTest')->get('event_data'));
++    $tx->commitOrRelease();
++    $this->assertMatchesRegularExpression("/^.*TransactionCommitEvent default default .*\\\\drupal_transaction commit-type: AutomaticUponDDL$/", \Drupal::keyValue('TransactionEventTest')->get('event_data'));
++  }
++
++  /**
++   * Tests DDL auto-commit - followed by rollback attempt.
++   */
++  public function testAttemptRollbackAfterAutoCommitOnDataDefinitionLanguageStatement(): void {
++    if ($this->connection->supportsTransactionalDDL()) {
++      $this->markTestSkipped('This test is only relevant for databases that do not support transactional DDL.');
++    }
++
++    $table = [
++      'fields' => [
++        'id' => [
++          'type' => 'serial',
++          'unsigned' => TRUE,
++          'not null' => TRUE,
++        ],
++      ],
++      'primary key' => ['id'],
 +    ];
-+    yield 'composite_primary_key_different_order' => [
-+      'initial_primary_key' => ['other_test_column', 'test_column'],
-+      'renamed_primary_key' => ['other_test_column', 'test_column_renamed'],
-+    ];
++
++    $tx = $this->connection->startTransaction();
++    $this->connection->schema()->createTable('database_test_00', $table);
++    $this->assertMatchesRegularExpression("/^.*TransactionAutoCommitEvent default default .*\\\\drupal_transaction$/", \Drupal::keyValue('TransactionEventTest')->get('event_data'));
++    set_error_handler(static function (int $errno, string $errstr): bool {
++      throw new \ErrorException($errstr);
++    });
++    try {
++      $tx->rollback();
++    }
++    catch (\ErrorException $e) {
++      $this->assertSame('Transaction::rollBack() failed because of a prior execution of a DDL statement.', $e->getMessage());
++    }
++    finally {
++      restore_error_handler();
++    }
++    $this->assertMatchesRegularExpression("/^.*TransactionRollbackFailureEvent default default .*\\\\drupal_transaction .* Transaction::rollBack\\(\\) failed because of a prior execution of a DDL statement\\.$/", \Drupal::keyValue('TransactionEventTest')->get('event_data'));
++  }
++
++  /**
++   * Tests releasing a savepoint.
++   */
++  public function testTransactionReleaseSavepoint(): void {
++    $tx = $this->connection->startTransaction();
++    $savepoint = $this->connection->startTransaction('foo');
++    $savepoint->commitOrRelease();
++    $this->assertMatchesRegularExpression("/^.*TransactionReleaseSavepointEvent default default .*\\\\foo stack: .*\\\\drupal_transaction$/", \Drupal::keyValue('TransactionEventTest')->get('event_data'));
++    $tx->commitOrRelease();
++    $this->assertMatchesRegularExpression("/^.*TransactionCommitEvent default default .*\\\\drupal_transaction commit-type: Explicit$/", \Drupal::keyValue('TransactionEventTest')->get('event_data'));
++  }
++
++  /**
++   * Tests rolling back a transaction.
++   */
++  public function testTransactionRollback(): void {
++    $tx = $this->connection->startTransaction();
++    $tx->rollback();
++    $this->assertMatchesRegularExpression("/^.*TransactionRollbackEvent default default .*\\\\drupal_transaction$/", \Drupal::keyValue('TransactionEventTest')->get('event_data'));
++  }
++
++  /**
++   * Tests rolling back a transaction to a savepoint.
++   */
++  public function testTransactionRollbackToSavepoint(): void {
++    $tx = $this->connection->startTransaction();
++    $savepoint = $this->connection->startTransaction('foo');
++    $savepoint->rollback();
++    $this->assertMatchesRegularExpression("/^.*TransactionRollbackToSavepointEvent default default .*\\\\foo stack: .*\\\\drupal_transaction$/", \Drupal::keyValue('TransactionEventTest')->get('event_data'));
++    $tx->commitOrRelease();
++    $this->assertMatchesRegularExpression("/^.*TransactionCommitEvent default default .*\\\\drupal_transaction commit-type: Explicit$/", \Drupal::keyValue('TransactionEventTest')->get('event_data'));
 +  }
 +
 +}
-diff --git a/core/tests/Drupal/Tests/Core/Database/SchemaDefinitionTest.php b/core/tests/Drupal/Tests/Core/Database/SchemaDefinitionTest.php
-index af2e4ba2dba..996898c0cb2 100644
---- a/core/tests/Drupal/Tests/Core/Database/SchemaDefinitionTest.php
-+++ b/core/tests/Drupal/Tests/Core/Database/SchemaDefinitionTest.php
-@@ -10,6 +10,7 @@
- use Drupal\Core\Database\SchemaDefinition\ForeignKey;
- use Drupal\Core\Database\SchemaDefinition\GeneratedColumnExpression;
- use Drupal\Core\Database\SchemaDefinition\GeneratedColumnStorage;
-+use Drupal\Core\Database\SchemaDefinition\Index;
- use Drupal\Core\Database\SchemaDefinition\IntValue;
- use Drupal\Core\Database\SchemaDefinition\NullValue;
- use Drupal\Core\Database\SchemaDefinition\PrimaryKey;
-@@ -568,6 +569,30 @@ public function testInvalidPrimaryKeyForPartialLengthColumn(): void {
-     $this->assertInstanceOf(Table::class, $table);
+diff --git a/core/tests/Drupal/Tests/Core/Database/Stub/EventSubscriber/StubTransactionEventSubscriber.php b/core/tests/Drupal/Tests/Core/Database/Stub/EventSubscriber/StubTransactionEventSubscriber.php
+new file mode 100644
+index 00000000000..92fe5383346
+--- /dev/null
++++ b/core/tests/Drupal/Tests/Core/Database/Stub/EventSubscriber/StubTransactionEventSubscriber.php
+@@ -0,0 +1,62 @@
++<?php
++
++declare(strict_types=1);
++
++namespace Drupal\Tests\Core\Database\Stub\EventSubscriber;
++
++use Drupal\Core\Database\Event\TransactionBeginEvent;
++use Drupal\Core\Database\Event\TransactionBeginFailureEvent;
++use Drupal\Core\Database\Event\TransactionCommitEvent;
++use Drupal\Core\Database\Event\TransactionCommitFailureEvent;
++use Drupal\Core\Database\Event\TransactionEventBase;
++use Drupal\Core\Database\Event\TransactionReleaseSavepointEvent;
++use Drupal\Core\Database\Event\TransactionReleaseSavepointFailureEvent;
++use Drupal\Core\Database\Event\TransactionRollbackEvent;
++use Drupal\Core\Database\Event\TransactionRollbackFailureEvent;
++use Drupal\Core\Database\Event\TransactionRollbackToSavepointEvent;
++use Drupal\Core\Database\Event\TransactionRollbackToSavepointFailureEvent;
++use Drupal\Core\Database\Event\TransactionSavepointEvent;
++use Drupal\Core\Database\Event\TransactionSavepointFailureEvent;
++use Symfony\Component\EventDispatcher\EventSubscriberInterface;
++
++/**
++ * Responds to database API transaction events.
++ */
++class StubTransactionEventSubscriber implements EventSubscriberInterface {
++
++  /**
++   * The last event dispatched.
++   */
++  public TransactionEventBase $lastEvent;
++
++  /**
++   * {@inheritdoc}
++   */
++  public static function getSubscribedEvents(): array {
++    return [
++      TransactionBeginEvent::class => 'onTransactionEvent',
++      TransactionBeginFailureEvent::class => 'onTransactionEvent',
++      TransactionCommitEvent::class => 'onTransactionEvent',
++      TransactionCommitFailureEvent::class => 'onTransactionEvent',
++      TransactionReleaseSavepointEvent::class => 'onTransactionEvent',
++      TransactionReleaseSavepointFailureEvent::class => 'onTransactionEvent',
++      TransactionRollbackEvent::class => 'onTransactionEvent',
++      TransactionRollbackFailureEvent::class => 'onTransactionEvent',
++      TransactionRollbackToSavepointEvent::class => 'onTransactionEvent',
++      TransactionRollbackToSavepointFailureEvent::class => 'onTransactionEvent',
++      TransactionSavepointEvent::class => 'onTransactionEvent',
++      TransactionSavepointFailureEvent::class => 'onTransactionEvent',
++    ];
++  }
++
++  /**
++   * Subscribes to a transaction event.
++   *
++   * @param \Drupal\Core\Database\Event\TransactionEventBase $event
++   *   The transaction event.
++   */
++  public function onTransactionEvent(TransactionEventBase $event): void {
++    $this->lastEvent = $event;
++  }
++
++}
+diff --git a/core/tests/Drupal/Tests/Core/Database/TransactionEventTest.php b/core/tests/Drupal/Tests/Core/Database/TransactionEventTest.php
+new file mode 100644
+index 00000000000..4ef9facd195
+--- /dev/null
++++ b/core/tests/Drupal/Tests/Core/Database/TransactionEventTest.php
+@@ -0,0 +1,275 @@
++<?php
++
++declare(strict_types=1);
++
++namespace Drupal\Tests\Core\Database;
++
++use Drupal\Core\Database\Connection;
++use Drupal\Core\Database\Event\TransactionBeginEvent;
++use Drupal\Core\Database\Event\TransactionBeginFailureEvent;
++use Drupal\Core\Database\Event\TransactionCommitEvent;
++use Drupal\Core\Database\Event\TransactionCommitFailureEvent;
++use Drupal\Core\Database\Event\TransactionEvent;
++use Drupal\Core\Database\Event\TransactionReleaseSavepointEvent;
++use Drupal\Core\Database\Event\TransactionReleaseSavepointFailureEvent;
++use Drupal\Core\Database\Event\TransactionRollbackEvent;
++use Drupal\Core\Database\Event\TransactionRollbackFailureEvent;
++use Drupal\Core\Database\Event\TransactionRollbackToSavepointEvent;
++use Drupal\Core\Database\Event\TransactionRollbackToSavepointFailureEvent;
++use Drupal\Core\Database\Event\TransactionSavepointEvent;
++use Drupal\Core\Database\Event\TransactionSavepointFailureEvent;
++use Drupal\Core\Database\Transaction\ClientConnectionTransactionState;
++use Drupal\Core\Database\Transaction\CommitType;
++use Drupal\Core\Database\TransactionCommitFailedException;
++use Drupal\Core\Database\TransactionException;
++use Drupal\Core\DependencyInjection\Container;
++use Drupal\Tests\Core\Database\Stub\EventSubscriber\StubTransactionEventSubscriber;
++use Drupal\Tests\Core\Database\Stub\StubConnection;
++use Drupal\Tests\UnitTestCase;
++use PHPUnit\Framework\Attributes\Group;
++use PHPUnit\Framework\Attributes\IgnoreDeprecations;
++use Symfony\Component\EventDispatcher\EventDispatcher;
++
++/**
++ * Tests transaction events.
++ */
++#[Group('Database')]
++class TransactionEventTest extends UnitTestCase {
++
++  /**
++   * A database connection.
++   */
++  protected Connection $connection;
++
++  /**
++   * A subscriber for transaction events.
++   */
++  protected StubTransactionEventSubscriber $subscriber;
++
++  /**
++   * {@inheritdoc}
++   */
++  protected function setUp(): void {
++    parent::setUp();
++    $this->connection = new StubConnection($this->createStub(\PDO::class), []);
++    $this->connection->enableEvents(TransactionEvent::all());
++
++    $container = new Container();
++    $dispatcher = new EventDispatcher();
++    $this->subscriber = new StubTransactionEventSubscriber();
++    $dispatcher->addSubscriber($this->subscriber);
++    $container->set('event_dispatcher', $dispatcher);
++    \Drupal::setContainer($container);
++  }
++
++  /**
++   * Tests starting a transaction.
++   */
++  public function testTransactionStart(): void {
++    $tx = $this->connection->startTransaction();
++    $this->assertSame(TransactionBeginEvent::class, get_class($this->subscriber->lastEvent));
++    $this->assertSame('drupal_transaction', $this->subscriber->lastEvent->name);
++    $this->assertSame(ClientConnectionTransactionState::Active, $this->subscriber->lastEvent->transactionState);
++    $this->assertCount(1, $this->subscriber->lastEvent->stackItems);
++    $tx->commitOrRelease();
++  }
++
++  /**
++   * Tests failure when starting a transaction.
++   */
++  public function testTransactionStartFailure(): void {
++    $this->connection->transactionManager()->success = FALSE;
++    try {
++      // phpcs:ignore VariableAnalysis.CodeAnalysis.VariableAnalysis.UnusedVariable
++      $tx = $this->connection->startTransaction();
++    }
++    catch (TransactionException) {
++      // Expected, do nothing.
++    }
++    $this->assertSame(TransactionBeginFailureEvent::class, get_class($this->subscriber->lastEvent));
++    $this->assertSame('drupal_transaction', $this->subscriber->lastEvent->name);
++    $this->assertSame(ClientConnectionTransactionState::Idle, $this->subscriber->lastEvent->transactionState);
++    $this->assertCount(0, $this->subscriber->lastEvent->stackItems);
++  }
++
++  /**
++   * Tests starting a savepoint.
++   */
++  public function testSavepointStart(): void {
++    $tx = $this->connection->startTransaction();
++    $savepoint = $this->connection->startTransaction('foo');
++    $this->assertSame(TransactionSavepointEvent::class, get_class($this->subscriber->lastEvent));
++    $this->assertSame('foo', $this->subscriber->lastEvent->name);
++    $this->assertSame(ClientConnectionTransactionState::Active, $this->subscriber->lastEvent->transactionState);
++    $this->assertCount(2, $this->subscriber->lastEvent->stackItems);
++    $savepoint->commitOrRelease();
++    $tx->commitOrRelease();
++  }
++
++  /**
++   * Tests failure when starting a savepoint.
++   */
++  public function testSavepointStartFailure(): void {
++    // phpcs:ignore VariableAnalysis.CodeAnalysis.VariableAnalysis.UnusedVariable
++    $tx = $this->connection->startTransaction();
++    $this->connection->transactionManager()->success = FALSE;
++    try {
++      // phpcs:ignore VariableAnalysis.CodeAnalysis.VariableAnalysis.UnusedVariable
++      $savepoint = $this->connection->startTransaction('foo');
++    }
++    catch (TransactionException) {
++      // Expected, do nothing.
++    }
++    $this->assertSame(TransactionSavepointFailureEvent::class, get_class($this->subscriber->lastEvent));
++    $this->assertSame('foo', $this->subscriber->lastEvent->name);
++    $this->assertSame(ClientConnectionTransactionState::Idle, $this->subscriber->lastEvent->transactionState);
++    $this->assertCount(0, $this->subscriber->lastEvent->stackItems);
++  }
++
++  /**
++   * Tests committing a transaction.
++   */
++  public function testTransactionCommit(): void {
++    $tx = $this->connection->startTransaction();
++    $tx->commitOrRelease();
++    $this->assertSame(TransactionCommitEvent::class, get_class($this->subscriber->lastEvent));
++    $this->assertSame('drupal_transaction', $this->subscriber->lastEvent->name);
++    $this->assertSame(ClientConnectionTransactionState::Committed, $this->subscriber->lastEvent->transactionState);
++    $this->assertSame(CommitType::Explicit, $this->subscriber->lastEvent->type);
++    $this->assertCount(0, $this->subscriber->lastEvent->stackItems);
++  }
++
++  /**
++   * Tests committing a transaction via object destruction.
++   */
++  #[IgnoreDeprecations]
++  public function testTransactionCommitOnDestruct(): void {
++    $tx = $this->connection->startTransaction();
++    unset($tx);
++    $this->assertSame(TransactionCommitEvent::class, get_class($this->subscriber->lastEvent));
++    $this->assertSame('drupal_transaction', $this->subscriber->lastEvent->name);
++    $this->assertSame(ClientConnectionTransactionState::Committed, $this->subscriber->lastEvent->transactionState);
++    $this->assertSame(CommitType::ImplicitOnDestruct, $this->subscriber->lastEvent->type);
++    $this->assertCount(0, $this->subscriber->lastEvent->stackItems);
++  }
++
++  /**
++   * Tests a transaction commit failure.
++   */
++  public function testTransactionCommitFailure(): void {
++    $tx = $this->connection->startTransaction();
++    $this->connection->transactionManager()->success = FALSE;
++    try {
++      $tx->commitOrRelease();
++    }
++    catch (TransactionCommitFailedException) {
++      // Expected, do nothing.
++    }
++    $this->assertSame(TransactionCommitFailureEvent::class, get_class($this->subscriber->lastEvent));
++    $this->assertSame('drupal_transaction', $this->subscriber->lastEvent->name);
++    $this->assertSame(ClientConnectionTransactionState::CommitFailed, $this->subscriber->lastEvent->transactionState);
++    $this->assertSame(CommitType::Explicit, $this->subscriber->lastEvent->type);
++    $this->assertCount(0, $this->subscriber->lastEvent->stackItems);
++  }
++
++  /**
++   * Tests releasing a savepoint.
++   */
++  public function testTransactionReleaseSavepoint(): void {
++    $tx = $this->connection->startTransaction();
++    $savepoint = $this->connection->startTransaction('foo');
++    $savepoint->commitOrRelease();
++    $this->assertSame(TransactionReleaseSavepointEvent::class, get_class($this->subscriber->lastEvent));
++    $this->assertSame('foo', $this->subscriber->lastEvent->name);
++    $this->assertSame(ClientConnectionTransactionState::Active, $this->subscriber->lastEvent->transactionState);
++    $this->assertSame(CommitType::Explicit, $this->subscriber->lastEvent->type);
++    $this->assertCount(1, $this->subscriber->lastEvent->stackItems);
++    $tx->commitOrRelease();
++  }
++
++  /**
++   * Tests a transaction release savepoint failure.
++   */
++  public function testTransactionReleaseSavepointFailure(): void {
++    $tx = $this->connection->startTransaction();
++    $savepoint = $this->connection->startTransaction('foo');
++    $this->connection->transactionManager()->success = FALSE;
++    try {
++      $savepoint->commitOrRelease();
++    }
++    catch (TransactionCommitFailedException) {
++      // Expected, do nothing.
++    }
++    $this->assertSame(TransactionReleaseSavepointFailureEvent::class, get_class($this->subscriber->lastEvent));
++    $this->assertSame('foo', $this->subscriber->lastEvent->name);
++    $this->assertSame(ClientConnectionTransactionState::CommitFailed, $this->subscriber->lastEvent->transactionState);
++    $this->assertSame(CommitType::Explicit, $this->subscriber->lastEvent->type);
++    $this->assertCount(0, $this->subscriber->lastEvent->stackItems);
++    unset($tx);
++  }
++
++  /**
++   * Tests rolling back a transaction.
++   */
++  public function testTransactionRollback(): void {
++    $tx = $this->connection->startTransaction();
++    $tx->rollback();
++    $this->assertSame(TransactionRollbackEvent::class, get_class($this->subscriber->lastEvent));
++    $this->assertSame('drupal_transaction', $this->subscriber->lastEvent->name);
++    $this->assertSame(ClientConnectionTransactionState::RolledBack, $this->subscriber->lastEvent->transactionState);
++    $this->assertCount(0, $this->subscriber->lastEvent->stackItems);
++  }
++
++  /**
++   * Tests a transaction rollback failure.
++   */
++  public function testTransactionRollbackFailure(): void {
++    $tx = $this->connection->startTransaction();
++    $this->connection->transactionManager()->success = FALSE;
++    try {
++      $tx->rollback();
++    }
++    catch (TransactionException) {
++      // Expected, do nothing.
++    }
++    $this->assertSame(TransactionRollbackFailureEvent::class, get_class($this->subscriber->lastEvent));
++    $this->assertSame('drupal_transaction', $this->subscriber->lastEvent->name);
++    $this->assertSame(ClientConnectionTransactionState::RollbackFailed, $this->subscriber->lastEvent->transactionState);
++    $this->assertCount(0, $this->subscriber->lastEvent->stackItems);
++  }
++
++  /**
++   * Tests rolling back a transaction to a savepoint.
++   */
++  public function testTransactionRollbackToSavepoint(): void {
++    $tx = $this->connection->startTransaction();
++    $savepoint = $this->connection->startTransaction('foo');
++    $savepoint->rollback();
++    $this->assertSame(TransactionRollbackToSavepointEvent::class, get_class($this->subscriber->lastEvent));
++    $this->assertSame('foo', $this->subscriber->lastEvent->name);
++    $this->assertSame(ClientConnectionTransactionState::Active, $this->subscriber->lastEvent->transactionState);
++    $this->assertCount(1, $this->subscriber->lastEvent->stackItems);
++    $tx->commitOrRelease();
++  }
++
++  /**
++   * Tests failure when rolling back a transaction to a savepoint.
++   */
++  public function testTransactionRollbackToSavepointFailure(): void {
++    $tx = $this->connection->startTransaction();
++    $savepoint = $this->connection->startTransaction('foo');
++    $this->connection->transactionManager()->success = FALSE;
++    try {
++      $savepoint->rollback();
++    }
++    catch (TransactionException) {
++      // Expected, do nothing.
++    }
++    $this->assertSame(TransactionRollbackToSavepointFailureEvent::class, get_class($this->subscriber->lastEvent));
++    $this->assertSame('foo', $this->subscriber->lastEvent->name);
++    $this->assertSame(ClientConnectionTransactionState::RollbackFailed, $this->subscriber->lastEvent->transactionState);
++    $this->assertCount(0, $this->subscriber->lastEvent->stackItems);
++    unset($tx);
++  }
++
++}
+diff --git a/core/tests/Drupal/Tests/Core/Database/TransactionManagerTest.php b/core/tests/Drupal/Tests/Core/Database/TransactionManagerTest.php
+index af3c46b8697..98660ea766b 100644
+--- a/core/tests/Drupal/Tests/Core/Database/TransactionManagerTest.php
++++ b/core/tests/Drupal/Tests/Core/Database/TransactionManagerTest.php
+@@ -53,7 +53,7 @@ public function testStartTransaction(): void {
+   public function testStartTransactionFailure(): void {
+     $this->connection->transactionManager()->success = FALSE;
+     $this->expectException(TransactionException::class);
+-    $this->expectExceptionMessage('Failed start of transaction');
++    $this->expectExceptionMessageIs('Failed start of transaction');
+     // phpcs:ignore VariableAnalysis.CodeAnalysis.VariableAnalysis.UnusedVariable
+     $tx = $this->connection->startTransaction();
+   }
+@@ -99,7 +99,7 @@ public function testStartSavepointFailure(): void {
+     $tx = $this->connection->startTransaction();
+     $this->connection->transactionManager()->success = FALSE;
+     $this->expectException(TransactionException::class);
+-    $this->expectExceptionMessage('Failed start of savepoint foo');
++    $this->expectExceptionMessageIs('Failed start of savepoint foo');
+     // phpcs:ignore VariableAnalysis.CodeAnalysis.VariableAnalysis.UnusedVariable
+     $savepoint = $this->connection->startTransaction('foo');
+   }
+@@ -141,7 +141,7 @@ public function testTransactionCommitFailure(): void {
+     $tx = $this->connection->startTransaction();
+     $this->connection->transactionManager()->success = FALSE;
+     $this->expectException(TransactionCommitFailedException::class);
+-    $this->expectExceptionMessage('Failed commit of transaction');
++    $this->expectExceptionMessageIs('Failed commit of transaction');
+     $tx->commitOrRelease();
    }
  
-+  /**
-+   * Tests passing invalid columns to primary key.
-+   */
-+  public function testInvalidColumnsInPrimaryKey(): void {
-+    $this->expectException(SchemaDefinitionException::class);
-+    $this->expectExceptionMessage('Table \'test\' specifies a primary key with undefined column(s): boo');
-+    $table = new Table(
-+      name: 'test',
-+      columns: [
-+        Column::text(
-+          name: 'id',
-+          length: 40,
-+          default: new StringValue('foo'),
-+        ),
-+        Column::int(
-+          name: 'test_column',
-+          notNull: TRUE,
-+        ),
-+      ],
-+      primaryKey: new PrimaryKey(['id', 'boo']),
-+    );
-+    $this->assertInstanceOf(Table::class, $table);
-+  }
-+
-   /**
-    * Tests passing limited length columns to an unique key.
-    */
-@@ -595,4 +620,90 @@ public function testInvalidUniqueKeyForPartialLengthColumn(): void {
-     $this->assertInstanceOf(Table::class, $table);
+@@ -186,7 +186,7 @@ public function testTransactionReleaseSavepointFailure(): void {
+     $savepoint = $this->connection->startTransaction('foo');
+     $this->connection->transactionManager()->success = FALSE;
+     $this->expectException(TransactionCommitFailedException::class);
+-    $this->expectExceptionMessage('Failed release of savepoint foo');
++    $this->expectExceptionMessageIs('Failed release of savepoint foo');
+     $savepoint->commitOrRelease();
    }
  
-+  /**
-+   * Tests passing invalid columns to a unique key.
-+   */
-+  public function testInvalidColumnsInUniqueKey(): void {
-+    $this->expectException(SchemaDefinitionException::class);
-+    $this->expectExceptionMessage('Table \'test\' specifies a unique key \'id_boo\' with undefined column(s): boo');
-+    $table = new Table(
-+      name: 'test',
-+      columns: [
-+        Column::text(
-+          name: 'id',
-+          length: 40,
-+          default: new StringValue('foo'),
-+        ),
-+        Column::int(
-+          name: 'test_column',
-+          notNull: TRUE,
-+        ),
-+      ],
-+      primaryKey: new PrimaryKey(['id']),
-+      uniqueKeys: [
-+        new UniqueKey(name: 'id_boo', columns: ['id', 'boo']),
-+      ],
-+    );
-+    $this->assertInstanceOf(Table::class, $table);
-+  }
-+
-+  /**
-+   * Tests passing invalid columns to a unique key.
-+   */
-+  public function testInvalidColumnsInIndex(): void {
-+    $this->expectException(SchemaDefinitionException::class);
-+    $this->expectExceptionMessage('Table \'test\' specifies an index \'id_boo\' with undefined column(s): boo');
-+    $table = new Table(
-+      name: 'test',
-+      columns: [
-+        Column::text(
-+          name: 'id',
-+          length: 40,
-+          default: new StringValue('foo'),
-+        ),
-+        Column::int(
-+          name: 'test_column',
-+          notNull: TRUE,
-+        ),
-+      ],
-+      primaryKey: new PrimaryKey(['id']),
-+      indexes: [
-+        new Index(name: 'id_boo', columns: ['id', 'boo']),
-+      ],
-+    );
-+    $this->assertInstanceOf(Table::class, $table);
-+  }
-+
-+  /**
-+   * Tests passing invalid columns to a unique key.
-+   */
-+  public function testInvalidColumnsInForeignKey(): void {
-+    $this->expectException(SchemaDefinitionException::class);
-+    $this->expectExceptionMessage('Table \'test\' specifies a foreign key \'id_boo\' with undefined column(s): boo');
-+    $table = new Table(
-+      name: 'test',
-+      columns: [
-+        Column::text(
-+          name: 'id',
-+          length: 40,
-+          default: new StringValue('foo'),
-+        ),
-+        Column::int(
-+          name: 'test_column',
-+          notNull: TRUE,
-+        ),
-+      ],
-+      primaryKey: new PrimaryKey(['id']),
-+      foreignKeys: [
-+        new ForeignKey(
-+          name: 'id_boo',
-+          foreignTable: 'test_boo',
-+          columns: ['id', 'boo'],
-+          foreignColumns: ['id', 'boo'],
-+        ),
-+      ],
-+    );
-+    $this->assertInstanceOf(Table::class, $table);
-+  }
-+
- }
+@@ -228,7 +228,7 @@ public function testTransactionRollbackFailure(): void {
+     $tx = $this->connection->startTransaction();
+     $this->connection->transactionManager()->success = FALSE;
+     $this->expectException(TransactionException::class);
+-    $this->expectExceptionMessage('Failed rollback of transaction');
++    $this->expectExceptionMessageIs('Failed rollback of transaction');
+     $tx->rollback();
+   }
+ 
+@@ -276,7 +276,7 @@ public function testTransactionRollbackToSavepointFailure(): void {
+     $savepoint = $this->connection->startTransaction('foo');
+     $this->connection->transactionManager()->success = FALSE;
+     $this->expectException(TransactionException::class);
+-    $this->expectExceptionMessage('Failed rollback of savepoint foo');
++    $this->expectExceptionMessageIs('Failed rollback of savepoint foo');
+     $savepoint->rollback();
+   }
+ 
